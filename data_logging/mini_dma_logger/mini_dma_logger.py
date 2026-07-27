@@ -248,6 +248,8 @@ CONTROL_TRACE_FIELDNAMES = [
     "automation_basis",
     "automation_target_value",
     "plateau_index",
+    "fatigue_cycle_index",
+    "fatigue_leg",
     "decision",
     "current_value",
     "error_value",
@@ -359,6 +361,8 @@ MEASUREMENT_CSV_FIELDNAMES = [
     "automation_target_value",
     "plateau_index",
     "plateau_label",
+    "fatigue_cycle_index",
+    "fatigue_leg",
     "raw_position_mm",
     "position_mm",
     "raw_load_g",
@@ -518,6 +522,8 @@ SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
+FATIGUE_RETAINED_MEASUREMENT_POINTS = 20_000
+FATIGUE_RETAINED_MEASUREMENT_TRIM_CHUNK = 2_000
 DISPLAY_PLOT_RECENT_POINTS = 600
 DISPLAY_PLOT_BRIDGE_POINTS = 200
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
@@ -630,6 +636,7 @@ CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
 CURRENT_SWEEP_FATIGUE = "current_sweep_fatigue"
+MAX_FINITE_FATIGUE_CYCLES = 2_000_000_000
 CONSTANT_CURRENT_STRAIN_SWEEP = "constant_current_strain_sweep"
 CONSTANT_CURRENT_STRESS_RAMP = "constant_current_stress_ramp"
 ELASTOCALORIC_EFFECT = "elastocaloric_effect"
@@ -1813,6 +1820,8 @@ class MeasurementPoint:
     automation_target_value: float | None
     plateau_index: int | None
     plateau_label: str | None
+    fatigue_cycle_index: int | None = None
+    fatigue_leg: str | None = None
     load_raw_last_g: float | None = None
     load_mean_g: float | None = None
     load_std_g: float | None = None
@@ -1862,6 +1871,9 @@ class AutomationStep:
     mechanical_step_limit: int | None = None
     duration_s: float | None = None
     note: str = ""
+    fatigue_cycle_index: int | None = None
+    fatigue_leg: str | None = None
+    fatigue_cycle_limit: int | None = None
 
 
 @dataclass
@@ -1884,6 +1896,9 @@ class AutomationResumeState:
     origin_mm: float
     summary: str
     current_setpoint_mA: float | None = None
+    source_run_path: str | None = None
+    fatigue_cycle_index: int = 0
+    fatigue_loop_anchor_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -3731,7 +3746,6 @@ class SessionSensorCsvTarget:
             written_rows = self.written_rows
             failed_rows = self.failed_rows
             failure_reason = self.failure_reason
-            inflight = self.inflight
         if close_timed_out:
             status = "incomplete"
             complete: bool | None = False
@@ -5320,11 +5334,15 @@ class MiniDmaAutomationController:
                 basis=step.basis,
                 target_value=step.target_value,
                 plateau_index=plateau_index,
+                fatigue_cycle_index=step.fatigue_cycle_index,
+                fatigue_leg=step.fatigue_leg,
             )
             if step.current_mA is None or not host._set_recipe_current_mA(float(step.current_mA), measure_after=False):
                 host._stop_auto_ramp(log_completion=False, offer_recovery=True)
             elif not host._record_scheduled_recipe_point(step):
                 host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "fatigue_loop":
+            host._expand_next_fatigue_cycle(step, step_index)
         elif step.action == "mark_current_zero":
             if not host._handle_current_zero_mark_step(step):
                 host._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -8030,6 +8048,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
         self._seek_last_stiffness_position_by_basis: dict[str, float] = {}
         self._session_points: list[MeasurementPoint] = []
+        self._session_point_count_total = 0
+        self._session_points_discarded_from_memory = 0
         self._live_plot_points: list[MeasurementPoint] = []
         self._last_live_plot_scale_timestamp: float | None = None
         self._display_plot_old_cache_key: tuple[object, ...] | None = None
@@ -8214,10 +8234,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_phase = "idle"
         self._automation_step_note: str | None = None
         self._automation_paused = False
+        self._automation_pause_started_s: float | None = None
         self._automation_basis: str | None = None
         self._automation_target_value: float | None = None
         self._automation_plateau_index: int | None = None
         self._automation_plateau_label: str | None = None
+        self._automation_fatigue_cycle_index: int | None = None
+        self._automation_fatigue_leg: str | None = None
+        self._fatigue_cycle_index = 0
+        self._fatigue_cycle_limit: int | None = None
+        self._fatigue_loop_anchor_index: int | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
         self._current_sweep_recipe_overrides: list[dict[str, object]] = []
         self._current_sweep_runtime_applied_values: dict[str, float | bool] | None = None
@@ -9298,6 +9324,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_scale_terminator = QtWidgets.QLineEdit(scale_advanced_box)
         self.edit_scale_terminator.setText("")
         scale_advanced_form.addRow("Line ending", self.edit_scale_terminator)
+
+        self.label_force_control_profile = QtWidgets.QLabel(scale_advanced_box)
+        self.label_force_control_profile.setWordWrap(True)
+        scale_advanced_form.addRow("Force control", self.label_force_control_profile)
+        self.combo_scale_baud.currentTextChanged.connect(self._refresh_force_control_profile_label)
+        self.edit_scale_request.textChanged.connect(self._refresh_force_control_profile_label)
+        self.edit_scale_terminator.textChanged.connect(self._refresh_force_control_profile_label)
+        self._refresh_force_control_profile_label()
 
         self.label_scale_raw = QtWidgets.QLabel("Raw line: -", scale_advanced_box)
         self.label_scale_raw.setWordWrap(True)
@@ -10747,11 +10781,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_sweep_fatigue_section.setFont(fatigue_font)
         current_sweep_form.addRow("", self.label_current_sweep_fatigue_section)
         self.spin_current_sweep_fatigue_cycles = QtWidgets.QSpinBox(automation_box)
-        self.spin_current_sweep_fatigue_cycles.setRange(1, 100000)
+        self.spin_current_sweep_fatigue_cycles.setRange(0, MAX_FINITE_FATIGUE_CYCLES)
+        self.spin_current_sweep_fatigue_cycles.setSpecialValueText("Forever")
         self.spin_current_sweep_fatigue_cycles.setValue(100)
         self.spin_current_sweep_fatigue_cycles.setSuffix(" cycles")
         self.spin_current_sweep_fatigue_cycles.setToolTip(
-            "Repeat the fixed-stress current sweep this many times, or stop earlier if wire-break diagnostics fire."
+            "Repeat the fixed-stress current sweep this many times. Select Forever (0) to keep "
+            "cycling until the operator stops the recipe or a safety diagnostic fires. Cycles "
+            "are scheduled incrementally, so this does not pre-build the full run in memory."
         )
         current_sweep_form.addRow("Cycles", self.spin_current_sweep_fatigue_cycles)
         self.label_current_sweep_fatigue_cycles = current_sweep_form.labelForField(
@@ -20433,15 +20470,8 @@ class MainWindow(QtWidgets.QMainWindow):
             length_mm = config.initial_length_mm if config is not None else float(self.spin_initial_length.value())
             return None if length_mm <= 0.0 else 100.0 / length_mm
         stiffness_candidates: list[float | None] = []
-        local_seek_stiffness: float | None = None
         if seek_key is not None:
             candidate = self._seek_live_stiffness_by_key.get(seek_key)
-            if (
-                candidate is not None
-                and math.isfinite(float(candidate))
-                and float(candidate) > 0.0
-            ):
-                local_seek_stiffness = float(candidate)
             stiffness_candidates.append(candidate)
         stiffness_candidates.extend(
             (
@@ -23549,10 +23579,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if fatigue_mode:
                 self.label_current_sweep_targets_section.setText("Stress target")
                 cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+                cycle_text = "forever" if cycles == 0 else f"{cycles} cycle(s)"
                 banner = "Iso-stress fatigue"
                 summary = (
                     f"Plan: {banner}, {_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix}; "
-                    f"{cycles} cycle(s); current "
+                    f"{cycle_text}; current "
                     f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
                     f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
                     f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
@@ -23910,6 +23941,27 @@ class MainWindow(QtWidgets.QMainWindow):
             if step.action == "start_session":
                 ticks += 1
                 logging_enabled = True
+                continue
+            if step.action == "fatigue_loop":
+                cycle_limit = step.fatigue_cycle_limit
+                if cycle_limit is None:
+                    ticks += 1
+                    continue
+                first_cycle = self._fatigue_cycle_steps(step, 1)
+                steady_cycle = self._fatigue_cycle_steps(step, 2)
+                first_points, first_ticks = self._estimate_recipe_points_and_ticks(
+                    first_cycle,
+                    interval_ms,
+                    include_current_hold_estimate=include_current_hold_estimate,
+                )
+                steady_points, steady_ticks = self._estimate_recipe_points_and_ticks(
+                    steady_cycle,
+                    interval_ms,
+                    include_current_hold_estimate=include_current_hold_estimate,
+                )
+                remaining_cycles = max(0, int(cycle_limit) - 1)
+                points += first_points + steady_points * remaining_cycles
+                ticks += first_ticks + steady_ticks * remaining_cycles + int(cycle_limit) + 1
                 continue
             if step.action == "ramp_target":
                 start_value = float(
@@ -24955,7 +25007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if result is None or not result.succeeded:
             return
         # Exact target-position readback is portable across the Prague and
-        # KoÅ¡ice planning-mode enums. Poll it from the 50 ms control path too,
+        # Košice planning-mode enums. Poll it from the 50 ms control path too,
         # so retry cannot depend on status-timer scheduling.
         if self._tic_target_position_steps == pending.target_steps:
             self._confirm_pending_motion_command()
@@ -25550,7 +25602,6 @@ class MainWindow(QtWidgets.QMainWindow):
         command_base_mm = self._relative_motion_base_mm()
         expected_duration_s = self._move_duration_s(position_mm - command_base_mm, selected_speed_mm_s)
         max_speed_units = max(1, int(round(selected_speed_mm_s * steps_per_mm * 10000.0)))
-        delta_mm = position_mm - command_base_mm
         self._log(
             self._format_motor_step_log(
                 delta_tic_units=target_steps - current_steps,
@@ -25903,7 +25954,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if line_index > 0 and line.strip():
                         return True
         except OSError:
-            return bool(self._session_points)
+            return self._session_point_count() > 0
         return False
 
     def _apply_ui_refresh_interval(self) -> None:
@@ -26724,7 +26775,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_metadata_dirty = True
                 return
         payload = self._session_metadata()
-        payload["point_count"] = len(self._session_points)
+        payload["point_count"] = self._session_point_count()
+        payload["memory_retained_point_count"] = len(self._session_points)
+        payload["memory_discarded_point_count"] = int(
+            self._session_points_discarded_from_memory
+        )
         if self._session_active:
             payload["session_state"] = "running"
             payload["elapsed_s"] = time.monotonic() - self._session_start_monotonic
@@ -26781,6 +26836,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._session_json_path is None
                 else str(self._session_json_path),
                 "saved_utc": _utc_timestamp(),
+                "measurement_copy_scope": (
+                    "all_points"
+                    if self._session_points_discarded_from_memory <= 0
+                    else "retained_recent_points_only_primary_measurement_csv_has_full_history"
+                ),
             }
             metadata_path = self._session_recovery_path / SESSION_METADATA_JSON
             metadata_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
@@ -26818,12 +26878,16 @@ class MainWindow(QtWidgets.QMainWindow):
         target_value: float | None = None,
         plateau_index: int | None = None,
         note: str | None = None,
+        fatigue_cycle_index: int | None = None,
+        fatigue_leg: str | None = None,
     ) -> None:
         self._automation_phase = phase
         self._automation_step_note = note
         self._automation_basis = basis
         self._automation_target_value = target_value
         self._automation_plateau_index = plateau_index
+        self._automation_fatigue_cycle_index = fatigue_cycle_index
+        self._automation_fatigue_leg = fatigue_leg
         if basis and target_value is not None:
             label = HSW_BASIS_LABELS.get(basis, basis)
             suffix, _ = self._distribution_units(basis)
@@ -26929,6 +26993,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._session_point_count_total = 0
+        self._session_points_discarded_from_memory = 0
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._last_dashboard_plot_refresh_s = None
@@ -27053,6 +27119,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._session_point_count_total = 0
+        self._session_points_discarded_from_memory = 0
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._last_dashboard_plot_refresh_s = None
@@ -27247,7 +27315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_setup_csv_writer = None
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
-        point_count = len(self._session_points)
+        point_count = self._session_point_count()
         _stop_category, stop_label = self._session_stop_label(self._session_stop_reason)
         self.label_session_status.setText(f"Session saved ({point_count} point(s)); {stop_label}")
         if self._supply_output_enabled:
@@ -27476,6 +27544,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     "automation_basis": "" if basis is None else basis,
                     "automation_target_value": _number(target_value),
                     "plateau_index": "" if self._automation_plateau_index is None else self._automation_plateau_index,
+                    "fatigue_cycle_index": (
+                        ""
+                        if self._automation_fatigue_cycle_index is None
+                        else self._automation_fatigue_cycle_index
+                    ),
+                    "fatigue_leg": self._automation_fatigue_leg or "",
                     "decision": decision,
                     "current_value": _number(current_value),
                     "error_value": _number(error_value),
@@ -27847,6 +27921,8 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_target_value=self._automation_target_value,
             plateau_index=self._automation_plateau_index,
             plateau_label=self._automation_plateau_label,
+            fatigue_cycle_index=self._automation_fatigue_cycle_index,
+            fatigue_leg=self._automation_fatigue_leg,
             load_raw_last_g=None if load_summary is None else load_summary.raw_last_g,
             load_mean_g=None if load_summary is None else load_summary.load_mean_g,
             load_std_g=None if load_summary is None else load_summary.load_std_g,
@@ -27927,6 +28003,8 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_target_value=self._automation_target_value,
             plateau_index=self._automation_plateau_index,
             plateau_label=self._automation_plateau_label,
+            fatigue_cycle_index=self._automation_fatigue_cycle_index,
+            fatigue_leg=self._automation_fatigue_leg,
             load_raw_last_g=raw_load_g,
             load_mean_g=load_g,
             load_std_g=None,
@@ -28018,7 +28096,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not self._session_active:
             return False
-        self._session_points.append(point)
+        self._retain_session_point(point)
         self._live_plot_points = [
             live_point
             for live_point in self._live_plot_points
@@ -28038,13 +28116,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         if not quiet:
             self._log(
-                f"Recorded point #{len(self._session_points)} at "
+                f"Recorded point #{self._session_point_count()} at "
                 f"{point.position_mm:.4f} mm tensile displacement, "
                 f"{load_g:.5f} g."
             )
         if advance_heating:
             self._advance_heating_after_record()
         return True
+
+    def _retain_session_point(self, point: MeasurementPoint) -> None:
+        self._session_points.append(point)
+        self._session_point_count_total += 1
+        if (
+            self._automation_name != CURRENT_SWEEP_FATIGUE
+            or self._fatigue_cycle_index <= 0
+        ):
+            return
+        trim_threshold = (
+            FATIGUE_RETAINED_MEASUREMENT_POINTS
+            + FATIGUE_RETAINED_MEASUREMENT_TRIM_CHUNK
+        )
+        if len(self._session_points) <= trim_threshold:
+            return
+        trim_count = len(self._session_points) - FATIGUE_RETAINED_MEASUREMENT_POINTS
+        del self._session_points[:trim_count]
+        self._session_points_discarded_from_memory += trim_count
+
+    def _session_point_count(self) -> int:
+        retained_and_discarded = (
+            len(self._session_points) + self._session_points_discarded_from_memory
+        )
+        return max(int(self._session_point_count_total), retained_and_discarded)
 
     def _maybe_record_scheduled_point(
         self,
@@ -28137,6 +28239,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 else f"{point.automation_target_value:.6f}",
                 "plateau_index": "" if point.plateau_index is None else point.plateau_index,
                 "plateau_label": "" if point.plateau_label is None else point.plateau_label,
+                "fatigue_cycle_index": (
+                    "" if point.fatigue_cycle_index is None else point.fatigue_cycle_index
+                ),
+                "fatigue_leg": point.fatigue_leg or "",
                 "raw_position_mm": f"{point.raw_position_mm:.6f}",
                 "position_mm": f"{point.position_mm:.6f}",
                 "raw_load_g": f"{point.raw_load_g:.6f}",
@@ -28620,6 +28726,7 @@ class MainWindow(QtWidgets.QMainWindow):
             setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
             target = self._recipe_number_token(self.spin_current_sweep_target_start.value())
             cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            cycles_token = "forever" if cycles == 0 else f"{cycles}cycles"
             current_start = self._recipe_number_token(self.spin_current_sweep_start_mA.value())
             current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
             current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
@@ -28633,7 +28740,7 @@ class MainWindow(QtWidgets.QMainWindow):
             flag_text = "" if not flags else "_" + "_".join(flags)
             return (
                 f"iso-stress-fatigue_setup{setup}MPa_stress{target}MPa_"
-                f"{cycles}cycles_current{current_start}-{current_end}mA_{current_rate}mAps"
+                f"{cycles_token}_current{current_start}-{current_end}mA_{current_rate}mAps"
                 f"{flag_text}.recipe.json"
             )
         if mode == CURRENT_SWEEP_STRESS:
@@ -28896,7 +29003,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_ramp_rate.setValue(float(current_sweep.get("target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())))
             self.spin_current_sweep_fatigue_cycles.setValue(
                 max(
-                    1,
+                    0,
                     int(
                         current_sweep.get(
                             "fatigue_cycles",
@@ -29447,6 +29554,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_progress_update_queued = False
         if complete:
             self._recipe_progress_pending_complete = False
+        if self._automation_name == CURRENT_SWEEP_FATIGUE:
+            cycle_index = max(0, int(self._fatigue_cycle_index))
+            cycle_limit = self._fatigue_cycle_limit
+            current_sweep_text = self._active_current_sweep_progress_text()
+            if complete:
+                completed_cycles = (
+                    cycle_index
+                    if cycle_limit is None
+                    else max(cycle_index, int(cycle_limit))
+                )
+                self.recipe_progress.setRange(0, max(1, completed_cycles))
+                self.recipe_progress.setValue(max(1, completed_cycles))
+                self.recipe_progress.setFormat(
+                    f"Fatigue complete after {completed_cycles} cycle(s)"
+                )
+                percent = 100
+                progress_value = max(1, completed_cycles)
+                progress_total = max(1, completed_cycles)
+            elif self._automation_active:
+                if cycle_limit is None:
+                    self.recipe_progress.setRange(0, 0)
+                    progress_text = (
+                        "Fatigue: preparing forever"
+                        if cycle_index <= 0
+                        else f"Fatigue cycle {cycle_index} | running until stopped"
+                    )
+                    progress_value = cycle_index
+                    progress_total = max(1, cycle_index + 1)
+                    percent = 0
+                else:
+                    finite_limit = max(1, int(cycle_limit))
+                    completed_cycles = max(0, cycle_index - 1)
+                    self.recipe_progress.setRange(0, finite_limit)
+                    self.recipe_progress.setValue(min(completed_cycles, finite_limit))
+                    progress_text = (
+                        f"Fatigue: preparing {finite_limit} cycle(s)"
+                        if cycle_index <= 0
+                        else f"Fatigue cycle {cycle_index}/{finite_limit}"
+                    )
+                    progress_value = min(completed_cycles, finite_limit)
+                    progress_total = finite_limit
+                    percent = min(
+                        99,
+                        int(math.floor((progress_value / finite_limit) * 100.0)),
+                    )
+                if current_sweep_text:
+                    progress_text += f" | {current_sweep_text}"
+                self.recipe_progress.setFormat(progress_text)
+            else:
+                progress_total = max(1, int(cycle_limit or cycle_index or 1))
+                progress_value = min(cycle_index, progress_total)
+                percent = int(round((progress_value / progress_total) * 100.0))
+                self.recipe_progress.setRange(0, progress_total)
+                self.recipe_progress.setValue(progress_value)
+                self.recipe_progress.setFormat(
+                    getattr(self, "_recipe_idle_progress_text", "Recipe progress: idle")
+                )
+            self._update_current_task_display()
+            self._update_length_setup_progress(
+                value=progress_value,
+                total=progress_total,
+                complete=complete,
+                percent=percent,
+            )
+            return
         total = max(1, self._automation_total_steps or len(self._automation_steps))
         if self._automation_active and not complete and self._automation_completed_ticks >= total:
             total = self._automation_completed_ticks + 1
@@ -29597,6 +29769,92 @@ class MainWindow(QtWidgets.QMainWindow):
             return CURRENT_SWEEP_BASIS_BY_MODE[str(self._automation_name)]
         return self._current_sweep_basis()
 
+    def _runtime_updated_future_step(
+        self,
+        step: AutomationStep,
+        values: Mapping[str, float | bool],
+    ) -> AutomationStep:
+        if step.action == "set_current" and step.current_mA is not None:
+            return replace(
+                step,
+                current_mA=float(values["current_start_mA"]),
+            )
+        if step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
+            return replace(
+                step,
+                target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+            )
+        if step.action == "fatigue_loop":
+            return replace(
+                step,
+                target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+                current_start_mA=float(values["current_start_mA"]),
+                current_end_mA=float(values["current_end_mA"]),
+                current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+                current_hold_enabled=bool(values["current_hold_enabled"]),
+                current_hold_pause_tolerance_factor=float(
+                    values["current_hold_pause_tolerance_factor"]
+                ),
+                current_hold_resume_tolerance_factor=float(
+                    values["current_hold_resume_tolerance_factor"]
+                ),
+                current_hold_resume_stable_s=float(
+                    values["current_hold_resume_stable_s"]
+                ),
+            )
+        if step.action != "sweep_current":
+            return step
+        old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
+        old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+        current_end_key = (
+            "first_overheating_current_end_mA"
+            if self._is_first_overheating_step(step)
+            else "current_end_mA"
+        )
+        if old_end >= old_start:
+            new_start = float(values["current_start_mA"])
+            new_end = float(values[current_end_key])
+        else:
+            new_start = float(values[current_end_key])
+            new_end = float(values["current_start_mA"])
+        return replace(
+            step,
+            current_start_mA=new_start,
+            current_end_mA=new_end,
+            current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+            current_hold_enabled=bool(values["current_hold_enabled"]),
+            current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+            current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+            current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+        )
+
+    def _runtime_pending_active_plateau_steps(
+        self,
+        values: Mapping[str, float | bool],
+        *,
+        basis: str,
+        active_index: int,
+        active_target: float,
+    ) -> list[AutomationStep]:
+        if not 0 <= active_index < len(self._automation_steps):
+            return []
+        active_step = self._automation_steps[active_index]
+        if active_step.action == "sweep_current":
+            return []
+        active_note = str(active_step.note)
+        pending: list[AutomationStep] = []
+        for step in self._automation_steps[active_index + 1 :]:
+            same_note = bool(active_note) and str(step.note) == active_note
+            same_target = (
+                step.basis == basis
+                and step.target_value is not None
+                and self._target_values_close(float(step.target_value), active_target)
+            )
+            if not same_note and not same_target:
+                break
+            pending.append(self._runtime_updated_future_step(step, values))
+        return pending
+
     @staticmethod
     def _is_first_overheating_step(step: AutomationStep) -> bool:
         return step.note == "first_overheating"
@@ -29694,6 +29952,15 @@ class MainWindow(QtWidgets.QMainWindow):
         current_end = float(values["current_end_mA"])
         current_ramp_rate = float(values["current_ramp_rate_mA_s"])
         target_ramp_rate = float(values["target_ramp_rate_value_s"])
+
+        tail.extend(
+            self._runtime_pending_active_plateau_steps(
+                values,
+                basis=basis,
+                active_index=active_index,
+                active_target=active_target,
+            )
+        )
 
         def _append_plateau(target: float, note: str) -> None:
             nonlocal previous_target
@@ -29858,10 +30125,13 @@ class MainWindow(QtWidgets.QMainWindow):
         active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
         active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
         replacement_tail = None
-        if not (
-            active_step is not None
-            and self._is_first_overheating_step(active_step)
-            and active_step.action != "sweep_current"
+        if (
+            self._automation_name != CURRENT_SWEEP_FATIGUE
+            and not (
+                active_step is not None
+                and self._is_first_overheating_step(active_step)
+                and active_step.action != "sweep_current"
+            )
         ):
             replacement_tail = self._build_runtime_current_sweep_tail(
                 update_values,
@@ -29895,41 +30165,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if index <= active_index:
                     continue
                 old_summary = self._current_sweep_step_override_summary(step)
-                new_step = step
-                if step.action == "set_current" and step.current_mA is not None:
-                    new_step = replace(
-                        step,
-                        current_mA=float(update_values["current_start_mA"]),
-                    )
-                elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
-                    new_step = replace(
-                        step,
-                        target_ramp_rate_value_s=float(update_values["target_ramp_rate_value_s"]),
-                    )
-                elif step.action == "sweep_current":
-                    old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
-                    old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
-                    current_end_key = (
-                        "first_overheating_current_end_mA"
-                        if self._is_first_overheating_step(step)
-                        else "current_end_mA"
-                    )
-                    if old_end >= old_start:
-                        new_start = float(update_values["current_start_mA"])
-                        new_end = float(update_values[current_end_key])
-                    else:
-                        new_start = float(update_values[current_end_key])
-                        new_end = float(update_values["current_start_mA"])
-                    new_step = replace(
-                        step,
-                        current_start_mA=new_start,
-                        current_end_mA=new_end,
-                        current_ramp_rate_mA_s=float(update_values["current_ramp_rate_mA_s"]),
-                        current_hold_enabled=bool(update_values["current_hold_enabled"]),
-                        current_hold_pause_tolerance_factor=float(update_values["current_hold_pause_tolerance_factor"]),
-                        current_hold_resume_tolerance_factor=float(update_values["current_hold_resume_tolerance_factor"]),
-                        current_hold_resume_stable_s=float(update_values["current_hold_resume_stable_s"]),
-                    )
+                new_step = self._runtime_updated_future_step(step, update_values)
                 if new_step is not step:
                     new_summary = self._current_sweep_step_override_summary(new_step)
                     if new_summary != old_summary:
@@ -30641,6 +30877,11 @@ class MainWindow(QtWidgets.QMainWindow):
             origin_mm=float(self._recipe_origin_mm),
             summary=summary or self._last_recipe_summary,
             current_setpoint_mA=self._supply_last_setpoint_mA,
+            source_run_path=(
+                None if self._session_base_path is None else str(self._session_base_path.parent)
+            ),
+            fatigue_cycle_index=int(self._fatigue_cycle_index),
+            fatigue_loop_anchor_index=self._fatigue_loop_anchor_index,
         )
 
     def _ask_resume_stopped_recipe(self) -> str:
@@ -30671,12 +30912,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_stopped_recipe(self, state: AutomationResumeState) -> None:
         if not self._preflight_recipe_hardware(state.steps):
             return
-        if not self._session_active:
-            self._log("Cannot resume because the previous session is no longer active. Start over instead.")
-            self._resume_recipe_state = None
-            return
         self._automation_steps = list(state.steps)
         self._automation_index = min(max(0, int(state.index)), len(self._automation_steps))
+        if (
+            state.current_setpoint_mA is not None
+            and self._automation_index < len(self._automation_steps)
+            and self._automation_steps[self._automation_index].action == "sweep_current"
+        ):
+            self._automation_steps[self._automation_index] = replace(
+                self._automation_steps[self._automation_index],
+                current_start_mA=float(state.current_setpoint_mA),
+            )
         self._automation_total_steps = int(state.total_steps)
         self._automation_completed_ticks = min(self._automation_index, self._automation_total_steps)
         self._automation_progress_started_s = time.monotonic()
@@ -30687,9 +30933,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._automation_active = True
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._automation_interval_ms = int(state.interval_ms)
-        self._active_control_config = self._freeze_control_config()
         self._automation_name = str(state.name)
+        self._fatigue_cycle_index = int(state.fatigue_cycle_index)
+        self._fatigue_loop_anchor_index = state.fatigue_loop_anchor_index
+        fatigue_loop_step = next(
+            (step for step in reversed(self._automation_steps) if step.action == "fatigue_loop"),
+            None,
+        )
+        self._fatigue_cycle_limit = (
+            None
+            if fatigue_loop_step is None
+            else fatigue_loop_step.fatigue_cycle_limit
+        )
         self._current_sweep_runtime_applied_values = (
             self._current_sweep_visible_runtime_values_from_controls()
             if self._is_current_sweep_mode(self._automation_name)
@@ -30697,6 +30954,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._recipe_origin_mm = float(state.origin_mm)
         self._last_recipe_summary = state.summary
+        if not self._session_active:
+            self._sync_stale_log_name_from_sample()
+            self._start_session(enable_logging=True, record_initial_point=False)
+            if not self._session_active:
+                self._automation_active = False
+                return
+        self._active_control_config = self._freeze_control_config()
         self._resume_recipe_state = None
         self._set_automation_context(phase="resume")
         if state.current_setpoint_mA is not None and self._is_current_sweep_mode(self._automation_name):
@@ -30734,7 +30998,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._end_zero_fallback_raw_g = None
         self._reset_timed_step_state()
         self._start_automation_control_loop(self._automation_interval_ms)
-        self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
+        source_text = (
+            f" from finalized run {state.source_run_path}"
+            if state.source_run_path
+            else ""
+        )
+        self._log(
+            f"Recipe resumed in this run at saved recipe row "
+            f"{self._automation_index + 1}{source_text}."
+        )
         self._update_recipe_progress()
         self._update_recipe_buttons()
         self._refresh_live_labels()
@@ -31414,7 +31686,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
-        if self._resume_recipe_state is not None and self._session_active:
+        if self._resume_recipe_state is not None:
             if self._resume_recipe_state.summary == summary:
                 resume_choice = self._ask_resume_stopped_recipe()
                 if resume_choice == "cancel":
@@ -31520,9 +31792,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._session_active:
                 self._first_overheating_preflight_decision = None
                 return
+        if not any(step.action == "start_session" for step in steps):
+            self._begin_recipe_logging()
         self._record_first_overheating_preflight_skip_for_session()
         self._automation_steps = steps
         self._automation_index = 0
+        fatigue_loop_step = next(
+            (step for step in reversed(steps) if step.action == "fatigue_loop"),
+            None,
+        )
+        self._fatigue_cycle_index = 0
+        self._fatigue_cycle_limit = (
+            None
+            if fatigue_loop_step is None
+            else fatigue_loop_step.fatigue_cycle_limit
+        )
+        self._fatigue_loop_anchor_index = (
+            None if fatigue_loop_step is None else steps.index(fatigue_loop_step)
+        )
         self._recipe_estimated_points, estimate_ticks = self._estimate_recipe_points_and_ticks(
             steps,
             interval_ms,
@@ -31548,6 +31835,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automatic_tic_settings_snapshot = None
         self._automation_active = True
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._automation_interval_ms = interval_ms
         self._active_control_config = self._freeze_control_config()
         self._recipe_origin_mm = self._current_position_mm
@@ -31583,6 +31871,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active or self._automation_paused:
             return
         self._automation_paused = True
+        self._automation_pause_started_s = time.monotonic()
         self._paused_current_setpoint_mA = self._supply_last_setpoint_mA
         quiescent = self._pause_automation_control_loop()
         self._stop_tic_keepalive()
@@ -31635,6 +31924,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._paused_current_setpoint_mA is not None and self._is_current_sweep_mode(self._automation_name):
             if not self._set_recipe_current_mA(float(self._paused_current_setpoint_mA)):
                 return
+        now_s = time.monotonic()
+        pause_started_s = self._automation_pause_started_s
+        paused_s = 0.0 if pause_started_s is None else max(0.0, now_s - pause_started_s)
+        if paused_s > 0.0:
+            for attribute in (
+                "_automation_progress_started_s",
+                "_active_current_sweep_started_s",
+                "_active_current_sweep_wall_started_s",
+                "_active_current_sweep_last_schedule_update_s",
+                "_current_sweep_ramp_hold_started_s",
+                "_active_target_ramp_started_s",
+                "_active_timed_step_started_s",
+                "_active_mechanical_scan_started_s",
+            ):
+                value = getattr(self, attribute, 0.0)
+                if isinstance(value, (int, float)) and value > 0.0:
+                    setattr(self, attribute, float(value) + paused_s)
+            for attribute in (
+                "_current_sweep_ramp_hold_in_band_since_s",
+                "_current_sweep_ramp_hold_seek_accepted_since_s",
+                "_current_sweep_ramp_hold_candidate_since_s",
+                "_current_sweep_voltage_limit_started_s",
+                "_target_ramp_endpoint_in_band_since_s",
+                "_active_mechanical_scan_hold_started_s",
+            ):
+                value = getattr(self, attribute, None)
+                if value is not None:
+                    setattr(self, attribute, float(value) + paused_s)
+        self._automation_pause_started_s = None
         self._automation_paused = False
         self._resume_automation_control_loop()
         self._set_automation_context(phase="resume")
@@ -32320,6 +32638,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._automation_interval_ms = interval_ms
         self._active_control_config = self._freeze_control_config()
         self._automation_name = RECOVERY_POSITION
@@ -32364,6 +32683,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._active_control_config = self._freeze_control_config()
         self._automation_name = RECOVERY_LOAD
         self._end_zero_fallback_armed = True
@@ -32419,6 +32739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._active_control_config = self._freeze_control_config()
         self._automation_name = RECOVERY_LOAD
         self._set_automation_context(
@@ -32512,10 +32833,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "remain blocked until motor status is checked."
             )
         self._automation_paused = False
+        self._automation_pause_started_s = None
         self._active_control_config = None
         self._kosice_force_control = None
         self._automation_steps = []
         self._automation_index = 0
+        self._fatigue_cycle_index = 0
+        self._fatigue_cycle_limit = None
+        self._fatigue_loop_anchor_index = None
         if not keep_progress:
             self._automation_completed_ticks = 0
             self._automation_progress_started_s = 0.0
@@ -33368,11 +33693,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_basis: str,
                 note: str,
                 plateau_current_end_mA: float = current_end,
+                fatigue_cycle_index: int | None = None,
             ) -> None:
                 sweep_ranges = [(current_start, plateau_current_end_mA)]
                 if reverse_current and abs(plateau_current_end_mA - current_start) > 1e-12:
                     sweep_ranges.append((plateau_current_end_mA, current_start))
                 for sweep_start_mA, sweep_end_mA in sweep_ranges:
+                    fatigue_leg = None
+                    if fatigue_cycle_index is not None:
+                        fatigue_leg = "up" if sweep_end_mA >= sweep_start_mA else "down"
                     steps.append(
                         AutomationStep(
                             "sweep_current",
@@ -33386,6 +33715,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             current_hold_resume_tolerance_factor=current_hold_resume_factor,
                             current_hold_resume_stable_s=current_hold_resume_stable_s,
                             note=note,
+                            fatigue_cycle_index=fatigue_cycle_index,
+                            fatigue_leg=fatigue_leg,
                         )
                     )
 
@@ -33421,33 +33752,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if is_fatigue_recipe:
                 target = target_start
-                for cycle_index in range(1, fatigue_cycles + 1):
-                    cycle_note = str(cycle_index)
-                    steps.append(
-                        AutomationStep(
-                            "set_current",
-                            target_value=target,
-                            basis=basis,
-                            current_mA=current_start,
-                            note=cycle_note,
-                        )
+                steps.append(
+                    AutomationStep(
+                        "fatigue_loop",
+                        target_value=target,
+                        target_start_value=previous_target,
+                        target_end_value=target,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=basis,
+                        current_start_mA=current_start,
+                        current_end_mA=current_end,
+                        current_ramp_rate_mA_s=current_ramp_rate,
+                        current_hold_enabled=current_hold_enabled,
+                        current_hold_pause_tolerance_factor=current_hold_pause_factor,
+                        current_hold_resume_tolerance_factor=current_hold_resume_factor,
+                        current_hold_resume_stable_s=current_hold_resume_stable_s,
+                        note="fatigue_loop",
+                        fatigue_cycle_limit=None if fatigue_cycles == 0 else fatigue_cycles,
                     )
-                    steps.append(
-                        AutomationStep(
-                            "ramp_target",
-                            target_value=target,
-                            target_start_value=previous_target,
-                            target_end_value=target,
-                            target_ramp_rate_value_s=target_ramp_rate,
-                            basis=basis,
-                            note=cycle_note,
-                        )
-                    )
-                    previous_target = target
-                    _append_current_sweep_plateau(target=target, plateau_basis=basis, note=cycle_note)
+                )
+                cycle_text = "forever" if fatigue_cycles == 0 else f"{fatigue_cycles} cycle(s)"
                 summary = (
                     f"Started iso-stress fatigue: stress {target_start:.4f} MPa, "
-                    f"{fatigue_cycles} cycle(s), current {current_start:.2f} to {current_end:.2f} mA "
+                    f"{cycle_text}, current {current_start:.2f} to {current_end:.2f} mA "
                     f"at {current_ramp_rate:.2f} mA/s; {clock_summary}."
                 )
                 if current_hold_enabled:
@@ -33468,6 +33795,13 @@ class MainWindow(QtWidgets.QMainWindow):
                             "as its current maximum."
                         )
                 summary += " Each cycle sweeps current up and back at the same stress target."
+                selected_profile = self._force_control_profile()
+                summary += (
+                    " Force control: Košice adaptive for fatigue control; automated setup uses "
+                    "the Prague setup path."
+                    if selected_profile is ForceControlProfile.KOSICE_ADAPTIVE
+                    else " Force control: Prague legacy for fatigue control and automated setup."
+                )
                 summary += self._recipe_setup_summary_sentence()
                 return steps, summary, control_interval_ms
 
@@ -33721,6 +34055,22 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._using_kern_kcp_scale()
             else ForceControlProfile.PRAGUE_LEGACY
         )
+
+    def _refresh_force_control_profile_label(self, _value: object = None) -> None:
+        if not hasattr(self, "label_force_control_profile"):
+            return
+        profile = self._force_control_profile()
+        if profile is ForceControlProfile.KOSICE_ADAPTIVE:
+            text = (
+                "Košice adaptive (selected from KERN KCP serial settings). "
+                "Automated setup target seeking remains on the Prague setup path."
+            )
+        else:
+            text = (
+                "Prague legacy (selected from the current scale serial settings). "
+                "Automated setup target seeking uses the same Prague path."
+            )
+        self.label_force_control_profile.setText(text)
 
     def _setup_preload_uses_locked_settle(self) -> bool:
         return self._using_kern_kcp_scale()
@@ -34262,7 +34612,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_current_sweep_ramp_hold_candidate()
             return False, False
 
-        held_s = max(0.0, now_s - self._current_sweep_ramp_hold_started_s)
         active_resume_band = self._current_sweep_hold_earned_resume_band(
             step,
             signed_error=signed_error,
@@ -34362,11 +34711,13 @@ class MainWindow(QtWidgets.QMainWindow):
             basis=step.basis,
             target_value=step.target_value,
             plateau_index=plateau_index,
+            fatigue_cycle_index=step.fatigue_cycle_index,
+            fatigue_leg=step.fatigue_leg,
         )
         now_s = time.monotonic()
         if self._maybe_resume_current_sweep_held_recovery_from_adaptive_band(step, now_s=now_s):
             return False
-        point_count_before_seek = len(self._session_points)
+        point_count_before_seek = self._session_point_count()
         try:
             target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
         except Exception as exc:
@@ -34392,7 +34743,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         else:
             self._current_sweep_ramp_hold_seek_accepted_since_s = None
-        if len(self._session_points) == point_count_before_seek:
+        if self._session_point_count() == point_count_before_seek:
             self._maybe_record_scheduled_point(
                 quiet=True,
                 advance_heating=False,
@@ -34665,6 +35016,104 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return self._record_scheduled_recipe_point(step)
 
+    def _fatigue_cycle_steps(
+        self,
+        loop_step: AutomationStep,
+        cycle_index: int,
+    ) -> list[AutomationStep]:
+        if (
+            loop_step.target_value is None
+            or loop_step.basis != HSW_BASIS_STRESS_MPA
+            or loop_step.current_start_mA is None
+            or loop_step.current_end_mA is None
+            or loop_step.current_ramp_rate_mA_s is None
+        ):
+            raise ValueError("The fatigue loop definition is incomplete.")
+        target = float(loop_step.target_value)
+        current_start = float(loop_step.current_start_mA)
+        current_end = float(loop_step.current_end_mA)
+        cycle_note = str(int(cycle_index))
+        ramp_start = (
+            loop_step.target_start_value
+            if cycle_index == 1
+            else target
+        )
+        steps = [
+            AutomationStep(
+                "set_current",
+                target_value=target,
+                basis=loop_step.basis,
+                current_mA=current_start,
+                note=cycle_note,
+                fatigue_cycle_index=cycle_index,
+                fatigue_leg="prepare",
+            ),
+            AutomationStep(
+                "ramp_target",
+                target_value=target,
+                target_start_value=ramp_start,
+                target_end_value=target,
+                target_ramp_rate_value_s=loop_step.target_ramp_rate_value_s,
+                basis=loop_step.basis,
+                note=cycle_note,
+                fatigue_cycle_index=cycle_index,
+                fatigue_leg="prepare",
+            ),
+        ]
+        sweep_ranges = [(current_start, current_end)]
+        if abs(current_end - current_start) > 1e-12:
+            sweep_ranges.append((current_end, current_start))
+        for sweep_start_mA, sweep_end_mA in sweep_ranges:
+            steps.append(
+                AutomationStep(
+                    "sweep_current",
+                    target_value=target,
+                    basis=loop_step.basis,
+                    current_start_mA=sweep_start_mA,
+                    current_end_mA=sweep_end_mA,
+                    current_ramp_rate_mA_s=loop_step.current_ramp_rate_mA_s,
+                    current_hold_enabled=loop_step.current_hold_enabled,
+                    current_hold_pause_tolerance_factor=(
+                        loop_step.current_hold_pause_tolerance_factor
+                    ),
+                    current_hold_resume_tolerance_factor=(
+                        loop_step.current_hold_resume_tolerance_factor
+                    ),
+                    current_hold_resume_stable_s=loop_step.current_hold_resume_stable_s,
+                    note=cycle_note,
+                    fatigue_cycle_index=cycle_index,
+                    fatigue_leg="up" if sweep_end_mA >= sweep_start_mA else "down",
+                )
+            )
+        return steps
+
+    def _expand_next_fatigue_cycle(
+        self,
+        loop_step: AutomationStep,
+        step_index: int,
+    ) -> None:
+        if self._fatigue_loop_anchor_index is None:
+            self._fatigue_loop_anchor_index = int(step_index)
+        anchor_index = int(self._fatigue_loop_anchor_index)
+        next_cycle_index = int(self._fatigue_cycle_index) + 1
+        cycle_limit = loop_step.fatigue_cycle_limit
+        if cycle_limit is not None and next_cycle_index > int(cycle_limit):
+            del self._automation_steps[anchor_index:]
+            self._automation_index = anchor_index
+            return
+        try:
+            cycle_steps = self._fatigue_cycle_steps(loop_step, next_cycle_index)
+        except ValueError as exc:
+            self._log(f"Recipe stopped: {exc}")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return
+        self._fatigue_cycle_index = next_cycle_index
+        self._fatigue_cycle_limit = cycle_limit
+        self._automation_steps[anchor_index:] = [*cycle_steps, loop_step]
+        self._automation_index = anchor_index
+        limit_text = "forever" if cycle_limit is None else str(cycle_limit)
+        self._log(f"Starting fatigue cycle {next_cycle_index}/{limit_text}.")
+
     def _handle_current_sweep_step(self, step: AutomationStep, step_index: int) -> bool:
         if step.current_start_mA is None or step.current_end_mA is None or step.current_ramp_rate_mA_s is None:
             self._log("Recipe stopped because the current ramp step is incomplete.")
@@ -34713,6 +35162,8 @@ class MainWindow(QtWidgets.QMainWindow):
             basis=step.basis,
             target_value=step.target_value,
             plateau_index=plateau_index,
+            fatigue_cycle_index=step.fatigue_cycle_index,
+            fatigue_leg=step.fatigue_leg,
         )
         now_s = time.monotonic()
         holding_current, stopped_for_hold = self._update_current_sweep_ramp_hold(
@@ -34751,14 +35202,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._stop_current_sweep_if_wire_break(step, tolerance=tolerance):
             return True
 
-        point_count_before_seek = len(self._session_points)
+        point_count_before_seek = self._session_point_count()
         try:
             self._seek_distribution_target(step.basis, step.target_value, tolerance)
         except Exception as exc:
             self._log(f"Recipe stopped: {exc}")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
-        if len(self._session_points) == point_count_before_seek:
+        if self._session_point_count() == point_count_before_seek:
             self._maybe_record_scheduled_point(
                 quiet=True,
                 advance_heating=False,
@@ -34940,6 +35391,8 @@ class MainWindow(QtWidgets.QMainWindow):
             target_value=desired_value,
             plateau_index=plateau_index,
             note=step.note,
+            fatigue_cycle_index=step.fatigue_cycle_index,
+            fatigue_leg=step.fatigue_leg,
         )
         tolerance = self._automation_tolerance_for_step(step)
         try:
@@ -35412,7 +35865,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     None if self._session_raw_scale_max_gap_s <= 0.0 else self._session_raw_scale_max_gap_s,
                     decimals=3,
                 ),
-                "session_points": len(self._session_points),
+                "session_points": self._session_point_count(),
                 "live_plot_points": len(self._live_plot_points),
             }
         )
@@ -35485,7 +35938,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"tic_command_duration={_fmt(dispatcher_health.get('last_command_duration_s'), ' s')}, "
             f"tic_keepalive_max_gap={_fmt(dispatcher_health.get('max_keepalive_gap_s'), ' s')}, "
             f"tic_dispatcher_error={dispatcher_health.get('last_error') or '-'}; "
-            f"points={len(self._session_points)}, live_points={len(self._live_plot_points)}, "
+            f"points={self._session_point_count()}, live_points={len(self._live_plot_points)}, "
             f"live_plot_sample={int(bool(live_plot_sample_recorded))}, "
             f"plot_refresh={int(bool(dashboard_plot_refreshed))}."
         )
@@ -35668,7 +36121,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._set_dashboard_value("speed_mm_s", self._live_linear_speed_text(speed_values["speed_mm_s"]))
         self.label_card_session.setText(
-            f"{session_value} | {len(self._session_points)} point(s)"
+            f"{session_value} | {self._session_point_count()} point(s)"
         )
         if self._latest_scale_timestamp is None:
             scale_value = "No readings yet"
@@ -36699,7 +37152,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_current_sweep_target_values(recipe_mode, allow_legacy_settings=True)
         self._last_recipe_mode = recipe_mode
         self.spin_current_sweep_fatigue_cycles.setValue(
-            max(1, int(self.settings.value("current_sweep_fatigue_cycles", 100)))
+            max(0, int(self.settings.value("current_sweep_fatigue_cycles", 100)))
         )
         current_sweep_servo_defaults_version = int(
             self.settings.value("current_sweep_servo_defaults_version", 0)

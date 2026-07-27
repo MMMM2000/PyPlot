@@ -4,6 +4,7 @@ import csv
 import os
 import re
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -24,6 +25,11 @@ from plotting.shared.origin import (
 )
 from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.readability import apply_readability_fonts, apply_readability
+from plotting.shared.transition_analysis import (
+    LinearSegmentFit,
+    TangentTransitionFit,
+    fit_tangent_transition,
+)
 from plotting.shared.toolkit import format_annealing_title
 
 # Defaults
@@ -58,6 +64,23 @@ ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
 _CURRENT_TARGET_PATTERN = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*mA\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class AnnealingTransitionSummary:
+    as_current_mA: float | None = None
+    af_current_mA: float | None = None
+    ms_current_mA: float | None = None
+    mf_current_mA: float | None = None
+    loop_index: int | None = None
+
+
+@dataclass(frozen=True)
+class _AnnealingTransitionCandidate:
+    fit: TangentTransitionFit
+    linear_rmse: float
+    score: float
+    count: int
 
 
 def _format_origin_annotation(text: str) -> str:
@@ -245,6 +268,529 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
             current_dir = smoothed_values[idx]
     segments.append((start, count, current_dir))
     return smoothed_values, segments
+
+
+def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSummary, ...]:
+    """Estimate annealing As/Af/Ms/Mf currents for each paired R(I) loop.
+
+    The annealing traces are deliberately gated more conservatively than TMA:
+    a loop is emitted only when its increasing-current leg has an accepted
+    austenite tangent fit. Cooling points are added for that same loop when the
+    following decreasing-current leg has a clear martensite fit.
+    """
+
+    resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
+    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
+        return ()
+    currents = pd.to_numeric(df["I_mA"], errors="coerce")
+    resistances = pd.to_numeric(df[resistance_column], errors="coerce")
+    working = pd.DataFrame({"I_mA": currents, "R_Ohm": resistances}).dropna()
+    if len(working.index) < 48:
+        return ()
+
+    _directions, segments = _direction_profile(working["I_mA"].to_numpy(dtype=float))
+    summaries: List[AnnealingTransitionSummary] = []
+    loop_index = 0
+    segment_count = len(segments)
+    for segment_index, (start, end, direction) in enumerate(segments):
+        if direction < 0:
+            continue
+        loop_index += 1
+        heating = _fit_heating_resistance_drop_segment(working.iloc[start:end].copy())
+        if heating is None:
+            continue
+        cooling_candidates: List[_AnnealingTransitionCandidate] = []
+        for next_start, next_end, next_direction in segments[segment_index + 1 : segment_count]:
+            if next_direction >= 0:
+                break
+            candidate = _fit_cooling_resistance_increase_segment(
+                working.iloc[next_start:next_end].copy(),
+                max_current_mA=heating.fit.finish_x,
+            )
+            if candidate is None:
+                continue
+            if (
+                candidate.fit.finish_x < heating.fit.finish_x
+                and candidate.fit.start_x < heating.fit.finish_x
+                and candidate.fit.transition.slope < 0.0
+            ):
+                cooling_candidates.append(candidate)
+        cooling = (
+            min(cooling_candidates, key=lambda candidate: candidate.score)
+            if cooling_candidates
+            else None
+        )
+        summaries.append(
+            AnnealingTransitionSummary(
+                as_current_mA=heating.fit.start_x,
+                af_current_mA=heating.fit.finish_x,
+                mf_current_mA=cooling.fit.start_x if cooling is not None else None,
+                ms_current_mA=cooling.fit.finish_x if cooling is not None else None,
+                loop_index=loop_index,
+            )
+        )
+    return tuple(summaries)
+
+
+def summarize_transition_currents(df: pd.DataFrame) -> AnnealingTransitionSummary:
+    """Estimate the first annealing As/Af/Ms/Mf current set from an R(I) trace."""
+
+    summaries = summarize_transition_loops(df)
+    if not summaries:
+        return AnnealingTransitionSummary()
+    first = summaries[0]
+    return AnnealingTransitionSummary(
+        as_current_mA=first.as_current_mA,
+        af_current_mA=first.af_current_mA,
+        ms_current_mA=first.ms_current_mA,
+        mf_current_mA=first.mf_current_mA,
+    )
+
+
+def format_transition_summary(
+    summary: AnnealingTransitionSummary,
+    *,
+    label: str | None = None,
+) -> str:
+    values = (
+        ("As", summary.as_current_mA),
+        ("Af", summary.af_current_mA),
+        ("Ms", summary.ms_current_mA),
+        ("Mf", summary.mf_current_mA),
+    )
+    if not any(value is not None for _name, value in values):
+        return ""
+    parts = [
+        f"{name} {_format_compact_number(float(value), max_decimals=0)} mA"
+        for name, value in values
+        if value is not None
+    ]
+    prefix = f"{label}: " if label else ""
+    return prefix + ", ".join(parts)
+
+
+def format_transition_summaries(
+    summaries: Tuple[AnnealingTransitionSummary, ...],
+    *,
+    label: str | None = None,
+) -> Tuple[str, ...]:
+    """Format one or more annealing loop summaries for review/table display."""
+
+    lines: List[str] = []
+    multiple = len(summaries) > 1
+    for summary in summaries:
+        loop_index = summary.loop_index
+        line_label = label
+        if loop_index is not None and (multiple or loop_index != 1):
+            line_label = f"{label} loop {loop_index}" if label else f"Loop {loop_index}"
+        text = format_transition_summary(summary, label=line_label)
+        if text:
+            lines.append(text)
+    return tuple(lines)
+
+
+def _fit_annealing_transition_segment(
+    segment: pd.DataFrame,
+    *,
+    transition_slope_sign: int | None = None,
+) -> _AnnealingTransitionCandidate | None:
+    if len(segment.index) < 24:
+        return None
+    current = pd.to_numeric(segment["I_mA"], errors="coerce")
+    resistance = pd.to_numeric(segment["R_Ohm"], errors="coerce")
+    valid = current.notna() & resistance.notna()
+    current_values = current.loc[valid].to_numpy(dtype=float)
+    resistance_values = resistance.loc[valid].to_numpy(dtype=float)
+    if len(current_values) < 24 or len(np.unique(current_values)) < 24:
+        return None
+    if transition_slope_sign is not None and transition_slope_sign < 0:
+        if not _has_resistance_drop_candidate(current_values, resistance_values):
+            return None
+
+    fit = fit_tangent_transition(
+        current_values,
+        resistance_values,
+        min_segment_points=8,
+        max_points=72,
+        min_slope_gain_ratio=2.5,
+        min_transition_width_fraction=0.05,
+        max_intersection_boundary_fraction=0.06,
+        transition_slope_sign=transition_slope_sign,
+    )
+    if fit is None:
+        return None
+
+    y_range = float(np.nanmax(resistance_values) - np.nanmin(resistance_values))
+    median_resistance = float(np.nanmedian(np.abs(resistance_values)))
+    if median_resistance <= 0.0 or y_range / median_resistance < 0.05:
+        return None
+    linear_rmse = _linear_rmse(current_values, resistance_values)
+    if not math.isfinite(linear_rmse) or linear_rmse <= 0.0:
+        return None
+    score = fit.rmse / linear_rmse
+    if score > 0.7:
+        return None
+    return _AnnealingTransitionCandidate(
+        fit=fit,
+        linear_rmse=linear_rmse,
+        score=score,
+        count=len(current_values),
+    )
+
+
+def _fit_heating_resistance_drop_segment(
+    segment: pd.DataFrame,
+) -> _AnnealingTransitionCandidate | None:
+    if len(segment.index) < 24:
+        return None
+    current = pd.to_numeric(segment["I_mA"], errors="coerce")
+    resistance = pd.to_numeric(segment["R_Ohm"], errors="coerce")
+    valid = current.notna() & resistance.notna()
+    x = current.loc[valid].to_numpy(dtype=float)
+    y = resistance.loc[valid].to_numpy(dtype=float)
+    if len(x) < 24 or len(np.unique(x)) < 24:
+        return None
+    order = np.argsort(x, kind="stable")
+    x = x[order]
+    y = y[order]
+    scan_width = float(np.nanmax(x) - np.nanmin(x))
+    if not math.isfinite(scan_width) or scan_width <= 0.0:
+        return None
+
+    smoothed = (
+        pd.Series(y)
+        .rolling(window=3, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+    diffs = np.diff(smoothed)
+    finite_diffs = np.abs(diffs[np.isfinite(diffs)])
+    noise = float(np.nanmedian(finite_diffs)) if finite_diffs.size else 0.0
+    median_resistance = float(np.nanmedian(np.abs(smoothed)))
+    min_drop = max(0.004 * median_resistance, 1.1 * noise, 0.8)
+    min_span = max(1.5, scan_width * 0.02)
+    max_span = max(4.0, scan_width * 0.12)
+    lower_limit = float(np.nanmin(x)) + max(5.0, scan_width * 0.08)
+    candidates: List[tuple[float, int, int, float]] = []
+    for start in range(2, len(x) - 5):
+        if x[start] < lower_limit:
+            continue
+        if smoothed[start + 1] >= smoothed[start]:
+            continue
+        for end in range(start + 2, len(x) - 3):
+            span = float(x[end] - x[start])
+            if span < min_span:
+                continue
+            if span > max_span:
+                break
+            drop = float(smoothed[start] - smoothed[end])
+            if drop < min_drop:
+                continue
+            after_end = min(len(x), end + 5)
+            recovered = float(np.nanmax(smoothed[end + 1 : after_end])) if end + 1 < after_end else smoothed[end]
+            if recovered < smoothed[end] + (0.35 * drop):
+                continue
+            score = float(x[start]) - (drop * 0.2) - (span * 0.02)
+            candidates.append((score, start, end, drop))
+    if not candidates:
+        return None
+
+    _score, start, end, drop = min(candidates, key=lambda item: item[0])
+    before_start = max(0, start - 8)
+    after_end = min(len(x), end + 9)
+    before = _line_segment_fit(x[before_start : start + 1], y[before_start : start + 1])
+    transition = _line_segment_fit(x[start : end + 1], y[start : end + 1])
+    after = _line_segment_fit(x[end:after_end], y[end:after_end])
+    if before is None or transition is None or after is None:
+        return None
+    if transition.slope >= 0.0:
+        return None
+    rmse = _combined_segment_rmse(
+        (
+            (before.rmse, start + 1 - before_start),
+            (transition.rmse, end + 1 - start),
+            (after.rmse, after_end - end),
+        )
+    )
+    linear_rmse = _linear_rmse(x, y)
+    fit = TangentTransitionFit(
+        start_x=float(x[start]),
+        finish_x=float(x[end]),
+        before=before,
+        transition=transition,
+        after=after,
+        rmse=rmse,
+    )
+    return _AnnealingTransitionCandidate(
+        fit=fit,
+        linear_rmse=linear_rmse,
+        score=float(x[start]) - drop,
+        count=len(x),
+    )
+
+
+def _fit_cooling_resistance_increase_segment(
+    segment: pd.DataFrame,
+    *,
+    max_current_mA: float,
+) -> _AnnealingTransitionCandidate | None:
+    if len(segment.index) < 12:
+        return None
+    current = pd.to_numeric(segment["I_mA"], errors="coerce")
+    resistance = pd.to_numeric(segment["R_Ohm"], errors="coerce")
+    valid = current.notna() & resistance.notna()
+    x = current.loc[valid].to_numpy(dtype=float)
+    y = resistance.loc[valid].to_numpy(dtype=float)
+    if len(x) < 12 or len(np.unique(x)) < 12:
+        return None
+    order = np.argsort(x, kind="stable")
+    x = x[order]
+    y = y[order]
+    eligible = x < float(max_current_mA)
+    x = x[eligible]
+    y = y[eligible]
+    if len(x) < 10 or len(np.unique(x)) < 10:
+        return None
+    scan_width = float(np.nanmax(x) - np.nanmin(x))
+    if not math.isfinite(scan_width) or scan_width <= 0.0:
+        return None
+    smoothed = (
+        pd.Series(y)
+        .rolling(window=3, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+    diffs = np.diff(smoothed)
+    finite_diffs = np.abs(diffs[np.isfinite(diffs)])
+    noise = float(np.nanmedian(finite_diffs)) if finite_diffs.size else 0.0
+    median_resistance = float(np.nanmedian(np.abs(smoothed)))
+    min_rise = max(0.008 * median_resistance, 1.0 * noise, 0.8)
+    min_span = max(0.8, scan_width * 0.04)
+    max_span = max(3.5, scan_width * 0.25)
+    low_current_limit = float(np.nanmin(x)) + max(8.0, scan_width * 0.35)
+    candidates: List[tuple[float, int, int, float]] = []
+    for start in range(2, len(x) - 5):
+        if x[start] > low_current_limit:
+            continue
+        window_start = max(0, start - 2)
+        window_end = min(len(smoothed), start + 3)
+        if smoothed[start] < float(np.nanmax(smoothed[window_start:window_end])) - max(noise, 0.2):
+            continue
+        if smoothed[start + 1] >= smoothed[start]:
+            continue
+        for end in range(start + 2, len(x) - 2):
+            span = float(x[end] - x[start])
+            if span < min_span:
+                continue
+            if span > max_span:
+                break
+            rise = float(smoothed[start] - smoothed[end])
+            if rise < min_rise:
+                continue
+            after_end = min(len(x), end + 5)
+            after_peak = (
+                float(np.nanmax(smoothed[end:after_end]))
+                if end < after_end
+                else float(smoothed[end])
+            )
+            if after_peak > smoothed[end] + (0.7 * rise):
+                continue
+            score = float(x[start]) + (span * 0.2) - (rise * 0.08)
+            candidates.append((score, start, end, rise))
+    if not candidates:
+        return None
+
+    _score, start, end, rise = min(candidates, key=lambda item: item[0])
+    before_start = max(0, start - 6)
+    after_end = min(len(x), end + 7)
+    before = _line_segment_fit(x[before_start : start + 1], y[before_start : start + 1])
+    transition = _line_segment_fit(x[start : end + 1], y[start : end + 1])
+    after = _line_segment_fit(x[end:after_end], y[end:after_end])
+    if before is None or transition is None or after is None:
+        return None
+    if transition.slope >= 0.0:
+        return None
+    rmse = _combined_segment_rmse(
+        (
+            (before.rmse, start + 1 - before_start),
+            (transition.rmse, end + 1 - start),
+            (after.rmse, after_end - end),
+        )
+    )
+    linear_rmse = _linear_rmse(x, y)
+    fit = TangentTransitionFit(
+        start_x=float(x[start]),
+        finish_x=float(x[end]),
+        before=before,
+        transition=transition,
+        after=after,
+        rmse=rmse,
+    )
+    return _AnnealingTransitionCandidate(
+        fit=fit,
+        linear_rmse=linear_rmse,
+        score=float(x[start]) - rise + (fit.finish_x - fit.start_x),
+        count=len(x),
+    )
+
+
+def _line_segment_fit(x_values: np.ndarray, y_values: np.ndarray) -> LinearSegmentFit | None:
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    x = x_values[mask]
+    y = y_values[mask]
+    if len(x) < 2 or len(np.unique(x)) < 2:
+        return None
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = (slope * x) + intercept
+    rmse = float(np.sqrt(np.mean((y - fitted) ** 2)))
+    return LinearSegmentFit(
+        slope=float(slope),
+        intercept=float(intercept),
+        start_x=float(np.nanmin(x)),
+        end_x=float(np.nanmax(x)),
+        rmse=rmse,
+    )
+
+
+def _combined_segment_rmse(segments: Tuple[Tuple[float, int], ...]) -> float:
+    total = sum(count for _rmse, count in segments)
+    if total <= 0:
+        return float("inf")
+    return float(math.sqrt(sum((rmse**2) * count for rmse, count in segments) / total))
+
+
+def _has_resistance_drop_candidate(current_values: np.ndarray, resistance_values: np.ndarray) -> bool:
+    mask = np.isfinite(current_values) & np.isfinite(resistance_values)
+    x = current_values[mask]
+    y = resistance_values[mask]
+    if len(x) < 24:
+        return False
+    order = np.argsort(x, kind="stable")
+    x = x[order]
+    y = y[order]
+    scan_width = float(np.nanmax(x) - np.nanmin(x))
+    if not math.isfinite(scan_width) or scan_width <= 0.0:
+        return False
+    smoothed = (
+        pd.Series(y)
+        .rolling(window=5, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+    diffs = np.diff(smoothed)
+    finite_diffs = np.abs(diffs[np.isfinite(diffs)])
+    noise = float(np.nanmedian(finite_diffs)) if finite_diffs.size else 0.0
+    median_resistance = float(np.nanmedian(np.abs(smoothed)))
+    threshold = max(0.04 * median_resistance, 8.0 * noise)
+    min_span = scan_width * 0.05
+    for start in range(0, len(x) - 3):
+        later = np.where((x[start + 1 :] - x[start]) >= min_span)[0]
+        if later.size == 0:
+            continue
+        end_values = later + start + 1
+        if float(smoothed[start] - np.nanmin(smoothed[end_values])) >= threshold:
+            return True
+    return False
+
+
+def _linear_rmse(x_values: np.ndarray, y_values: np.ndarray) -> float:
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    x = x_values[mask]
+    y = y_values[mask]
+    if len(x) < 2 or len(np.unique(x)) < 2:
+        return float("inf")
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = (slope * x) + intercept
+    return float(np.sqrt(np.mean((y - fitted) ** 2)))
+
+
+def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
+    rounded = round(float(value), max_decimals)
+    if math.isclose(rounded, round(rounded), abs_tol=0.5 * (10**-max_decimals)):
+        return str(int(round(rounded)))
+    return f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
+
+
+def _normalise_diameter_um(value: object) -> float | None:
+    try:
+        diameter_um = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(diameter_um) or diameter_um <= 0:
+        return None
+    return diameter_um
+
+
+def _wire_area_mm2_from_diameter_um(diameter_um: object) -> float | None:
+    normalised = _normalise_diameter_um(diameter_um)
+    if normalised is None:
+        return None
+    diameter_mm = normalised / 1000.0
+    return math.pi * (diameter_mm**2) / 4.0
+
+
+def _current_density_a_per_mm2(
+    current_mA: float | int | None,
+    diameter_um: object,
+) -> float | None:
+    area_mm2 = _wire_area_mm2_from_diameter_um(diameter_um)
+    if area_mm2 is None or area_mm2 <= 0:
+        return None
+    try:
+        current_value_mA = float(current_mA)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(current_value_mA):
+        return None
+    return (current_value_mA / 1000.0) / area_mm2
+
+
+def _current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
+    base_label = "Current [mA]"
+    normalised_diameter = _normalise_diameter_um(diameter_um)
+    if normalised_diameter is None:
+        return base_label
+    finite_currents = np.asarray(currents, dtype=float)
+    finite_currents = finite_currents[np.isfinite(finite_currents)]
+    if finite_currents.size == 0:
+        return base_label
+    max_current_mA = float(np.nanmax(np.abs(finite_currents)))
+    density = _current_density_a_per_mm2(max_current_mA, normalised_diameter)
+    if density is None:
+        return base_label
+    return (
+        f"{base_label} "
+        f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
+        f"{_format_compact_number(density, max_decimals=0)} A/mm², "
+        f"d = {_format_compact_number(normalised_diameter)} µm)"
+    )
+
+
+def _origin_current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
+    return _current_axis_label(currents, diameter_um).replace("[mA]", "(mA)")
+
+
+def _add_current_density_top_axis(ax: Any, diameter_um: object) -> Any | None:
+    area_mm2 = _wire_area_mm2_from_diameter_um(diameter_um)
+    if area_mm2 is None or area_mm2 <= 0:
+        return None
+    top_ax = ax.twiny()
+    top_ax.set_xlim(ax.get_xlim())
+    ticks = [
+        float(tick)
+        for tick in ax.get_xticks()
+        if isinstance(tick, (int, float, np.floating)) and math.isfinite(float(tick))
+    ]
+    top_ax.set_xticks(ticks)
+    top_ax.set_xticklabels(
+        [
+            _format_compact_number((tick / 1000.0) / area_mm2, max_decimals=0)
+            for tick in ticks
+        ]
+    )
+    top_ax.set_xlabel("Current density [A/mm²]", fontsize=AXIS_LABEL_SIZE)
+    top_ax.tick_params(axis="x", labelsize=TICK_SIZE)
+    return top_ax
 
 
 def _normalise_origin_mode(mode: str | None) -> str:
@@ -1031,6 +1577,8 @@ def plot_one(
     figsize: Tuple[float, float] | None = None,
     target_px: Tuple[int, int] | None = None,
     show_power_top_axis: bool = False,
+    show_current_density_top_axis: bool = True,
+    wire_diameter_um: float | None = None,
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
@@ -1119,10 +1667,11 @@ def plot_one(
             )
             previous_direction = direction
 
-    ax.set_xlabel("Current [mA]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_xlabel(_current_axis_label(currents, wire_diameter_um), fontsize=AXIS_LABEL_SIZE)
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
+    density_top_axis = None
     if show_power_top_axis:
         add_power_top_axis(
             ax,
@@ -1132,6 +1681,8 @@ def plot_one(
             label_size=AXIS_LABEL_SIZE,
             tick_size=TICK_SIZE,
         )
+    elif show_current_density_top_axis:
+        density_top_axis = _add_current_density_top_axis(ax, wire_diameter_um)
     if legend_handles:
         legend = ax.legend(
             handles=legend_handles,
@@ -1169,6 +1720,11 @@ def plot_one(
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)
+    if density_top_axis is not None:
+        try:
+            density_top_axis.set_xlim(ax.get_xlim())
+        except Exception:
+            pass
     legend = ax.get_legend()
     if legend is not None:
         try:
@@ -1193,6 +1749,8 @@ def plot_one_origin(
     mode: str | None = None,
     *,
     show_power_top_axis: bool = False,
+    show_current_density_top_axis: bool = True,
+    wire_diameter_um: float | None = None,
     return_handles: bool = False,
 ) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -1215,7 +1773,12 @@ def plot_one_origin(
         return handles if return_handles else None
 
     display_label = _format_origin_annotation(legend_label)
-    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ω)")
+    _ = show_current_density_top_axis
+    _apply_axis_labels(
+        layer,
+        _origin_current_axis_label(currents, wire_diameter_um),
+        "Resistance (\u03a9)",
+    )
     _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)

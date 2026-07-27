@@ -264,6 +264,106 @@ def test_current_density_refresh_skips_resize_during_project_load(
         section.close()
 
 
+def test_transition_temps_refresh_skips_resize_during_project_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    vsm_section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.TransitionTempsSection(
+        vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    resize_calls: list[str] = []
+    try:
+        monkeypatch.setattr(section, "_refresh_record_groups", lambda: None)
+        monkeypatch.setattr(section, "_prune_transition_points", lambda _keys: False)
+        monkeypatch.setattr(section, "_prune_transition_reviews", lambda: False)
+        monkeypatch.setattr(
+            section,
+            "_build_frame",
+            lambda: pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "1/1",
+                        **{
+                            column: None
+                            for column in builder_ui.TRANSITION_TEMP_COLUMN_MAP.values()
+                        },
+                    }
+                ]
+            ),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section.refresh_data()
+
+        assert resize_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+        vsm_section.close()
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+
+def test_assemble_project_load_defers_graph_preview_restore_and_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_args: None)
+    resize_calls: list[str] = []
+    preview_calls: list[str] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        monkeypatch.setattr(
+            section,
+            "_update_graph_preview_panel",
+            lambda *_args: preview_calls.append("preview"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section.import_project_payload(
+            {
+                "graph_preview": True,
+                "columns": ["Composition", "Microwire"],
+                "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "1/1"}],
+            }
+        )
+
+        assert section.graph_panel_checkbox.isChecked() is False
+        assert section.graph_preview_panel.isVisible() is False
+        assert resize_calls == []
+        assert preview_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+
+
 def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
     app = QtWidgets.QApplication.instance()
     if app is None:

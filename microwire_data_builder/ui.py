@@ -3,27 +3,45 @@
 from __future__ import annotations
 
 import base64
+import copy
 import difflib
 import faulthandler
+import hashlib
 import html
 import io
 import json
 import logging
 import math
 import os
-import pickle
 import re
 import subprocess
 import sys
+import textwrap
 import time
 import traceback
+import unicodedata
 import warnings
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Collection,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -32,9 +50,10 @@ except Exception:
 
 import pandas as pd
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets, sip
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
 try:
@@ -42,7 +61,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     openpyxl = None  # type: ignore[assignment]
 
-from plotting.plugins.current_annealing.core import plot_one as plot_annealing_curve
+from plotting.plugins.current_annealing.core import (
+    plot_one as plot_annealing_curve,
+    summarize_transition_currents as summarize_annealing_transition_currents,
+    summarize_transition_loops as summarize_annealing_transition_loops,
+)
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.shared.utils import (
     ensure_app_theme,
@@ -53,6 +76,23 @@ from plotting.shared.utils import (
 from plotting.shared.logfiles import append_text_with_rotation, open_rotating_text_log
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
+from .safe_codec import (
+    MAX_JSON_BYTES,
+    SafeCodecError,
+    atomic_write_json,
+    decode_envelope,
+    encode_envelope,
+)
+from .project_package import (
+    DELETED_PAYLOADS_KEY,
+    PACKAGE_VERSION as PACKAGED_PROJECT_VERSION,
+    ProjectIndex,
+    ProjectPayloadResolver,
+    inspect_project_package,
+    is_project_package,
+    stage_payload_value,
+    write_project_package,
+)
 
 from .core import (
     LOGGER_NAME,
@@ -80,6 +120,7 @@ from .core import (
     OUTPUT_COLUMNS,
     FIGURE_COLUMNS,
     ORIGIN_FIGURE_COLUMNS,
+    ANNEALING_TRANSITION_COLUMN,
     VSM_HYSTERESIS_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
@@ -87,7 +128,20 @@ from .core import (
     MINI_DMA_ORIGIN_COLUMN,
     MINI_DMA_STRAIN_COLUMN,
     MINI_DMA_TRANSITION_COLUMN,
+    MINI_DMA_TRANSITION_STATUS_COLUMN,
+    MINI_DMA_TRANSITION_COUNTS_COLUMN,
     MINI_DMA_BREAK_COLUMN,
+    LEGACY_MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN,
+    LEGACY_MINI_DMA_BREAK_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN,
+    VSM_TRANSITION_TEMP_STATUS_COLUMN,
+    VSM_TRANSITION_TEMP_COUNTS_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -98,6 +152,7 @@ from .core import (
     SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
     SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
     FMR_COLUMN,
+    resolve_assemble_projection,
     build_database,
     build_fabrication_index,
     _normalise_output_name,
@@ -107,6 +162,7 @@ from .core import (
     _microscope_is_brittle,
     _draw_key,
     _load_annealing,
+    _annealing_transition_summary,
     _resistance_sanity_check,
     _group_microscope_measurements,
     _collect_video_metrics,
@@ -116,6 +172,7 @@ from .core import (
     _microwire_key_to_str,
     _microwire_key_from_string,
     _split_microwire_key,
+    _mini_dma_peak_strain_summary,
     MICROWIRE_SORT_RE,
     _parse_strain_float,
     _plot_measurement_matplotlib,
@@ -183,12 +240,15 @@ VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
 MICROSCOPE_D_COLUMN = "d (\u00b5m)"
 MICROSCOPE_CAP_D_COLUMN = "D (\u00b5m)"
+MICROSCOPE_STATUS_COLUMN = "Microscope status"
 MICROSCOPE_TABLE_COLUMNS = [
     "Composition",
     "Microwire",
     MICROSCOPE_D_COLUMN,
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
+    MICROSCOPE_STATUS_COLUMN,
+    "Source label",
     BRITTLE_COLUMN,
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
@@ -204,12 +264,20 @@ ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
 ANNEALING_HIGH_GRAPH_COLUMN = "Graph — 1000 mA"
+ANNEALING_HIGH_GRAPH_DISPLAY_TITLE = "Exact 1000 mA graph"
+ANNEALING_IMPORTED_ITEM_LABEL = "Imported workbook sources"
 ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
 ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
+OPTIONAL_BUILDER_SECTIONS: Tuple[Tuple[str, str], ...] = (
+    ("current_density", "Annealing transitions"),
+    ("strain", "Strain"),
+    ("shape_memory_stress_strain", "Manual stress/strain"),
+)
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
+VSM_TRANSITION_REVIEW_MAX_PLOT_POINTS = 500
 VSM_HYSTERESIS_PREVIEW_RANGE_SETTING = "vsm_hysteresis_preview_range_oe"
 VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE = 1000.0
 VSM_HYSTERESIS_PREVIEW_RANGE_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -240,6 +308,37 @@ ANNEALING_MS2_COLUMN = "Ms2 (mA)"
 ANNEALING_MF2_COLUMN = "Mf2 (mA)"
 CURRENT_DENSITY_AS_DENSITY_COLUMN = "As current density (A/mm^2)"
 CURRENT_DENSITY_MS_DENSITY_COLUMN = "Ms current density (A/mm^2)"
+CURRENT_DENSITY_PER_LABEL_COLUMNS = {
+    "As1": "J_As1 (A/mm^2)",
+    "Af1": "J_Af1 (A/mm^2)",
+    "Ms1": "J_Ms1 (A/mm^2)",
+    "Mf1": "J_Mf1 (A/mm^2)",
+    "As2": "J_As2 (A/mm^2)",
+    "Af2": "J_Af2 (A/mm^2)",
+    "Ms2": "J_Ms2 (A/mm^2)",
+    "Mf2": "J_Mf2 (A/mm^2)",
+}
+SUPERSEDED_CURRENT_DENSITY_COLUMNS = {
+    "As (mA)",
+    "Ms (mA)",
+    CURRENT_DENSITY_AS_DENSITY_COLUMN,
+    CURRENT_DENSITY_MS_DENSITY_COLUMN,
+}
+ASSEMBLE_DEFAULT_HIDDEN_COLUMNS = {
+    ANNEALING_TRANSITION_COLUMN,
+    MINI_DMA_STRAIN_COLUMN,
+    MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN,
+    "Legacy strain",
+    "Calc mode",
+    "Clamp span (mm)",
+    "m",
+    "Legacy stress (MPa)",
+    "M length",
+    "A length",
+    "Broke",
+}
 CURRENT_DENSITY_AS_DELTA_COLUMN = "As2-As1 (mA)"
 CURRENT_DENSITY_AF_DELTA_COLUMN = "Af2-Af1 (mA)"
 CURRENT_DENSITY_MS_DELTA_COLUMN = "Ms2-Ms1 (mA)"
@@ -271,6 +370,7 @@ TRANSITION_TEMP_COLUMN_MAP = {
 CURRENT_DENSITY_COLUMNS = [
     "Composition",
     "Microwire",
+    "Graph",
     MICROSCOPE_D_COLUMN,
     ANNEALING_AS_COLUMN,
     ANNEALING_AF1_COLUMN,
@@ -282,6 +382,7 @@ CURRENT_DENSITY_COLUMNS = [
     ANNEALING_MF2_COLUMN,
     CURRENT_DENSITY_AS_DENSITY_COLUMN,
     CURRENT_DENSITY_MS_DENSITY_COLUMN,
+    *CURRENT_DENSITY_PER_LABEL_COLUMNS.values(),
     CURRENT_DENSITY_AS_DELTA_COLUMN,
     CURRENT_DENSITY_AF_DELTA_COLUMN,
     CURRENT_DENSITY_MS_DELTA_COLUMN,
@@ -290,11 +391,14 @@ CURRENT_DENSITY_COLUMNS = [
     CURRENT_DENSITY_MF_AF2_DELTA_COLUMN,
     "Setpoints (mA)",
     "Sources",
+    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN,
     "Notes",
 ]
 TRANSITION_TEMP_COLUMNS = [
     "Composition",
     "Microwire",
+    "Graph",
     TRANSITION_TEMP_AS_COLUMN,
     TRANSITION_TEMP_AF_COLUMN,
     TRANSITION_TEMP_MS_COLUMN,
@@ -364,6 +468,142 @@ _STAGE_LABELS = {
 }
 
 _TEST_PATH_TOKENS = ("pytest-of-", "pyplot-tests", ".pytest_cache")
+SOURCE_LABEL_COLUMN = "Source label"
+SOURCE_LABEL_ALL = "All sources"
+_SOURCE_PROVENANCE_COLUMNS = (
+    "_sources",
+    "_source_paths",
+    "_source_path",
+    "Source path",
+    "Source files",
+    "Sources",
+    "Data source",
+)
+
+
+def _fold_source_text(value: object) -> str:
+    text = str(value or "").replace("\\", "/").casefold()
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in text if not unicodedata.combining(char))
+
+
+def _iter_source_text_values(value: object) -> Iterable[str]:
+    if value is None:
+        return
+    try:
+        if bool(pd.isna(value)):
+            return
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_source_text_values(item)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _iter_source_text_values(item)
+        return
+    text = str(value).strip()
+    if text:
+        yield text
+
+
+def _source_label_from_text(value: object) -> Optional[str]:
+    folded = _fold_source_text(value)
+    if not folded:
+        return None
+    if "kosice" in folded or "košice" in folded:
+        return "Ko\u0161ice"
+    if "praha" in folded:
+        return "Praha"
+    if "imported" in folded:
+        return "Imported"
+    if folded in {"manual", "manual entry", "manual_entry"}:
+        return "Manual"
+    if ":/" in folded or folded.startswith("//"):
+        return "Other"
+    return None
+
+
+def _microscope_expected_suffix_from_path(path: Path) -> Optional[str]:
+    """Return only suffixes that are meaningful microscope row identities."""
+
+    parsed_key = _microscope_key(path)
+    if parsed_key is None:
+        return None
+    suffix = str(parsed_key[3] or "").strip()
+    if suffix.casefold() == "oe":
+        return "oe"
+    return None
+
+
+def _source_label_from_path_family(value: object) -> Optional[str]:
+    folded = _fold_source_text(value)
+    if not folded:
+        return None
+    if (
+        "shape memory database" in folded
+        or "databaza mikrodrotov" in folded
+    ):
+        return "Ko\u0161ice"
+    return None
+
+
+def _source_labels_from_row(row: Mapping[str, Any] | pd.Series) -> List[str]:
+    labels: List[str] = []
+
+    def add(label: Optional[str]) -> None:
+        if label and label not in labels:
+            labels.append(label)
+
+    try:
+        existing = row.get(SOURCE_LABEL_COLUMN)  # type: ignore[arg-type]
+    except Exception:
+        existing = None
+    for value in _iter_source_text_values(existing):
+        add(str(value).strip())
+    for column in _SOURCE_PROVENANCE_COLUMNS:
+        try:
+            value = row.get(column)  # type: ignore[arg-type]
+        except Exception:
+            value = None
+        for item in _iter_source_text_values(value):
+            family_label = _source_label_from_path_family(item)
+            add(family_label)
+            text_label = _source_label_from_text(item)
+            if text_label != "Other" or family_label is None:
+                add(text_label)
+    return labels
+
+
+def _source_label_for_row(row: Mapping[str, Any] | pd.Series) -> str:
+    return ", ".join(_source_labels_from_row(row))
+
+
+def _with_source_label_column(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if not any(str(column) in _SOURCE_PROVENANCE_COLUMNS or str(column) == SOURCE_LABEL_COLUMN for column in frame.columns):
+        return frame
+    updated = frame.copy()
+    labels = [_source_label_for_row(row) for _, row in updated.iterrows()]
+    if not any(label for label in labels):
+        return updated
+    updated[SOURCE_LABEL_COLUMN] = labels
+    columns = [column for column in updated.columns if str(column) != SOURCE_LABEL_COLUMN]
+    insert_after = None
+    for preferred in ("Data source", "Sources", "Source files"):
+        if preferred in columns:
+            insert_after = columns.index(preferred) + 1
+            break
+    if insert_after is None:
+        first_internal = next(
+            (idx for idx, column in enumerate(columns) if str(column).startswith("_")),
+            len(columns),
+        )
+        insert_after = first_internal
+    columns.insert(insert_after, SOURCE_LABEL_COLUMN)
+    return updated.loc[:, columns]
 
 
 def _builder_settings() -> QtCore.QSettings:
@@ -490,6 +730,104 @@ def _builder_dialogs_suppressed() -> bool:
     }
 
 
+def _builder_project_load_active() -> bool:
+    return bool(getattr(MiniDatabaseSection, "_project_load_batch_mode", False))
+
+
+def _log_builder_timing(
+    logger: logging.Logger,
+    event: str,
+    started_s: float,
+    **fields: object,
+) -> None:
+    duration_ms = (time.perf_counter() - started_s) * 1000.0
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    try:
+        logger.debug("Builder timing: %s duration_ms=%.1f%s", event, duration_ms, suffix)
+    except Exception:
+        pass
+
+
+def _log_builder_cache_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    hit: bool,
+    **fields: object,
+) -> None:
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    try:
+        logger.debug("Builder timing: %s cache_hit=%s%s", event, int(bool(hit)), suffix)
+    except Exception:
+        pass
+
+
+def _builder_ui_telemetry_enabled() -> bool:
+    return os.environ.get("MICROWIRE_BUILDER_UI_TELEMETRY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class _BuilderUiHeartbeat(QtCore.QObject):
+    """Debug-only event-loop lag sampler for Builder responsiveness checks."""
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        parent: QtCore.QObject | None = None,
+        *,
+        interval_ms: int = 250,
+        report_interval_ms: int = 5000,
+        lag_threshold_ms: float = 150.0,
+    ) -> None:
+        super().__init__(parent)
+        self._logger = logger
+        self._interval_ms = max(int(interval_ms), 50)
+        self._report_interval_ms = max(int(report_interval_ms), self._interval_ms)
+        self._lag_threshold_ms = float(lag_threshold_ms)
+        self._last_tick_s: Optional[float] = None
+        self._last_report_s = time.perf_counter()
+        self._max_lag_ms = 0.0
+        self._sample_count = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(self._interval_ms)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        self._last_tick_s = time.perf_counter()
+        self._last_report_s = self._last_tick_s
+        self._timer.start()
+
+    def _tick(self) -> None:
+        now = time.perf_counter()
+        if self._last_tick_s is not None:
+            elapsed_ms = (now - self._last_tick_s) * 1000.0
+            lag_ms = max(0.0, elapsed_ms - float(self._interval_ms))
+            self._max_lag_ms = max(self._max_lag_ms, lag_ms)
+            self._sample_count += 1
+        self._last_tick_s = now
+        if (now - self._last_report_s) * 1000.0 < self._report_interval_ms:
+            return
+        if self._max_lag_ms >= self._lag_threshold_ms:
+            try:
+                self._logger.debug(
+                    "Builder timing: event_loop_heartbeat max_lag_ms=%.1f samples=%d interval_ms=%d",
+                    self._max_lag_ms,
+                    self._sample_count,
+                    self._interval_ms,
+                )
+            except Exception:
+                pass
+        self._max_lag_ms = 0.0
+        self._sample_count = 0
+        self._last_report_s = now
+
+
 def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None = None) -> None:
     from microwire_eda import launch_eda_window
 
@@ -546,6 +884,9 @@ def _sanitise_existing_file(value: object) -> Optional[str]:
 
 
 def _database_name_from_project_stem(stem: str) -> str | None:
+    packaged_latest = re.match(r"^(?P<name>.+)_latest_v\d+$", stem, re.IGNORECASE)
+    if packaged_latest:
+        return packaged_latest.group("name") or None
     if stem.endswith("_latest"):
         return stem[: -len("_latest")] or None
     match = re.match(r"^(?P<name>.+)_\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?$", stem)
@@ -563,7 +904,7 @@ def _resolve_latest_database_project(path: Path) -> Path:
             return candidate
     except Exception:
         return candidate
-    if candidate.name.endswith("_latest.pydpj"):
+    if re.search(r"_latest(?:_v\d+)?\.pydpj$", candidate.name, re.IGNORECASE):
         return candidate
 
     database_name = _database_name_from_project_stem(candidate.stem)
@@ -602,6 +943,23 @@ def _latest_database_project_in_dir(database_dir: Path) -> Path | None:
             return None
     except Exception:
         return None
+    try:
+        packaged_candidates = [
+            candidate
+            for candidate in root.glob("*_latest_v*.pydpj")
+            if candidate.exists()
+            and candidate.is_file()
+            and re.search(r"_latest_v\d+\.pydpj$", candidate.name, re.IGNORECASE)
+        ]
+    except Exception:
+        packaged_candidates = []
+    if packaged_candidates:
+        try:
+            packaged_candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        except Exception:
+            packaged_candidates.sort(key=lambda path: path.name, reverse=True)
+        return packaged_candidates[0]
+
     preferred = root / "microwire_database_latest.pydpj"
     try:
         if preferred.exists() and preferred.is_file():
@@ -702,30 +1060,277 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _encode_project_payload(value: Any) -> Optional[Dict[str, str]]:
-    try:
-        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        return None
-    return {
-        "encoding": "pickle-base64",
-        "value": base64.b64encode(raw).decode("ascii"),
-    }
+def _encode_project_payload(value: Any) -> Dict[str, Any]:
+    return encode_envelope(value)
 
 
 def _decode_project_payload(payload: Any) -> Any:
-    if not isinstance(payload, Mapping):
-        return None
-    if payload.get("encoding") != "pickle-base64":
-        return None
-    value = payload.get("value")
-    if not isinstance(value, str) or not value:
-        return None
     try:
-        raw = base64.b64decode(value.encode("ascii"), validate=True)
-        return pickle.loads(raw)
-    except Exception:
+        return decode_envelope(payload)
+    except SafeCodecError:
         return None
+
+
+LEGACY_PROJECT_PAYLOAD_MESSAGE = (
+    "Legacy Builder payload was not decoded because ordinary project opening never "
+    "executes pickle. Use the explicit trusted-copy migration command on a disposable "
+    "copy if this payload is required."
+)
+
+
+PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
+PROJECT_LAZY_PAYLOAD_LOADERS_KEY = "__lazy_payload_loaders"
+_ACTIVE_PROJECT_PAYLOAD_STAGER: Callable[[Any], Any] | None = None
+
+# These payloads are the data behind the Builder's overview thumbnails.  Their
+# section tables remain independently lazy, but once a graph tab is selected
+# the records are decoded on its existing background section worker so the
+# overview can progressively render real previews instead of permanent cards.
+PROJECT_OVERVIEW_PAYLOADS = {
+    "annealing": "annealing_records",
+    "dma_iso_stress": "dma_iso_stress_records",
+    "fmr": "fmr_records",
+    "mini_dma": "mini_dma_records",
+    "shape_memory_stress_strain": "shape_memory_stress_strain_records",
+    "vsm_hysteresis": "vsm_hysteresis_records",
+    "vsm_temperature_scan": "vsm_temperature_scan_records",
+}
+PROJECT_OVERVIEW_PAYLOAD_SECTIONS = set(PROJECT_OVERVIEW_PAYLOADS)
+PROJECT_EAGER_OVERVIEW_SECTIONS = PROJECT_OVERVIEW_PAYLOAD_SECTIONS - {
+    "mini_dma",
+    "vsm_hysteresis",
+}
+
+
+def _has_lazy_project_payloads(payload: object) -> bool:
+    return bool(
+        isinstance(payload, Mapping)
+        and isinstance(payload.get(PROJECT_LAZY_PAYLOAD_LOADERS_KEY), Mapping)
+    )
+
+
+@dataclass
+class _PreparedProjectLoad:
+    target: Path
+    payload: Dict[str, Any]
+    byte_count: int
+    decoded_payload_count: int
+    read_ms: float
+    json_ms: float
+    decode_ms: float
+    diagnostics: Tuple[str, ...] = ()
+    package_index: ProjectIndex | None = None
+    payload_resolver: ProjectPayloadResolver | None = None
+
+
+def _prepare_project_section_payload(
+    section_key: str,
+    section_payload: object,
+    *,
+    strict: bool,
+) -> tuple[Dict[str, Any], int, Tuple[str, ...]]:
+    prepared_section = dict(section_payload) if isinstance(section_payload, Mapping) else {}
+    encoded_payloads = prepared_section.get("payloads")
+    decoded_payloads: Dict[str, Any] = {}
+    decoded_payload_count = 0
+    diagnostics: List[str] = []
+    if isinstance(encoded_payloads, Mapping):
+        for name, encoded in encoded_payloads.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if (
+                isinstance(encoded, Mapping)
+                and encoded.get("encoding") == "pickle-base64"
+            ):
+                diagnostics.append(
+                    f"{section_key}.{name}: {LEGACY_PROJECT_PAYLOAD_MESSAGE}"
+                )
+                continue
+            try:
+                decoded = decode_envelope(encoded)
+            except SafeCodecError as exc:
+                if strict:
+                    raise SafeCodecError(
+                        f"Invalid safe Builder payload {section_key}.{name}: {exc}"
+                    ) from exc
+                diagnostics.append(
+                    f"{section_key}.{name}: unsupported legacy payload was blocked"
+                )
+                continue
+            decoded_payloads[name.strip()] = decoded
+            decoded_payload_count += 1
+    if decoded_payloads:
+        prepared_section[PROJECT_DECODED_PAYLOADS_KEY] = decoded_payloads
+    return prepared_section, decoded_payload_count, tuple(diagnostics)
+
+
+def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
+    """Read, parse, and decode data-only project payloads away from Qt widgets."""
+
+    read_started_s = time.perf_counter()
+    file_size = target.stat().st_size
+    if is_project_package(target):
+        package_index = inspect_project_package(target)
+        payload_resolver = ProjectPayloadResolver(package_index)
+        read_ms = (time.perf_counter() - read_started_s) * 1000.0
+        return _PreparedProjectLoad(
+            target=target,
+            payload=package_index.project_header(),
+            byte_count=file_size,
+            decoded_payload_count=0,
+            read_ms=read_ms,
+            json_ms=0.0,
+            decode_ms=0.0,
+            package_index=package_index,
+            payload_resolver=payload_resolver,
+        )
+    if file_size > MAX_JSON_BYTES:
+        raise SafeCodecError(
+            f"Builder project exceeds the safe JSON limit of {MAX_JSON_BYTES} bytes"
+        )
+    text = target.read_text(encoding="utf-8")
+    read_ms = (time.perf_counter() - read_started_s) * 1000.0
+    byte_count = len(text.encode("utf-8", errors="replace"))
+
+    json_started_s = time.perf_counter()
+    raw_payload = json.loads(text)
+    json_ms = (time.perf_counter() - json_started_s) * 1000.0
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+
+    decode_started_s = time.perf_counter()
+    payload: Dict[str, Any] = dict(raw_payload)
+    sections_payload = payload.get("sections")
+    decoded_payload_count = 0
+    diagnostics: List[str] = []
+    safe_json_versions = {2, PACKAGED_PROJECT_VERSION}
+    if payload.get("version") not in safe_json_versions:
+        diagnostics.append(
+            "Legacy Builder project opened in degraded safe mode. JSON-safe table and "
+            "review fields remain available, but executable legacy payloads are blocked. "
+            "Use the explicit trusted-copy migration command with a distinct output path."
+        )
+    if isinstance(sections_payload, Mapping):
+        prepared_sections: Dict[str, Any] = {}
+        for section_key, section_payload in sections_payload.items():
+            if not isinstance(section_payload, Mapping):
+                prepared_sections[str(section_key)] = section_payload
+                continue
+            prepared_section, section_count, section_diagnostics = (
+                _prepare_project_section_payload(
+                    str(section_key),
+                    section_payload,
+                    strict=payload.get("version") in safe_json_versions,
+                )
+            )
+            decoded_payload_count += section_count
+            diagnostics.extend(section_diagnostics)
+            prepared_sections[str(section_key)] = prepared_section
+        payload["sections"] = prepared_sections
+    decode_ms = (time.perf_counter() - decode_started_s) * 1000.0
+
+    return _PreparedProjectLoad(
+        target=target,
+        payload=payload,
+        byte_count=byte_count,
+        decoded_payload_count=decoded_payload_count,
+        diagnostics=tuple(diagnostics),
+        read_ms=read_ms,
+        json_ms=json_ms,
+        decode_ms=decode_ms,
+    )
+
+
+class _ProjectLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(self, target: Path) -> None:
+        super().__init__()
+        self._target = target
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(_prepare_project_payload_for_gui(self._target))
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
+class _ProjectSectionLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        package_index: ProjectIndex,
+        payload_resolver: ProjectPayloadResolver,
+        section_key: str,
+        *,
+        decode_payloads: bool = False,
+    ) -> None:
+        super().__init__()
+        self._package_index = package_index
+        self._payload_resolver = payload_resolver
+        self._section_key = str(section_key)
+        self._decode_payloads = bool(decode_payloads)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            raw = self._package_index.read_section(
+                self._section_key,
+                load_payloads=self._decode_payloads,
+                budget=self._payload_resolver.budget,
+            )
+            descriptor = self._package_index.sections.get(self._section_key, {})
+            payload_paths = descriptor.get("payloads", {})
+            if (
+                not self._decode_payloads
+                and isinstance(payload_paths, Mapping)
+                and payload_paths
+            ):
+                raw[PROJECT_LAZY_PAYLOAD_LOADERS_KEY] = {
+                    payload_id: partial(
+                        self._payload_resolver.load,
+                        self._section_key,
+                        payload_id,
+                    )
+                    for payload_id in payload_paths
+                }
+            prepared, _count, diagnostics = _prepare_project_section_payload(
+                self._section_key,
+                raw,
+                strict=True,
+            )
+            if diagnostics:
+                raise SafeCodecError(
+                    f"Unexpected diagnostics in packaged section {self._section_key}"
+                )
+            self.finished.emit(prepared)
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
+class _ProjectRecordSubsetLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        loader: Callable[[Sequence[str]], Sequence[Any]],
+        source_paths: Sequence[str],
+    ) -> None:
+        super().__init__()
+        self._loader = loader
+        self._source_paths = tuple(source_paths)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(list(self._loader(self._source_paths)))
+        except Exception as exc:
+            self.failed.emit(exc)
 
 
 def _normalise_import_header(text: str) -> str:
@@ -1515,7 +2120,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
     PROJECT_EXTENSION = ".pydpj"
-    PROJECT_VERSION = 1
+    PROJECT_VERSION = 2
     PROJECT_KIND = "MicrowireDataBuilder"
     log_message = QtCore.pyqtSignal(int, str)
 
@@ -1561,6 +2166,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         self._last_strain_dir = str(cwd)
         self.settings = _builder_settings()
         self._project_path: Optional[Path] = None
+        self._project_degraded_safe_mode = False
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
 
@@ -1894,7 +2500,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.root_group)
 
         # Annealing inputs
-        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt)")
+        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt, .dat)")
         anneal_layout = QtWidgets.QVBoxLayout(self.anneal_group)
         self.anneal_list = QtWidgets.QListWidget()
         self.anneal_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2296,7 +2902,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self,
             "Select current-annealing files",
             self._last_anneal_dir,
-            "Text files (*.txt)",
+            "Current annealing files (*.txt *.dat);;Text files (*.txt);;Data files (*.dat)",
         )
         if not files:
             return
@@ -2314,10 +2920,15 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         if not folder:
             return
         root = Path(folder)
-        iterator = root.rglob("*.txt") if self.anneal_recursive.isChecked() else root.glob("*.txt")
-        files = [p for p in iterator if p.is_file()]
+        iterator = root.rglob("*") if self.anneal_recursive.isChecked() else root.glob("*")
+        suffixes = {".txt", ".dat"}
+        files = [p for p in iterator if p.is_file() and p.suffix.lower() in suffixes]
         if not files:
-            QtWidgets.QMessageBox.information(self, "Microwire Data Builder", "No text files were found in that folder.")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No current-annealing .txt or .dat files were found in that folder.",
+            )
             return
         self._last_anneal_dir = folder
         self._extend_paths("annealing_paths", files)
@@ -2934,6 +3545,32 @@ class SectionProcessResult:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+_SOURCE_RECORD_CACHE_ATTRS: Tuple[Tuple[str, Callable[[], object]], ...] = (
+    ("_cached_annealing_records", list),
+    ("_cached_annealing_groups", dict),
+    ("_cached_vsm_hysteresis_records", list),
+    ("_cached_vsm_hysteresis_groups", dict),
+    ("_cached_vsm_temperature_records", list),
+    ("_cached_vsm_temperature_groups", dict),
+    ("_cached_dma_isostress_records", list),
+    ("_cached_dma_isostress_groups", dict),
+    ("_cached_mini_dma_records", list),
+    ("_cached_mini_dma_groups", dict),
+    ("_cached_shape_memory_stress_strain_records", list),
+    ("_cached_shape_memory_stress_strain_groups", dict),
+    ("_cached_shape_memory_entries", dict),
+    ("_cached_shape_memory_record_entries", dict),
+    ("_cached_fmr_records", list),
+    ("_cached_fmr_groups", dict),
+)
+
+
+def _clear_source_record_caches(owner: object) -> None:
+    for attr, factory in _SOURCE_RECORD_CACHE_ATTRS:
+        if hasattr(owner, attr):
+            setattr(owner, attr, factory())
+
+
 class DataFrameModel(QtCore.QAbstractTableModel):
     """Expose a pandas DataFrame to Qt view widgets."""
 
@@ -2972,13 +3609,16 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             except Exception:
                 return pd.DataFrame()
 
+    def _invalidate_frame_caches(self) -> None:
+        self._row_series_cache = {}
+        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
         self._frame = self._coerce_frame(frame)
         self._recent_edits = {}
         self._recent_old_values = {}
-        self._row_series_cache = {}
-        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+        self._invalidate_frame_caches()
         self.endResetModel()
         try:
             self.layoutChanged.emit()
@@ -3278,8 +3918,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             # Normalize back to a plain object-backed frame after in-place edits so
             # follow-up Qt handlers don't trip over pandas extension-dtype internals.
             self._frame = self._coerce_frame(self._frame)
-            self._row_series_cache = {}
-            self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+            self._invalidate_frame_caches()
         except Exception:
             return False
         try:
@@ -3336,6 +3975,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return
         self.beginResetModel()
         self._frame = sorted_frame.reset_index(drop=True)
+        self._invalidate_frame_caches()
         self.endResetModel()
 
 
@@ -3695,12 +4335,67 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def _positive_float_or_none(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _diameter_um_from_mapping(values: Mapping[str, object] | None) -> float | None:
+    if not isinstance(values, Mapping):
+        return None
+    for key in (
+        MICROSCOPE_D_COLUMN,
+        "d (µm)",
+        "d (um)",
+        "wire_diameter_um",
+        "diameter_um",
+        "d_um",
+    ):
+        diameter_um = _positive_float_or_none(values.get(key))
+        if diameter_um is not None:
+            return diameter_um
+    for key in ("wire_diameter_mm", "diameter_mm", "d_mm"):
+        diameter_mm = _positive_float_or_none(values.get(key))
+        if diameter_mm is not None:
+            return diameter_mm * 1000.0
+    return None
+
+
+def _annealing_wire_diameter_um(
+    record: Optional[MeasurementRecord],
+    *,
+    explicit: float | None = None,
+) -> float | None:
+    diameter_um = _positive_float_or_none(explicit)
+    if diameter_um is not None:
+        return diameter_um
+    if record is None:
+        return None
+    frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else None
+    if isinstance(frame, pd.DataFrame):
+        diameter_um = _diameter_um_from_mapping(getattr(frame, "attrs", {}))
+        if diameter_um is not None:
+            return diameter_um
+    metadata = getattr(record, "metadata", None)
+    if metadata is not None:
+        diameter_um = _diameter_um_from_mapping(getattr(metadata, "__dict__", {}))
+        if diameter_um is not None:
+            return diameter_um
+    return None
+
+
 def _render_measurement_pixmap(
     record: Optional[MeasurementRecord],
     logger: logging.Logger,
     *,
     width_px: int = ANNEALING_GRAPH_WIDTH,
     height_px: int = ANNEALING_GRAPH_HEIGHT,
+    wire_diameter_um: float | None = None,
 ) -> Optional[QtGui.QPixmap]:
     if record is None:
         return None
@@ -3760,6 +4455,7 @@ def _render_measurement_pixmap(
                 title = ""
     if not title:
         title = "Current annealing"
+    diameter_um = _annealing_wire_diameter_um(record, explicit=wire_diameter_um)
     target_width = max(int(width_px * 2), width_px)
     target_height = max(int(height_px * 2), height_px)
     figsize = (max(target_width / 96.0, 1.0), max(target_height / 96.0, 1.0))
@@ -3770,6 +4466,7 @@ def _render_measurement_pixmap(
             plot_df,
             title,
             target_px=(target_width, target_height),
+            wire_diameter_um=diameter_um,
         )
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
@@ -3833,6 +4530,351 @@ def _render_measurement_pixmap(
     finally:
         if figure is not None:
             plt.close(figure)
+
+
+def _set_transition_marker_metadata(artist: Any, label: str, kind: str) -> None:
+    try:
+        setattr(artist, "_transition_marker_label", str(label))
+        setattr(artist, "_transition_marker_kind", str(kind))
+    except Exception:
+        pass
+
+
+def _transition_marker_label(artist: Any) -> Optional[str]:
+    try:
+        value = getattr(artist, "_transition_marker_label", None)
+    except Exception:
+        return None
+    return str(value) if value not in (None, "") else None
+
+
+class _TransitionMarkerDragController:
+    def __init__(
+        self,
+        canvas: FigureCanvasQTAgg,
+        *,
+        labels: Iterable[str],
+        on_release: Callable[[str, float], None],
+        on_start: Optional[Callable[[str], None]] = None,
+        pixel_tolerance: float = 10.0,
+    ) -> None:
+        self._canvas = canvas
+        self._labels = {str(label) for label in labels}
+        self._on_release = on_release
+        self._on_start = on_start
+        self._pixel_tolerance = float(pixel_tolerance)
+        self._drag_label: Optional[str] = None
+        self._last_value: Optional[float] = None
+
+    @property
+    def dragging(self) -> bool:
+        return self._drag_label is not None
+
+    def handle_press(self, event: Any) -> bool:
+        value = self._event_xdata(event)
+        if value is None:
+            return False
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
+            return False
+        label = self._nearest_label(event, value)
+        if label is None:
+            return False
+        self._drag_label = label
+        self._last_value = value
+        if callable(self._on_start):
+            try:
+                self._on_start(label)
+            except Exception:
+                pass
+        self._move_label(label, value)
+        return True
+
+    def handle_motion(self, event: Any) -> bool:
+        if self._drag_label is None:
+            return False
+        value = self._event_xdata(event)
+        if value is None:
+            return True
+        self._last_value = value
+        self._move_label(self._drag_label, value)
+        return True
+
+    def handle_release(self, event: Any) -> bool:
+        label = self._drag_label
+        if label is None:
+            return False
+        value = self._event_xdata(event)
+        if value is None:
+            value = self._last_value
+        self._drag_label = None
+        self._last_value = None
+        if value is None:
+            return True
+        self._move_label(label, value)
+        try:
+            self._on_release(label, float(value))
+        except Exception:
+            pass
+        return True
+
+    @staticmethod
+    def _event_xdata(event: Any) -> Optional[float]:
+        if event is None or getattr(event, "xdata", None) is None:
+            return None
+        try:
+            value = float(event.xdata)
+        except Exception:
+            return None
+        return value if math.isfinite(value) else None
+
+    def _nearest_label(self, event: Any, value: float) -> Optional[str]:
+        figure = getattr(self._canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return None
+        event_px = getattr(event, "x", None)
+        best: Tuple[float, Optional[str]] = (math.inf, None)
+        for axis in axes:
+            for line in list(getattr(axis, "lines", []) or []):
+                label = _transition_marker_label(line)
+                if label not in self._labels:
+                    continue
+                try:
+                    x_values = list(line.get_xdata())
+                except Exception:
+                    continue
+                if not x_values:
+                    continue
+                x_value = _coerce_finite_float(x_values[0])
+                if x_value is None:
+                    continue
+                if event_px is not None:
+                    try:
+                        marker_px = axis.transData.transform((float(x_value), 0.0))[0]
+                        distance = abs(float(event_px) - float(marker_px))
+                    except Exception:
+                        distance = abs(float(value) - float(x_value))
+                else:
+                    distance = abs(float(value) - float(x_value))
+                if distance < best[0]:
+                    best = (distance, label)
+        if best[1] is None:
+            return None
+        if event_px is not None and best[0] > self._pixel_tolerance:
+            return None
+        return best[1]
+
+    def _move_label(self, label: str, value: float) -> None:
+        figure = getattr(self._canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        for axis in axes:
+            for line in list(getattr(axis, "lines", []) or []):
+                if _transition_marker_label(line) != label:
+                    continue
+                try:
+                    line.set_xdata([float(value), float(value)])
+                except Exception:
+                    pass
+            for text in list(getattr(axis, "texts", []) or []):
+                if _transition_marker_label(text) != label:
+                    continue
+                try:
+                    x, y = text.get_position()
+                    text.set_position((float(value), y))
+                except Exception:
+                    pass
+        try:
+            self._canvas.draw_idle()
+        except Exception:
+            pass
+
+
+def _annotate_transition_marker(
+    axis: Any,
+    value: float,
+    label: str,
+    color: str,
+    *,
+    reviewed: bool = False,
+    marker_label: Optional[str] = None,
+) -> None:
+    try:
+        text = axis.text(
+            float(value),
+            0.985 if reviewed else 0.92,
+            label,
+            transform=axis.get_xaxis_transform(),
+            rotation=90,
+            rotation_mode="anchor",
+            va="top",
+            ha="right",
+            color=color,
+            fontsize=8,
+            fontweight="bold" if reviewed else "normal",
+            bbox={
+                "boxstyle": "round,pad=0.16",
+                "facecolor": "white",
+                "edgecolor": color,
+                "alpha": 0.86 if reviewed else 0.68,
+                "linewidth": 0.6,
+            },
+            clip_on=False,
+            zorder=8 if reviewed else 6,
+        )
+        try:
+            text.set_gid("reviewed_transition_label" if reviewed else "auto_transition_label")
+            _set_transition_marker_metadata(text, marker_label or label, "reviewed" if reviewed else "auto")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _add_annealing_transition_markers(
+    figure: Figure | None,
+    plot_df: pd.DataFrame,
+    logger: logging.Logger | None = None,
+) -> None:
+    if figure is None or not figure.axes:
+        return
+    try:
+        summaries = summarize_annealing_transition_loops(plot_df)
+    except Exception:
+        if logger is not None:
+            logger.debug("Failed to summarize annealing transition currents", exc_info=True)
+        return
+    axis = figure.axes[0]
+    added = False
+    for summary in summaries:
+        loop_index = getattr(summary, "loop_index", None)
+        suffix = str(loop_index) if loop_index is not None else ""
+        markers = (
+            (f"As{suffix}", getattr(summary, "as_current_mA", None), "#65a30d", "--"),
+            (f"Af{suffix}", getattr(summary, "af_current_mA", None), "#65a30d", ":"),
+            (f"Ms{suffix}", getattr(summary, "ms_current_mA", None), "#7e22ce", "--"),
+            (f"Mf{suffix}", getattr(summary, "mf_current_mA", None), "#7e22ce", ":"),
+        )
+        for label, value, color, linestyle in markers:
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            numeric = float(value)
+            line = axis.axvline(
+                numeric,
+                color=color,
+                linestyle=linestyle,
+                linewidth=0.95,
+                alpha=0.48,
+                label="_nolegend_",
+                zorder=3,
+            )
+            _set_transition_marker_metadata(line, label, "auto")
+            _annotate_transition_marker(axis, numeric, label, color, reviewed=False)
+            added = True
+    if not added:
+        return
+    try:
+        axis.legend(loc="best", fontsize=8)
+    except Exception:
+        pass
+
+
+def _add_annealing_transition_markers_from_values(
+    figure: Figure | None,
+    values: Mapping[str, Any] | None,
+) -> bool:
+    if figure is None or not figure.axes:
+        return False
+    cleaned = _clean_transition_values(values)
+    if not cleaned:
+        return False
+    axis = figure.axes[0]
+    style_map = {
+        "As": ("#65a30d", "--"),
+        "Af": ("#65a30d", ":"),
+        "Ms": ("#7e22ce", "--"),
+        "Mf": ("#7e22ce", ":"),
+    }
+    added = False
+    for label in PHASE_POINT_LABELS:
+        value = cleaned.get(label)
+        if value is None:
+            continue
+        base = label[:2]
+        color, linestyle = style_map.get(base, ("#111827", "--"))
+        numeric = float(value)
+        line = axis.axvline(
+            numeric,
+            color=color,
+            linestyle=linestyle,
+            linewidth=0.95,
+            alpha=0.48,
+            label="_nolegend_",
+            zorder=3,
+        )
+        _set_transition_marker_metadata(line, label, "auto")
+        _annotate_transition_marker(axis, numeric, label, color, reviewed=False)
+        added = True
+    if added:
+        try:
+            axis.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
+    return added
+
+
+def _add_reviewed_transition_markers(
+    figure: Figure | None,
+    values: Mapping[str, Any] | None,
+) -> None:
+    if figure is None or not figure.axes:
+        return
+    cleaned = _clean_transition_values(values)
+    if not cleaned:
+        return
+    axis = figure.axes[0]
+    style_map = {
+        "As": ("#16a34a", "-"),
+        "Af": ("#16a34a", "-."),
+        "Ms": ("#7c3aed", "-"),
+        "Mf": ("#7c3aed", "-."),
+    }
+    added = False
+    for label in PHASE_POINT_LABELS:
+        value = cleaned.get(label)
+        if value is None:
+            continue
+        base = label[:2]
+        color, linestyle = style_map.get(base, ("#111827", "-"))
+        numeric = float(value)
+        line = axis.axvline(
+            numeric,
+            color=color,
+            linestyle=linestyle,
+            linewidth=1.8,
+            alpha=0.95,
+            label="_nolegend_",
+            zorder=7,
+        )
+        try:
+            line.set_gid("reviewed_transition_marker")
+            _set_transition_marker_metadata(line, label, "reviewed")
+        except Exception:
+            pass
+        _annotate_transition_marker(
+            axis,
+            numeric,
+            _phase_current_label(label),
+            color,
+            reviewed=True,
+            marker_label=label,
+        )
+        added = True
+    if added:
+        try:
+            axis.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
 
 
 def _figure_to_pixmap(
@@ -4098,10 +5140,36 @@ def _combine_pixmaps_side_by_side(
                 )
             y_pos = max((height_px - scaled.height()) // 2, 0)
             painter.drawPixmap(x_pos, y_pos, scaled)
-            x_pos += slot_width + spacing
+            x_pos += scaled.width() + spacing
     finally:
         painter.end()
     return target
+
+
+def _deferred_graph_preview_pixmap(
+    label: str,
+    *,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
+) -> QtGui.QPixmap:
+    """Return a cheap, explicit placeholder for a lazy packaged-project graph."""
+
+    pixmap = QtGui.QPixmap(max(int(width_px), 1), max(int(height_px), 1))
+    pixmap.fill(QtGui.QColor("#24282e"))
+    painter = QtGui.QPainter(pixmap)
+    try:
+        painter.setPen(QtGui.QPen(QtGui.QColor("#56606c"), 1))
+        painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1))
+        painter.setPen(QtGui.QColor("#c7d0da"))
+        painter.drawText(
+            pixmap.rect().adjusted(18, 18, -18, -18),
+            QtCore.Qt.AlignmentFlag.AlignCenter
+            | QtCore.Qt.TextFlag.TextWordWrap,
+            label,
+        )
+    finally:
+        painter.end()
+    return pixmap
 
 
 def _combine_pixmaps_vertical(
@@ -4150,6 +5218,56 @@ def _combine_pixmaps_vertical(
             x_pos = max((width_px - scaled.width()) // 2, 0)
             painter.drawPixmap(x_pos, y_pos, scaled)
             y_pos += slot_height + spacing
+    finally:
+        painter.end()
+    return target
+
+
+def _render_missing_high_measurement_pixmap(
+    records: Sequence[MeasurementRecord],
+    *,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
+) -> QtGui.QPixmap:
+    target = QtGui.QPixmap(max(int(width_px), 1), max(int(height_px), 1))
+    target.fill(QtGui.QColor("#181818"))
+    painter = QtGui.QPainter(target)
+    try:
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        border_rect = target.rect().adjusted(0, 0, -1, -1)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#5f6368"), 1))
+        painter.drawRect(border_rect)
+
+        title_font = QtGui.QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(11)
+        painter.setFont(title_font)
+        painter.setPen(QtGui.QColor("#f1f3f4"))
+        painter.drawText(
+            QtCore.QRect(16, 18, target.width() - 32, 32),
+            int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
+            "No exact 1000 mA graph",
+        )
+
+        body_font = QtGui.QFont()
+        body_font.setPointSize(9)
+        painter.setFont(body_font)
+        painter.setPen(QtGui.QColor("#bdc1c6"))
+        available = _format_annealing_setpoint_list(records)
+        body_text = (
+            f"Available setpoints:\n{available} mA"
+            if available
+            else "No annealing setpoints were detected."
+        )
+        painter.drawText(
+            QtCore.QRect(20, 58, target.width() - 40, target.height() - 76),
+            int(
+                QtCore.Qt.AlignmentFlag.AlignHCenter
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+                | QtCore.Qt.TextFlag.TextWordWrap
+            ),
+            body_text,
+        )
     finally:
         painter.end()
     return target
@@ -4473,6 +5591,30 @@ def _plot_vsm_hysteresis_figure(
     return figure
 
 
+def _wrap_plot_title(value: object, *, width: int = 52) -> str:
+    """Wrap long review titles without breaking sample identifiers."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return "\n".join(
+        textwrap.wrap(
+            text,
+            width=max(int(width), 20),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def _configure_review_canvas(canvas: FigureCanvasQTAgg) -> None:
+    """Let embedded plots yield space to their review controls at high DPI."""
+    canvas.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Ignored,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
+    canvas.setMinimumSize(0, 180)
+
+
 def _plot_vsm_temperature_scan_figure(
     record: VsmTemperatureScanRecord,
     processor: VSMTemperatureScanProcessor,
@@ -4480,6 +5622,7 @@ def _plot_vsm_temperature_scan_figure(
     width_px: int,
     height_px: int,
     preview_mode: str = VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE,
+    max_plot_points: int = MAX_PLOT_POINTS,
 ) -> Optional["plt.Figure"]:
     frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
@@ -4506,8 +5649,8 @@ def _plot_vsm_temperature_scan_figure(
             plot_frame = processor._smooth_frame(plot_frame)
         temps = plot_frame["temperature"]
         signal = plot_frame["signal"]
-        if len(temps) > MAX_PLOT_POINTS:
-            temps = _downsample_series(temps, MAX_PLOT_POINTS)
+        if len(temps) > max_plot_points:
+            temps = _downsample_series(temps, max_plot_points)
             signal = signal.loc[temps.index]
         color = prepared_series.color
         label = prepared_series.legend
@@ -4532,9 +5675,11 @@ def _plot_vsm_temperature_scan_figure(
     if isinstance(variant, str) and variant.strip():
         title = f"{title} ({variant.strip()})"
     if preview_mode == "smoothed":
-        ax_left.set_title(f"{title} - Smoothed VSM Temperature Scan")
+        ax_left.set_title(
+            _wrap_plot_title(f"{title} - Smoothed VSM Temperature Scan", width=40)
+        )
     else:
-        ax_left.set_title(f"{title} - VSM Temperature Scan")
+        ax_left.set_title(_wrap_plot_title(f"{title} - VSM Temperature Scan", width=40))
     ax_left.set_xlabel("Temperature (°C)")
     ax_left.set_ylabel("Signal X (emu)")
     if ax_right is not None:
@@ -4542,6 +5687,7 @@ def _plot_vsm_temperature_scan_figure(
     if legend_handles:
         ax_left.legend(legend_handles, legend_labels, loc="best")
     figure.tight_layout()
+    figure.subplots_adjust(left=0.12, right=0.98, top=0.82, bottom=0.15)
     return figure
 
 
@@ -4648,6 +5794,7 @@ def _annealing_records_to_frame(
         "Microwire",
         ANNEALING_HIGH_GRAPH_COLUMN,
         ANNEALING_OTHER_GRAPH_COLUMN,
+        ANNEALING_TRANSITION_COLUMN,
         "_group_key",
         "_sources",
     ]
@@ -4706,12 +5853,26 @@ def _annealing_records_to_frame(
                 source_paths.append(str(Path(path)))
         if source_paths:
             source_paths = list(dict.fromkeys(source_paths))
+        transition_lines: List[str] = []
+        for entry in [high_record, *other_records]:
+            if entry is None:
+                continue
+            lines = getattr(entry, "transition_summary", ()) or ()
+            if not lines:
+                lines = _annealing_transition_summary(
+                    entry.dataframe,
+                    label=getattr(entry.metadata, "file_name", None),
+                )
+            for line in lines:
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
         rows.append(
             {
                 "Composition": composition,
                 "Microwire": microwire,
                 ANNEALING_HIGH_GRAPH_COLUMN: None,
                 ANNEALING_OTHER_GRAPH_COLUMN: None,
+                ANNEALING_TRANSITION_COLUMN: transition_lines or None,
                 "_group_key": group_key,
                 "_sources": source_paths,
             }
@@ -4746,6 +5907,35 @@ def _format_setpoint(value: Optional[float]) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def _available_annealing_setpoints(records: Sequence[MeasurementRecord]) -> List[float]:
+    values: List[float] = []
+    for record in records:
+        setpoint = _extract_setpoint(record)
+        if setpoint is None:
+            continue
+        if any(abs(existing - setpoint) < 1e-6 for existing in values):
+            continue
+        values.append(setpoint)
+    return sorted(values)
+
+
+def _format_annealing_setpoint_list(records: Sequence[MeasurementRecord]) -> str:
+    values = _available_annealing_setpoints(records)
+    formatted = [_format_setpoint(value) for value in values]
+    formatted = [value for value in formatted if value]
+    return ", ".join(formatted)
+
+
+def _missing_high_measurement_message(records: Sequence[MeasurementRecord]) -> str:
+    available = _format_annealing_setpoint_list(records)
+    if available:
+        return (
+            "No exact 1000 mA measurement available for this microwire.\n"
+            f"Available setpoints: {available} mA."
+        )
+    return "No exact 1000 mA measurement available for this microwire."
+
+
 def _select_anchor_and_other_records(
     records: List[MeasurementRecord],
 ) -> Tuple[Optional[MeasurementRecord], List[MeasurementRecord]]:
@@ -4776,6 +5966,7 @@ def _select_other_measurements(
 
 class _AnnealingPlotDisplay(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(float)
+    markerDragged = QtCore.pyqtSignal(str, float)
     """Render a single annealing plot with contextual details."""
 
     def __init__(
@@ -4783,13 +5974,18 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         title: str,
         logger: logging.Logger,
         parent: QtWidgets.QWidget | None = None,
+        *,
+        show_transition_markers: bool = False,
     ) -> None:
         super().__init__(parent)
         self._base_title = title
         self._logger = logger
+        self._show_transition_markers = bool(show_transition_markers)
         self._canvas: FigureCanvasQTAgg | None = None
         self._motion_cid: Optional[int] = None
         self._click_cid: Optional[int] = None
+        self._release_cid: Optional[int] = None
+        self._drag_controller: Optional[_TransitionMarkerDragController] = None
         self._cursor_units: str = "mA"
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -4797,6 +5993,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         layout.setSpacing(2)
 
         self.title_label = QtWidgets.QLabel(title)
+        self.title_label.setWordWrap(True)
         self.title_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
@@ -4834,14 +6031,28 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         *,
         setpoint: Optional[float],
         description: str,
+        reviewed_values: Optional[Mapping[str, Any]] = None,
+        auto_values: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        render_started_s = time.perf_counter()
         if record is None:
             self._show_placeholder(description)
             self.title_label.setText(self._base_title)
             return
 
         try:
-            figure = self._build_figure(record)
+            build_started_s = time.perf_counter()
+            figure = self._build_figure(
+                record,
+                reviewed_values=reviewed_values,
+                auto_values=auto_values,
+            )
+            _log_builder_timing(
+                self._logger,
+                "current_annealing_review_build_figure",
+                build_started_s,
+                record=getattr(getattr(record, "metadata", object()), "file_name", ""),
+            )
         except Exception:
             self._logger.exception("Failed to render annealing preview for %s", getattr(record, "path", "?"))
             self._show_placeholder("Failed to render plot for the selected measurement.")
@@ -4876,8 +6087,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.subtitle_label.setText(" · ".join(details))
 
         canvas = FigureCanvasQTAgg(figure)
+        _configure_review_canvas(canvas)
         if self._canvas is not None:
             self._disconnect_motion_handler()
+            self._disconnect_click_handler()
+            self._disconnect_release_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
@@ -4893,11 +6107,26 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         except Exception:
             self._motion_cid = None
         try:
-            self._click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+            self._click_cid = canvas.mpl_connect("button_press_event", self._handle_button_press)
         except Exception:
             self._click_cid = None
+        try:
+            self._release_cid = canvas.mpl_connect("button_release_event", self._handle_button_release)
+        except Exception:
+            self._release_cid = None
+        self._drag_controller = _TransitionMarkerDragController(
+            canvas,
+            labels=PHASE_POINT_LABELS,
+            on_release=self._emit_marker_dragged,
+        )
         self._cursor_units = "mA"
         self._update_cursor_label(None)
+        _log_builder_timing(
+            self._logger,
+            "current_annealing_review_render",
+            render_started_s,
+            record=getattr(getattr(record, "metadata", object()), "file_name", ""),
+        )
 
     def clear(self, message: str) -> None:
         self._show_placeholder(message)
@@ -4907,10 +6136,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         if self._canvas is not None:
             self._disconnect_motion_handler()
             self._disconnect_click_handler()
+            self._disconnect_release_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
             self._canvas = None
+            self._drag_controller = None
         self.subtitle_label.setText("")
         self._placeholder.setText(message)
         self._stack.setCurrentWidget(self._placeholder)
@@ -4932,7 +6163,19 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 pass
         self._click_cid = None
 
+    def _disconnect_release_handler(self) -> None:
+        if self._canvas is not None and self._release_cid is not None:
+            try:
+                self._canvas.mpl_disconnect(self._release_cid)
+            except Exception:
+                pass
+        self._release_cid = None
+
     def _handle_motion(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_motion(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+            return
         if event is None or event.inaxes is None or event.xdata is None:
             self._update_cursor_label(None)
             return
@@ -4943,8 +6186,29 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             return
         self._update_cursor_label(value)
 
+    def _handle_button_press(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_press(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+            return
+        self._handle_click(event)
+
+    def _handle_button_release(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_release(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+
+    def _emit_marker_dragged(self, label: str, value: float) -> None:
+        try:
+            self.markerDragged.emit(str(label), float(value))
+        except Exception:
+            pass
+
     def _handle_click(self, event: Any) -> None:
-        if event is None or not getattr(event, "dblclick", False):
+        if event is None:
+            return
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
             return
         if event.xdata is None:
             return
@@ -4967,7 +6231,13 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             text = f"Cursor: {formatted}{suffix}"
         self.cursor_label.setText(text)
 
-    def _build_figure(self, record: MeasurementRecord):
+    def _build_figure(
+        self,
+        record: MeasurementRecord,
+        *,
+        reviewed_values: Optional[Mapping[str, Any]] = None,
+        auto_values: Optional[Mapping[str, Any]] = None,
+    ):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             raise ValueError("No data to plot")
@@ -5002,6 +6272,15 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             raise ValueError("Current annealing dataframe missing expected columns")
         if plot_df.empty:
             raise ValueError("No valid samples to plot")
+        display_df = plot_df
+        max_display_points = 4000
+        if len(plot_df.index) > max_display_points:
+            step = max(int(math.ceil(len(plot_df.index) / max_display_points)), 1)
+            display_df = pd.concat(
+                [plot_df.iloc[::step], plot_df.tail(1)],
+                ignore_index=False,
+            )
+            display_df = display_df[~display_df.index.duplicated(keep="first")]
         path = getattr(record, "path", None)
         stem = None
         if path:
@@ -5015,10 +6294,23 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         target_width = max(int(ANNEALING_GRAPH_WIDTH * 2), ANNEALING_GRAPH_WIDTH)
         target_height = max(int(ANNEALING_GRAPH_HEIGHT * 2), ANNEALING_GRAPH_HEIGHT)
         figure, _ = plot_annealing_curve(
-            plot_df,
+            display_df,
             title,
             target_px=(target_width, target_height),
+            wire_diameter_um=_annealing_wire_diameter_um(record),
         )
+        try:
+            logger = self.__dict__.get("_logger")
+        except Exception:
+            logger = None
+        if bool(self.__dict__.get("_show_transition_markers", False)):
+            if not _add_annealing_transition_markers_from_values(figure, auto_values):
+                _add_annealing_transition_markers(
+                    figure,
+                    plot_df,
+                    logger if isinstance(logger, logging.Logger) else None,
+                )
+            _add_reviewed_transition_markers(figure, reviewed_values)
         try:
             axes = figure.axes[0] if figure.axes else None
         except Exception:
@@ -5028,11 +6320,50 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 axes.tick_params(labelsize=8)
             except Exception:
                 pass
+            try:
+                axes.set_title(_wrap_plot_title(axes.get_title(), width=58))
+            except Exception:
+                pass
         try:
-            figure.subplots_adjust(left=0.08, right=0.98, top=0.88, bottom=0.14)
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.82, bottom=0.22)
         except Exception:
             pass
         return figure
+
+    def update_reviewed_values(self, values: Optional[Mapping[str, Any]]) -> bool:
+        update_started_s = time.perf_counter()
+        canvas = self._canvas
+        if canvas is None:
+            return False
+        figure = getattr(canvas, "figure", None)
+        if figure is None or not getattr(figure, "axes", None):
+            return False
+        axis = figure.axes[0]
+        for artist in list(getattr(axis, "lines", [])) + list(getattr(axis, "texts", [])):
+            try:
+                gid = artist.get_gid()
+            except Exception:
+                gid = None
+            if gid not in {"reviewed_transition_marker", "reviewed_transition_label"}:
+                continue
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        _add_reviewed_transition_markers(figure, values)
+        try:
+            canvas.draw_idle()
+        except Exception:
+            try:
+                canvas.draw()
+            except Exception:
+                return False
+        _log_builder_timing(
+            self._logger,
+            "current_annealing_review_marker_update",
+            update_started_s,
+        )
+        return True
 
 
 class _AnnealingPlotGallery(QtWidgets.QWidget):
@@ -5117,6 +6448,1239 @@ class _AnnealingPlotGallery(QtWidgets.QWidget):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
+
+
+@dataclass(frozen=True)
+class _AnnealingTransitionReviewEntry:
+    record: MeasurementRecord
+    title: str
+    status: str
+    summary_lines: Tuple[str, ...]
+    record_id: str
+    auto_values: Dict[str, float]
+
+
+TRANSITION_REVIEW_SCHEMA_VERSION = 1
+TRANSITION_REVIEW_EXTRA_KEY = "transition_reviews"
+TRANSITION_REVIEW_STATUS_UNREVIEWED = "unreviewed"
+TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO = "accepted_auto"
+TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED = "manual_adjusted"
+TRANSITION_REVIEW_STATUS_NO_TRANSITION = "no_transition"
+TRANSITION_REVIEW_STATUS_EXCLUDED = "excluded"
+TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION = "needs_attention"
+TRANSITION_REVIEW_INCLUDED_STATUSES = {
+    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+}
+
+MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION = 2
+MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY = "mini_dma_transition_reviews"
+MINI_DMA_REVIEW_STATUS_ACCEPTED = "accepted"
+MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
+MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
+MINI_DMA_TRANSITION_LABELS = ("As", "Af", "Ms", "Mf")
+
+VSM_TRANSITION_REVIEW_SCHEMA_VERSION = 2
+VSM_TRANSITION_REVIEW_EXTRA_KEY = "transition_reviews"
+VSM_TRANSITION_VALUES_KEY = "transition_temps"
+VSM_TRANSITION_STATUS_KEY = "__review_status__"
+VSM_TRANSITION_INCLUDED_KEY = "__included__"
+VSM_TRANSITION_REVIEW_COLUMNS = [
+    "Review status",
+    "Scans",
+    "Accepted",
+    "No transition",
+    "Excluded",
+    "Unreviewed",
+]
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _clean_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in PHASE_POINT_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    if "As1" not in cleaned:
+        value = _coerce_finite_float(values.get("As"))
+        if value is not None:
+            cleaned["As1"] = value
+    if "Ms1" not in cleaned:
+        value = _coerce_finite_float(values.get("Ms"))
+        if value is not None:
+            cleaned["Ms1"] = value
+    return cleaned
+
+
+def _clean_mini_dma_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in MINI_DMA_TRANSITION_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    return cleaned
+
+
+def _clean_vsm_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in TRANSITION_TEMP_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    return cleaned
+
+
+def _format_mini_dma_transition_value(value: float) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+
+def _mini_dma_current_label(label: str) -> str:
+    return f"I_{label}"
+
+
+def _format_mini_dma_transition_review_line(
+    target_label: str,
+    values: Mapping[str, Any],
+) -> str:
+    cleaned = _clean_mini_dma_transition_values(values)
+    parts = [
+        f"{label} {_format_mini_dma_transition_value(value)} mA"
+        for label, value in cleaned.items()
+    ]
+    if not parts:
+        return ""
+    return f"{target_label}: {', '.join(parts)}"
+
+
+def _mini_dma_transition_values_from_text(line: object) -> Dict[str, float]:
+    """Parse cached TMA transition-summary text without reloading a raw run."""
+
+    text = str(line or "")
+    if not text:
+        return {}
+    values: Dict[str, float] = {}
+    for label in MINI_DMA_TRANSITION_LABELS:
+        match = re.search(
+            rf"\b{re.escape(label)}\s+([-+]?\d+(?:[.,]\d+)?)\s*mA\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        value = _coerce_finite_float(match.group(1).replace(",", "."))
+        if value is not None:
+            values[label] = value
+    return values
+
+
+class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
+    valuesEdited = QtCore.pyqtSignal(dict)
+    valueCleared = QtCore.pyqtSignal(str)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._updating = False
+        self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        self._auto_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._edits: Dict[str, QtWidgets.QLineEdit] = {}
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QtWidgets.QLabel("Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)", self))
+        hint = QtWidgets.QLabel(
+            "Select a transition current, then click or drag a graph marker to add or move its vertical line.",
+            self,
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        layout.addWidget(hint)
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(3)
+        validator = QtGui.QDoubleValidator(0.0, 10000.0, 3, self)
+        validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
+        for index, label in enumerate(MINI_DMA_TRANSITION_LABELS):
+            col = index * 3
+            radio = QtWidgets.QRadioButton(_mini_dma_current_label(label), self)
+            if index == 0:
+                radio.setChecked(True)
+            auto_label = QtWidgets.QLabel("Auto: --", self)
+            auto_label.setMinimumWidth(64)
+            auto_label.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            edit = QtWidgets.QLineEdit(self)
+            edit.setValidator(validator)
+            edit.setMaximumWidth(78)
+            edit.setPlaceholderText("mA")
+            edit.returnPressed.connect(self._emit_values)
+            self._target_buttons[label] = radio
+            self._auto_labels[label] = auto_label
+            self._edits[label] = edit
+            grid.addWidget(radio, 0, col)
+            grid.addWidget(auto_label, 0, col + 1)
+            grid.addWidget(edit, 0, col + 2)
+        layout.addLayout(grid)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        apply_button = QtWidgets.QPushButton("Apply values", self)
+        apply_button.clicked.connect(self._emit_values)
+        clear_button = QtWidgets.QPushButton("Clear selected", self)
+        clear_button.clicked.connect(self._clear_selected)
+        buttons.addWidget(apply_button)
+        buttons.addWidget(clear_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    def selected_label(self) -> str:
+        for label, button in self._target_buttons.items():
+            if button.isChecked():
+                return label
+        return MINI_DMA_TRANSITION_LABELS[0]
+
+    def set_target(self, label: str) -> None:
+        button = self._target_buttons.get(str(label))
+        if button is not None:
+            button.setChecked(True)
+
+    def set_auto_values(self, values: Mapping[str, Any]) -> None:
+        for label in MINI_DMA_TRANSITION_LABELS:
+            widget = self._auto_labels.get(label)
+            if widget is None:
+                continue
+            value = _coerce_finite_float(values.get(label))
+            if value is None:
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {_format_mini_dma_transition_value(value)}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+
+    def set_values(self, values: Mapping[str, Any]) -> None:
+        self._updating = True
+        try:
+            for label in MINI_DMA_TRANSITION_LABELS:
+                edit = self._edits.get(label)
+                if edit is None:
+                    continue
+                value = _coerce_finite_float(values.get(label))
+                edit.setText(_format_mini_dma_transition_value(value) if value is not None else "")
+                edit.setStyleSheet("color: #22c55e; font-weight: 600;" if value is not None else "")
+        finally:
+            self._updating = False
+
+    def values(self) -> Dict[str, Optional[float]]:
+        return {label: _coerce_finite_float(edit.text()) for label, edit in self._edits.items()}
+
+    def apply_picked_value(self, value: float) -> None:
+        edit = self._edits.get(self.selected_label())
+        if edit is None:
+            return
+        edit.setText(_format_mini_dma_transition_value(float(value)))
+        self._emit_values()
+
+    def _clear_selected(self) -> None:
+        label = self.selected_label()
+        edit = self._edits.get(label)
+        if edit is not None:
+            edit.clear()
+        try:
+            self.valueCleared.emit(label)
+        except Exception:
+            pass
+
+    def _emit_values(self) -> None:
+        if self._updating:
+            return
+        try:
+            self.valuesEdited.emit(self.values())
+        except Exception:
+            pass
+
+
+def _transition_record_id_for_annealing_record(record: MeasurementRecord) -> str:
+    metadata = getattr(record, "metadata", None)
+    key = _phase_point_key_for_annealing_record(record) or ""
+    parts = [
+        "current_annealing",
+        key,
+        str(getattr(metadata, "measurement_id", "") or ""),
+        str(getattr(metadata, "file_name", "") or ""),
+        str(getattr(metadata, "relpath", "") or ""),
+        str(getattr(metadata, "setpoint_mA", "") or ""),
+    ]
+    path_value = getattr(record, "path", None)
+    if path_value:
+        try:
+            parts.append(str(Path(path_value)))
+        except Exception:
+            parts.append(str(path_value))
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"ca:{digest}"
+
+
+def _auto_transition_values_for_annealing_record(record: MeasurementRecord) -> Dict[str, float]:
+    dataframe = getattr(record, "dataframe", None)
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return {}
+    try:
+        summaries = summarize_annealing_transition_loops(dataframe)
+    except Exception:
+        summaries = ()
+    values: Dict[str, float] = {}
+    for summary in summaries:
+        loop_index = getattr(summary, "loop_index", None)
+        if loop_index not in (1, 2):
+            continue
+        suffix = str(loop_index)
+        mapping = {
+            f"As{suffix}": getattr(summary, "as_current_mA", None),
+            f"Af{suffix}": getattr(summary, "af_current_mA", None),
+            f"Ms{suffix}": getattr(summary, "ms_current_mA", None),
+            f"Mf{suffix}": getattr(summary, "mf_current_mA", None),
+        }
+        for label, raw in mapping.items():
+            value = _coerce_finite_float(raw)
+            if value is not None:
+                values[label] = value
+    if not values:
+        try:
+            summary = summarize_annealing_transition_currents(dataframe)
+        except Exception:
+            summary = None
+        if summary is not None:
+            mapping = {
+                "As1": getattr(summary, "as_current_mA", None),
+                "Af1": getattr(summary, "af_current_mA", None),
+                "Ms1": getattr(summary, "ms_current_mA", None),
+                "Mf1": getattr(summary, "mf_current_mA", None),
+            }
+            for label, raw in mapping.items():
+                value = _coerce_finite_float(raw)
+                if value is not None:
+                    values[label] = value
+    return values
+
+
+def _phase_point_key_for_annealing_record(record: MeasurementRecord) -> Optional[str]:
+    metadata = getattr(record, "metadata", None)
+    if metadata is None:
+        return None
+    composition = getattr(metadata, "composition_token", None)
+    draw = getattr(metadata, "draw_x", None)
+    piece = getattr(metadata, "piece_y", None)
+    if composition is None or draw is None or piece is None:
+        return None
+    suffix = None
+    path_value = getattr(record, "path", None)
+    if isinstance(path_value, Path):
+        parsed_key = _microscope_key(path_value)
+        if parsed_key is not None:
+            _, _, _, suffix = parsed_key
+    try:
+        return _microwire_key_to_str((str(composition), int(draw), int(piece), suffix))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_phase_current_value(value: float) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+
+def _phase_current_label(label: str) -> str:
+    return f"I_{label}"
+
+
+def _transition_review_status_label(
+    status: str | None,
+    *,
+    has_values: bool = False,
+    has_auto_values: bool = False,
+) -> str:
+    normalized = str(status or "").strip()
+    if normalized == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+        return "Accepted"
+    if normalized == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+        return "Manual adjusted"
+    if normalized == TRANSITION_REVIEW_STATUS_NO_TRANSITION:
+        return "No transition"
+    if normalized == TRANSITION_REVIEW_STATUS_EXCLUDED:
+        return "Excluded"
+    if normalized == TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION:
+        return "Needs attention"
+    if has_values:
+        return "Manual adjusted"
+    if has_auto_values:
+        return "Auto candidates"
+    return "Unreviewed"
+
+
+def _transition_review_status_color(status_label: str) -> str:
+    normalized = status_label.lower()
+    if normalized in {"accepted", "manual adjusted"}:
+        return "#4ade80"
+    if normalized == "no transition":
+        return "#93c5fd"
+    if normalized == "excluded":
+        return "#f87171"
+    if normalized == "needs attention":
+        return "#facc15"
+    if normalized == "auto candidates":
+        return "#fbbf24"
+    return "#d1d5db"
+
+
+class _PhasePointEditorControls(QtWidgets.QWidget):
+    valuesEdited = QtCore.pyqtSignal(dict)
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        title: str = "Transition currents",
+    ) -> None:
+        super().__init__(parent)
+        self._updating = False
+        self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        self._auto_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._edits: Dict[str, QtWidgets.QLineEdit] = {}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QtWidgets.QLabel(title, self)
+        header.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(header)
+
+        hint = QtWidgets.QLabel(
+            "Select a transition current, then click or drag a graph marker to add or move its vertical line.",
+            self,
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        layout.addWidget(hint)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
+        validator = QtGui.QDoubleValidator(0.0, 10000.0, 3, self)
+        validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
+        for index, label in enumerate(PHASE_POINT_LABELS):
+            row = index // 4
+            col = (index % 4) * 3
+            radio = QtWidgets.QRadioButton(_phase_current_label(label), self)
+            radio.setToolTip(
+                f"Select {_phase_current_label(label)}, then click the graph to place its reviewed current."
+            )
+            if index == 0:
+                radio.setChecked(True)
+            auto_label = QtWidgets.QLabel("Auto: --", self)
+            auto_label.setMinimumWidth(64)
+            auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
+            auto_label.setToolTip(f"Automatic candidate for {_phase_current_label(label)}.")
+            edit = QtWidgets.QLineEdit(self)
+            edit.setValidator(validator)
+            edit.setMaximumWidth(72)
+            edit.setPlaceholderText("mA")
+            edit.setToolTip(f"Reviewed {_phase_current_label(label)} current in mA.")
+            edit.returnPressed.connect(self._emit_values)
+            self._target_buttons[label] = radio
+            self._auto_labels[label] = auto_label
+            self._edits[label] = edit
+            grid.addWidget(radio, row, col)
+            grid.addWidget(auto_label, row, col + 1)
+            grid.addWidget(edit, row, col + 2)
+        layout.addLayout(grid)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        apply_button = QtWidgets.QPushButton("Apply values", self)
+        apply_button.clicked.connect(self._emit_values)
+        clear_button = QtWidgets.QPushButton("Clear selected", self)
+        clear_button.clicked.connect(self._clear_selected)
+        buttons.addWidget(apply_button)
+        buttons.addWidget(clear_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    def selected_label(self) -> str:
+        for label, button in self._target_buttons.items():
+            if button.isChecked():
+                return label
+        return PHASE_POINT_LABELS[0]
+
+    def set_target(self, label: str) -> None:
+        button = self._target_buttons.get(label)
+        if button is not None:
+            button.setChecked(True)
+
+    def set_values(self, values: Mapping[str, Any]) -> None:
+        self._updating = True
+        try:
+            for label in PHASE_POINT_LABELS:
+                edit = self._edits.get(label)
+                if edit is None:
+                    continue
+                value = values.get(label)
+                if value is None and label == "As1":
+                    value = values.get("As")
+                if value is None and label == "Ms1":
+                    value = values.get("Ms")
+                numeric = CurrentDensitySection._coerce_phase_value(value)
+                edit.setText(_format_phase_current_value(numeric) if numeric is not None else "")
+                if numeric is not None:
+                    edit.setStyleSheet("color: #22c55e; font-weight: 600;")
+                else:
+                    edit.setStyleSheet("")
+        finally:
+            self._updating = False
+
+    def set_auto_values(self, values: Mapping[str, Any]) -> None:
+        for label in PHASE_POINT_LABELS:
+            widget = self._auto_labels.get(label)
+            if widget is None:
+                continue
+            value = values.get(label)
+            if value is None and label == "As1":
+                value = values.get("As")
+            if value is None and label == "Ms1":
+                value = values.get("Ms")
+            numeric = CurrentDensitySection._coerce_phase_value(value)
+            if numeric is None:
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {_format_phase_current_value(numeric)}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+
+    def values(self) -> Dict[str, Optional[float]]:
+        result: Dict[str, Optional[float]] = {}
+        for label, edit in self._edits.items():
+            result[label] = CurrentDensitySection._coerce_phase_value(edit.text())
+        return result
+
+    def apply_picked_value(self, value: float) -> None:
+        label = self.selected_label()
+        edit = self._edits.get(label)
+        if edit is None:
+            return
+        edit.setText(_format_phase_current_value(float(value)))
+        self._emit_values()
+
+    def _clear_selected(self) -> None:
+        edit = self._edits.get(self.selected_label())
+        if edit is not None:
+            edit.clear()
+        self._emit_values()
+
+    def _emit_values(self) -> None:
+        if self._updating:
+            return
+        try:
+            self.valuesEdited.emit(self.values())
+        except Exception:
+            pass
+
+
+def _annealing_transition_review_entries(
+    records: Sequence[MeasurementRecord],
+    logger: logging.Logger | None = None,
+) -> List[_AnnealingTransitionReviewEntry]:
+    entries: List[_AnnealingTransitionReviewEntry] = []
+    for record in records:
+        metadata = getattr(record, "metadata", None)
+        file_name = str(getattr(metadata, "file_name", "") or "")
+        if not file_name:
+            path = getattr(record, "path", None)
+            if path:
+                try:
+                    file_name = Path(path).name
+                except Exception:
+                    file_name = str(path)
+        title_parts: List[str] = []
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        if composition is not None and draw is not None and piece is not None:
+            try:
+                title_parts.append(f"{composition} {_microwire_label(int(draw), int(piece))}")
+            except Exception:
+                title_parts.append(str(composition))
+        setpoint = _extract_setpoint(record)
+        if setpoint is not None:
+            title_parts.append(f"{_format_setpoint(setpoint)} mA")
+        if file_name:
+            title_parts.append(file_name)
+        title = " - ".join(part for part in title_parts if part) or "Current annealing run"
+
+        raw_lines = getattr(record, "transition_summary", ()) or ()
+        lines = tuple(str(line) for line in raw_lines if str(line).strip())
+        if not lines:
+            try:
+                computed = _annealing_transition_summary(
+                    record.dataframe,
+                    label=file_name or None,
+                )
+                lines = tuple(str(line) for line in computed if str(line).strip())
+            except Exception:
+                if isinstance(logger, logging.Logger):
+                    logger.exception("Failed to summarize annealing transitions for %s", file_name or record)
+                lines = ()
+        status = "auto candidates" if lines else "no candidates"
+        record_id = _transition_record_id_for_annealing_record(record)
+        auto_values = _auto_transition_values_for_annealing_record(record)
+        entries.append(
+            _AnnealingTransitionReviewEntry(
+                record=record,
+                title=title,
+                status=status,
+                summary_lines=lines,
+                record_id=record_id,
+                auto_values=auto_values,
+            )
+        )
+    return entries
+
+
+class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        records: Sequence[MeasurementRecord],
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        transition_reviews_provider: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
+        transition_reviews_setter: Optional[
+            Callable[[str, Dict[str, Any]], None]
+        ] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Current annealing transition review")
+        self.resize(1280, 780)
+        self._logger = logger
+        self._entries = _annealing_transition_review_entries(records, logger)
+        self._transition_reviews_provider = transition_reviews_provider
+        self._transition_reviews_setter = transition_reviews_setter
+        self._current_record_id: Optional[str] = None
+        self._current_item: Optional[QtWidgets.QTreeWidgetItem] = None
+        self._review_snapshot: Dict[str, Dict[str, Any]] = self._load_review_snapshot()
+        self._render_generation = 0
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        root.addWidget(splitter, 1)
+
+        self._tree = QtWidgets.QTreeWidget(splitter)
+        self._tree.setHeaderLabels(["Annealing run", "Status"])
+        self._tree.setUniformRowHeights(True)
+        self._tree.setRootIsDecorated(False)
+        self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        try:
+            self._tree.header().setStretchLastSection(False)
+        except Exception:
+            pass
+        self._tree.setColumnWidth(0, 240)
+        self._tree.setColumnWidth(1, 120)
+        splitter.addWidget(self._tree)
+
+        right = QtWidgets.QWidget(splitter)
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+        self._accept_next_button = QtWidgets.QPushButton("Accept && next", right)
+        self._accept_next_button.setAccessibleName("Accept current annealing review and go to next")
+        self._accept_next_button.clicked.connect(self._accept_current_and_next)
+        action_row.addWidget(self._accept_next_button)
+        self._no_transition_button = QtWidgets.QPushButton("No transition", right)
+        self._no_transition_button.setAccessibleName("Mark current annealing run as no transition")
+        self._no_transition_button.clicked.connect(self._mark_current_no_transition)
+        action_row.addWidget(self._no_transition_button)
+        self._exclude_button = QtWidgets.QPushButton("Exclude graph", right)
+        self._exclude_button.setAccessibleName("Exclude current annealing graph")
+        self._exclude_button.clicked.connect(self._exclude_current_graph)
+        action_row.addWidget(self._exclude_button)
+        action_row.addStretch(1)
+        right_layout.addLayout(action_row)
+
+        navigation_row = QtWidgets.QHBoxLayout()
+        navigation_row.setContentsMargins(0, 0, 0, 0)
+        navigation_row.setSpacing(6)
+        self._previous_button = QtWidgets.QPushButton("Previous", right)
+        self._previous_button.setAccessibleName("Go to previous annealing review")
+        self._previous_button.clicked.connect(self._select_previous_item)
+        navigation_row.addWidget(self._previous_button)
+        self._next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", right)
+        self._next_unreviewed_button.setAccessibleName("Go to next unreviewed annealing run")
+        self._next_unreviewed_button.clicked.connect(lambda _checked=False: self._select_next_unreviewed())
+        navigation_row.addWidget(self._next_unreviewed_button)
+        navigation_row.addStretch(1)
+        right_layout.addLayout(navigation_row)
+
+        self._counts_label = QtWidgets.QLabel("", right)
+        self._counts_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._counts_label.setStyleSheet("font-size: 10px;")
+        self._counts_label.setWordWrap(True)
+        right_layout.addWidget(self._counts_label)
+
+        self._summary_label = QtWidgets.QLabel("")
+        self._summary_label.setWordWrap(True)
+        self._summary_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        right_layout.addWidget(self._summary_label)
+        self._display = _AnnealingPlotDisplay(
+            "Current annealing transition review",
+            logger,
+            right,
+            show_transition_markers=True,
+        )
+        self._display.valuePicked.connect(self._handle_plot_pick)
+        self._display.markerDragged.connect(self._handle_marker_dragged)
+        right_layout.addWidget(self._display, 1)
+        self._phase_controls = _PhasePointEditorControls(
+            right,
+            title="Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)",
+        )
+        self._phase_controls.valuesEdited.connect(self._handle_phase_values_edited)
+        self._phase_controls.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        right_layout.addWidget(self._phase_controls)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        try:
+            splitter.setSizes([360, 920])
+        except Exception:
+            pass
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._populate()
+        self._tree.currentItemChanged.connect(self._handle_current_item_changed)
+        if self._tree.topLevelItemCount():
+            self._tree.setCurrentItem(self._tree.topLevelItem(0))
+        else:
+            self._display.clear("No current annealing runs are available.")
+            self._summary_label.setText("No current annealing runs are available.")
+        self._refresh_counts()
+
+    def _load_review_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        if not callable(self._transition_reviews_provider):
+            return {}
+        try:
+            raw_snapshot = self._transition_reviews_provider()
+        except Exception:
+            return {}
+        if not isinstance(raw_snapshot, dict):
+            return {}
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in raw_snapshot.items():
+            if isinstance(record_id, str) and isinstance(payload, dict):
+                snapshot[record_id] = dict(payload)
+        return snapshot
+
+    def _populate(self) -> None:
+        self._tree.clear()
+        for index, entry in enumerate(self._entries):
+            payload = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, payload)
+            item = QtWidgets.QTreeWidgetItem([entry.title, self._status_for_entry(entry, payload, values)])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
+            if entry.summary_lines:
+                item.setToolTip(0, "\n".join(entry.summary_lines))
+            self._apply_status_to_item(item, entry, payload, values)
+            self._tree.addTopLevelItem(item)
+        self._tree.setColumnWidth(0, 240)
+        self._tree.setColumnWidth(1, 120)
+        self._refresh_counts()
+
+    def _review_counts(self) -> Dict[str, int]:
+        counts = {
+            "total": len(self._entries),
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+        for entry in self._entries:
+            payload = self._review_snapshot.get(entry.record_id, {}) if entry.record_id else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            values = self._values_for_entry(entry, payload)
+            status_label = self._status_for_entry(entry, payload, values)
+            if entry.auto_values:
+                counts["auto_candidates"] += 1
+            if status_label == "Accepted":
+                counts["accepted"] += 1
+            elif status_label == "Manual adjusted":
+                counts["manual"] += 1
+            elif status_label == "No transition":
+                counts["no_transition"] += 1
+            elif status_label == "Excluded":
+                counts["excluded"] += 1
+            elif status_label == "Needs attention":
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+        counts["reviewed"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+        )
+        return counts
+
+    def _refresh_counts(self) -> None:
+        if not hasattr(self, "_counts_label"):
+            return
+        counts = self._review_counts()
+        parts = [
+            f"Total {counts['total']}",
+            f"Done {counts['reviewed']}",
+            f"Open {counts['unreviewed']}",
+            f"Auto {counts['auto_candidates']}",
+            f"Accepted {counts['accepted']}",
+            f"Manual {counts['manual']}",
+            f"No transition {counts['no_transition']}",
+            f"Excluded {counts['excluded']}",
+        ]
+        if counts["needs_attention"]:
+            parts.append(f"Needs attention {counts['needs_attention']}")
+        self._counts_label.setText(" | ".join(parts))
+
+    def _review_payload_for_id(self, record_id: Optional[str]) -> Dict[str, Any]:
+        if not record_id:
+            return {}
+        payload = self._review_snapshot.get(record_id, {})
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _set_cached_review_payload(self, record_id: str, payload: Mapping[str, Any]) -> None:
+        if not record_id:
+            return
+        self._review_snapshot[record_id] = dict(payload)
+
+    @staticmethod
+    def _values_for_entry(
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, float]:
+        status = str(payload.get("status") or "").strip()
+        if status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
+        manual = _clean_transition_values(payload.get("manual_values_mA"))
+        if manual:
+            return manual
+        final = _clean_transition_values(payload.get("final_values_mA"))
+        if final:
+            return final
+        if str(payload.get("status") or "") == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            return dict(entry.auto_values)
+        return {}
+
+    @staticmethod
+    def _status_for_entry(
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> str:
+        status = str(payload.get("status") or "").strip()
+        has_values = any(CurrentDensitySection._coerce_phase_value(values.get(label)) is not None for label in PHASE_POINT_LABELS)
+        return _transition_review_status_label(
+            status,
+            has_values=has_values,
+            has_auto_values=bool(entry.auto_values),
+        )
+
+    @staticmethod
+    def _apply_status_to_item(
+        item: QtWidgets.QTreeWidgetItem,
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> None:
+        status_label = _AnnealingTransitionReviewDialog._status_for_entry(entry, payload, values)
+        item.setText(1, status_label)
+        color = _transition_review_status_color(status_label)
+        brush = QtGui.QBrush(QtGui.QColor(color))
+        item.setForeground(1, brush)
+        item.setToolTip(1, status_label)
+
+    @staticmethod
+    def _manual_summary(values: Mapping[str, Any]) -> str:
+        parts: List[str] = []
+        for label in PHASE_POINT_LABELS:
+            value = CurrentDensitySection._coerce_phase_value(values.get(label))
+            if value is not None:
+                parts.append(f"{_phase_current_label(label)} {_format_phase_current_value(value)} mA")
+        return ", ".join(parts)
+
+    def _summary_text(
+        self,
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> str:
+        status = str(payload.get("status") or "").strip()
+        has_values = any(
+            CurrentDensitySection._coerce_phase_value(values.get(label)) is not None
+            for label in PHASE_POINT_LABELS
+        )
+        status_label = _transition_review_status_label(
+            status,
+            has_values=has_values,
+            has_auto_values=bool(entry.auto_values),
+        )
+        lines = [f"Review state: {status_label}"]
+        if status_label in {"Accepted", "Manual adjusted"}:
+            lines.append("Included in current-density and Assemble transition summaries.")
+        elif status_label == "No transition":
+            lines.append("Reviewed as no transition; the graph remains valid but contributes no transition currents.")
+        elif status_label == "Excluded":
+            lines.append("Excluded from current-density and Assemble transition summaries.")
+        elif status_label == "Auto candidates":
+            lines.append("Automatic candidates are available but have not been accepted yet.")
+        else:
+            lines.append("Not yet reviewed for transition summaries.")
+        if entry.summary_lines:
+            lines.append("")
+            lines.extend(entry.summary_lines)
+        manual = self._manual_summary(values)
+        if manual:
+            lines.append(f"Reviewed: {manual}")
+        return "\n".join(lines)
+
+    def _handle_current_item_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            self._display.clear("Select an annealing run to review.")
+            self._summary_label.setText("")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_auto_values({})
+            self._phase_controls.set_values({})
+            self._current_record_id = None
+            self._current_item = None
+            return
+        index = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        try:
+            entry = self._entries[int(index)]
+        except Exception:
+            self._display.clear("Select an annealing run to review.")
+            self._summary_label.setText("")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_auto_values({})
+            self._phase_controls.set_values({})
+            self._current_record_id = None
+            self._current_item = None
+            return
+        self._current_record_id = entry.record_id
+        self._current_item = current
+        payload = self._review_payload_for_id(entry.record_id)
+        values = self._values_for_entry(entry, payload)
+        self._phase_controls.setEnabled(bool(self._current_record_id and callable(self._transition_reviews_setter)))
+        self._phase_controls.set_auto_values(entry.auto_values)
+        self._phase_controls.set_values(values)
+        self._summary_label.setText(self._summary_text(entry, payload, values))
+        self._apply_status_to_item(current, entry, payload, values)
+        self._schedule_display_record(entry, values)
+
+    def _schedule_display_record(
+        self,
+        entry: _AnnealingTransitionReviewEntry,
+        values: Mapping[str, Any],
+    ) -> None:
+        self._render_generation += 1
+        generation = self._render_generation
+        reviewed_values = dict(values)
+        auto_values = dict(entry.auto_values)
+        self._display.clear("Loading selected annealing graph...")
+
+        def _render_if_current() -> None:
+            if sip.isdeleted(self) or sip.isdeleted(self._display):
+                return
+            if generation != self._render_generation:
+                return
+            if self._current_record_id != entry.record_id:
+                return
+            self._display.set_record(
+                entry.record,
+                setpoint=_extract_setpoint(entry.record),
+                description="Select an annealing run to review.",
+                reviewed_values=reviewed_values,
+                auto_values=auto_values,
+            )
+
+        QtCore.QTimer.singleShot(25, _render_if_current)
+
+    def _current_entry(self) -> Optional[_AnnealingTransitionReviewEntry]:
+        item = self._current_item
+        if item is None:
+            return None
+        index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        try:
+            return self._entries[int(index)]
+        except Exception:
+            return None
+
+    def _handle_plot_pick(self, value: float) -> None:
+        started_s = time.perf_counter()
+        try:
+            self._phase_controls.apply_picked_value(value)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="click_commit",
+            )
+
+    def _handle_marker_dragged(self, label: str, value: float) -> None:
+        self._phase_controls.set_target(label)
+        self._phase_controls.apply_picked_value(value)
+
+    def _handle_phase_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        started_s = time.perf_counter()
+        record_id = self._current_record_id
+        try:
+            if not record_id or not callable(self._transition_reviews_setter):
+                return
+            cleaned = _clean_transition_values(values)
+            entry = self._current_entry()
+            payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
+            payload["status"] = TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED
+            payload["included"] = bool(cleaned)
+            payload["manual_values_mA"] = cleaned
+            payload["final_values_mA"] = cleaned
+            if entry is not None:
+                payload.setdefault("auto_values_mA", dict(entry.auto_values))
+            try:
+                self._transition_reviews_setter(record_id, payload)
+            except Exception:
+                return
+            self._set_cached_review_payload(record_id, payload)
+            if entry is not None:
+                stored_payload = self._review_payload_for_id(record_id)
+                stored_values = self._values_for_entry(entry, stored_payload)
+                self._phase_controls.set_auto_values(entry.auto_values)
+                self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
+                if not self._display.update_reviewed_values(stored_values):
+                    self._display.set_record(
+                        entry.record,
+                        setpoint=_extract_setpoint(entry.record),
+                        description="Select an annealing run to review.",
+                        reviewed_values=stored_values,
+                        auto_values=entry.auto_values,
+                    )
+                if self._current_item is not None:
+                    self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
+                self._refresh_counts()
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="edit_commit",
+            )
+
+    def _store_current_review(
+        self,
+        status: str,
+        *,
+        included: bool,
+        values: Optional[Mapping[str, Any]] = None,
+        refresh_display: bool = True,
+    ) -> None:
+        record_id = self._current_record_id
+        entry = self._current_entry()
+        if not record_id or entry is None or not callable(self._transition_reviews_setter):
+            return
+        cleaned = _clean_transition_values(values or {})
+        payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
+        payload["status"] = status
+        payload["included"] = bool(included)
+        payload["auto_values_mA"] = dict(entry.auto_values)
+        if cleaned:
+            payload["final_values_mA"] = cleaned
+            if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+                payload["manual_values_mA"] = cleaned
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            payload["final_values_mA"] = dict(entry.auto_values)
+        else:
+            payload["final_values_mA"] = {}
+            payload["manual_values_mA"] = {}
+        try:
+            self._transition_reviews_setter(record_id, payload)
+        except Exception:
+            return
+        self._set_cached_review_payload(record_id, payload)
+        refreshed = self._review_payload_for_id(record_id)
+        refreshed_values = self._values_for_entry(entry, refreshed)
+        self._phase_controls.set_auto_values(entry.auto_values)
+        self._phase_controls.set_values(refreshed_values)
+        self._summary_label.setText(self._summary_text(entry, refreshed, refreshed_values))
+        if refresh_display:
+            if not self._display.update_reviewed_values(refreshed_values):
+                self._display.set_record(
+                    entry.record,
+                    setpoint=_extract_setpoint(entry.record),
+                    description="Select an annealing run to review.",
+                    reviewed_values=refreshed_values,
+                    auto_values=entry.auto_values,
+                )
+        if self._current_item is not None:
+            self._apply_status_to_item(self._current_item, entry, refreshed, refreshed_values)
+        self._refresh_counts()
+
+    def _accept_current_and_next(self) -> None:
+        started_s = time.perf_counter()
+        try:
+            entry = self._current_entry()
+            if entry is None:
+                return
+            payload = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
+            if values:
+                self._store_current_review(
+                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    included=True,
+                    values=values,
+                    refresh_display=False,
+                )
+            else:
+                self._store_current_review(
+                    TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    included=False,
+                    refresh_display=False,
+                )
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="accept",
+            )
+
+    def _mark_current_no_transition(self) -> None:
+        started_s = time.perf_counter()
+        try:
+            self._store_current_review(
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                included=False,
+                refresh_display=False,
+            )
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="no_transition",
+            )
+
+    def _exclude_current_graph(self) -> None:
+        started_s = time.perf_counter()
+        try:
+            self._store_current_review(
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+                included=False,
+                refresh_display=False,
+            )
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="exclude",
+            )
+
+    def _select_previous_item(self) -> None:
+        item = self._current_item
+        if item is None:
+            return
+        row = self._tree.indexOfTopLevelItem(item)
+        if row > 0:
+            self._tree.setCurrentItem(self._tree.topLevelItem(row - 1))
+
+    def _select_next_unreviewed(self, *, fallback_next: bool = False) -> None:
+        started_s = time.perf_counter()
+        count = self._tree.topLevelItemCount()
+        try:
+            if count <= 0:
+                return
+            current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
+            for offset in range(1, count + 1):
+                row = (current_row + offset) % count
+                item = self._tree.topLevelItem(row)
+                if item is None:
+                    continue
+                index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                try:
+                    entry = self._entries[int(index)]
+                except Exception:
+                    continue
+                payload = self._review_snapshot.get(entry.record_id, {}) if entry.record_id else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                status = str(payload.get("status") or "").strip()
+                if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
+                    self._tree.setCurrentItem(item)
+                    return
+            if fallback_next and current_row + 1 < count:
+                self._tree.setCurrentItem(self._tree.topLevelItem(current_row + 1))
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="select_next",
+            )
 
 
 @dataclass
@@ -5532,6 +8096,1425 @@ class _GraphGalleryDialog(QtWidgets.QDialog):
         layout.addWidget(button_box)
 
 
+@dataclass
+class _MiniDmaTransitionReviewEntry:
+    sample: str
+    run_label: str
+    target_label: str
+    status: str
+    record: MiniDmaRecord
+    run: Any
+    group: pd.DataFrame
+    target_summary: Any
+
+
+def _transition_review_content_identity(
+    record: object,
+    namespace: str,
+    cache: Optional[MutableMapping[int, Tuple[object, str]]] = None,
+) -> str:
+    """Hash already-loaded record content once; never re-read the source path."""
+
+    cache_key = id(record)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] is record:
+            return cached[1]
+    digest = hashlib.sha256()
+    digest.update(str(namespace).encode("utf-8", errors="replace"))
+    frame = getattr(record, "data", None)
+    if isinstance(frame, pd.DataFrame):
+        digest.update(repr(tuple(str(column) for column in frame.columns)).encode("utf-8"))
+        digest.update(repr(tuple(str(dtype) for dtype in frame.dtypes)).encode("utf-8"))
+        digest.update(repr(tuple(int(value) for value in frame.shape)).encode("ascii"))
+        try:
+            hashed = pd.util.hash_pandas_object(frame, index=True, categorize=True)
+            digest.update(hashed.to_numpy(copy=False).tobytes())
+        except Exception:
+            try:
+                fallback = frame.to_json(orient="split", date_format="iso")
+            except Exception:
+                fallback = repr(frame)
+            digest.update(fallback.encode("utf-8", errors="replace"))
+    else:
+        digest.update(repr(frame).encode("utf-8", errors="replace"))
+    identity = f"{namespace}:{digest.hexdigest()}"
+    if cache is not None:
+        cache[cache_key] = (record, identity)
+    return identity
+
+
+def _transition_review_source_name(record: object) -> str:
+    path = getattr(record, "path", None)
+    return path.name if isinstance(path, Path) else ""
+
+
+def _transition_review_orphan_id(
+    namespace: str,
+    stored_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return a stable key that cannot be consumed as a current path-based ID."""
+
+    digest = hashlib.sha256()
+    for value in (
+        namespace,
+        stored_id,
+        str(payload.get("content_identity") or ""),
+        str(payload.get("target_label") or ""),
+    ):
+        digest.update(value.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return f"unmatched:{namespace}:{digest.hexdigest()}"
+
+
+def _move_transition_review_to_orphan(
+    reviews: MutableMapping[str, Dict[str, Any]],
+    stored_id: str,
+    namespace: str,
+) -> bool:
+    payload = reviews.get(stored_id)
+    if not isinstance(payload, dict):
+        return False
+    orphan_id = _transition_review_orphan_id(namespace, stored_id, payload)
+    if orphan_id in reviews:
+        suffix = 2
+        while f"{orphan_id}:{suffix}" in reviews:
+            suffix += 1
+        orphan_id = f"{orphan_id}:{suffix}"
+    reviews[orphan_id] = reviews.pop(stored_id)
+    return True
+
+
+def _mini_dma_review_record_path(record: MiniDmaRecord) -> str:
+    cached = getattr(record, "_builder_review_path", None)
+    if isinstance(cached, str) and cached:
+        return cached
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        # Saved TMA paths are normally absolute already.  Resolving an absolute
+        # path asks Windows for the final filesystem name and can take
+        # milliseconds on synced/network drives; review reconciliation calls
+        # this thousands of times.  Preserve the same absolute identity without
+        # touching the filesystem, resolving only genuinely relative paths.
+        if path.is_absolute():
+            path_text = os.path.normpath(str(path))
+        else:
+            try:
+                path_text = str(path.resolve())
+            except Exception:
+                path_text = os.path.abspath(os.path.normpath(str(path)))
+    else:
+        path_text = repr(record)
+    try:
+        setattr(record, "_builder_review_path", path_text)
+    except Exception:
+        pass
+    return path_text
+
+
+def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
+    path_text = _mini_dma_review_record_path(record)
+    return f"{path_text}::{target_label}"
+
+
+def _mini_dma_transition_values_from_summary(target_summary: object) -> Dict[str, float]:
+    mapping = {
+        "As": "as_current_mA",
+        "Af": "af_current_mA",
+        "Ms": "ms_current_mA",
+        "Mf": "mf_current_mA",
+    }
+    values: Dict[str, float] = {}
+    for label, attr in mapping.items():
+        value = getattr(target_summary, attr, None)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            values[label] = float(value)
+    return values
+
+
+def _mini_dma_cleared_transition_labels(review: Mapping[str, Any] | None) -> Set[str]:
+    if not isinstance(review, Mapping):
+        return set()
+    raw = review.get("cleared_labels")
+    if raw is None:
+        raw = review.get("cleared_labels_mA")
+    if isinstance(raw, str):
+        candidates: Iterable[Any] = raw.replace(";", ",").split(",")
+    elif isinstance(raw, Iterable):
+        candidates = raw
+    else:
+        candidates = ()
+    valid = set(MINI_DMA_TRANSITION_LABELS)
+    return {str(label).strip() for label in candidates if str(label).strip() in valid}
+
+
+def _mini_dma_review_status_label(status: str) -> str:
+    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+        return "Accepted"
+    if status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+        return "No transition"
+    if status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+        return "Excluded"
+    return "Unreviewed"
+
+
+def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mapping[str, Any] | None) -> str:
+    status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and (
+        _clean_mini_dma_transition_values(
+            review.get("manual_values_mA") if isinstance(review, Mapping) else None
+        )
+        or _mini_dma_cleared_transition_labels(review)
+    ):
+        return "Manual adjusted"
+    label = _mini_dma_review_status_label(status)
+    if label != "Unreviewed":
+        return label
+    if entry.status == "accepted":
+        return "Auto candidates"
+    if entry.status == "partial":
+        return "Needs attention"
+    return "Unreviewed"
+
+
+def _apply_transition_status_color(
+    item: QtWidgets.QTreeWidgetItem,
+    status_label: str,
+    *,
+    column: int = 1,
+) -> None:
+    color = _transition_review_status_color(status_label)
+    brush = QtGui.QBrush(QtGui.QColor(color))
+    item.setForeground(column, brush)
+    item.setToolTip(column, status_label)
+
+
+@dataclass
+class _MiniDmaTransitionReviewRunNode:
+    key: str
+    sample: str
+    run_label: str
+    record: MiniDmaRecord
+
+
+@dataclass
+class _MiniDmaTransitionReviewLoadResult:
+    key: str
+    entries: List[_MiniDmaTransitionReviewEntry]
+    error: str = ""
+
+
+def _mini_dma_transition_status(target: object) -> str:
+    values = [
+        getattr(target, "as_current_mA", None),
+        getattr(target, "af_current_mA", None),
+        getattr(target, "ms_current_mA", None),
+        getattr(target, "mf_current_mA", None),
+    ]
+    accepted = [
+        value is not None
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        for value in values
+    ]
+    if all(accepted):
+        return "accepted"
+    if any(accepted):
+        return "partial"
+    return "rejected"
+
+
+def _mini_dma_transition_review_entries(
+    records: Sequence[MiniDmaRecord],
+    logger: logging.Logger,
+) -> List[_MiniDmaTransitionReviewEntry]:
+    entries: List[_MiniDmaTransitionReviewEntry] = []
+    if mini_dma_core is None:
+        return entries
+    for record in records:
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path):
+            continue
+        try:
+            run = mini_dma_core.load_run(path)
+            if not mini_dma_core.supports_transition_review(run):
+                continue
+            groups = mini_dma_core.current_sweep_groups(
+                run.frame,
+                phases=mini_dma_core.SUMMARY_PHASES,
+            )
+            summary = mini_dma_core.summarize_current_sweep(run)
+        except Exception:
+            logger.exception("Failed to prepare TMA transition review for %s", path)
+            continue
+        sample = str(getattr(record, "sample", "") or getattr(run, "sample_name", "") or path.name)
+        run_label = str(getattr(record, "label", "") or path.name)
+        for (target, group), target_summary in zip(groups, summary.targets, strict=False):
+            target_label = mini_dma_core._format_plot_target_label(run, float(target), group)
+            entries.append(
+                _MiniDmaTransitionReviewEntry(
+                    sample=sample,
+                    run_label=run_label,
+                    target_label=target_label,
+                    status=_mini_dma_transition_status(target_summary),
+                    record=record,
+                    run=run,
+                    group=group,
+                    target_summary=target_summary,
+                )
+            )
+    return entries
+
+
+class _MiniDmaTransitionReviewLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        key: str,
+        record: MiniDmaRecord,
+        logger: logging.Logger,
+    ) -> None:
+        super().__init__()
+        self._key = key
+        self._record = record
+        self._logger = logger
+
+    def run(self) -> None:
+        try:
+            entries = _mini_dma_transition_review_entries([self._record], self._logger)
+        except Exception as exc:
+            self._logger.exception("Failed to prepare TMA transition review")
+            self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, [], str(exc)))
+            return
+        self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, entries))
+
+
+class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        records: Sequence[MiniDmaRecord],
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        review_provider: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
+        review_setter: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("TMA transition review")
+        self.resize(1280, 820)
+        self._logger = logger
+        self._review_provider = review_provider
+        self._review_setter = review_setter
+        self._review_snapshot_cache = self._load_review_snapshot()
+        self._runs = self._run_nodes(records)
+        self._entries_by_run: Dict[str, List[_MiniDmaTransitionReviewEntry]] = {}
+        self._entries: List[_MiniDmaTransitionReviewEntry] = []
+        self._visible_refs: List[Tuple[str, int]] = []
+        self._current_ref: Optional[Tuple[str, int]] = None
+        self._current_run_key: Optional[str] = None
+        self._run_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        self._tree_items: Dict[Tuple[str, int], QtWidgets.QTreeWidgetItem] = {}
+        self._loading_keys: Set[str] = set()
+        self._workers: Dict[str, Tuple[QtCore.QThread, _MiniDmaTransitionReviewLoadWorker]] = {}
+        self._pending_select_key: Optional[str] = None
+        self._pending_select_unreviewed = False
+        self._closing = False
+        self._drag_controller: Optional[_TransitionMarkerDragController] = None
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        filter_row = QtWidgets.QHBoxLayout()
+        self.accepted_only_check = QtWidgets.QCheckBox("Accepted only")
+        self.rejected_only_check = QtWidgets.QCheckBox("Rejected only")
+        self.show_resistance_check = QtWidgets.QCheckBox("Resistance")
+        self.show_resistance_check.setChecked(False)
+        self.show_fit_lines_check = QtWidgets.QCheckBox("Fit lines")
+        self.show_fit_lines_check.setChecked(True)
+        self.show_markers_check = QtWidgets.QCheckBox("Markers")
+        self.show_markers_check.setChecked(True)
+        self.next_rejected_button = QtWidgets.QPushButton("Next auto rejected")
+        self.next_questionable_button = QtWidgets.QPushButton("Next auto partial")
+        self.accept_button = QtWidgets.QPushButton("Accept && next")
+        self.no_transition_button = QtWidgets.QPushButton("No transition")
+        self.exclude_button = QtWidgets.QPushButton("Exclude target")
+        self.next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed")
+        self.status_label = QtWidgets.QLabel("Select a run to load its transition fits.")
+        for widget in (
+            self.accepted_only_check,
+            self.rejected_only_check,
+            self.show_resistance_check,
+            self.show_fit_lines_check,
+            self.show_markers_check,
+        ):
+            filter_row.addWidget(widget)
+        filter_row.addStretch(1)
+        main_layout.addLayout(filter_row)
+
+        review_row = QtWidgets.QHBoxLayout()
+        for widget in (
+            self.next_rejected_button,
+            self.next_questionable_button,
+            self.accept_button,
+            self.no_transition_button,
+            self.exclude_button,
+            self.next_unreviewed_button,
+        ):
+            review_row.addWidget(widget)
+        review_row.addStretch(1)
+        main_layout.addLayout(review_row)
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        main_layout.addWidget(self.status_label)
+
+        self.accept_button.setAccessibleName("Accept current TMA target and go to next")
+        self.no_transition_button.setAccessibleName("Mark current TMA target as no transition")
+        self.exclude_button.setAccessibleName("Exclude current TMA target")
+        self.next_unreviewed_button.setAccessibleName("Go to next unreviewed TMA target")
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        self.tree = QtWidgets.QTreeWidget(splitter)
+        self.tree.setHeaderLabels(["Sample / run / stress", "Status"])
+        self.tree.setMinimumWidth(320)
+        plot_panel = QtWidgets.QWidget(splitter)
+        plot_layout = QtWidgets.QVBoxLayout(plot_panel)
+        self.figure = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        _configure_review_canvas(self.canvas)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        self.transition_controls = _MiniDmaTransitionEditorControls(plot_panel)
+        self.transition_controls.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.empty_label = QtWidgets.QLabel(
+            "No TMA transition review targets are available.\n"
+            "Connect or refresh a TMA source, then select a current-sweep run.",
+            plot_panel,
+        )
+        self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setAccessibleName("TMA transition review empty-state guidance")
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas, 1)
+        plot_layout.addWidget(self.transition_controls)
+        plot_layout.addWidget(self.empty_label, 1)
+        self.canvas.hide()
+        self.toolbar.hide()
+        self.transition_controls.hide()
+        splitter.addWidget(self.tree)
+        splitter.addWidget(plot_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        main_layout.addWidget(splitter, 1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close,
+            self,
+        )
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+        self.accepted_only_check.toggled.connect(self._handle_accepted_filter_toggled)
+        self.rejected_only_check.toggled.connect(self._handle_rejected_filter_toggled)
+        self.show_resistance_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.show_fit_lines_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.show_markers_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.next_rejected_button.clicked.connect(lambda: self._select_next_status({"rejected"}))
+        self.next_questionable_button.clicked.connect(lambda: self._select_next_status({"partial"}))
+        self.accept_button.clicked.connect(self._accept_current_and_next)
+        self.no_transition_button.clicked.connect(lambda: self._set_current_review(MINI_DMA_REVIEW_STATUS_NO_TRANSITION, move_next=True))
+        self.exclude_button.clicked.connect(lambda: self._set_current_review(MINI_DMA_REVIEW_STATUS_EXCLUDED, move_next=True))
+        self.next_unreviewed_button.clicked.connect(self._select_next_unreviewed)
+        self.tree.currentItemChanged.connect(self._handle_tree_selection)
+        self.transition_controls.valuesEdited.connect(self._handle_transition_values_edited)
+        self.transition_controls.valueCleared.connect(self._handle_transition_label_cleared)
+        self._drag_controller = _TransitionMarkerDragController(
+            self.canvas,
+            labels=MINI_DMA_TRANSITION_LABELS,
+            on_release=self._handle_marker_dragged,
+            on_start=self.transition_controls.set_target,
+        )
+        try:
+            self.canvas.mpl_connect("button_press_event", self._handle_canvas_press)
+            self.canvas.mpl_connect("motion_notify_event", self._handle_canvas_motion)
+            self.canvas.mpl_connect("button_release_event", self._handle_canvas_release)
+        except Exception:
+            pass
+        self._refresh_tree()
+        QtCore.QTimer.singleShot(0, self._select_initial_run)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._closing = True
+        for thread, _worker in list(self._workers.values()):
+            try:
+                thread.quit()
+                if not thread.wait(5000):
+                    self._logger.warning("Timed out stopping TMA transition loader")
+                    self._closing = False
+                    event.ignore()
+                    return
+            except Exception:
+                self._logger.exception("Failed to stop TMA transition loader")
+                self._closing = False
+                event.ignore()
+                return
+        super().closeEvent(event)
+
+    def has_active_loaders(self) -> bool:
+        return any(thread.isRunning() for thread, _worker in self._workers.values())
+
+    @staticmethod
+    def _run_key(record: MiniDmaRecord) -> str:
+        return _mini_dma_review_record_path(record)
+
+    @classmethod
+    def _run_nodes(
+        cls,
+        records: Sequence[MiniDmaRecord],
+    ) -> List[_MiniDmaTransitionReviewRunNode]:
+        nodes: List[_MiniDmaTransitionReviewRunNode] = []
+        seen: Set[str] = set()
+        for record in records:
+            key = cls._run_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            path = getattr(record, "path", None)
+            sample = str(getattr(record, "sample", "") or "")
+            if not sample and isinstance(path, Path):
+                sample = path.name
+            run_label = str(getattr(record, "label", "") or "")
+            if not run_label and isinstance(path, Path):
+                run_label = path.name
+            nodes.append(
+                _MiniDmaTransitionReviewRunNode(
+                    key=key,
+                    sample=sample or "TMA",
+                    run_label=run_label or key,
+                    record=record,
+                )
+            )
+        return nodes
+
+    def _handle_accepted_filter_toggled(self, checked: bool) -> None:
+        if checked and self.rejected_only_check.isChecked():
+            self.rejected_only_check.setChecked(False)
+            return
+        self._refresh_tree()
+
+    def _handle_rejected_filter_toggled(self, checked: bool) -> None:
+        if checked and self.accepted_only_check.isChecked():
+            self.accepted_only_check.setChecked(False)
+            return
+        self._refresh_tree()
+
+    def _load_review_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        if not callable(self._review_provider):
+            return {}
+        try:
+            snapshot = self._review_provider()
+        except Exception:
+            self._logger.exception("Failed to load TMA transition reviews")
+            return {}
+        if not isinstance(snapshot, dict):
+            return {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for key, payload in snapshot.items():
+            if isinstance(payload, Mapping):
+                cleaned[str(key)] = dict(payload)
+        return cleaned
+
+    def _review_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        return self._review_snapshot_cache
+
+    def _cache_review(self, record_id: str, payload: Mapping[str, Any]) -> None:
+        self._review_snapshot_cache[str(record_id)] = dict(payload)
+
+    def _review_for_entry(self, entry: _MiniDmaTransitionReviewEntry) -> Dict[str, Any]:
+        return self._review_snapshot().get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+
+    def _saved_reviews_for_run(self, run: _MiniDmaTransitionReviewRunNode) -> List[Tuple[str, Dict[str, Any]]]:
+        prefix = f"{run.key}::"
+        reviews = [
+            (record_id, dict(payload))
+            for record_id, payload in self._review_snapshot().items()
+            if str(record_id).startswith(prefix)
+        ]
+        return sorted(
+            reviews,
+            key=lambda item: str(item[1].get("target_label") or item[0]).casefold(),
+        )
+
+    @staticmethod
+    def _saved_review_display_status(review: Mapping[str, Any]) -> str:
+        status = str(review.get("status") or "").strip()
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and (
+            _clean_mini_dma_transition_values(review.get("manual_values_mA"))
+            or _mini_dma_cleared_transition_labels(review)
+        ):
+            return "Manual adjusted"
+        return _mini_dma_review_status_label(status)
+
+    @staticmethod
+    def _auto_values_for_entry(entry: _MiniDmaTransitionReviewEntry) -> Dict[str, float]:
+        return _mini_dma_transition_values_from_summary(entry.target_summary)
+
+    @staticmethod
+    def _manual_values_from_review(review: Mapping[str, Any]) -> Dict[str, float]:
+        return _clean_mini_dma_transition_values(review.get("manual_values_mA"))
+
+    @classmethod
+    def _values_for_entry(
+        cls,
+        entry: _MiniDmaTransitionReviewEntry,
+        review: Mapping[str, Any],
+    ) -> Dict[str, float]:
+        status = str(review.get("status") or "").strip()
+        if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
+            return {}
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        final = _clean_mini_dma_transition_values(review.get("values"))
+        if final:
+            for label in cleared_labels:
+                final.pop(label, None)
+            return final
+        manual = cls._manual_values_from_review(review)
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            values = cls._auto_values_for_entry(entry)
+            values.update(manual)
+            for label in cleared_labels:
+                values.pop(label, None)
+            return values
+        return manual
+
+    def _entry_allowed(self, entry: _MiniDmaTransitionReviewEntry) -> bool:
+        if self.accepted_only_check.isChecked() and entry.status != "accepted":
+            return False
+        if self.rejected_only_check.isChecked() and entry.status != "rejected":
+            return False
+        return True
+
+    def _refresh_tree(self) -> None:
+        self.tree.clear()
+        self._tree_items = {}
+        self._run_items = {}
+        self._visible_refs = []
+        sample_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for run in self._runs:
+            sample_item = sample_items.get(run.sample)
+            if sample_item is None:
+                sample_item = QtWidgets.QTreeWidgetItem([run.sample, ""])
+                self.tree.addTopLevelItem(sample_item)
+                sample_items[run.sample] = sample_item
+            entries = self._entries_by_run.get(run.key)
+            if run.key in self._loading_keys:
+                status = "loading"
+            elif entries is None:
+                saved_reviews = self._saved_reviews_for_run(run)
+                status = f"{len(saved_reviews)} saved review(s)" if saved_reviews else "not loaded"
+            else:
+                status = f"{len(entries)} stresses"
+            run_item = QtWidgets.QTreeWidgetItem([run.run_label, status])
+            run_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("run", run.key))
+            sample_item.addChild(run_item)
+            self._run_items[run.key] = run_item
+            if run.key in self._loading_keys and not entries:
+                child = QtWidgets.QTreeWidgetItem(["Loading...", ""])
+                child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                run_item.addChild(child)
+                continue
+            if entries is None:
+                saved_reviews = self._saved_reviews_for_run(run)
+                if saved_reviews:
+                    for _record_id, review in saved_reviews:
+                        target_label = str(review.get("target_label") or "Saved target")
+                        status_label = self._saved_review_display_status(review)
+                        child = QtWidgets.QTreeWidgetItem([target_label, status_label])
+                        child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                        _apply_transition_status_color(child, status_label)
+                        run_item.addChild(child)
+                else:
+                    child = QtWidgets.QTreeWidgetItem(["Select to load", ""])
+                    child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                    run_item.addChild(child)
+                continue
+            shown = 0
+            for index, entry in enumerate(entries):
+                if not self._entry_allowed(entry):
+                    continue
+                ref = (run.key, index)
+                self._visible_refs.append(ref)
+                shown += 1
+                review = self._review_for_entry(entry)
+                status_label = _mini_dma_display_status(entry, review)
+                leaf = QtWidgets.QTreeWidgetItem([
+                    entry.target_label,
+                    status_label,
+                ])
+                leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("entry", run.key, index))
+                _apply_transition_status_color(leaf, status_label)
+                run_item.addChild(leaf)
+                self._tree_items[ref] = leaf
+            if entries and shown == 0:
+                child = QtWidgets.QTreeWidgetItem(["No targets match the active filter", ""])
+                child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                run_item.addChild(child)
+        self.tree.expandAll()
+        if self._current_ref in self._tree_items:
+            self.tree.setCurrentItem(self._tree_items[cast(Tuple[str, int], self._current_ref)])
+        elif self._current_run_key in self._run_items:
+            self.tree.setCurrentItem(self._run_items[cast(str, self._current_run_key)])
+        elif not self._visible_refs and not self._runs:
+            self._current_ref = None
+            self._show_empty()
+        self._update_review_counts()
+
+    def _iter_loaded_entries(self) -> Iterable[Tuple[str, int, _MiniDmaTransitionReviewEntry]]:
+        for key, entries in self._entries_by_run.items():
+            for index, entry in enumerate(entries):
+                yield key, index, entry
+
+    def _review_counts(self) -> Dict[str, int]:
+        loaded = 0
+        accepted = 0
+        manual = 0
+        no_transition = 0
+        excluded = 0
+        auto_candidates = 0
+        needs_attention = 0
+        snapshot = self._review_snapshot()
+        counted_review_ids: Set[str] = set()
+        for _key, _index, entry in self._iter_loaded_entries():
+            loaded += 1
+            record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+            counted_review_ids.add(record_id)
+            review = snapshot.get(record_id, {})
+            status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+            if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                if _clean_mini_dma_transition_values(
+                    review.get("manual_values_mA") if isinstance(review, Mapping) else None
+                ) or _mini_dma_cleared_transition_labels(review if isinstance(review, Mapping) else None):
+                    manual += 1
+                else:
+                    accepted += 1
+            elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+                no_transition += 1
+            elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+                excluded += 1
+            elif entry.status == "accepted":
+                auto_candidates += 1
+            elif entry.status == "partial":
+                needs_attention += 1
+        run_prefixes = [f"{run.key}::" for run in self._runs]
+        for record_id, review in snapshot.items():
+            if record_id in counted_review_ids:
+                continue
+            if not any(str(record_id).startswith(prefix) for prefix in run_prefixes):
+                continue
+            loaded += 1
+            status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+            if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                if _clean_mini_dma_transition_values(
+                    review.get("manual_values_mA") if isinstance(review, Mapping) else None
+                ) or _mini_dma_cleared_transition_labels(review if isinstance(review, Mapping) else None):
+                    manual += 1
+                else:
+                    accepted += 1
+            elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+                no_transition += 1
+            elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+                excluded += 1
+        reviewed = accepted + manual + no_transition + excluded
+        return {
+            "total": loaded,
+            "accepted": accepted,
+            "manual": manual,
+            "no_transition": no_transition,
+            "excluded": excluded,
+            "needs_attention": needs_attention,
+            "auto_candidates": auto_candidates,
+            "reviewed": reviewed,
+            "unreviewed": max(loaded - reviewed, 0),
+        }
+
+    def _update_review_counts(self) -> None:
+        counts = self._review_counts()
+        if counts["total"] <= 0:
+            return
+        parts = [
+            f"Total {counts['total']}",
+            f"Done {counts['reviewed']}",
+            f"Open {counts['unreviewed']}",
+            f"Auto {counts['auto_candidates']}",
+            f"Accepted {counts['accepted']}",
+            f"Manual {counts['manual']}",
+            f"No transition {counts['no_transition']}",
+            f"Excluded {counts['excluded']}",
+        ]
+        if counts["needs_attention"]:
+            parts.append(f"Needs attention {counts['needs_attention']}")
+        self.status_label.setText(" | ".join(parts))
+
+    def _select_initial_run(self) -> None:
+        if self._closing:
+            return
+        current = self.tree.currentItem()
+        if current is not None:
+            value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(value, tuple) and value:
+                if value[0] == "entry":
+                    return
+                if value[0] == "run":
+                    self._handle_tree_selection(current, None)
+                    return
+        if not self._runs:
+            self._show_empty("No TMA transition review targets are available.")
+            return
+        # Opening the workspace must remain instantaneous.  Loading and
+        # analysing a raw TMA run can take several seconds and is therefore an
+        # explicit selection action rather than an automatic side effect of
+        # navigating to the Transitions tab.
+        self._show_empty("Select a TMA run to load its transition fits.")
+
+    def _handle_tree_selection(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(value, tuple) or not value:
+            return
+        kind = value[0]
+        if kind == "run" and len(value) >= 2 and isinstance(value[1], str):
+            key = value[1]
+            self._current_run_key = key
+            self._current_ref = None
+            self._ensure_run_loaded(key, select_first=True)
+            if key in self._loading_keys:
+                self._show_empty("Loading TMA transition fits...")
+            elif key not in self._entries_by_run:
+                self._show_empty("Select a stress/load entry after the run is loaded.")
+            return
+        if kind == "entry" and len(value) >= 3 and isinstance(value[1], str) and isinstance(value[2], int):
+            key = value[1]
+            index = int(value[2])
+            entries = self._entries_by_run.get(key, [])
+            if index < 0 or index >= len(entries):
+                return
+            self._current_run_key = key
+            self._current_ref = (key, index)
+            self._plot_entry(entries[index])
+
+    def _redraw_current(self) -> None:
+        if self._current_ref is None:
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        self._plot_entry(entries[index])
+
+    def _select_next_status(self, statuses: Set[str]) -> None:
+        refs = [
+            ref
+            for ref in self._visible_refs
+            if self._entries_by_run.get(ref[0], [])[ref[1]].status in statuses
+        ]
+        if not refs:
+            return
+        start_position = 0
+        if self._current_ref in refs:
+            start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
+        ordered = refs[start_position:] + refs[:start_position]
+        for ref in ordered:
+            item = self._tree_items.get(ref)
+            if item is not None:
+                self.tree.setCurrentItem(item)
+                return
+
+    def _select_next_unreviewed(self) -> None:
+        started_s = time.perf_counter()
+        snapshot = self._review_snapshot()
+        try:
+            refs: List[Tuple[str, int]] = []
+            for ref in self._visible_refs:
+                entries = self._entries_by_run.get(ref[0], [])
+                if ref[1] < 0 or ref[1] >= len(entries):
+                    continue
+                entry = entries[ref[1]]
+                review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+                status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+                if status not in {
+                    MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                    MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                    MINI_DMA_REVIEW_STATUS_EXCLUDED,
+                }:
+                    refs.append(ref)
+            if not refs:
+                unloaded = next(
+                    (
+                        run.key
+                        for run in self._runs
+                        if run.key not in self._entries_by_run and run.key not in self._loading_keys
+                    ),
+                    None,
+                )
+                if unloaded is not None:
+                    self._pending_select_unreviewed = True
+                    self._ensure_run_loaded(unloaded, select_first=False)
+                else:
+                    self.status_label.setText("No unreviewed TMA targets are currently loaded.")
+                return
+            start_position = 0
+            if self._current_ref in refs:
+                start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
+            for ref in refs[start_position:] + refs[:start_position]:
+                item = self._tree_items.get(ref)
+                if item is not None:
+                    self.tree.setCurrentItem(item)
+                    return
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="mini_dma",
+                action="select_next",
+            )
+
+    def _accept_current_and_next(self) -> None:
+        self._set_current_review(MINI_DMA_REVIEW_STATUS_ACCEPTED, move_next=True)
+
+    def _set_current_review(self, status: str, *, move_next: bool = False) -> None:
+        started_s = time.perf_counter()
+        if self._current_ref is None:
+            return
+        if not callable(self._review_setter):
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": status,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+        }
+        auto_values = self._auto_values_for_entry(entry)
+        review = self._review_for_entry(entry)
+        manual_values = self._manual_values_from_review(review)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        values = dict(auto_values)
+        values.update(manual_values)
+        for label in cleared_labels:
+            values.pop(label, None)
+        if auto_values:
+            payload["auto_values_mA"] = auto_values
+        if manual_values:
+            payload["manual_values_mA"] = manual_values
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and cleared_labels:
+            payload["cleared_labels"] = sorted(cleared_labels)
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and values:
+            payload["values"] = values
+        elif status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            payload["values"] = {}
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to store TMA transition review")
+            return
+        self._cache_review(record_id, payload)
+        if self.accepted_only_check.isChecked() or self.rejected_only_check.isChecked():
+            self._refresh_tree()
+        else:
+            self._update_current_tree_status(entry)
+            self._update_review_counts()
+        if move_next:
+            self._select_next_unreviewed()
+        else:
+            self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action=status if not move_next else f"{status}_next",
+        )
+
+    def _update_current_tree_status(self, entry: _MiniDmaTransitionReviewEntry) -> None:
+        ref = self._current_ref
+        if ref is None:
+            return
+        item = self._tree_items.get(ref)
+        if item is None:
+            return
+        review = self._review_for_entry(entry)
+        status_label = _mini_dma_display_status(entry, review)
+        item.setText(1, status_label)
+        _apply_transition_status_color(item, status_label)
+
+    def _handle_canvas_press(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_press(event):
+            return
+        self._handle_canvas_click(event)
+
+    def _handle_canvas_motion(self, event: Any) -> None:
+        if self._drag_controller is not None:
+            self._drag_controller.handle_motion(event)
+
+    def _handle_canvas_release(self, event: Any) -> None:
+        if self._drag_controller is not None:
+            self._drag_controller.handle_release(event)
+
+    def _handle_marker_dragged(self, label: str, value: float) -> None:
+        self.transition_controls.set_target(label)
+        self.transition_controls.apply_picked_value(value)
+
+    def _handle_canvas_click(self, event: Any) -> None:
+        started_s = time.perf_counter()
+        if event is None:
+            return
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
+            return
+        if getattr(event, "xdata", None) is None:
+            return
+        try:
+            value = float(event.xdata)
+        except Exception:
+            return
+        if not math.isfinite(value):
+            return
+        try:
+            self.transition_controls.apply_picked_value(value)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="mini_dma",
+                action="click_commit",
+            )
+
+    def _handle_transition_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        started_s = time.perf_counter()
+        if self._current_ref is None or not callable(self._review_setter):
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        manual_values = _clean_mini_dma_transition_values(values)
+        auto_values = self._auto_values_for_entry(entry)
+        review = self._review_for_entry(entry)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        cleared_labels.difference_update(manual_values.keys())
+        final_values = dict(auto_values)
+        final_values.update(manual_values)
+        for label in cleared_labels:
+            final_values.pop(label, None)
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+            "auto_values_mA": auto_values,
+            "manual_values_mA": manual_values,
+            "values": final_values,
+        }
+        if cleared_labels:
+            payload["cleared_labels"] = sorted(cleared_labels)
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to store TMA transition review values")
+            return
+        self._cache_review(record_id, payload)
+        review = self._review_for_entry(entry)
+        self.transition_controls.set_auto_values(auto_values)
+        self.transition_controls.set_values(self._manual_values_from_review(review))
+        item = self._tree_items.get((key, index))
+        if item is not None:
+            status_label = _mini_dma_display_status(entry, review)
+            item.setText(1, status_label)
+            _apply_transition_status_color(item, status_label)
+        self._update_review_counts()
+        self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action="edit_commit",
+        )
+
+    def _handle_transition_label_cleared(self, label: str) -> None:
+        started_s = time.perf_counter()
+        if self._current_ref is None or not callable(self._review_setter):
+            return
+        if label not in MINI_DMA_TRANSITION_LABELS:
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        review = self._review_for_entry(entry)
+        auto_values = self._auto_values_for_entry(entry)
+        manual_values = self._manual_values_from_review(review)
+        manual_values.pop(label, None)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        cleared_labels.add(label)
+        final_values = dict(auto_values)
+        final_values.update(manual_values)
+        for cleared in cleared_labels:
+            final_values.pop(cleared, None)
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+            "auto_values_mA": auto_values,
+            "manual_values_mA": manual_values,
+            "cleared_labels": sorted(cleared_labels),
+            "values": final_values,
+        }
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to clear TMA transition review label")
+            return
+        self._cache_review(record_id, payload)
+        refreshed = self._review_for_entry(entry)
+        self.transition_controls.set_auto_values(auto_values)
+        self.transition_controls.set_values(self._manual_values_from_review(refreshed))
+        item = self._tree_items.get((key, index))
+        if item is not None:
+            status_label = _mini_dma_display_status(entry, refreshed)
+            item.setText(1, status_label)
+            _apply_transition_status_color(item, status_label)
+        self._update_review_counts()
+        self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action="clear_label",
+        )
+
+    def _ensure_run_loaded(self, key: str, *, select_first: bool = False) -> None:
+        if key in self._entries_by_run:
+            if select_first:
+                self._select_first_entry_for_run(key)
+            return
+        if key in self._loading_keys:
+            if select_first:
+                self._pending_select_key = key
+            return
+        run = next((candidate for candidate in self._runs if candidate.key == key), None)
+        if run is None:
+            return
+        self._pending_select_key = key if select_first else self._pending_select_key
+        self._loading_keys.add(key)
+        self.status_label.setText(f"Loading {run.run_label}...")
+        self._refresh_tree()
+        thread = QtCore.QThread(self)
+        worker = _MiniDmaTransitionReviewLoadWorker(key, run.record, self._logger)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_load_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda *_args, key=key: self._workers.pop(key, None))
+        self._workers[key] = (thread, worker)
+        thread.start()
+
+    def _load_next_unloaded_run(self) -> None:
+        if self._closing or self._loading_keys:
+            return
+        for run in self._runs:
+            if run.key not in self._entries_by_run:
+                self._ensure_run_loaded(run.key, select_first=False)
+                return
+
+    def _handle_load_finished(self, result: object) -> None:
+        if self._closing or not isinstance(result, _MiniDmaTransitionReviewLoadResult):
+            return
+        self._loading_keys.discard(result.key)
+        self._entries_by_run[result.key] = result.entries
+        ordered_entries: List[_MiniDmaTransitionReviewEntry] = []
+        for run in self._runs:
+            ordered_entries.extend(self._entries_by_run.get(run.key, []))
+        self._entries = ordered_entries
+        if result.error:
+            self.status_label.setText(f"Failed to load run: {result.error}")
+        else:
+            self.status_label.setText(f"Loaded {len(result.entries)} stress/load targets.")
+        pending = self._pending_select_key == result.key
+        if pending:
+            self._pending_select_key = None
+        self._refresh_tree()
+        if pending:
+            self._select_first_entry_for_run(result.key)
+        elif self._pending_select_unreviewed:
+            self._pending_select_unreviewed = False
+            self._select_next_unreviewed()
+        elif self._current_run_key == result.key and not result.entries and not result.error:
+            self._show_empty("No supported current-sweep transition targets for this TMA run.")
+
+    def _select_first_entry_for_run(self, key: str) -> None:
+        entries = self._entries_by_run.get(key, [])
+        for index, entry in enumerate(entries):
+            if not self._entry_allowed(entry):
+                continue
+            item = self._tree_items.get((key, index))
+            if item is not None:
+                self.tree.setCurrentItem(item)
+                return
+        self._current_ref = None
+        self._current_run_key = key
+        self._show_empty("No supported current-sweep transition targets for this TMA run.")
+
+    def _show_empty(self, message: str = "No TMA transition review targets are available.") -> None:
+        self.figure.clear()
+        self.canvas.hide()
+        self.toolbar.hide()
+        self.transition_controls.hide()
+        guidance = "Connect or refresh a TMA source, then select a current-sweep run."
+        self.empty_label.setText(f"{message}\n{guidance}")
+        self.empty_label.show()
+
+    def _plot_entry(self, entry: _MiniDmaTransitionReviewEntry) -> None:
+        started_s = time.perf_counter()
+        self.empty_label.hide()
+        self.canvas.show()
+        self.toolbar.show()
+        self.transition_controls.show()
+        self.figure.clear()
+        if self.show_resistance_check.isChecked():
+            strain_ax, resistance_ax = self.figure.subplots(2, 1, sharex=True)
+        else:
+            strain_ax = self.figure.add_subplot(111)
+            resistance_ax = None
+        self._plot_strain(entry, strain_ax)
+        if resistance_ax is not None:
+            self._plot_resistance(entry, resistance_ax)
+        self.figure.tight_layout()
+        review = self._review_for_entry(entry)
+        self.transition_controls.setEnabled(callable(self._review_setter))
+        self.transition_controls.set_auto_values(self._auto_values_for_entry(entry))
+        self.transition_controls.set_values(self._manual_values_from_review(review))
+        self.canvas.draw_idle()
+        _log_builder_timing(
+            self._logger,
+            "mini_dma_transition_review_render",
+            started_s,
+            target=entry.target_label,
+        )
+
+    def _plot_strain(
+        self,
+        entry: _MiniDmaTransitionReviewEntry,
+        ax: Any,
+    ) -> None:
+        group = entry.group
+        try:
+            strain = mini_dma_core.strain_from_trace_minimum_length(entry.run, group)
+        except Exception:
+            strain = pd.to_numeric(group.get("strain_pct"), errors="coerce")
+        ax.plot(
+            pd.to_numeric(group["current_mA"], errors="coerce"),
+            strain,
+            marker="o",
+            markersize=3,
+            linewidth=1.2,
+            label=entry.target_label,
+        )
+        if self.show_markers_check.isChecked():
+            self._draw_transition_markers(ax, entry.target_summary)
+            self._draw_reviewed_transition_markers(
+                ax,
+                self._values_for_entry(entry, self._review_for_entry(entry)),
+            )
+        if self.show_fit_lines_check.isChecked():
+            self._draw_transition_fit_lines(ax, entry, strain)
+        ax.set_title(
+            _wrap_plot_title(
+                f"{entry.sample} - {entry.run_label} - {entry.target_label} "
+                f"({_mini_dma_display_status(entry, self._review_for_entry(entry))})",
+                width=42,
+            )
+        )
+        ax.set_ylabel("Strain [%]")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=8, loc="best")
+
+    def _plot_resistance(
+        self,
+        entry: _MiniDmaTransitionReviewEntry,
+        ax: Any,
+    ) -> None:
+        group = entry.group
+        ax.plot(
+            pd.to_numeric(group["current_mA"], errors="coerce"),
+            pd.to_numeric(group["resistance_ohm"], errors="coerce"),
+            marker=".",
+            markersize=3,
+            linewidth=1.0,
+            color="tab:blue",
+            label=entry.target_label,
+        )
+        if self.show_markers_check.isChecked():
+            self._draw_transition_markers(ax, entry.target_summary, labels=False, alpha=0.45)
+            self._draw_reviewed_transition_markers(
+                ax,
+                self._values_for_entry(entry, self._review_for_entry(entry)),
+                labels=False,
+            )
+        ax.set_ylabel("Resistance [Ω]")
+        ax.set_xlabel("Current [mA]")
+        ax.grid(True, alpha=0.25)
+
+    def _draw_transition_markers(
+        self,
+        ax: Any,
+        target_summary: object,
+        *,
+        labels: bool = True,
+        alpha: float = 0.7,
+    ) -> None:
+        specs = (
+            ("As", "as_current_mA", "tab:red"),
+            ("Af", "af_current_mA", "tab:green"),
+            ("Ms", "ms_current_mA", "tab:olive"),
+            ("Mf", "mf_current_mA", "tab:purple"),
+        )
+        for name, attr, color in specs:
+            value = getattr(target_summary, attr, None)
+            if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            line = ax.axvline(float(value), color=color, linestyle="--", alpha=alpha)
+            _set_transition_marker_metadata(line, name, "auto")
+            if labels:
+                text = ax.text(
+                    float(value),
+                    0.98,
+                    f"{name} {float(value):.0f} mA",
+                    transform=ax.get_xaxis_transform(),
+                    rotation=90,
+                    va="top",
+                    ha="right",
+                    fontsize=8,
+                    color=color,
+                )
+                _set_transition_marker_metadata(text, name, "auto")
+
+    def _draw_reviewed_transition_markers(
+        self,
+        ax: Any,
+        values: Mapping[str, Any],
+        *,
+        labels: bool = True,
+    ) -> None:
+        cleaned = _clean_mini_dma_transition_values(values)
+        if not cleaned:
+            return
+        specs = {
+            "As": ("#16a34a", "-"),
+            "Af": ("#16a34a", "-."),
+            "Ms": ("#7c3aed", "-"),
+            "Mf": ("#7c3aed", "-."),
+        }
+        for name in MINI_DMA_TRANSITION_LABELS:
+            value = cleaned.get(name)
+            if value is None:
+                continue
+            color, linestyle = specs.get(name, ("#111827", "-"))
+            numeric = float(value)
+            line = ax.axvline(
+                numeric,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.8,
+                alpha=0.95,
+                label="_nolegend_",
+                zorder=7,
+            )
+            _set_transition_marker_metadata(line, name, "reviewed")
+            if not labels:
+                continue
+            text = ax.text(
+                numeric,
+                0.98,
+                f"{_mini_dma_current_label(name)} {numeric:.0f} mA",
+                transform=ax.get_xaxis_transform(),
+                rotation=90,
+                va="top",
+                ha="left",
+                fontsize=8,
+                color=color,
+                bbox={
+                    "boxstyle": "round,pad=0.16",
+                    "facecolor": "white",
+                    "edgecolor": color,
+                    "alpha": 0.86,
+                    "linewidth": 0.6,
+                },
+            )
+            _set_transition_marker_metadata(text, name, "reviewed")
+
+    def _draw_transition_fit_lines(
+        self,
+        ax: Any,
+        entry: _MiniDmaTransitionReviewEntry,
+        strain: pd.Series,
+    ) -> None:
+        heating, cooling = mini_dma_core._split_current_sweep_legs(entry.group)
+        for leg_name, leg_group, linestyle in (
+            ("heating", heating, "-"),
+            ("cooling", cooling, "--"),
+        ):
+            fit = mini_dma_core._fit_current_transition(leg_group, strain)
+            if fit is None:
+                continue
+            for segment_name, color in (
+                ("before", "tab:green"),
+                ("transition", "tab:orange"),
+                ("after", "tab:purple"),
+            ):
+                segment = getattr(fit, segment_name)
+                x_values = [segment.start_x, segment.end_x]
+                y_values = [
+                    segment.slope * segment.start_x + segment.intercept,
+                    segment.slope * segment.end_x + segment.intercept,
+                ]
+                ax.plot(
+                    x_values,
+                    y_values,
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=2.2,
+                    alpha=0.95,
+                    label=f"{leg_name} {segment_name} fit",
+                )
+
+
 _VSM_TEMP_PROCESSOR: VSMTemperatureScanProcessor | None = None
 _OPEN_PYPLOT_WINDOWS: List[QtWidgets.QWidget] = []
 _OPEN_EDA_WINDOWS: List[QtWidgets.QWidget] = []
@@ -5838,6 +9821,157 @@ def _dma_iso_stress_preview_items(
     return items
 
 
+def _downsample_mini_dma_preview_run(run: Any, *, points_per_trace: int = 180) -> Any:
+    frame = getattr(run, "frame", None)
+    if not isinstance(frame, pd.DataFrame) or len(frame.index) <= points_per_trace:
+        return run
+    try:
+        iso_current = bool(mini_dma_core.is_iso_current_run(run))
+    except Exception:
+        iso_current = False
+    if iso_current:
+        group_columns = [
+            column
+            for column in ("current_set_mA", "current_measured_mA", "current_mA")
+            if column in frame.columns
+        ][:1]
+    else:
+        group_columns = [
+            column
+            for column in ("automation_target_value", "plateau_index")
+            if column in frame.columns
+        ]
+    if not group_columns:
+        group_columns = (
+            ["automation_target_value"]
+            if "automation_target_value" in frame.columns
+            else []
+        )
+    groups: Iterable[Tuple[object, pd.DataFrame]]
+    if group_columns:
+        groups = frame.groupby(group_columns, sort=False, dropna=False)
+    else:
+        groups = ((None, frame),)
+    sampled: List[pd.DataFrame] = []
+    for _key, group in groups:
+        if len(group.index) <= points_per_trace:
+            sampled.append(group)
+            continue
+        positions = sorted(
+            {
+                int(round(position * (len(group.index) - 1) / (points_per_trace - 1)))
+                for position in range(points_per_trace)
+            }
+        )
+        sampled.append(group.iloc[positions])
+    if not sampled:
+        return run
+    preview_frame = pd.concat(sampled).sort_index().reset_index(drop=True)
+    return mini_dma_core.MiniDmaRun(
+        path=run.path,
+        measurement_path=run.measurement_path,
+        frame=preview_frame,
+        sample_name=run.sample_name,
+        initial_length_mm=run.initial_length_mm,
+        wire_diameter_mm=run.wire_diameter_mm,
+    )
+
+
+def _mini_dma_preview_run(record: MiniDmaRecord) -> Any:
+    path = getattr(record, "path", None)
+    if not isinstance(path, Path):
+        raise ValueError("TMA preview record has no path")
+    frame = getattr(record, "data", None)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        run = mini_dma_core.load_run(path)
+    else:
+        initial_length_mm = None
+        if "current_l0_mm" in frame.columns:
+            values = pd.to_numeric(frame["current_l0_mm"], errors="coerce").dropna()
+            if not values.empty:
+                initial_length_mm = _coerce_finite_float(values.median())
+        run = mini_dma_core.MiniDmaRun(
+            path=path,
+            measurement_path=path / mini_dma_core.MEASUREMENT_FILE,
+            frame=frame,
+            sample_name=str(getattr(record, "sample", "") or path.name),
+            initial_length_mm=initial_length_mm,
+        )
+    return _downsample_mini_dma_preview_run(run)
+
+
+def _mini_dma_preview_items(
+    records: Sequence[MiniDmaRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    items: List[_GraphPreviewItem] = []
+    if mini_dma_core is None:
+        return items
+    for record in records:
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path):
+            continue
+        try:
+            run = _mini_dma_preview_run(record)
+            if mini_dma_core.is_iso_current_run(run):
+                figure = mini_dma_core.make_iso_current_figure(run)
+            else:
+                figure = mini_dma_core.make_strain_current_figure(
+                    run,
+                    strain_baseline_mode=mini_dma_core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
+                    show_power_top_axis=False,
+                )
+        except ValueError as exc:
+            message = str(exc)
+            if (
+                "No current-sweep target groups with enough points" in message
+                or "No iso-current stress/strain groups with enough points" in message
+            ):
+                logger.debug("Skipping TMA preview for %s: %s", path, exc)
+            else:
+                logger.exception("Failed to render TMA preview for %s", path)
+            continue
+        except Exception:
+            logger.exception("Failed to render TMA preview for %s", path)
+            continue
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or getattr(record, "sample", "") or path.name
+        paths = [path]
+        actions = (
+            _GraphPreviewAction(
+                "Open in PyPlot",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "TMA",
+                    logger,
+                    auto_plot=True,
+                    open_origin=False,
+                ),
+                tooltip="Open this TMA run in PyPlot.",
+            ),
+            _GraphPreviewAction(
+                "Open in Origin",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "TMA",
+                    logger,
+                    auto_plot=True,
+                    open_origin=True,
+                ),
+                tooltip="Send this TMA run to Origin via PyPlot.",
+            ),
+        )
+        items.append(_GraphPreviewItem(title, pixmap, actions=actions))
+    return items
+
+
 def _shape_memory_stress_strain_preview_items(
     records: Sequence[ShapeMemoryStressStrainRecord],
     logger: logging.Logger,
@@ -5999,7 +10133,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         layout.addWidget(self.header_label)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
-        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, splitter)
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, logger, splitter)
         self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, splitter)
         splitter.addWidget(self._high_display)
         splitter.addWidget(self._other_display)
@@ -6016,7 +10150,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
-            self._high_display.clear("Select a row to view the 1000 mA measurement.")
+            self._high_display.clear("Select a row to view the exact 1000 mA measurement.")
             self._other_display.clear("Select a row to view the other annealing measurements.")
             return
 
@@ -6030,7 +10164,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         self._high_display.set_record(
             high,
             setpoint=_extract_setpoint(high),
-            description="No 1000 mA measurement available for this microwire.",
+            description=_missing_high_measurement_message(other_records),
         )
         self._other_display.set_records(
             other_records,
@@ -7080,10 +11214,14 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
     )
     if MINI_DMA_STRAIN_COLUMN not in frame.columns:
         frame[MINI_DMA_STRAIN_COLUMN] = [[] for _ in range(len(frame.index))]
+    frame[MINI_DMA_STRAIN_COLUMN] = frame[MINI_DMA_STRAIN_COLUMN].astype(object)
     if MINI_DMA_TRANSITION_COLUMN not in frame.columns:
         frame[MINI_DMA_TRANSITION_COLUMN] = [[] for _ in range(len(frame.index))]
+    frame[MINI_DMA_TRANSITION_COLUMN] = frame[MINI_DMA_TRANSITION_COLUMN].astype(object)
     if MINI_DMA_BREAK_COLUMN not in frame.columns:
-        frame[MINI_DMA_BREAK_COLUMN] = ""
+        frame[MINI_DMA_BREAK_COLUMN] = pd.Series([""] * len(frame.index), dtype=object)
+    else:
+        frame[MINI_DMA_BREAK_COLUMN] = frame[MINI_DMA_BREAK_COLUMN].astype(object)
     if not records or frame.empty:
         return frame
 
@@ -7099,7 +11237,7 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
         transition_lines: List[str] = []
         break_lines: List[str] = []
         for record in group:
-            for line in getattr(record, "strain_summary", ()) or ():
+            for line in _mini_dma_peak_strain_summary(record):
                 if line and line not in strain_lines:
                     strain_lines.append(str(line))
             for line in getattr(record, "transition_summary", ()) or ():
@@ -7114,6 +11252,299 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
             list(dict.fromkeys(break_lines)) if break_lines else ""
         )
     return frame
+
+
+def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[MiniDmaRecord]:
+    """Build lightweight TMA run records without decoding the raw project payload.
+
+    The compact project table already carries the source run paths used by the
+    transition-review and preview code.  Keeping these records data-free lets a
+    packaged project populate its TMA queue immediately; the full monolithic
+    payload remains lazy until an export or another data-heavy operation asks
+    for it explicitly.
+    """
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    records: List[MiniDmaRecord] = []
+    seen_paths: Set[str] = set()
+    for _index, row in frame.iterrows():
+        raw_sources = row.get("_sources")
+        if isinstance(raw_sources, (str, Path)):
+            sources = [raw_sources]
+        elif isinstance(raw_sources, (list, tuple)):
+            sources = list(raw_sources)
+        else:
+            sources = []
+        raw_labels = row.get(MINI_DMA_COLUMN)
+        if isinstance(raw_labels, str):
+            labels = [raw_labels]
+        elif isinstance(raw_labels, (list, tuple)):
+            labels = [str(value) for value in raw_labels]
+        else:
+            labels = []
+        sample = _row_sample_value(row) or "TMA"
+        raw_key = str(row.get("_group_key") or "").strip()
+        parsed_key = _microwire_key_from_string(raw_key) if raw_key else None
+        for position, raw_source in enumerate(sources):
+            source_text = str(raw_source or "").strip()
+            if not source_text or source_text in seen_paths:
+                continue
+            seen_paths.add(source_text)
+            path = Path(source_text)
+            label = labels[position] if position < len(labels) else path.name
+            records.append(
+                MiniDmaRecord(
+                    path=path,
+                    sample=sample,
+                    data=pd.DataFrame(),
+                    key=parsed_key,  # type: ignore[arg-type]
+                    label=label or path.name,
+                )
+            )
+    return records
+
+
+_TMA_LEGACY_COLUMN_ALIASES = {
+    LEGACY_MINI_DMA_COLUMN: MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN: MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN: MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN: MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN: MINI_DMA_TRANSITION_STATUS_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN: MINI_DMA_TRANSITION_COUNTS_COLUMN,
+    LEGACY_MINI_DMA_BREAK_COLUMN: MINI_DMA_BREAK_COLUMN,
+}
+
+
+def _normalise_tma_display_columns(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    rename_map = {
+        old: new
+        for old, new in _TMA_LEGACY_COLUMN_ALIASES.items()
+        if old in frame.columns and new not in frame.columns
+    }
+    if not rename_map:
+        return frame
+    return frame.rename(columns=rename_map)
+
+
+def _mini_dma_resolve_measurement_path(path: Path) -> Path | None:
+    try:
+        if mini_dma_core is not None:
+            return mini_dma_core.resolve_measurement_path(path)
+    except Exception:
+        return None
+    candidate = Path(path)
+    if candidate.is_dir():
+        candidate = candidate / "measurement.csv"
+    if candidate.name.casefold() != "measurement.csv":
+        return None
+    try:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _read_mini_dma_metadata(measurement_path: Path) -> Dict[str, Any]:
+    metadata_path = measurement_path.with_name("metadata.json")
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mini_dma_timestamp(value: object) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d_%H%M%S"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                parsed = None  # type: ignore[assignment]
+        if parsed is None:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _mini_dma_metadata_sort_timestamp(
+    metadata: Mapping[str, Any],
+    measurement_path: Path,
+) -> float:
+    for key in ("created_utc", "timestamp_utc", "started_utc", "finished_utc"):
+        parsed = _mini_dma_timestamp(metadata.get(key))
+        if parsed is not None:
+            return parsed
+    for candidate in (measurement_path.with_name("metadata.json"), measurement_path):
+        try:
+            return float(candidate.stat().st_mtime)
+        except OSError:
+            continue
+    return 0.0
+
+
+def _mini_dma_clear_completion_status(metadata: Mapping[str, Any]) -> Tuple[bool, str]:
+    state = str(metadata.get("session_state") or "").strip().casefold()
+    finished_utc = metadata.get("finished_utc")
+    has_finished_utc = _mini_dma_timestamp(finished_utc) is not None or bool(str(finished_utc or "").strip())
+    if state == "finished":
+        if has_finished_utc:
+            return True, "metadata session_state=finished with finished_utc"
+        return False, "metadata session_state=finished but missing finished_utc"
+    if state:
+        return False, f"metadata session_state={state}"
+    if has_finished_utc:
+        return True, "metadata finished_utc present"
+    try:
+        point_count = int(float(metadata.get("point_count")))
+        estimated = int(float(metadata.get("recipe_estimated_points")))
+    except (TypeError, ValueError):
+        point_count = 0
+        estimated = 0
+    if point_count > 0 and estimated > 0 and point_count >= estimated:
+        return True, "fallback point_count reached recipe_estimated_points"
+    if metadata:
+        return False, "metadata lacks session_state and finished_utc"
+    return True, "legacy fallback: metadata.json missing"
+
+
+def _mini_dma_reportability_sample_key(
+    measurement_path: Path,
+    metadata: Mapping[str, Any],
+    sources: Sequence[str],
+) -> str:
+    metadata_sample = str(metadata.get("sample_name") or "").strip()
+    if metadata_sample:
+        return metadata_sample.replace("/", "_")
+    run_path = measurement_path.parent
+    sample = _sample_from_path(run_path, sources)
+    return sample or run_path.name
+
+
+def _reportable_mini_dma_measurements(
+    paths: Sequence[Path],
+    *,
+    sources: Sequence[str] = (),
+    excluded_dirs: Collection[str] | None = None,
+) -> Tuple[List[Path], List[Dict[str, Any]]]:
+    ignored = {str(name).casefold() for name in (excluded_dirs or MiniDmaSection.excluded_refresh_dirs)}
+    source_roots: List[Path] = []
+    for source in sources:
+        try:
+            candidate = Path(source).expanduser()
+            root = candidate.resolve() if candidate.is_dir() else candidate.parent.resolve()
+        except Exception:
+            root = Path(source).expanduser()
+        source_roots.append(root)
+
+    def _ignored_part_for(measurement_path: Path) -> Optional[str]:
+        try:
+            resolved_path = measurement_path.resolve()
+        except OSError:
+            resolved_path = measurement_path
+        for root in source_roots:
+            try:
+                relative_parts = resolved_path.relative_to(root).parts[:-1]
+            except ValueError:
+                continue
+            return next((part for part in relative_parts if part.casefold() in ignored), None)
+        return next((part for part in measurement_path.parts[:-1] if part.casefold() in ignored), None)
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for raw_path in paths:
+        measurement_path = _mini_dma_resolve_measurement_path(Path(raw_path))
+        if measurement_path is None:
+            continue
+        try:
+            resolved = str(measurement_path.resolve())
+        except OSError:
+            resolved = str(measurement_path)
+        if resolved in candidates:
+            continue
+        ignored_part = _ignored_part_for(measurement_path)
+        metadata = _read_mini_dma_metadata(measurement_path)
+        sample_key = _mini_dma_reportability_sample_key(measurement_path, metadata, sources)
+        timestamp = _mini_dma_metadata_sort_timestamp(metadata, measurement_path)
+        finished, status_reason = _mini_dma_clear_completion_status(metadata)
+        candidates[resolved] = {
+            "sample": sample_key,
+            "run_folder": str(measurement_path.parent),
+            "measurement": str(measurement_path),
+            "timestamp": timestamp,
+            "metadata_session_state": metadata.get("session_state"),
+            "metadata_finished_utc": metadata.get("finished_utc"),
+            "metadata_created_utc": metadata.get("created_utc"),
+            "reportable": False,
+            "skip_reason": f"ignored folder: {ignored_part}" if ignored_part else "",
+            "status_reason": status_reason,
+            "_path": measurement_path,
+            "_finished": finished,
+            "_ignored": ignored_part is not None,
+        }
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in candidates.values():
+        if entry["_ignored"]:
+            continue
+        grouped.setdefault(str(entry["sample"]), []).append(entry)
+
+    for sample, group in grouped.items():
+        newest = max(
+            group,
+            key=lambda item: (
+                float(item.get("timestamp") or 0.0),
+                str(item.get("run_folder") or ""),
+            ),
+        )
+        if not newest["_finished"]:
+            reason = f"newest active run is unfinished: {newest['status_reason']}"
+            for entry in group:
+                entry["skip_reason"] = reason
+            continue
+        for entry in group:
+            if entry["_finished"]:
+                entry["reportable"] = True
+                entry["skip_reason"] = ""
+            else:
+                entry["skip_reason"] = f"run is unfinished: {entry['status_reason']}"
+
+    reportable = [
+        cast(Path, entry["_path"])
+        for entry in sorted(
+            candidates.values(),
+            key=lambda item: (str(item.get("sample") or ""), float(item.get("timestamp") or 0.0), str(item.get("run_folder") or "")),
+        )
+        if bool(entry.get("reportable"))
+    ]
+    audit: List[Dict[str, Any]] = []
+    for entry in sorted(
+        candidates.values(),
+        key=lambda item: (str(item.get("sample") or ""), float(item.get("timestamp") or 0.0), str(item.get("run_folder") or "")),
+    ):
+        clean = {
+            key: value
+            for key, value in entry.items()
+            if not key.startswith("_") and key != "timestamp"
+        }
+        clean["timestamp"] = float(entry.get("timestamp") or 0.0)
+        audit.append(clean)
+    return reportable, audit
 
 
 def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
@@ -7161,6 +11592,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
     _project_load_batch_mode: ClassVar[bool] = False
+    _skip_initial_store_load: ClassVar[bool] = False
     _SCROLL_SINGLE_STEP = 12
 
     def __init__(
@@ -7170,10 +11602,42 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        init_started_s = time.perf_counter()
         self.logger = logger
         self._log_callback = log_callback
-        self.store = MiniDatabaseStore(self.section_key)
-        self.data = self.store.load()
+        self.store = MiniDatabaseStore(
+            self.section_key,
+            suppress_legacy_diagnostics=self._skip_initial_store_load,
+        )
+        self._store_blocked_error = ""
+        if self._skip_initial_store_load:
+            self.data = MiniDatabaseData()
+            _log_builder_timing(
+                self.logger,
+                "section_init_store_load_skipped",
+                init_started_s,
+                section=self.section_key,
+            )
+        else:
+            load_started_s = time.perf_counter()
+            try:
+                self.data = self.store.load()
+            except SafeCodecError as exc:
+                self.data = MiniDatabaseData()
+                self._store_blocked_error = (
+                    f"{self.section_title} storage is blocked and opened read-only: {exc}. "
+                    "Quarantine or repair the safe store explicitly before refreshing."
+                )
+                self.logger.error(self._store_blocked_error)
+            _log_builder_timing(
+                self.logger,
+                "section_init_store_load",
+                load_started_s,
+                section=self.section_key,
+                rows=len(self.data.table.index)
+                if isinstance(self.data.table, pd.DataFrame)
+                else 0,
+            )
         self.model = DataFrameModel(self.data.table)
         self._search_proxy = _TableSearchProxyModel(self)
         self.table_view: QtWidgets.QTableView | None = None
@@ -7197,6 +11661,16 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._pending_scan_thread: QtCore.QThread | None = None
         self._pending_scan_worker: Optional[_PendingScanWorker] = None
         self._progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._project_overview_loader: Callable[[Sequence[str]], Sequence[Any]] | None = None
+        self._project_overview_generation = 0
+        self._project_overview_pending: Set[str] = set()
+        self._project_overview_completed: Set[str] = set()
+        self._project_overview_queued: Dict[str, Tuple[str, ...]] = {}
+        self._project_overview_start_scheduled = False
+        self._project_overview_batch_id = 0
+        self._project_overview_threads: Dict[
+            str, Tuple[QtCore.QThread, _ProjectRecordSubsetLoadWorker]
+        ] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7206,6 +11680,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         controls = QtWidgets.QHBoxLayout()
         self.source_button = QtWidgets.QPushButton()
         self.source_button.setText("Connect folder…")
+        self.source_button.setAccessibleName(f"Connect a folder for {self.section_title}")
+        self.source_button.setToolTip("Choose the folder that contains this measurement type.")
         self.source_button.clicked.connect(self._toggle_source)
         controls.addWidget(self.source_button)
 
@@ -7241,6 +11717,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.search_clear_button.setEnabled(False)
         self.search_clear_button.clicked.connect(self._clear_search)
         search_row.addWidget(self.search_clear_button)
+        search_row.addWidget(QtWidgets.QLabel("Source:"))
+        self.source_filter_combo = QtWidgets.QComboBox(self)
+        self.source_filter_combo.addItem(SOURCE_LABEL_ALL)
+        self.source_filter_combo.setEnabled(False)
+        self.source_filter_combo.currentTextChanged.connect(
+            self._handle_source_filter_changed
+        )
+        search_row.addWidget(self.source_filter_combo)
         layout.addLayout(search_row)
 
         self.status_label = QtWidgets.QLabel()
@@ -7268,17 +11752,55 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.sources_list.hide()
 
         right_panel = self.create_right_panel(self)
-        layout.addWidget(right_panel, 1)
+        self._right_panel = right_panel
+        self._content_stack = QtWidgets.QStackedWidget(self)
+        self._content_stack.setObjectName("sectionContentStack")
+        self._empty_state_widget = QtWidgets.QWidget(self._content_stack)
+        empty_layout = QtWidgets.QVBoxLayout(self._empty_state_widget)
+        empty_layout.addStretch(1)
+        empty_title = QtWidgets.QLabel(f"Connect a folder to begin {self.section_title.lower()}.")
+        empty_title.setObjectName("sectionEmptyStateTitle")
+        empty_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_title.setWordWrap(True)
+        empty_layout.addWidget(empty_title)
+        empty_hint = QtWidgets.QLabel(
+            "Your source files stay in place. Builder scans them only after you press Refresh."
+        )
+        empty_hint.setObjectName("sectionEmptyStateHint")
+        empty_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_hint.setWordWrap(True)
+        empty_layout.addWidget(empty_hint)
+        self.empty_connect_button = QtWidgets.QPushButton("Connect folder…", self._empty_state_widget)
+        self.empty_connect_button.setAccessibleName(f"Connect a folder for {self.section_title}")
+        self.empty_connect_button.setToolTip("Choose the folder that contains this measurement type.")
+        self.empty_connect_button.clicked.connect(self.source_button.click)
+        empty_layout.addWidget(
+            self.empty_connect_button,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignHCenter,
+        )
+        empty_layout.addStretch(2)
+        self._content_stack.addWidget(self._empty_state_widget)
+        self._content_stack.addWidget(right_panel)
+        self._update_content_stack()
+        layout.addWidget(self._content_stack, 1)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._search_proxy.setSourceModel(self.model)
-            self._search_proxy.set_row_predicate(self._row_visible)
+            self._search_proxy.set_row_predicate(self._row_filter_accepts)
             self.table_view.setModel(self._search_proxy)
         self._configure_table_view()
 
         self._populate_sources_list()
+        self.data.table = _with_source_label_column(self.data.table)
         self.model.set_frame(self.data.table)
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
+        if self._store_blocked_error:
+            self.source_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+            self.status_label.setText(self._store_blocked_error)
+            self.status_label.setWordWrap(True)
         self._reset_progress_ui()
         self._hook_table_selection()
         self._update_open_sources_enabled()
@@ -7287,6 +11809,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 self._sanitize_graph_columns()
         except Exception:
             pass
+        _log_builder_timing(
+            self.logger,
+            "section_init_total",
+            init_started_s,
+            section=self.section_key,
+        )
 
     # ------------------------------------------------------------------ UI helpers
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -7489,8 +12017,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         text = "Remove folder…" if has_sources else "Connect folder…"
         self.source_button.setText(text)
         if has_sources:
+            self.source_button.setAccessibleName(
+                f"Remove a connected folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Disconnect the currently linked folder.")
         else:
+            self.source_button.setAccessibleName(
+                f"Connect a folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Select a folder to analyse.")
 
     def has_project_data(self) -> bool:
@@ -7499,6 +12033,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def apply_data(self, data: MiniDatabaseData) -> None:
         self.data = data
+        self.data.table = _with_source_label_column(self.data.table)
         try:
             self.store.save(self.data)
         except Exception:
@@ -7507,6 +12042,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._close_active_editor()
         self.model.set_frame(self.data.table)
         self._populate_sources_list()
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
         self._reset_progress_ui()
@@ -7610,6 +12146,54 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         _ = row
         return True
 
+    def _row_source_filter_accepts(self, row: pd.Series) -> bool:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return True
+        selected = str(combo.currentText() or "").strip()
+        if not selected or selected == SOURCE_LABEL_ALL:
+            return True
+        return selected in _source_labels_from_row(row)
+
+    def _row_filter_accepts(self, row: pd.Series) -> bool:
+        return self._row_visible(row) and self._row_source_filter_accepts(row)
+
+    def _refresh_source_filter_options(self) -> None:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        current = str(combo.currentText() or SOURCE_LABEL_ALL)
+        frame = self.model.frame()
+        labels: List[str] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                for label in _source_labels_from_row(row):
+                    if label and label not in labels:
+                        labels.append(label)
+        labels = sorted(labels, key=str.casefold)
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(SOURCE_LABEL_ALL)
+            for label in labels:
+                combo.addItem(label)
+            target = current if current in labels else SOURCE_LABEL_ALL
+            combo.setCurrentText(target)
+            combo.setEnabled(bool(labels))
+        finally:
+            combo.blockSignals(False)
+        try:
+            self._search_proxy.invalidateFilter()
+        except Exception:
+            pass
+
+    def _handle_source_filter_changed(self, _text: str) -> None:
+        try:
+            self._search_proxy.invalidateFilter()
+        except Exception:
+            pass
+        self._update_open_sources_enabled()
+
     def _handle_search_changed(self, text: str) -> None:
         self._search_proxy.set_search_text(text)
         if isinstance(self.search_clear_button, QtWidgets.QPushButton):
@@ -7710,6 +12294,124 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 self.section_title,
                 f"None of the selected rows have available source files.\n\n{details}",
             )
+
+    def _set_project_overview_loader(
+        self,
+        loader: Callable[[Sequence[str]], Sequence[Any]] | None,
+    ) -> None:
+        self._project_overview_generation += 1
+        self._project_overview_loader = loader
+        self._project_overview_pending = set()
+        self._project_overview_completed = set()
+        self._project_overview_queued = {}
+        self._project_overview_start_scheduled = False
+        cache = getattr(self, "_pixmap_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+        model = getattr(self, "model", None)
+        if callable(loader) and isinstance(model, DataFrameModel):
+            try:
+                model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _request_project_overview_records(
+        self,
+        request_key: str,
+        source_paths: Sequence[Path | str],
+    ) -> bool:
+        loader = self._project_overview_loader
+        if not callable(loader):
+            return False
+        paths = tuple(str(path) for path in source_paths if str(path).strip())
+        if not paths:
+            return False
+        key = str(request_key)
+        if key in self._project_overview_completed:
+            return False
+        if key in self._project_overview_pending:
+            return True
+        self._project_overview_pending.add(key)
+        self._project_overview_queued[key] = paths
+        self._schedule_project_overview_batch()
+        return True
+
+    def _schedule_project_overview_batch(self) -> None:
+        if (
+            self._project_overview_start_scheduled
+            or self._project_overview_threads
+            or not self._project_overview_queued
+        ):
+            return
+        self._project_overview_start_scheduled = True
+        QtCore.QTimer.singleShot(0, self._start_project_overview_batch)
+
+    def _start_project_overview_batch(self) -> None:
+        self._project_overview_start_scheduled = False
+        loader = self._project_overview_loader
+        if (
+            not callable(loader)
+            or self._project_overview_threads
+            or not self._project_overview_queued
+        ):
+            return
+        requests = self._project_overview_queued
+        self._project_overview_queued = {}
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for request_paths in requests.values()
+                for path in request_paths
+            )
+        )
+        if not paths:
+            self._project_overview_pending.difference_update(requests)
+            return
+        generation = self._project_overview_generation
+        self._project_overview_batch_id += 1
+        batch_key = f"batch-{self._project_overview_batch_id}"
+        thread = QtCore.QThread(self)
+        worker = _ProjectRecordSubsetLoadWorker(loader, paths)
+        worker.moveToThread(thread)
+        self._project_overview_threads[batch_key] = (thread, worker)
+        result: Dict[str, object] = {}
+
+        worker.finished.connect(lambda records: result.__setitem__("records", records))
+        worker.failed.connect(lambda error: result.__setitem__("error", error))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+
+        def _complete() -> None:
+            self._project_overview_threads.pop(batch_key, None)
+            if generation != self._project_overview_generation:
+                self._schedule_project_overview_batch()
+                return
+            self._project_overview_pending.difference_update(requests)
+            error = result.get("error")
+            if error is not None:
+                self.logger.warning(
+                    "Failed to load packaged preview records for %s: %s",
+                    self.section_key,
+                    error,
+                )
+                self._schedule_project_overview_batch()
+                return
+            self._project_overview_completed.update(requests)
+            records = result.get("records")
+            if isinstance(records, list):
+                self._accept_project_overview_records(records)
+            self._schedule_project_overview_batch()
+
+        thread.finished.connect(_complete)
+        thread.finished.connect(thread.deleteLater)
+        thread.started.connect(worker.run)
+        thread.start()
+
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        _ = records
+
     def _start_progress(self, total: int) -> None:
         self._progress_total = max(int(total), 0)
         self._progress_current = 0
@@ -8109,9 +12811,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def _update_status(self) -> None:
         sources_count = len(self.data.sources)
+        self._update_content_stack()
         pending_count = self._pending_count_cache
         if sources_count == 0:
-            message = "Connect one or more folders to begin."
+            if self.has_project_data():
+                record_count = (
+                    len(self.data.table.index)
+                    if isinstance(self.data.table, pd.DataFrame)
+                    else 0
+                )
+                message = (
+                    f"Restored project data ({record_count} record(s)); "
+                    "connect a folder to scan for updates."
+                )
+            else:
+                message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
             self._pending_count_cache = 0
         elif self._project_load_batch_mode:
@@ -8142,6 +12856,44 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _data_page_is_active(self) -> bool:
+        stack = getattr(self, "_content_stack", None)
+        right_panel = getattr(self, "_right_panel", None)
+        if not isinstance(stack, QtWidgets.QStackedWidget):
+            return True
+        return right_panel is not None and stack.currentWidget() is right_panel
+
+    def _refresh_table_decorations(self) -> None:
+        """Repaint cached thumbnails without resetting the table layout."""
+
+        if isinstance(self.model, DataFrameModel):
+            rows = self.model.rowCount()
+            columns = self.model.columnCount()
+            if rows > 0 and columns > 0:
+                try:
+                    self.model.dataChanged.emit(
+                        self.model.index(0, 0),
+                        self.model.index(rows - 1, columns - 1),
+                        [QtCore.Qt.ItemDataRole.DecorationRole],
+                    )
+                except Exception:
+                    pass
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            try:
+                self.table_view.viewport().update()
+            except Exception:
+                pass
+
+    def _update_content_stack(self) -> None:
+        if not self.supported_suffixes:
+            self._content_stack.setCurrentWidget(self._right_panel)
+            return
+        self._content_stack.setCurrentWidget(
+            self._right_panel
+            if self.data.sources or self.has_project_data()
+            else self._empty_state_widget
+        )
+
     def _dispatch_log(self, level: int, message: str) -> None:
         try:
             self._log_callback(level, message)
@@ -8158,6 +12910,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def reset_to_blank(self) -> None:
         """Clear all processed data and disconnect sources for a fresh start."""
 
+        self._set_project_overview_loader(None)
         payload_names: Set[str] = set()
         extra = getattr(self.data, "extra", None)
         if isinstance(extra, Mapping):
@@ -8174,6 +12927,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data = MiniDatabaseData()
         self.model.set_frame(pd.DataFrame())
         self.sources_list.clear()
+        self._refresh_source_filter_options()
         self._sync_sources()
         self.store.clear_table()
         self.store.save(self.data)
@@ -8193,6 +12947,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        frame = _with_source_label_column(frame)
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if isinstance(frame, pd.DataFrame) and not frame.empty:
@@ -8208,7 +12963,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         extra_payload = _json_safe(self.data.extra)
         if not isinstance(extra_payload, (dict, list, tuple, str, int, float, bool)) and extra_payload is not None:
             extra_payload = str(extra_payload)
-        project_payloads: Dict[str, Dict[str, str]] = {}
+        project_payloads: Dict[str, Dict[str, Any]] = {}
         payload_refs = {}
         if isinstance(self.data.extra, Mapping):
             payloads_extra = self.data.extra.get("payloads")
@@ -8219,15 +12974,22 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                     if isinstance(key, str) and isinstance(value, str) and value.strip()
                 }
         for name in sorted(set(payload_refs.values())):
+            if self.store.has_payload_loader(name):
+                # An untouched v3 payload remains represented by its source package
+                # entry and is streamed into the next save without materialization.
+                continue
             try:
                 stored_payload = self.store.load_payload(name)
+            except SafeCodecError:
+                raise
             except Exception:
                 stored_payload = None
             if stored_payload is None:
                 continue
-            encoded_payload = _encode_project_payload(stored_payload)
-            if encoded_payload is not None:
-                project_payloads[name] = encoded_payload
+            if _ACTIVE_PROJECT_PAYLOAD_STAGER is not None:
+                project_payloads[name] = _ACTIVE_PROJECT_PAYLOAD_STAGER(stored_payload)
+            else:
+                project_payloads[name] = _encode_project_payload(stored_payload)
         return {
             "section": self.section_key,
             "title": self.section_title,
@@ -8238,15 +13000,28 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             "sources": list(self.data.sources),
             "processed": dict(self.data.processed),
             "payloads": project_payloads,
+            DELETED_PAYLOADS_KEY: sorted(self.store.payload_tombstones()),
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
         """Restore section state from a project payload."""
 
+        started_s = time.perf_counter()
+        self._set_project_overview_loader(None)
         if not isinstance(payload, Mapping):
             self.reset_to_blank()
+            _log_builder_timing(
+                self.logger,
+                "section_import",
+                started_s,
+                section=self.section_key,
+                rows=0,
+                payloads=0,
+                reset=True,
+            )
             return
 
+        decoded_payload_count = 0
         columns_payload = payload.get("columns")
         if isinstance(columns_payload, (list, tuple)):
             column_names = [str(column) for column in columns_payload]
@@ -8288,20 +13063,79 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 except (TypeError, ValueError):
                     continue
 
+        frame = _with_source_label_column(frame)
         self.data = MiniDatabaseData(sources=sources, processed=processed, table=frame, extra=extra)
         self.model.set_frame(frame)
+        self._refresh_source_filter_options()
         self._pending_count_cache = 0
+        save_started_s = time.perf_counter()
         self.store.save(self.data)
+        _log_builder_timing(
+            self.logger,
+            "section_import_store_save",
+            save_started_s,
+            section=self.section_key,
+            rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+        )
+        decoded_project_payloads = payload.get(PROJECT_DECODED_PAYLOADS_KEY)
+        lazy_payload_loaders = payload.get(PROJECT_LAZY_PAYLOAD_LOADERS_KEY)
+        if isinstance(lazy_payload_loaders, Mapping):
+            for name, loader in lazy_payload_loaders.items():
+                if not isinstance(name, str) or not name.strip() or not callable(loader):
+                    continue
+                try:
+                    self.store.register_payload_loader(name.strip(), loader)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to register packaged project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
+        if isinstance(decoded_project_payloads, Mapping):
+            for name, decoded in decoded_project_payloads.items():
+                if not isinstance(name, str) or not name.strip() or decoded is None:
+                    continue
+                payload_started_s = time.perf_counter()
+                try:
+                    self.store.save_payload(name.strip(), decoded)
+                    decoded_payload_count += 1
+                    _log_builder_timing(
+                        self.logger,
+                        "section_import_payload",
+                        payload_started_s,
+                        section=self.section_key,
+                        payload=name.strip(),
+                        predecoded=True,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Failed to restore predecoded project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
         project_payloads = payload.get("payloads")
-        if isinstance(project_payloads, Mapping):
+        if (
+            not isinstance(decoded_project_payloads, Mapping)
+            and not isinstance(lazy_payload_loaders, Mapping)
+            and isinstance(project_payloads, Mapping)
+        ):
             for name, encoded in project_payloads.items():
                 if not isinstance(name, str) or not name.strip():
                     continue
+                payload_started_s = time.perf_counter()
                 decoded = _decode_project_payload(encoded)
                 if decoded is None:
                     continue
                 try:
                     self.store.save_payload(name.strip(), decoded)
+                    decoded_payload_count += 1
+                    _log_builder_timing(
+                        self.logger,
+                        "section_import_payload",
+                        payload_started_s,
+                        section=self.section_key,
+                        payload=name.strip(),
+                    )
                 except Exception:
                     self.logger.exception(
                         "Failed to restore project payload %s for section %s",
@@ -8309,8 +13143,18 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                         self.section_key,
                     )
         self._populate_sources_list()
+        self._update_content_stack()
         if self._project_load_batch_mode:
             self._reset_progress_ui()
+            _log_builder_timing(
+                self.logger,
+                "section_import",
+                started_s,
+                section=self.section_key,
+                rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+                payloads=decoded_payload_count,
+                batch=True,
+            )
             return
         self._auto_fit_columns()
         self._update_status()
@@ -8324,6 +13168,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data_updated.emit()
         except Exception:
             pass
+        _log_builder_timing(
+            self.logger,
+            "section_import",
+            started_s,
+            section=self.section_key,
+            rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+            payloads=decoded_payload_count,
+        )
 
     def _new_project(self) -> None:
         if self._dirty:
@@ -8347,6 +13199,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             if isinstance(section, MiniDatabaseSection):
                 section.reset_to_blank()
         self._project_path = None
+        self._project_degraded_safe_mode = False
         self._dirty = False
         self._suppress_dirty = False
         self._update_project_title()
@@ -8364,6 +13217,9 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         return bool(self.data.extra)
 
     def refresh(self) -> None:
+        if self._store_blocked_error:
+            self.status_label.setText(self._store_blocked_error)
+            return
         self._cancel_requested = False
         self.stop_button.setEnabled(True)
         owner = MiniDatabaseSection._processing_owner
@@ -8564,10 +13420,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if result.extra:
             self.data.extra.update(result.extra)
         self.data.processed = result.processed
-        self.data.table = result.table
+        self.data.table = _with_source_label_column(result.table)
         self.store.save(self.data)
         self._close_active_editor()
-        self.model.set_frame(result.table)
+        self.model.set_frame(self.data.table)
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
         processed_count = len(self._active_candidates)
@@ -8878,7 +13735,10 @@ class FabricationSection(MiniDatabaseSection):
         annealing_keys: Set[Tuple[str, int, int]] = set()
         microscope_keys: Set[Tuple[str, int, int]] = set()
         try:
-            store = MiniDatabaseStore("annealing")
+            store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -8900,10 +13760,15 @@ class FabricationSection(MiniDatabaseSection):
             else pd.DataFrame()
         )
         if microscope_table.empty:
-            try:
-                microscope_data = MiniDatabaseStore("microscope").load()
-            except Exception:
-                microscope_data = None
+            microscope_data = None
+            if not MiniDatabaseSection._skip_initial_store_load:
+                try:
+                    microscope_data = MiniDatabaseStore(
+                        "microscope",
+                        suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                    ).load()
+                except Exception:
+                    microscope_data = None
             microscope_table = (
                 microscope_data.table
                 if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
@@ -9739,7 +14604,7 @@ class FabricationSection(MiniDatabaseSection):
 class AnnealingSection(MiniDatabaseSection):
     section_key = "annealing"
     section_title = "Current annealing"
-    supported_suffixes = (".txt", ".csv", ".tsv")
+    supported_suffixes = (".txt", ".dat", ".csv", ".tsv")
 
     def __init__(
         self,
@@ -9755,6 +14620,15 @@ class AnnealingSection(MiniDatabaseSection):
         self._all_records: List[MeasurementRecord] = []
         self._pixmap_cache: Dict[Tuple[object, ...], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
+        self._transition_reviews: Dict[str, Dict[str, Any]] = {}
+        self._transition_review_store_timer: QtCore.QTimer | None = QtCore.QTimer(self)
+        self._transition_review_store_timer.setSingleShot(True)
+        self._transition_review_store_timer.setInterval(250)
+        self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
+        self._transition_review_update_timer = QtCore.QTimer(self)
+        self._transition_review_update_timer.setSingleShot(True)
+        self._transition_review_update_timer.setInterval(5000)
+        self._transition_review_update_timer.timeout.connect(self.data_updated.emit)
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -9765,9 +14639,11 @@ class AnnealingSection(MiniDatabaseSection):
                 if entry:
                     cleaned[key] = entry
             self._phase_points = cleaned
+        self._load_transition_reviews()
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
+            self.model.set_tooltip_provider(self._tooltip_for_cell)
         self._sanitize_graph_columns()
         self._record_groups: Dict[str, List[MeasurementRecord]] = {}
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
@@ -9785,6 +14661,10 @@ class AnnealingSection(MiniDatabaseSection):
         self.visibility_button.setToolTip("Show or hide specific annealing graphs.")
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
+        self.review_transitions_button = QtWidgets.QPushButton("Review transitions")
+        self.review_transitions_button.setToolTip("Review automatic As/Af/Ms/Mf candidates on annealing graphs.")
+        self.review_transitions_button.clicked.connect(self._open_transition_review)
+        self.controls_layout.addWidget(self.review_transitions_button)
         self._update_export_enabled()
         self._refresh_record_groups()
         self._hide_columns(["_group_key", "_sources"])
@@ -9856,9 +14736,11 @@ class AnnealingSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        self._load_transition_reviews()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_transition_reviews()
         self._prune_phase_points()
         self._update_export_enabled()
 
@@ -9908,6 +14790,7 @@ class AnnealingSection(MiniDatabaseSection):
                 dataframe=df,
                 sanity_ok=ok,
                 sanity_error=mean_error,
+                transition_summary=_annealing_transition_summary(df, label=path.name),
             )
             records.append(record)
             try:
@@ -9944,7 +14827,10 @@ class AnnealingSection(MiniDatabaseSection):
             table=table,
             processed=processed,
             payloads={"annealing_records": records},
-            extra={"phase_points": dict(self._phase_points)},
+            extra={
+                "phase_points": dict(self._phase_points),
+                TRANSITION_REVIEW_EXTRA_KEY: self._transition_reviews_payload(),
+            },
         )
 
     def refresh(self) -> None:
@@ -9952,15 +14838,29 @@ class AnnealingSection(MiniDatabaseSection):
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_transition_reviews()
         self._prune_phase_points()
         self._update_export_enabled()
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
+        self._phase_points = {}
+        stored_phase_points = self.data.extra.get("phase_points")
+        if isinstance(stored_phase_points, Mapping):
+            for key, stored in stored_phase_points.items():
+                if isinstance(key, str) and isinstance(stored, dict):
+                    cleaned = self._clean_phase_points_payload(stored)
+                    if cleaned:
+                        self._phase_points[key] = cleaned
+        self._load_transition_reviews()
+        self._load_hidden_paths()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
-        self._refresh_record_groups()
-        self._prune_phase_points()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
+            self._prune_transition_reviews()
+            self._prune_phase_points()
         self._update_export_enabled()
 
     def _update_export_enabled(self) -> None:
@@ -9981,6 +14881,7 @@ class AnnealingSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist annealing visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[MeasurementRecord]
@@ -10014,6 +14915,302 @@ class AnnealingSection(MiniDatabaseSection):
             self._hidden_paths = dialog.hidden_paths()
             self._store_hidden_paths()
             self._refresh_record_groups()
+
+    def _transition_review_records(self) -> List[MeasurementRecord]:
+        selected = self._selected_records()
+
+        def _dedupe(records: Sequence[MeasurementRecord]) -> List[MeasurementRecord]:
+            result: List[MeasurementRecord] = []
+            seen: Set[int] = set()
+            for record in records:
+                marker = id(record)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                result.append(record)
+            return result
+
+        if selected:
+            return _dedupe(selected)
+        if self._all_records:
+            return self._visible_records(self._all_records)
+        records: List[MeasurementRecord] = []
+        for group in self._record_groups.values():
+            records.extend(group)
+        return _dedupe(records)
+
+    def _open_transition_review(self) -> None:
+        records = self._transition_review_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No current annealing graphs are available yet.",
+            )
+            return
+        dialog = _AnnealingTransitionReviewDialog(
+            records,
+            self.logger,
+            self,
+            transition_reviews_provider=self.transition_reviews_snapshot,
+            transition_reviews_setter=self.set_transition_review_for_record,
+        )
+        dialog.exec()
+
+    def _load_transition_reviews(self) -> None:
+        raw = self.data.extra.get(TRANSITION_REVIEW_EXTRA_KEY)
+        if isinstance(raw, dict) and isinstance(raw.get("records"), dict):
+            raw_records = raw.get("records")
+        elif isinstance(raw, dict):
+            raw_records = raw
+        else:
+            raw_records = {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_records, dict):
+            for record_id, payload in raw_records.items():
+                if not isinstance(record_id, str) or not isinstance(payload, dict):
+                    continue
+                entry = self._clean_transition_review_payload(record_id, payload)
+                if entry:
+                    cleaned[record_id] = entry
+        self._transition_reviews = cleaned
+
+    def _transition_reviews_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+
+    def _clean_transition_review_payload(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        record_id = str(record_id).strip()
+        if not record_id:
+            return {}
+        status = str(payload.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED).strip()
+        if status not in {
+            TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
+        }:
+            status = TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION
+        included = bool(payload.get("included", status in TRANSITION_REVIEW_INCLUDED_STATUSES))
+        if status in {TRANSITION_REVIEW_STATUS_NO_TRANSITION, TRANSITION_REVIEW_STATUS_EXCLUDED}:
+            included = False
+        entry: Dict[str, Any] = {
+            "transition_record_id": record_id,
+            "source_kind": str(payload.get("source_kind") or "current_annealing"),
+            "status": status,
+            "included": included,
+            "auto_values_mA": _clean_transition_values(payload.get("auto_values_mA")),
+            "manual_values_mA": _clean_transition_values(payload.get("manual_values_mA")),
+            "final_values_mA": _clean_transition_values(payload.get("final_values_mA")),
+        }
+        for key in (
+            "sample_key",
+            "composition",
+            "microwire",
+            "source_path",
+            "graph_label",
+            "setpoint_mA",
+            "notes",
+            "updated_at",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                entry[key] = value
+        return entry
+
+    def _store_transition_reviews(self) -> None:
+        self.data.extra[TRANSITION_REVIEW_EXTRA_KEY] = self._transition_reviews_payload()
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist transition review records")
+
+    def _schedule_transition_review_store(self) -> None:
+        self.data.extra[TRANSITION_REVIEW_EXTRA_KEY] = self._transition_reviews_payload()
+        timer = self._transition_review_store_timer
+        if timer is None:
+            self._store_transition_reviews()
+            return
+        timer.start()
+
+    def _schedule_transition_review_dependents_update(self) -> None:
+        timer = getattr(self, "_transition_review_update_timer", None)
+        if timer is None:
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
+        try:
+            timer.start()
+        except Exception:
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+
+    def export_project_payload(self) -> Dict[str, Any]:
+        self._store_transition_reviews()
+        return super().export_project_payload()
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            cleaned = self._clean_transition_review_payload(record_id, payload)
+            if cleaned:
+                snapshot[record_id] = cleaned
+        return snapshot
+
+    def set_transition_review_for_record(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        record_id = str(record_id).strip()
+        if not record_id:
+            return
+        entry = self._clean_transition_review_payload(record_id, payload)
+        if not entry:
+            self._transition_reviews.pop(record_id, None)
+        else:
+            record = self._record_by_transition_id(record_id)
+            if record is not None:
+                entry.update(self._transition_review_metadata(record_id, record))
+            entry["updated_at"] = datetime.now(UTC).isoformat()
+            self._transition_reviews[record_id] = entry
+        self._schedule_transition_review_store()
+        self._schedule_transition_review_dependents_update()
+
+    def _record_by_transition_id(self, record_id: str) -> Optional[MeasurementRecord]:
+        for record in self._all_records:
+            if _transition_record_id_for_annealing_record(record) == record_id:
+                return record
+        for records in self._record_groups.values():
+            for record in records:
+                if _transition_record_id_for_annealing_record(record) == record_id:
+                    return record
+        return None
+
+    def _prune_transition_reviews(self, *, store: bool = True) -> None:
+        records = list(self._all_records)
+        if not records:
+            for group in self._record_groups.values():
+                records.extend(group)
+        records_by_id: Dict[str, MeasurementRecord] = {}
+        aliases: Dict[Tuple[str, str], str] = {}
+
+        def _path_alias(value: object) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            try:
+                return str(Path(text)).replace("\\", "/").casefold()
+            except Exception:
+                return text.replace("\\", "/").casefold()
+
+        def _add_alias(kind: str, value: object, record_id: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            key = (kind, _path_alias(text) if kind == "source_path" else text.casefold())
+            existing = aliases.get(key)
+            if existing is None:
+                aliases[key] = record_id
+            elif existing != record_id:
+                aliases.pop(key, None)
+
+        for record in records:
+            record_id = _transition_record_id_for_annealing_record(record)
+            records_by_id[record_id] = record
+            metadata = self._transition_review_metadata(record_id, record)
+            _add_alias("source_path", metadata.get("source_path"), record_id)
+            _add_alias(
+                "sample_graph",
+                f"{metadata.get('sample_key', '')}|{metadata.get('graph_label', '')}",
+                record_id,
+            )
+        valid_ids = set(records_by_id)
+        if not valid_ids:
+            if self._transition_reviews:
+                self._transition_reviews.clear()
+                if store:
+                    self._store_transition_reviews()
+            return
+        removed = False
+        for record_id in list(self._transition_reviews.keys()):
+            if record_id not in valid_ids:
+                payload = self._transition_reviews.pop(record_id, None)
+                removed = True
+                if not isinstance(payload, Mapping):
+                    continue
+                new_id = aliases.get(("source_path", _path_alias(payload.get("source_path"))))
+                if new_id is None:
+                    new_id = aliases.get(
+                        (
+                            "sample_graph",
+                            f"{payload.get('sample_key', '')}|{payload.get('graph_label', '')}".casefold(),
+                        )
+                    )
+                if not new_id or new_id in self._transition_reviews:
+                    continue
+                remapped = self._clean_transition_review_payload(new_id, payload)
+                record = records_by_id.get(new_id)
+                if remapped and record is not None:
+                    preserved_updated_at = remapped.get("updated_at")
+                    remapped.update(self._transition_review_metadata(new_id, record))
+                    if preserved_updated_at:
+                        remapped["updated_at"] = preserved_updated_at
+                    self._transition_reviews[new_id] = remapped
+        if removed and store:
+            self._store_transition_reviews()
+
+    def _transition_review_metadata(
+        self,
+        record_id: str,
+        record: MeasurementRecord,
+    ) -> Dict[str, Any]:
+        metadata = getattr(record, "metadata", None)
+        sample_key = _phase_point_key_for_annealing_record(record)
+        path = getattr(record, "path", None)
+        setpoint = _extract_setpoint(record)
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        suffix = None
+        if sample_key:
+            parsed = _microwire_key_from_string(sample_key)
+            if parsed is not None:
+                _composition, _draw, _piece, suffix = parsed
+        microwire = ""
+        if draw is not None and piece is not None:
+            try:
+                microwire = _microwire_label(int(draw), int(piece), suffix)
+            except Exception:
+                microwire = f"{draw}/{piece}"
+        graph_label = str(getattr(metadata, "file_name", "") or "")
+        if not graph_label and path:
+            try:
+                graph_label = Path(path).name
+            except Exception:
+                graph_label = str(path)
+        return {
+            "transition_record_id": record_id,
+            "source_kind": "current_annealing",
+            "sample_key": sample_key or "",
+            "composition": str(composition or ""),
+            "microwire": microwire,
+            "source_path": str(path or ""),
+            "graph_label": graph_label,
+            "setpoint_mA": setpoint,
+        }
 
     def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
         entry: Dict[str, float] = {}
@@ -10216,6 +15413,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._update_export_enabled()
 
     def _refresh_record_groups(self) -> None:
+        self._project_previews_deferred = False
         grouped: Dict[str, List[MeasurementRecord]] = {}
         try:
             payload = self.store.load_payload("annealing_records")
@@ -10416,6 +15614,16 @@ class AnnealingSection(MiniDatabaseSection):
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(key)
         if not records:
+            if bool(getattr(self, "_project_previews_deferred", False)):
+                preview = getattr(self, "_deferred_preview_pixmap", None)
+                if not isinstance(preview, QtGui.QPixmap):
+                    preview = _deferred_graph_preview_pixmap(
+                        "Preview kept lazy for a responsive project load.\n"
+                        "Select this row, then use Open in PyPlot."
+                    )
+                    self._deferred_preview_pixmap = preview
+                self._pixmap_cache[cache_key] = preview
+                return preview
             loaded_records: List[MeasurementRecord] = []
             for source in self._row_sources(row):
                 try:
@@ -10435,10 +15643,18 @@ class AnnealingSection(MiniDatabaseSection):
             records = loaded_records
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            diameter_um = _diameter_um_from_mapping(row.to_dict())
             high_record, other_records = _select_anchor_and_other_records(records)
             if column == ANNEALING_HIGH_GRAPH_COLUMN:
                 target = high_record
-                pixmap = _render_measurement_pixmap(target, self.logger)
+                if target is None and other_records:
+                    pixmap = _render_missing_high_measurement_pixmap(other_records)
+                else:
+                    pixmap = _render_measurement_pixmap(
+                        target,
+                        self.logger,
+                        wire_diameter_um=diameter_um,
+                    )
             else:
                 if other_records:
                     preview_count = max(
@@ -10456,7 +15672,11 @@ class AnnealingSection(MiniDatabaseSection):
                         return cached
                     pixmaps: List[QtGui.QPixmap] = []
                     for record in other_records:
-                        preview = _render_measurement_pixmap(record, self.logger)
+                        preview = _render_measurement_pixmap(
+                            record,
+                            self.logger,
+                            wire_diameter_um=diameter_um,
+                        )
                         if preview is not None:
                             pixmaps.append(preview)
                     pixmap = _combine_pixmaps_side_by_side(
@@ -10479,6 +15699,20 @@ class AnnealingSection(MiniDatabaseSection):
                         pixmap = loaded
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _tooltip_for_cell(self, row: pd.Series, column: str) -> Optional[str]:
+        if column != ANNEALING_HIGH_GRAPH_COLUMN:
+            return None
+        key = row.get("_group_key")
+        if not isinstance(key, str) or not key:
+            return None
+        records = self._record_groups.get(key, [])
+        if not records:
+            return None
+        high_record, _other_records = _select_anchor_and_other_records(records)
+        if high_record is not None:
+            return None
+        return _missing_high_measurement_message(records)
 
     def _preview_background(
         self,
@@ -10814,7 +16048,14 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pending_advance_review: bool = False
         self._pending_partial_rows: List[dict] = []
         self._pending_partial_flush = False
+        self._expected_key_source_labels: Dict[str, str] = {}
+        self._pending_state_save_timer: QtCore.QTimer | None = None
+        self._suppress_model_edit_handler = False
         super().__init__(logger, log_callback, parent)
+        self._pending_state_save_timer = QtCore.QTimer(self)
+        self._pending_state_save_timer.setSingleShot(True)
+        self._pending_state_save_timer.setInterval(350)
+        self._pending_state_save_timer.timeout.connect(self._persist_review_state)
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
 
         # Removed the missing-items list UI; missing values are visible in the table.
@@ -10835,6 +16076,7 @@ class MicroscopeSection(MiniDatabaseSection):
         # are removed even when there are no overrides/validations stored.
         self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._update_hidden_columns()
         self._update_missing_summary()
         self.partial_row_ready.connect(
@@ -10857,6 +16099,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._load_extra_state()
         self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -10873,6 +16116,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._load_extra_state()
         self._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -10901,6 +16145,8 @@ class MicroscopeSection(MiniDatabaseSection):
                 for key, value in stored_overrides.items()
                 if isinstance(value, dict)
             }
+        else:
+            self._overrides = {}
 
         stored_validated = self.data.extra.get("validated")
         if isinstance(stored_validated, dict):
@@ -10910,6 +16156,8 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 cleaned[str(key)] = dict(payload)
             self._validated = cleaned
+        else:
+            self._validated = {}
 
     def _normalise_brittle_column(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -10924,7 +16172,10 @@ class MicroscopeSection(MiniDatabaseSection):
             if str(current).strip().lower() == "brittle":
                 continue
             sources: List[Path] = []
-            for path_value in row.get("_images") or []:
+            image_values = row.get("_images")
+            if not isinstance(image_values, (list, tuple, set)):
+                image_values = []
+            for path_value in image_values:
                 try:
                     sources.append(Path(path_value))
                 except Exception:
@@ -11110,10 +16361,12 @@ class MicroscopeSection(MiniDatabaseSection):
         self._validated.clear()
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
+        self._expected_key_source_labels.clear()
         self._pixmap_cache.clear()
         self._show_other_ends = True
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(True)
+        self._refresh_status_column()
         self._search_proxy.set_row_predicate(self._row_visible)
         self._update_missing_summary()
         self._update_review_buttons()
@@ -11126,7 +16379,12 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
         self._search_proxy.set_row_predicate(self._row_visible)
+        self._refresh_status_column()
         self._ensure_valid_selection()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
         if self._show_other_ends:
@@ -11208,13 +16466,18 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _expected_microwire_keys(self) -> Set[MicrowireKey]:
         keys: Set[MicrowireKey] = set()
+        source_labels: Dict[str, str] = {}
         try:
-            annealing_records = MiniDatabaseStore("annealing").load_payload(
+            annealing_records = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load_payload(
                 "annealing_records"
             )
         except Exception:
             annealing_records = None
         if not isinstance(annealing_records, list):
+            self._expected_key_source_labels = {}
             return keys
         for record in annealing_records:
             metadata = getattr(record, "metadata", None)
@@ -11228,14 +16491,18 @@ class MicroscopeSection(MiniDatabaseSection):
             suffix = None
             path = getattr(record, "path", None)
             if isinstance(path, Path):
-                parsed_key = _microscope_key(path)
-                if parsed_key is not None:
-                    _, _, _, suffix = parsed_key
+                suffix = _microscope_expected_suffix_from_path(path)
             try:
-                keys.add((str(composition), int(draw), int(piece), suffix))
+                key_tuple = (str(composition), int(draw), int(piece), suffix)
             except (TypeError, ValueError):
                 continue
+            keys.add(key_tuple)
+            if path is not None:
+                label = _source_label_from_path_family(path) or _source_label_from_text(path)
+                if label:
+                    source_labels[_microwire_key_to_str(key_tuple)] = label
         keys.update(self._extra_expected_keys())
+        self._expected_key_source_labels = source_labels
         return keys
 
     def _extra_expected_keys(self) -> Set[MicrowireKey]:
@@ -11289,6 +16556,15 @@ class MicroscopeSection(MiniDatabaseSection):
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in frame.columns:
                 frame[column] = pd.Series([None] * len(frame))
+        if SOURCE_LABEL_COLUMN in frame.columns and self._expected_key_source_labels:
+            for idx, row in frame.iterrows():
+                key_text = str(row.get("_key") or "").strip()
+                if not key_text:
+                    continue
+                current_label = str(row.get(SOURCE_LABEL_COLUMN) or "").strip()
+                expected_label = self._expected_key_source_labels.get(key_text)
+                if expected_label and not current_label:
+                    frame.at[idx, SOURCE_LABEL_COLUMN] = expected_label
         existing_keys = set(str(key) for key in frame.get("_key", []))
         new_rows: List[Dict[str, object]] = []
         for composition, draw, piece, suffix in sorted(
@@ -11310,6 +16586,8 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
+                    MICROSCOPE_STATUS_COLUMN: None,
+                    SOURCE_LABEL_COLUMN: self._expected_key_source_labels.get(key_str),
                     BRITTLE_COLUMN: None,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
@@ -11334,6 +16612,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 )
                 frame = pd.DataFrame(existing_rows + new_rows)
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = self._with_status_column(frame)
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         return frame
 
@@ -11344,8 +16623,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._auto_fit_columns()
         self._update_missing_summary()
 
-    @staticmethod
     def _merge_rows_into_frame(
+        self,
         frame: pd.DataFrame,
         rows: Sequence[Mapping[str, Any]],
     ) -> pd.DataFrame:
@@ -11395,6 +16674,7 @@ class MicroscopeSection(MiniDatabaseSection):
             if column not in merged.columns:
                 merged[column] = pd.Series([None] * len(merged))
         merged = merged.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        merged = self._with_status_column(merged)
         return merged
 
     def _build_image_ref_rows(
@@ -11477,6 +16757,7 @@ class MicroscopeSection(MiniDatabaseSection):
             existing_d = existing_row.get(MICROSCOPE_D_COLUMN)
             existing_D = existing_row.get(MICROSCOPE_CAP_D_COLUMN)
             existing_ratio = existing_row.get("d/D")
+            existing_source_label = existing_row.get(SOURCE_LABEL_COLUMN)
             existing_brittle = existing_row.get(BRITTLE_COLUMN)
             existing_core_image = existing_row.get("_core_image")
             existing_glass_image = existing_row.get("_glass_image")
@@ -11493,6 +16774,13 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: existing_d,
                     MICROSCOPE_CAP_D_COLUMN: existing_D,
                     "d/D": existing_ratio,
+                    MICROSCOPE_STATUS_COLUMN: None,
+                    SOURCE_LABEL_COLUMN: (
+                        existing_source_label
+                        or _source_label_from_path_family(merged_images)
+                        or _source_label_from_text(merged_images)
+                        or self._expected_key_source_labels.get(key)
+                    ),
                     BRITTLE_COLUMN: (
                         existing_brittle
                         if existing_brittle
@@ -11622,6 +16910,12 @@ class MicroscopeSection(MiniDatabaseSection):
             MICROSCOPE_D_COLUMN: d_value,
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
+            MICROSCOPE_STATUS_COLUMN: None,
+            SOURCE_LABEL_COLUMN: (
+                _source_label_from_path_family(image_paths)
+                or _source_label_from_text(image_paths)
+                or self._expected_key_source_labels.get(key_str)
+            ),
             MICROSCOPE_IMAGE_COLUMNS[0]: None,
             MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": key_str,
@@ -11667,6 +16961,7 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         frame = self._merge_rows_into_frame(frame, rows)
+        frame = self._with_status_column(frame)
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -11834,7 +17129,7 @@ class MicroscopeSection(MiniDatabaseSection):
             self._select_row_for_key(key_text, column_label=column_label)
             self._selected_key = key_text
             if self._is_valid_diameter(row.get(column_label)):
-                self._mark_reviewed(auto=True, columns={column_label})
+                self._mark_reviewed(auto=True, columns={column_label}, fast=True)
             self._advance_to_next_pending(column_label)
 
         QtCore.QTimer.singleShot(75, _advance)
@@ -12024,7 +17319,7 @@ class MicroscopeSection(MiniDatabaseSection):
             return QtGui.QBrush(QtGui.QColor("#22c55e" if reviewed else "#ef4444"))
         return None
 
-    def _is_cell_reviewed(self, key: str, column: str) -> bool:
+    def _reviewed_for_row(self, key: str, column: str, row: pd.Series) -> bool:
         entry = self._validated.get(key)
         if not isinstance(entry, dict):
             return False
@@ -12035,17 +17330,201 @@ class MicroscopeSection(MiniDatabaseSection):
             reviewed = bool(entry.get("D_reviewed")) if has_flags else True
         else:
             return False
-        if not reviewed:
+        return bool(reviewed and self._is_valid_diameter(row.get(column)))
+
+    def _status_for_row(self, row: pd.Series) -> str:
+        key = str(row.get("_key") or "").strip()
+        suffix = ""
+        parsed = _microwire_key_from_string(key) if key else None
+        if parsed is not None:
+            suffix = str(parsed[3] or "").strip().lower()
+        prefix = "Other end - " if suffix == "oe" else ""
+
+        brittle = str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle"
+        core_present = self._has_image_value(row.get("_core_image"))
+        glass_present = self._has_image_value(row.get("_glass_image"))
+        images = row.get("_images")
+        has_any_image = bool(images) if isinstance(images, (list, tuple, set)) else False
+        if not core_present and not glass_present and not has_any_image:
+            if self._row_is_expected_unlinked(row):
+                return f"{prefix}Expected from annealing; no microscope image linked"
+            return f"{prefix}Missing image"
+        missing_labeled: List[str] = []
+        if not brittle and not core_present:
+            missing_labeled.append("core")
+        if not glass_present:
+            missing_labeled.append("glass")
+        if missing_labeled:
+            return f"{prefix}Image found; missing {'/'.join(missing_labeled)} label"
+
+        d_valid = self._is_valid_diameter(row.get(MICROSCOPE_D_COLUMN))
+        D_valid = self._is_valid_diameter(row.get(MICROSCOPE_CAP_D_COLUMN))
+        if not d_valid or not D_valid:
+            missing_values = []
+            if not d_valid:
+                missing_values.append("d")
+            if not D_valid:
+                missing_values.append("D")
+            return f"{prefix}Image found; enter/review {' and '.join(missing_values)}"
+
+        d_reviewed = self._reviewed_for_row(key, MICROSCOPE_D_COLUMN, row)
+        D_reviewed = self._reviewed_for_row(key, MICROSCOPE_CAP_D_COLUMN, row)
+        if not d_reviewed or not D_reviewed:
+            return f"{prefix}Values need review"
+        return f"{prefix}Reviewed"
+
+    def _row_is_expected_unlinked(self, row: pd.Series) -> bool:
+        key = str(row.get("_key") or "").strip()
+        if not key:
             return False
+        parsed = _microwire_key_from_string(key)
+        if parsed is None:
+            return False
+        if parsed not in self._expected_keys_current:
+            return False
+        images = row.get("_images")
+        has_any_image = bool(images) if isinstance(images, (list, tuple, set)) else False
+        return not (
+            self._has_image_value(row.get("_core_image"))
+            or self._has_image_value(row.get("_glass_image"))
+            or has_any_image
+        )
+
+    @staticmethod
+    def _has_image_value(value: object) -> bool:
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            text = value.strip()
+            return bool(text and text.lower() not in {"nan", "none"})
+        return bool(value)
+
+    def _with_status_column(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
+        updated = frame.copy()
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in updated.columns:
+                updated[column] = pd.Series([None] * len(updated))
+        if MICROSCOPE_STATUS_COLUMN in updated.columns:
+            updated[MICROSCOPE_STATUS_COLUMN] = updated[MICROSCOPE_STATUS_COLUMN].astype(object)
+        if updated.empty:
+            return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        for index, row in updated.iterrows():
+            updated.at[index, MICROSCOPE_STATUS_COLUMN] = self._status_for_row(row)
+        return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
+
+    def _source_row_for_key(self, key: str) -> Optional[int]:
+        frame = self.model.frame()
+        if frame.empty or "_key" not in frame.columns:
+            return None
+        try:
+            matches = frame.index[frame["_key"].astype(str) == str(key)].tolist()
+        except Exception:
+            return None
+        if not matches:
+            return None
+        try:
+            return int(matches[0])
+        except Exception:
+            return None
+
+    def _refresh_row_for_key(self, key: str) -> None:
+        row_idx = self._source_row_for_key(key)
+        if row_idx is None:
+            return
+        frame = self.model.frame()
+        try:
+            row = frame.iloc[row_idx]
+        except Exception:
+            return
+        if "d/D" in frame.columns:
+            d_value = row.get(MICROSCOPE_D_COLUMN)
+            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+            ratio = None
+            if self._is_valid_diameter(d_value) and self._is_valid_diameter(D_value):
+                try:
+                    ratio = float(d_value) / float(D_value)
+                except ZeroDivisionError:
+                    ratio = None
+            frame.at[row_idx, "d/D"] = round(ratio, 3) if ratio is not None else None
+        if MICROSCOPE_STATUS_COLUMN in frame.columns:
+            frame.at[row_idx, MICROSCOPE_STATUS_COLUMN] = self._status_for_row(frame.iloc[row_idx])
+        self.data.table = frame.copy()
+        try:
+            self.model._row_series_cache.pop(int(row_idx), None)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            left = self.model.index(row_idx, 0)
+            right = self.model.index(row_idx, max(0, self.model.columnCount() - 1))
+            self._suppress_model_edit_handler = True
+            try:
+                self.model.dataChanged.emit(
+                    left,
+                    right,
+                    [
+                        QtCore.Qt.ItemDataRole.DisplayRole,
+                        QtCore.Qt.ItemDataRole.BackgroundRole,
+                        QtCore.Qt.ItemDataRole.ForegroundRole,
+                        QtCore.Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+            finally:
+                self._suppress_model_edit_handler = False
+        except Exception:
+            self._suppress_model_edit_handler = False
+            pass
+
+    def _schedule_review_state_save(self) -> None:
+        self.data.extra["overrides"] = self._overrides
+        self.data.extra["validated"] = self._validated
+        timer = self._pending_state_save_timer
+        if timer is None:
+            self._persist_review_state()
+            return
+        timer.start()
+
+    def _persist_review_state(self) -> None:
+        self.data.extra["overrides"] = self._overrides
+        self.data.extra["validated"] = self._validated
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to save microscope review state")
+
+    def _refresh_status_column(self) -> None:
+        selected_key = self._selected_key
+        active_column = self._active_column
+        if not selected_key:
+            row = self._selected_row()
+            if row is not None:
+                raw_key = row.get("_key")
+                selected_key = str(raw_key) if raw_key is not None else None
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        updated = self._with_status_column(frame)
+        self.data.table = updated
+        self.model.set_frame(updated)
+        if selected_key:
+            self._select_row_for_key(selected_key, active_column or None)
+
+    def _is_cell_reviewed(self, key: str, column: str) -> bool:
         row = self._row_for_key(key)
-        if row is not None and not self._is_valid_diameter(row.get(column)):
+        if row is None:
             return False
-        return True
+        return self._reviewed_for_row(key, column, row)
 
     def _row_missing_images(self, row: pd.Series) -> bool:
+        if self._row_is_expected_unlinked(row):
+            return False
         brittle = bool(row.get(BRITTLE_COLUMN))
-        core_present = bool(row.get("_core_image"))
-        glass_present = bool(row.get("_glass_image"))
+        core_present = self._has_image_value(row.get("_core_image"))
+        glass_present = self._has_image_value(row.get("_glass_image"))
         extras = row.get("_images")
         if not core_present and isinstance(extras, (list, tuple)) and extras:
             core_present = True
@@ -12103,6 +17582,8 @@ class MicroscopeSection(MiniDatabaseSection):
         bottom_right: QtCore.QModelIndex,
         roles: list[int] | None = None,
     ) -> None:
+        if self._suppress_model_edit_handler:
+            return
         if roles and QtCore.Qt.ItemDataRole.EditRole not in roles and QtCore.Qt.ItemDataRole.DisplayRole not in roles:
             return
         frame = self.model.frame()
@@ -12158,7 +17639,7 @@ class MicroscopeSection(MiniDatabaseSection):
             key, column_label = advance_request
             self._select_row_for_key(key, column_label)
             self._selected_key = key
-            self._mark_reviewed(auto=True, columns={column_label})
+            self._mark_reviewed(auto=True, columns={column_label}, fast=True)
             self._advance_to_next_pending(column_label)
 
     def _queue_advance_after_restore(
@@ -12189,7 +17670,7 @@ class MicroscopeSection(MiniDatabaseSection):
             if self._pending_advance_column:
                 column_label = self._pending_advance_column
                 if self._pending_advance_review:
-                    self._mark_reviewed(auto=True, columns={column_label})
+                    self._mark_reviewed(auto=True, columns={column_label}, fast=True)
                 self._advance_to_next_pending(column_label)
                 self._pending_advance_key = None
                 self._pending_advance_column = None
@@ -12587,7 +18068,19 @@ class MicroscopeSection(MiniDatabaseSection):
             self._overrides[selected_key] = override
         else:
             self._overrides.pop(selected_key, None)
-        self._store_overrides(restore_selection=False, autosize=False)
+        frame = self.model.frame()
+        row_idx = self._source_row_for_key(selected_key)
+        if row_idx is not None:
+            if MICROSCOPE_D_COLUMN in frame.columns:
+                frame.at[row_idx, MICROSCOPE_D_COLUMN] = override.get("d")
+            if MICROSCOPE_CAP_D_COLUMN in frame.columns:
+                frame.at[row_idx, MICROSCOPE_CAP_D_COLUMN] = override.get("D")
+            self._refresh_row_for_key(selected_key)
+        self._schedule_review_state_save()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
         self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
         self._selected_key = selected_key
         columns: set[str] = set()
@@ -12596,7 +18089,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if "D" in override:
             columns.add(MICROSCOPE_CAP_D_COLUMN)
         if columns:
-            self._mark_reviewed(auto=True, columns=columns)
+            self._mark_reviewed(auto=True, columns=columns, fast=True)
         if advance_column:
             self._advance_to_next_pending(advance_column)
 
@@ -12618,6 +18111,7 @@ class MicroscopeSection(MiniDatabaseSection):
         auto: bool = False,
         columns: set[str] | None = None,
         allow_without_sources: bool = True,
+        fast: bool = False,
     ) -> None:
         if not self._selected_key:
             return
@@ -12683,7 +18177,6 @@ class MicroscopeSection(MiniDatabaseSection):
 
         entry["timestamp"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         self._validated[key] = entry
-        self._store_validation()
         override_changed = False
         override_entry = dict(self._overrides.get(key, {}))
         if MICROSCOPE_D_COLUMN in columns_to_mark and self._is_valid_diameter(d_value):
@@ -12696,6 +18189,17 @@ class MicroscopeSection(MiniDatabaseSection):
                 override_changed = True
         if override_changed:
             self._overrides[key] = override_entry
+        if fast:
+            self._refresh_row_for_key(key)
+            self._update_review_buttons()
+            self._schedule_review_state_save()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
+        self._store_validation()
+        if override_changed:
             self._store_overrides()
 
     def _clear_review(self) -> None:
@@ -12710,6 +18214,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self.data.extra["validated"] = self._validated
         if persist:
             self.store.save(self.data)
+        self._refresh_status_column()
         self._refresh_review_display()
         self._update_review_buttons()
         try:
@@ -12856,6 +18361,7 @@ class MicroscopeSection(MiniDatabaseSection):
             frame.at[index, MICROSCOPE_D_COLUMN] = d_value
             frame.at[index, MICROSCOPE_CAP_D_COLUMN] = D_value
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
+        frame = self._with_status_column(frame)
         self.data.table = frame
         self.model.set_frame(frame)
         if autosize:
@@ -12872,8 +18378,30 @@ class MicroscopeSection(MiniDatabaseSection):
         index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
         if not isinstance(table, pd.DataFrame) or table.empty:
             return index
+
+        def _positive_float(value: object) -> Optional[float]:
+            if isinstance(value, str):
+                value = value.strip().replace(",", ".")
+                if not value:
+                    return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if math.isfinite(numeric) and numeric > 0 else None
+
         for _, row in table.iterrows():
             key = _microwire_key_from_string(str(row.get("_key") or "").strip())
+            if key is None:
+                composition = str(row.get("Composition") or "").strip()
+                parsed = _microwire_parts_from_label_safe(
+                    str(row.get("Microwire") or "").strip()
+                )
+                if composition and parsed is not None:
+                    try:
+                        key = (composition, int(parsed[0]), int(parsed[1]), parsed[2])
+                    except (TypeError, ValueError):
+                        key = None
             if key is None:
                 continue
             measurements = index.setdefault(key, MicroscopeMeasurements())
@@ -12888,10 +18416,10 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 glass_image = None
 
-            d_value = row.get(MICROSCOPE_D_COLUMN)
-            if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)) and float(d_value) > 0:
+            d_value = _positive_float(row.get(MICROSCOPE_D_COLUMN))
+            if d_value is not None:
                 detection = MicroscopeDetection(
-                    value=float(d_value),
+                    value=d_value,
                     image_path=core_image,
                     source="manual",
                 )
@@ -12900,10 +18428,10 @@ class MicroscopeSection(MiniDatabaseSection):
             elif core_image is not None:
                 measurements.add_placeholder("core", core_image)
 
-            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
-            if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)) and float(D_value) > 0:
+            D_value = _positive_float(row.get(MICROSCOPE_CAP_D_COLUMN))
+            if D_value is not None:
                 detection = MicroscopeDetection(
-                    value=float(D_value),
+                    value=D_value,
                     image_path=glass_image,
                     source="manual",
                 )
@@ -12985,6 +18513,7 @@ class MicroscopeSection(MiniDatabaseSection):
         rows_to_apply = self._build_image_ref_rows(unique_paths, expected_keys, table)
         if rows_to_apply:
             table = self._merge_rows_into_frame(table, rows_to_apply)
+        table = self._with_status_column(table)
         merged_index = self._build_microscope_index_from_table(table)
         filtered_overrides = {
             key: value
@@ -13031,7 +18560,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
 
 class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
-    valuePicked = QtCore.pyqtSignal(str, float)
+    phaseValuesEdited = QtCore.pyqtSignal(dict)
     def __init__(self, logger: logging.Logger, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._logger = logger
@@ -13045,25 +18574,35 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
-        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, self)
+        self._phase_controls = _PhasePointEditorControls(
+            self,
+            title="Manual transition currents (mA)",
+        )
+        self._phase_controls.valuesEdited.connect(self.phaseValuesEdited.emit)
+        layout.addWidget(self._phase_controls)
+
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, logger, self)
         self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, self)
         layout.addWidget(self._high_display, 1)
         layout.addWidget(self._other_display, 1)
-        layout.setStretch(1, 1)
         layout.setStretch(2, 1)
-        self._high_display.valuePicked.connect(lambda value: self.valuePicked.emit("As", value))
-        self._other_display.valuePicked.connect(lambda value: self.valuePicked.emit("Ms", value))
+        layout.setStretch(3, 1)
+        self._high_display.valuePicked.connect(self._phase_controls.apply_picked_value)
+        self._other_display.valuePicked.connect(self._phase_controls.apply_picked_value)
 
     def update_selection(
         self,
         key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
         other_records: Sequence[MeasurementRecord],
+        phase_values: Mapping[str, Any],
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
-            self._high_display.clear("Select a row to view the 1000 mA measurement.")
+            self._high_display.clear("Select a row to view the exact 1000 mA measurement.")
             self._other_display.clear("Select a row to view the other annealing measurements.")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_values({})
             return
         composition, draw, piece, suffix = key
         try:
@@ -13071,11 +18610,13 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         except Exception:
             microwire = f"{draw}/{piece}"
         self.header_label.setText(f"{composition} — {microwire}")
+        self._phase_controls.setEnabled(True)
+        self._phase_controls.set_values(phase_values)
 
         self._high_display.set_record(
             high,
             setpoint=_extract_setpoint(high),
-            description="No 1000 mA measurement available for this microwire.",
+            description=_missing_high_measurement_message(other_records),
         )
         self._other_display.set_records(
             other_records,
@@ -13085,7 +18626,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
 
 class CurrentDensitySection(QtWidgets.QWidget):
     section_key = "current_density"
-    section_title = "Current density"
+    section_title = "Annealing transitions"
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
@@ -13117,7 +18658,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         layout.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
-        self.refresh_button = QtWidgets.QPushButton("Recalculate")
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_data)
         controls.addWidget(self.refresh_button)
         self.export_button = QtWidgets.QPushButton("Export worksheet...")
@@ -13189,7 +18730,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         preview_panel = _CurrentDensityPreviewPanel(logger, splitter)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
-        preview_panel.valuePicked.connect(self._apply_picked_value)
+        preview_panel.phaseValuesEdited.connect(self._apply_phase_values)
 
         if hasattr(self._annealing_section, "data_updated"):
             try:
@@ -13215,8 +18756,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
         try:
             frame = self._calculate_frame()
         except Exception:
-            self.logger.exception("Failed to calculate current density table")
-            self.status_label.setText("Failed to calculate current density.")
+            self.logger.exception("Failed to calculate annealing transition summary")
+            self.status_label.setText("Failed to calculate annealing transition summary.")
             self.export_button.setEnabled(False)
             return
         self._current_frame = frame
@@ -13250,7 +18791,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             ms_series = pd.to_numeric(frame[ANNEALING_MS_COLUMN], errors="coerce")
             annotated = int((as_series.notna() & ms_series.notna()).sum())
         status_text = (
-            f"{annotated} of {total} microwire(s) have As1/Ms1 annotated."
+            f"{annotated} of {total} graph row(s) have As1/Ms1 annotated."
             if total
             else "No overlapping microscope and annealing data yet."
         )
@@ -13286,9 +18827,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     key_text = _microwire_key_to_str(key_tuple)
             if not key_text:
                 continue
+            if key_text in snapshot:
+                continue
             entry: Dict[str, Any] = {}
             for column in frame.columns:
-                if column == "_group_key":
+                if str(column).startswith("_") or column == "Graph":
                     continue
                 entry[column] = row.get(column)
             if entry:
@@ -13360,15 +18903,22 @@ class CurrentDensitySection(QtWidgets.QWidget):
             pass
 
     def _update_preview(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         panel = self._preview_panel
         if panel is None:
             return
         key = self._current_selection_key()
         if key is None:
-            panel.update_selection(None, None, [])
+            panel.update_selection(None, None, [], {})
             return
-        high, other_records = self._fetch_records_for_key(key)
-        panel.update_selection(key, high, other_records)
+        row = self._selected_row_series()
+        record = self._record_for_row(row)
+        if record is not None:
+            high, other_records = record, []
+        else:
+            high, other_records = self._fetch_records_for_key(key)
+        panel.update_selection(key, high, other_records, self._selected_phase_values())
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -13391,9 +18941,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         relevant = set(PHASE_POINT_COLUMN_MAP.values())
         if not any(column in relevant for column in columns_slice):
             return
-        setter = getattr(self._annealing_section, "set_phase_points_for_key", None)
         updated = False
-        setter_used = False
         for row in range(top_left.row(), bottom_right.row() + 1):
             if row < 0 or row >= len(frame.index):
                 continue
@@ -13407,41 +18955,24 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 for label, column in PHASE_POINT_COLUMN_MAP.items()
             }
             try:
-                if callable(setter):
-                    setter(key, phase_values=phase_values)
-                    setter_used = True
+                parsed_key = self._parse_group_key(key)
+                if parsed_key is None:
+                    continue
+                record = self._record_for_row(series)
+                if record is not None:
+                    self._store_transition_review_for_record(record, phase_values)
                 else:
-                    phase_points = getattr(self._annealing_section, "_phase_points", {})
-                    if isinstance(phase_points, dict):
-                        entry: Dict[str, float] = {}
-                        for label, value in phase_values.items():
-                            if value is not None:
-                                entry[label] = value
-                        if "As1" in entry:
-                            entry["As"] = entry["As1"]
-                        if "Ms1" in entry:
-                            entry["Ms"] = entry["Ms1"]
-                        if entry:
-                            phase_points[key] = entry
-                        elif key in phase_points:
-                            phase_points.pop(key, None)
-                        store = getattr(self._annealing_section, "_store_phase_points", None)
-                        if callable(store):
-                            store()
-                        updated_signal = getattr(self._annealing_section, "data_updated", None)
-                        if hasattr(updated_signal, "emit"):
-                            try:
-                                updated_signal.emit()
-                            except Exception:
-                                pass
+                    self._store_transition_review_for_key(parsed_key, phase_values)
                 updated = True
             except Exception:
                 self.logger.exception("Failed to persist phase transition points for %s", key)
-        if updated and not setter_used:
+        if updated:
             QtCore.QTimer.singleShot(0, self.refresh_data)
 
-    def _column_index_for_kind(self, kind: str) -> Optional[int]:
-        target_column = ANNEALING_AS_COLUMN if kind == "As" else ANNEALING_MS_COLUMN
+    def _column_index_for_label(self, label: str) -> Optional[int]:
+        target_column = PHASE_POINT_COLUMN_MAP.get(label)
+        if not target_column:
+            return None
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
             return None
@@ -13450,48 +18981,115 @@ class CurrentDensitySection(QtWidgets.QWidget):
         except Exception:
             return None
 
-    def _apply_picked_value(self, kind: str, value: float) -> None:
+    def _selected_source_row(self) -> Optional[int]:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
-            return
+            return None
         selection_model = table.selectionModel()
         if selection_model is None:
-            return
+            return None
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            row = self._source_row(current_index.row())
+            if row is not None:
+                return row
+        rows = selection_model.selectedRows()
+        if rows:
+            return self._source_row(rows[0].row())
+        return None
+
+    def _selected_phase_values(self) -> Dict[str, Optional[float]]:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return
-        current_index = selection_model.currentIndex()
-        column_index = None
-        if current_index.isValid():
-            source_row = self._source_row(current_index.row())
-            try:
-                current_label = str(frame.columns[current_index.column()])
-            except Exception:
-                current_label = ""
-            if current_label in PHASE_POINT_COLUMN_MAP.values():
-                column_index = current_index.column()
-        if column_index is None:
-            column_index = self._column_index_for_kind(kind)
-        if column_index is None:
-            return
-        row = source_row if current_index.isValid() else None
-        if row is None:
-            rows = selection_model.selectedRows()
-            if rows:
-                row = self._source_row(rows[0].row())
+            return {}
+        row = self._selected_source_row()
         if row is None or row < 0 or row >= len(frame.index):
+            return {}
+        series = frame.iloc[row]
+        return {
+            label: self._coerce_phase_value(series.get(column))
+            for label, column in PHASE_POINT_COLUMN_MAP.items()
+        }
+
+    def _apply_phase_values(self, values: Dict[str, Optional[float]]) -> None:
+        row = self._selected_row_series()
+        key = self._current_selection_key()
+        if key is None:
             return
-        target_index = current_index if (current_index.isValid() and current_index.column() == column_index) else self.model.index(row, column_index)
-        if not target_index.isValid():
-            return
-        if not self.model.setData(target_index, float(value)):
-            return
+        cleaned = {
+            label: self._coerce_phase_value(values.get(label))
+            for label in PHASE_POINT_LABELS
+        }
         try:
-            table.setCurrentIndex(target_index)
-            table.scrollTo(target_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
+            record = self._record_for_row(row) if row is not None else None
+            if record is not None:
+                self._store_transition_review_for_record(record, cleaned)
+            else:
+                self._store_transition_review_for_key(key, cleaned)
         except Exception:
-            pass
-        self._update_preview()
+            self.logger.exception("Failed to persist phase transition points for %s", _microwire_key_to_str(key))
+            return
+        self.refresh_data()
+
+    def _selected_row_series(self) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        row = self._selected_source_row()
+        if not isinstance(frame, pd.DataFrame) or row is None or row < 0 or row >= len(frame.index):
+            return None
+        return frame.iloc[row]
+
+    def _store_transition_review_for_key(
+        self,
+        key: MicrowireKey,
+        phase_values: Mapping[str, Any],
+    ) -> None:
+        high, other_records = self._fetch_records_for_key(key)
+        record = high or (other_records[0] if other_records else None)
+        if record is None:
+            return
+        self._store_transition_review_for_record(record, phase_values)
+
+    def _store_transition_review_for_record(
+        self,
+        record: MeasurementRecord,
+        phase_values: Mapping[str, Any],
+    ) -> None:
+        record_id = _transition_record_id_for_annealing_record(record)
+        setter = getattr(self._annealing_section, "set_transition_review_for_record", None)
+        if not callable(setter):
+            return
+        cleaned = _clean_transition_values(phase_values)
+        payload = {
+            "status": TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            "included": bool(cleaned),
+            "manual_values_mA": cleaned,
+            "final_values_mA": cleaned,
+            "auto_values_mA": _auto_transition_values_for_annealing_record(record),
+        }
+        setter(record_id, payload)
+
+    def _record_for_row(self, row: Optional[pd.Series]) -> Optional[MeasurementRecord]:
+        if row is None:
+            return None
+        record_id = str(row.get("_record_id") or "").strip()
+        if not record_id:
+            return None
+        lookup = getattr(self._annealing_section, "_record_by_transition_id", None)
+        if callable(lookup):
+            try:
+                record = lookup(record_id)
+            except Exception:
+                record = None
+            if isinstance(record, MeasurementRecord):
+                return record
+        key = self._parse_group_key(row.get("_group_key"))
+        if key is None:
+            return None
+        high, other_records = self._fetch_records_for_key(key)
+        for record in (high, *other_records):
+            if record is not None and _transition_record_id_for_annealing_record(record) == record_id:
+                return record
+        return None
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
@@ -13553,10 +19151,103 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return None
         return _microwire_key_from_string(text)
 
+    @staticmethod
+    def _empty_review_counts() -> Dict[str, int]:
+        return {
+            "total": 0,
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+
+    @staticmethod
+    def _format_review_counts(counts: Mapping[str, int]) -> str:
+        if int(counts.get("total", 0) or 0) <= 0:
+            return ""
+        keys = (
+            "total",
+            "accepted",
+            "manual",
+            "no_transition",
+            "excluded",
+            "needs_attention",
+            "unreviewed",
+            "auto_candidates",
+        )
+        return "; ".join(f"{key}={int(counts.get(key, 0) or 0)}" for key in keys)
+
+    @staticmethod
+    def _status_from_review_counts(counts: Mapping[str, int]) -> str:
+        total = int(counts.get("total", 0) or 0)
+        if total <= 0:
+            return "Not measured"
+        manual = int(counts.get("manual", 0) or 0)
+        accepted = int(counts.get("accepted", 0) or 0)
+        no_transition = int(counts.get("no_transition", 0) or 0)
+        excluded = int(counts.get("excluded", 0) or 0)
+        needs_attention = int(counts.get("needs_attention", 0) or 0)
+        unreviewed = int(counts.get("unreviewed", 0) or 0)
+        negative = no_transition + excluded
+        reviewed = manual + accepted + negative
+        if needs_attention and needs_attention == total:
+            return "Needs attention"
+        if manual == total:
+            return "Manual adjusted"
+        if accepted == total:
+            return "Accepted auto"
+        if negative == total:
+            return "No transition" if no_transition else "Excluded"
+        if reviewed or needs_attention:
+            return "Partly reviewed"
+        if int(counts.get("auto_candidates", 0) or 0):
+            return "Auto candidate"
+        if unreviewed or total:
+            return "Unreviewed"
+        return "Not measured"
+
+    def _review_counts_for_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+    ) -> Dict[str, int]:
+        counts = self._empty_review_counts()
+        annealing = self._annealing_section
+        snapshot_provider = getattr(annealing, "transition_reviews_snapshot", None)
+        if callable(snapshot_provider):
+            raw_reviews = snapshot_provider()
+        else:
+            raw_reviews = getattr(annealing, "_transition_reviews", {})
+        if not isinstance(raw_reviews, dict):
+            raw_reviews = {}
+        for record in records:
+            counts["total"] += 1
+            record_id = _transition_record_id_for_annealing_record(record)
+            payload = raw_reviews.get(record_id, {}) if isinstance(raw_reviews, dict) else {}
+            status = str(payload.get("status") if isinstance(payload, dict) else "").strip()
+            if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+                counts["manual"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+                counts["accepted"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_NO_TRANSITION:
+                counts["no_transition"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_EXCLUDED:
+                counts["excluded"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION:
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+                if _auto_transition_values_for_annealing_record(record):
+                    counts["auto_candidates"] += 1
+        return counts
+
     def _calculate_frame(self) -> pd.DataFrame:
         diameter_map = self._collect_microscope_data()
         setpoint_map = self._collect_setpoint_data()
         phase_map = self._collect_phase_points()
+        groups = getattr(self._annealing_section, "_record_groups", {})
         keys = sorted(
             set(setpoint_map.keys()) | set(phase_map.keys()),
             key=lambda item: (
@@ -13569,87 +19260,171 @@ class CurrentDensitySection(QtWidgets.QWidget):
         rows: List[Dict[str, Any]] = []
         all_sources: Set[str] = set()
         if not keys:
-            columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
+            columns = CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"]
             return pd.DataFrame(columns=columns)
         for composition, draw, piece, suffix in keys:
             key = (composition, draw, piece, suffix)
             base_key = (composition, draw, piece, None)
             micro_info = diameter_map.get(key) or diameter_map.get(base_key, {})
             setpoint_info = setpoint_map.get(key) or setpoint_map.get(base_key, {})
-            phase_info = phase_map.get(key) or phase_map.get(base_key, {})
             diameter_um = micro_info.get("diameter")
             area_mm2 = self._diameter_to_area(diameter_um)
             setpoints = setpoint_info.get("setpoints", [])
             sources = setpoint_info.get("sources", [])
             all_sources.update(str(source) for source in sources)
-            notes: List[str] = []
-            if diameter_um is None or area_mm2 is None:
-                notes.append("Missing diameter")
             composition_label = micro_info.get("composition") or setpoint_info.get("composition") or composition
             try:
                 microwire_label = micro_info.get("label") or _microwire_label(draw, piece, suffix)
             except Exception:
                 microwire_label = micro_info.get("label") or f"{draw}/{piece}"
-            as1_value = phase_info.get("As1")
-            if as1_value is None:
-                as1_value = phase_info.get("As")
-            af1_value = phase_info.get("Af1")
-            ms1_value = phase_info.get("Ms1")
-            if ms1_value is None:
-                ms1_value = phase_info.get("Ms")
-            mf1_value = phase_info.get("Mf1")
-            as2_value = phase_info.get("As2")
-            af2_value = phase_info.get("Af2")
-            ms2_value = phase_info.get("Ms2")
-            mf2_value = phase_info.get("Mf2")
-            as_density = self._compute_density(as1_value, area_mm2)
-            ms_density = self._compute_density(ms1_value, area_mm2)
-            as_delta = self._compute_delta(as2_value, as1_value)
-            af_delta = self._compute_delta(af2_value, af1_value)
-            ms_delta = self._compute_delta(ms2_value, ms1_value)
-            mf_delta = self._compute_delta(mf2_value, mf1_value)
-            mf1_af1 = self._compute_delta(mf1_value, af1_value)
-            mf2_af2 = self._compute_delta(mf2_value, af2_value)
-            if as1_value is None:
-                notes.append("As1 missing")
-            if ms1_value is None:
-                notes.append("Ms1 missing")
-            if not setpoints:
-                notes.append("No setpoint data")
-            rows.append(
-                {
-                    "Composition": composition_label,
-                    "Microwire": microwire_label,
-                    MICROSCOPE_D_COLUMN: diameter_um,
-                    ANNEALING_AS_COLUMN: as1_value,
-                    ANNEALING_AF1_COLUMN: af1_value,
-                    ANNEALING_MS_COLUMN: ms1_value,
-                    ANNEALING_MF1_COLUMN: mf1_value,
-                    ANNEALING_AS2_COLUMN: as2_value,
-                    ANNEALING_AF2_COLUMN: af2_value,
-                    ANNEALING_MS2_COLUMN: ms2_value,
-                    ANNEALING_MF2_COLUMN: mf2_value,
-                    CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
-                    CURRENT_DENSITY_MS_DENSITY_COLUMN: ms_density,
-                    CURRENT_DENSITY_AS_DELTA_COLUMN: as_delta,
-                    CURRENT_DENSITY_AF_DELTA_COLUMN: af_delta,
-                    CURRENT_DENSITY_MS_DELTA_COLUMN: ms_delta,
-                    CURRENT_DENSITY_MF_DELTA_COLUMN: mf_delta,
-                    CURRENT_DENSITY_MF_AF1_DELTA_COLUMN: mf1_af1,
-                    CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: mf2_af2,
-                    "Setpoints (mA)": self._format_setpoints(setpoints),
-                    "Sources": self._summarise_sources(sources),
-                    "Notes": "; ".join(notes) if notes else "",
-                    "_group_key": _microwire_key_to_str(key),
-                }
-            )
+            key_text = _microwire_key_to_str(key)
+            records = []
+            if isinstance(groups, dict):
+                raw_records = groups.get(key_text, [])
+                if not raw_records and suffix is not None:
+                    raw_records = groups.get(_microwire_key_to_str(base_key), [])
+                if isinstance(raw_records, list):
+                    high_record, other_records = _select_anchor_and_other_records(raw_records)
+                    records = [record for record in (high_record, *other_records) if record is not None]
+            if not records:
+                rows.append(
+                    self._current_density_row(
+                        composition_label,
+                        microwire_label,
+                        diameter_um,
+                        area_mm2,
+                        phase_map.get(key) or phase_map.get(base_key, {}),
+                        setpoints,
+                        sources,
+                        key_text,
+                        graph_label="",
+                        record=None,
+                    )
+                )
+                continue
+            for record in records:
+                row_sources = list(sources)
+                path = getattr(record, "path", None)
+                if path:
+                    try:
+                        row_sources.append(str(Path(path)))
+                    except Exception:
+                        row_sources.append(str(path))
+                all_sources.update(str(source) for source in row_sources)
+                rows.append(
+                    self._current_density_row(
+                        composition_label,
+                        microwire_label,
+                        diameter_um,
+                        area_mm2,
+                        self._phase_values_for_annealing_record(record),
+                        setpoints,
+                        row_sources,
+                        key_text,
+                        graph_label=_record_label_for_display(record),
+                        record=record,
+                    )
+                )
         self._last_sources = sorted(all_sources)
         if not rows:
-            columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
+            columns = CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"]
             return pd.DataFrame(columns=columns)
         frame = pd.DataFrame(rows)
-        desired_order = [column for column in CURRENT_DENSITY_COLUMNS + ["_group_key"] if column in frame.columns]
+        desired_order = [column for column in CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"] if column in frame.columns]
         return frame.loc[:, desired_order]
+
+    def _phase_values_for_annealing_record(self, record: MeasurementRecord) -> Dict[str, float]:
+        values = _auto_transition_values_for_annealing_record(record)
+        record_id = _transition_record_id_for_annealing_record(record)
+        snapshot_provider = getattr(self._annealing_section, "transition_reviews_snapshot", None)
+        raw_reviews = snapshot_provider() if callable(snapshot_provider) else getattr(self._annealing_section, "_transition_reviews", {})
+        payload = raw_reviews.get(record_id, {}) if isinstance(raw_reviews, dict) else {}
+        if isinstance(payload, dict):
+            status = str(payload.get("status") or "").strip()
+            if status in {
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+            }:
+                return {}
+            final_values = _clean_transition_values(payload.get("final_values_mA"))
+            manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+            if final_values:
+                values.update(final_values)
+            if manual_values:
+                values.update(manual_values)
+        return values
+
+    def _current_density_row(
+        self,
+        composition_label: str,
+        microwire_label: str,
+        diameter_um: Any,
+        area_mm2: Optional[float],
+        phase_info: Mapping[str, Any],
+        setpoints: Sequence[Any],
+        sources: Sequence[Any],
+        key_text: str,
+        *,
+        graph_label: str,
+        record: Optional[MeasurementRecord],
+    ) -> Dict[str, Any]:
+        phase_values = dict(phase_info)
+        if phase_values.get("As1") is None and phase_values.get("As") is not None:
+            phase_values["As1"] = phase_values.get("As")
+        if phase_values.get("Ms1") is None and phase_values.get("Ms") is not None:
+            phase_values["Ms1"] = phase_values.get("Ms")
+        notes: List[str] = []
+        if diameter_um is None or area_mm2 is None:
+            notes.append("Missing diameter")
+        as1_value = phase_values.get("As1")
+        af1_value = phase_values.get("Af1")
+        ms1_value = phase_values.get("Ms1")
+        mf1_value = phase_values.get("Mf1")
+        as2_value = phase_values.get("As2")
+        af2_value = phase_values.get("Af2")
+        ms2_value = phase_values.get("Ms2")
+        mf2_value = phase_values.get("Mf2")
+        if as1_value is None:
+            notes.append("As1 missing")
+        if ms1_value is None:
+            notes.append("Ms1 missing")
+        if not setpoints:
+            notes.append("No setpoint data")
+        review_records = [record] if record is not None else []
+        review_counts = self._review_counts_for_annealing_records(review_records)
+        return {
+            "Composition": composition_label,
+            "Microwire": microwire_label,
+            "Graph": graph_label,
+            MICROSCOPE_D_COLUMN: diameter_um,
+            ANNEALING_AS_COLUMN: as1_value,
+            ANNEALING_AF1_COLUMN: af1_value,
+            ANNEALING_MS_COLUMN: ms1_value,
+            ANNEALING_MF1_COLUMN: mf1_value,
+            ANNEALING_AS2_COLUMN: as2_value,
+            ANNEALING_AF2_COLUMN: af2_value,
+            ANNEALING_MS2_COLUMN: ms2_value,
+            ANNEALING_MF2_COLUMN: mf2_value,
+            CURRENT_DENSITY_AS_DENSITY_COLUMN: self._compute_density(as1_value, area_mm2),
+            CURRENT_DENSITY_MS_DENSITY_COLUMN: self._compute_density(ms1_value, area_mm2),
+            **{
+                column: self._compute_density(phase_values.get(label), area_mm2)
+                for label, column in CURRENT_DENSITY_PER_LABEL_COLUMNS.items()
+            },
+            CURRENT_DENSITY_AS_DELTA_COLUMN: self._compute_delta(as2_value, as1_value),
+            CURRENT_DENSITY_AF_DELTA_COLUMN: self._compute_delta(af2_value, af1_value),
+            CURRENT_DENSITY_MS_DELTA_COLUMN: self._compute_delta(ms2_value, ms1_value),
+            CURRENT_DENSITY_MF_DELTA_COLUMN: self._compute_delta(mf2_value, mf1_value),
+            CURRENT_DENSITY_MF_AF1_DELTA_COLUMN: self._compute_delta(mf1_value, af1_value),
+            CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: self._compute_delta(mf2_value, af2_value),
+            "Setpoints (mA)": self._format_setpoints(setpoints),
+            "Sources": self._summarise_sources(sources),
+            CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: self._status_from_review_counts(review_counts),
+            CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: self._format_review_counts(review_counts),
+            "Notes": "; ".join(notes) if notes else "",
+            "_group_key": key_text,
+            "_record_id": _transition_record_id_for_annealing_record(record) if record is not None else "",
+        }
 
     def _collect_microscope_data(self) -> Dict[MicrowireKey, Dict[str, Any]]:
         result: Dict[MicrowireKey, Dict[str, Any]] = {}
@@ -13661,7 +19436,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             if key is None:
                 continue
             composition, draw, piece, suffix = key
-            diameter = self._to_positive_float(row.get(MICROSCOPE_D_COLUMN))
+            diameter = _diameter_um_from_mapping(row.to_dict())
             composition_label = self._normalise_text(row.get("Composition")) or composition
             label = self._normalise_text(row.get("Microwire"))
             if not label:
@@ -13708,7 +19483,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                         str(composition),
                         int(draw),
                         int(piece),
-                        str(suffix).strip() or None,
+                        str(suffix).strip() if suffix is not None and str(suffix).strip() else None,
                     )
                     setpoint_value = float(setpoint)
                 except (TypeError, ValueError):
@@ -13736,45 +19511,112 @@ class CurrentDensitySection(QtWidgets.QWidget):
         return result
 
     def _collect_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
-        result: Dict[MicrowireKey, Dict[str, float]] = {}
-        snapshot_provider = getattr(self._annealing_section, "phase_points_snapshot", None)
+        result = self._collect_auto_annealing_phase_points()
+        for key_tuple, values in self._collect_reviewed_transition_phase_points().items():
+            combined = dict(result.get(key_tuple, {}))
+            combined.update(values)
+            result[key_tuple] = combined
+        return result
+
+    def _collect_reviewed_transition_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
+        annealing = self._annealing_section
+        snapshot_provider = getattr(annealing, "transition_reviews_snapshot", None)
         if callable(snapshot_provider):
-            raw = snapshot_provider()
+            raw_reviews = snapshot_provider()
         else:
-            raw = getattr(self._annealing_section, "_phase_points", {})
-        if not isinstance(raw, dict):
+            raw_reviews = getattr(annealing, "_transition_reviews", {})
+        if not isinstance(raw_reviews, dict):
+            return {}
+        candidates: Dict[MicrowireKey, List[Tuple[Tuple[int, float, str], Dict[str, float]]]] = {}
+        for record_id, payload in raw_reviews.items():
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("included") is False:
+                continue
+            status = str(payload.get("status") or "").strip()
+            if status and status not in TRANSITION_REVIEW_INCLUDED_STATUSES:
+                continue
+            key_text = str(payload.get("sample_key") or "").strip()
+            if not key_text:
+                record = None
+                lookup = getattr(annealing, "_record_by_transition_id", None)
+                if callable(lookup):
+                    record = lookup(str(record_id))
+                if record is not None:
+                    key_text = _phase_point_key_for_annealing_record(record) or ""
+            key_tuple = _microwire_key_from_string(key_text)
+            if key_tuple is None:
+                continue
+            values = _clean_transition_values(payload.get("auto_values_mA"))
+            final_values = _clean_transition_values(payload.get("final_values_mA"))
+            manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+            if final_values:
+                values.update(final_values)
+            if manual_values:
+                values.update(manual_values)
+            if not values:
+                continue
+            setpoint = _coerce_finite_float(payload.get("setpoint_mA"))
+            setpoint_sort = -setpoint if setpoint is not None else float("inf")
+            status_rank = 0 if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED else 1
+            graph_label = str(payload.get("graph_label") or record_id)
+            candidates.setdefault(key_tuple, []).append(((status_rank, setpoint_sort, graph_label), values))
+        result: Dict[MicrowireKey, Dict[str, float]] = {}
+        for key_tuple, entries in candidates.items():
+            if not entries:
+                continue
+            _sort_key, selected = min(entries, key=lambda item: item[0])
+            result[key_tuple] = dict(selected)
+        return result
+
+    def _collect_auto_annealing_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
+        result: Dict[MicrowireKey, Dict[str, float]] = {}
+        groups = getattr(self._annealing_section, "_record_groups", {})
+        if not isinstance(groups, dict):
             return result
-        for key, payload in raw.items():
-            if not isinstance(key, str) or not isinstance(payload, dict):
+        for key_text, records in groups.items():
+            if not isinstance(records, list):
                 continue
-            parts = _microwire_key_from_string(key)
-            if parts is None:
+            key = _microwire_key_from_string(str(key_text))
+            if key is None:
                 continue
-            composition, draw, piece, suffix = parts
-            cleaned: Dict[str, float] = {}
-            for label in PHASE_POINT_LABELS:
-                try:
-                    numeric = float(payload.get(label))
-                except (TypeError, ValueError):
+            candidates: List[Tuple[Tuple[int, float, str], Dict[str, float]]] = []
+            for record in records:
+                dataframe = getattr(record, "dataframe", None)
+                if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
                     continue
-                if math.isfinite(numeric):
-                    cleaned[label] = numeric
-            if "As1" not in cleaned:
                 try:
-                    numeric = float(payload.get("As"))
-                except (TypeError, ValueError):
-                    numeric = None
-                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
-                    cleaned["As1"] = float(numeric)
-            if "Ms1" not in cleaned:
+                    summary = summarize_annealing_transition_currents(dataframe)
+                except Exception:
+                    continue
+                values = {
+                    "As1": summary.as_current_mA,
+                    "Af1": summary.af_current_mA,
+                    "Ms1": summary.ms_current_mA,
+                    "Mf1": summary.mf_current_mA,
+                }
+                cleaned: Dict[str, float] = {}
+                for label, value in values.items():
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        cleaned[label] = float(value)
+                if set(cleaned) != {"As1", "Af1", "Ms1", "Mf1"}:
+                    continue
+                metadata = getattr(record, "metadata", None)
+                setpoint = getattr(metadata, "setpoint_mA", None)
                 try:
-                    numeric = float(payload.get("Ms"))
+                    setpoint_value = float(setpoint)
                 except (TypeError, ValueError):
-                    numeric = None
-                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
-                    cleaned["Ms1"] = float(numeric)
-            if cleaned:
-                result[(composition, draw, piece, suffix)] = cleaned
+                    setpoint_value = float("inf")
+                high_anchor = 1 if math.isfinite(setpoint_value) and setpoint_value >= 900.0 else 0
+                filename = str(getattr(metadata, "file_name", "") or getattr(record, "path", ""))
+                candidates.append(((high_anchor, setpoint_value, filename), cleaned))
+            if not candidates:
+                continue
+            _sort_key, selected = min(candidates, key=lambda item: item[0])
+            selected = dict(selected)
+            selected["As"] = selected["As1"]
+            selected["Ms"] = selected["Ms1"]
+            result[key] = selected
         return result
 
     @staticmethod
@@ -13970,7 +19812,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 f"Failed to export worksheet:\n{exc}",
             )
             return
-        self.log(f"Current density worksheet exported to {path}")
+        self.log(f"Annealing transitions worksheet exported to {path}")
         QtWidgets.QMessageBox.information(
             self,
             "Export worksheet",
@@ -13978,8 +19820,54 @@ class CurrentDensitySection(QtWidgets.QWidget):
         )
 
 
+def _vsm_transition_review_record_id(record: VsmTemperatureScanRecord) -> str:
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        try:
+            path_text = str(path.resolve())
+        except Exception:
+            path_text = str(path)
+    else:
+        path_text = ""
+    parts = [
+        "vsm_temperature_scan",
+        path_text,
+        str(getattr(record, "sample", "") or ""),
+        str(getattr(record, "label", "") or ""),
+        repr(getattr(record, "key", None)),
+    ]
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"vsm-ts:{digest}"
+
+
+def _vsm_transition_review_is_final(status: str | None) -> bool:
+    return str(status or "").strip() in {
+        TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+        TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+        TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        TRANSITION_REVIEW_STATUS_EXCLUDED,
+    }
+
+
+def _vsm_transition_review_blocks_values(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    status = str(payload.get("status") or "").strip()
+    return status in {
+        TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        TRANSITION_REVIEW_STATUS_EXCLUDED,
+    }
+
+
 class _TransitionTempPreviewPanel(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(str, float)
+    valueCleared = QtCore.pyqtSignal(str)
+    acceptNextRequested = QtCore.pyqtSignal()
+    noTransitionRequested = QtCore.pyqtSignal()
+    excludeRequested = QtCore.pyqtSignal()
+    previousRequested = QtCore.pyqtSignal()
+    nextUnreviewedRequested = QtCore.pyqtSignal()
+    scanChanged = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -13989,10 +19877,18 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self._logger = logger
         self._processor = _get_vsm_temp_processor(logger)
-        self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int]]] = []
-        self._cursor_units = "°C"
+        self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int], Optional[int]]] = []
+        self._drag_controllers: Dict[FigureCanvasQTAgg, _TransitionMarkerDragController] = {}
+        self._cursor_units = "C"
         self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
         self._value_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._auto_value_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._clear_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        self._tab_record_ids: List[str] = []
+        self._tab_auto_values: Dict[str, Dict[str, float]] = {}
+        self._tab_reviewed_values: Dict[str, Dict[str, float]] = {}
+        self._tab_status_texts: Dict[str, str] = {}
+        self._updating_tabs = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -14004,6 +19900,58 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+        self.accept_next_button = QtWidgets.QPushButton("Accept && next", self)
+        self.accept_next_button.clicked.connect(self.acceptNextRequested.emit)
+        self.no_transition_button = QtWidgets.QPushButton("No transition", self)
+        self.no_transition_button.clicked.connect(self.noTransitionRequested.emit)
+        self.exclude_button = QtWidgets.QPushButton("Exclude scan", self)
+        self.exclude_button.clicked.connect(self.excludeRequested.emit)
+        self.previous_button = QtWidgets.QPushButton("Previous", self)
+        self.previous_button.clicked.connect(self.previousRequested.emit)
+        self.next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", self)
+        self.next_unreviewed_button.clicked.connect(self.nextUnreviewedRequested.emit)
+        for button in (
+            self.accept_next_button,
+            self.no_transition_button,
+            self.exclude_button,
+        ):
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        navigation_row = QtWidgets.QHBoxLayout()
+        navigation_row.setContentsMargins(0, 0, 0, 0)
+        navigation_row.setSpacing(6)
+        navigation_row.addWidget(self.previous_button)
+        navigation_row.addWidget(self.next_unreviewed_button)
+        navigation_row.addStretch(1)
+        layout.addLayout(navigation_row)
+
+        self.accept_next_button.setAccessibleName("Accept current VSM scan and go to next")
+        self.no_transition_button.setAccessibleName("Mark current VSM scan as no transition")
+        self.exclude_button.setAccessibleName("Exclude current VSM scan")
+        self.previous_button.setAccessibleName("Go to previous VSM transition review")
+        self.next_unreviewed_button.setAccessibleName("Go to next unreviewed VSM scan")
+
+        self.review_status_label = QtWidgets.QLabel("Review state: Unreviewed", self)
+        self.review_status_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.review_status_label.setStyleSheet("font-size: 10px;")
+        self.review_status_label.setWordWrap(True)
+        layout.addWidget(self.review_status_label)
+
+        self.review_counts_label = QtWidgets.QLabel("", self)
+        self.review_counts_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.review_counts_label.setStyleSheet("font-size: 10px;")
+        self.review_counts_label.setWordWrap(True)
+        layout.addWidget(self.review_counts_label)
+
         self._stack = QtWidgets.QStackedLayout()
         self._placeholder = QtWidgets.QLabel(
             "Select a row to preview VSM temperature scans."
@@ -14011,33 +19959,53 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._tab_widget = QtWidgets.QTabWidget(self)
+        self._tab_widget.currentChanged.connect(self._handle_tab_changed)
         self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._tab_widget)
         layout.addLayout(self._stack, 1)
 
-        controls = QtWidgets.QHBoxLayout()
+        target_row = QtWidgets.QHBoxLayout()
         self.cursor_label = QtWidgets.QLabel("Cursor: —")
         self.cursor_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        controls.addWidget(self.cursor_label)
-        controls.addSpacing(20)
+        target_row.addWidget(self.cursor_label)
+        target_row.addSpacing(12)
 
         for label in TRANSITION_TEMP_LABELS:
             radio = QtWidgets.QRadioButton(f"Set {label}")
             if label == "As":
                 radio.setChecked(True)
             self._target_buttons[label] = radio
-            controls.addWidget(radio)
-        controls.addSpacing(20)
+            radio.setAccessibleName(f"Set reviewed VSM {label} temperature")
+            target_row.addWidget(radio)
+        target_row.addStretch(1)
+        layout.addLayout(target_row)
 
-        for label in TRANSITION_TEMP_LABELS:
+        values_grid = QtWidgets.QGridLayout()
+        values_grid.setContentsMargins(0, 0, 0, 0)
+        values_grid.setHorizontalSpacing(8)
+        values_grid.setVerticalSpacing(3)
+
+        for column, label in enumerate(TRANSITION_TEMP_LABELS):
+            auto_label = QtWidgets.QLabel("Auto: --")
+            auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
             value_label = QtWidgets.QLabel("unset")
+            value_label.setStyleSheet("color: #22c55e; font-weight: 600;")
+            clear_button = QtWidgets.QPushButton(f"Clear {label}")
+            clear_button.setMaximumWidth(66)
+            clear_button.setToolTip(f"Remove only the reviewed {label} temperature.")
+            clear_button.setAccessibleName(f"Clear reviewed VSM {label} temperature")
+            clear_button.clicked.connect(lambda _checked=False, name=label: self._emit_clear_label(name))
+            self._auto_value_labels[label] = auto_label
             self._value_labels[label] = value_label
-            controls.addWidget(QtWidgets.QLabel(f"{label}:"))
-            controls.addWidget(value_label)
-        controls.addStretch(1)
-        layout.addLayout(controls)
+            self._clear_buttons[label] = clear_button
+            values_grid.addWidget(QtWidgets.QLabel(f"{label}:"), 0, column)
+            values_grid.addWidget(auto_label, 1, column)
+            values_grid.addWidget(value_label, 2, column)
+            values_grid.addWidget(clear_button, 3, column)
+            values_grid.setColumnStretch(column, 1)
+        layout.addLayout(values_grid)
 
     def set_target(self, label: Optional[str]) -> None:
         if not label:
@@ -14051,11 +20019,34 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         title: str,
         records: Sequence[VsmTemperatureScanRecord],
         values: Mapping[str, float],
+        auto_values: Mapping[str, float] | None = None,
+        *,
+        auto_values_by_record: Mapping[str, Mapping[str, float]] | None = None,
+        reviewed_values_by_record: Mapping[str, Mapping[str, float]] | None = None,
+        status_by_record: Mapping[str, str] | None = None,
+        counts_text: str = "",
+        selected_record_id: Optional[str] = None,
     ) -> None:
+        render_started_s = time.perf_counter()
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
-        self.header_label.setText(title or "Transition temps")
+        self.header_label.setText(title or "VSM transitions")
         self._update_value_labels(values)
+        self._update_auto_value_labels(auto_values or {})
+        self.review_counts_label.setText(counts_text)
+        self.set_status_text("Review state: Unreviewed")
         self._clear_tabs()
+        self._tab_auto_values = {
+            str(record_id): _clean_vsm_transition_values(payload)
+            for record_id, payload in (auto_values_by_record or {}).items()
+        }
+        self._tab_reviewed_values = {
+            str(record_id): _clean_vsm_transition_values(payload)
+            for record_id, payload in (reviewed_values_by_record or {}).items()
+        }
+        self._tab_status_texts = {
+            str(record_id): str(status)
+            for record_id, status in (status_by_record or {}).items()
+        }
 
         if self._processor is None:
             self._placeholder.setText("VSM temperature scan parser is unavailable.")
@@ -14066,30 +20057,58 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._stack.setCurrentWidget(self._placeholder)
             return
         for record in records:
+            record_id = _vsm_transition_review_record_id(record)
+            figure_started_s = time.perf_counter()
             figure = _plot_vsm_temperature_scan_figure(
                 record,
                 self._processor,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
+                max_plot_points=VSM_TRANSITION_REVIEW_MAX_PLOT_POINTS,
             )
             if figure is None:
                 continue
+            _log_builder_timing(
+                self._logger,
+                "vsm_transition_review_build_figure",
+                figure_started_s,
+                record=_record_label_for_display(record),
+            )
+            self._draw_transition_markers(
+                figure,
+                self._tab_auto_values.get(record_id, auto_values or {}),
+                self._tab_reviewed_values.get(record_id, values),
+            )
             canvas = FigureCanvasQTAgg(figure)
+            _configure_review_canvas(canvas)
             try:
                 canvas.setMouseTracking(True)
             except Exception:
                 pass
             click_cid = None
             motion_cid = None
+            release_cid = None
+            drag_controller = _TransitionMarkerDragController(
+                canvas,
+                labels=TRANSITION_TEMP_LABELS,
+                on_release=self._emit_dragged_value,
+                on_start=self.set_target,
+            )
+            self._drag_controllers[canvas] = drag_controller
             try:
-                click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+                click_cid = canvas.mpl_connect("button_press_event", self._handle_button_press)
             except Exception:
                 click_cid = None
             try:
                 motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
             except Exception:
                 motion_cid = None
-            self._canvas_connections.append((canvas, motion_cid, click_cid))
+            try:
+                release_cid = canvas.mpl_connect("button_release_event", self._handle_button_release)
+            except Exception:
+                release_cid = None
+            self._canvas_connections.append((canvas, motion_cid, click_cid, release_cid))
+            self._tab_record_ids.append(record_id)
             label = _record_label_for_display(record) or record.sample or "Scan"
             page = QtWidgets.QWidget(self._tab_widget)
             page_layout = QtWidgets.QVBoxLayout(page)
@@ -14100,11 +20119,27 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._placeholder.setText("No VSM temperature scans available for this microwire.")
             self._stack.setCurrentWidget(self._placeholder)
         else:
-            if current_index >= 0:
-                self._tab_widget.setCurrentIndex(
-                    min(current_index, self._tab_widget.count() - 1)
-                )
+            selected_index = current_index
+            if selected_record_id and selected_record_id in self._tab_record_ids:
+                selected_index = self._tab_record_ids.index(selected_record_id)
+            if selected_index >= 0:
+                self._updating_tabs = True
+                try:
+                    self._tab_widget.setCurrentIndex(
+                        min(selected_index, self._tab_widget.count() - 1)
+                    )
+                finally:
+                    self._updating_tabs = False
             self._stack.setCurrentWidget(self._tab_widget)
+            self._sync_current_tab_labels()
+            self._emit_scan_changed()
+        _log_builder_timing(
+            self._logger,
+            "vsm_transition_review_render",
+            render_started_s,
+            records=len(records),
+            tabs=self._tab_widget.count(),
+        )
 
     def _current_target(self) -> str:
         for label, button in self._target_buttons.items():
@@ -14112,8 +20147,30 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 return label
         return "As"
 
+    def current_record_id(self) -> Optional[str]:
+        index = self._tab_widget.currentIndex()
+        if index < 0 or index >= len(self._tab_record_ids):
+            return None
+        return self._tab_record_ids[index]
+
+    def set_counts_text(self, text: str) -> None:
+        self.review_counts_label.setText(str(text or ""))
+
+    def set_status_text(self, text: str) -> None:
+        rendered = str(text or "Review state: Unreviewed")
+        self.review_status_label.setText(rendered)
+        status_label = rendered.split(":", 1)[-1].strip() if ":" in rendered else rendered
+        color = _transition_review_status_color(status_label)
+        self.review_status_label.setStyleSheet(f"font-size: 10px; color: {color}; font-weight: 600;")
+
+    def select_record_id(self, record_id: str) -> bool:
+        if not record_id or record_id not in self._tab_record_ids:
+            return False
+        self._tab_widget.setCurrentIndex(self._tab_record_ids.index(record_id))
+        return True
+
     def _clear_tabs(self) -> None:
-        for canvas, motion_cid, click_cid in self._canvas_connections:
+        for canvas, motion_cid, click_cid, release_cid in self._canvas_connections:
             if motion_cid is not None:
                 try:
                     canvas.mpl_disconnect(motion_cid)
@@ -14124,7 +20181,13 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                     canvas.mpl_disconnect(click_cid)
                 except Exception:
                     pass
+            if release_cid is not None:
+                try:
+                    canvas.mpl_disconnect(release_cid)
+                except Exception:
+                    pass
         self._canvas_connections.clear()
+        self._drag_controllers.clear()
         while self._tab_widget.count():
             widget = self._tab_widget.widget(0)
             self._tab_widget.removeTab(0)
@@ -14132,8 +20195,37 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._update_cursor_label(None)
+        self._tab_record_ids.clear()
+        self._tab_auto_values.clear()
+        self._tab_reviewed_values.clear()
+        self._tab_status_texts.clear()
+
+    def _handle_tab_changed(self, _index: int) -> None:
+        self._sync_current_tab_labels()
+        self._emit_scan_changed()
+
+    def _sync_current_tab_labels(self) -> None:
+        record_id = self.current_record_id()
+        if not record_id:
+            return
+        self._update_auto_value_labels(self._tab_auto_values.get(record_id, {}))
+        self._update_value_labels(self._tab_reviewed_values.get(record_id, {}))
+        self.set_status_text(self._tab_status_texts.get(record_id, "Review state: Unreviewed"))
+
+    def _emit_scan_changed(self) -> None:
+        if self._updating_tabs:
+            return
+        try:
+            self.scanChanged.emit()
+        except Exception:
+            pass
 
     def _handle_motion(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_motion(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
+            return
         if event is None or event.inaxes is None or event.xdata is None:
             self._update_cursor_label(None)
             return
@@ -14144,21 +20236,61 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             return
         self._update_cursor_label(value)
 
-    def _handle_click(self, event: Any) -> None:
-        if event is None or not getattr(event, "dblclick", False):
+    def _handle_button_press(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_press(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
             return
-        if event.xdata is None:
-            return
+        self._handle_click(event)
+
+    def _handle_button_release(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_release(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
+
+    def _emit_dragged_value(self, label: str, value: float) -> None:
         try:
-            value = float(event.xdata)
-        except Exception:
-            return
-        target = self._current_target()
-        self._update_cursor_label(value)
-        try:
-            self.valuePicked.emit(target, value)
+            self.valuePicked.emit(str(label), float(value))
         except Exception:
             pass
+
+    def _emit_clear_label(self, label: str) -> None:
+        self.set_target(label)
+        try:
+            self.valueCleared.emit(str(label))
+        except Exception:
+            pass
+
+    def _handle_click(self, event: Any) -> None:
+        started_s = time.perf_counter()
+        try:
+            if event is None:
+                return
+            button = getattr(event, "button", None)
+            if button not in (None, 1):
+                return
+            if event.xdata is None:
+                return
+            try:
+                value = float(event.xdata)
+            except Exception:
+                return
+            target = self._current_target()
+            self._update_cursor_label(value)
+            try:
+                self.valuePicked.emit(target, value)
+            except Exception:
+                pass
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="click_commit",
+            )
 
     def _update_cursor_label(self, value: Optional[float]) -> None:
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -14179,10 +20311,157 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         for label, widget in self._value_labels.items():
             widget.setText(self._format_value(values.get(label)))
 
+    def _update_auto_value_labels(self, values: Mapping[str, float]) -> None:
+        for label, widget in self._auto_value_labels.items():
+            text = self._format_value(values.get(label))
+            if text == "unset":
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {text}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+
+    def _draw_transition_markers(
+        self,
+        figure: Figure,
+        auto_values: Mapping[str, float],
+        reviewed_values: Mapping[str, float],
+    ) -> None:
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return
+        primary = axes[0]
+
+        def _draw(
+            label: str,
+            value: object,
+            *,
+            color: str,
+            linestyle: str,
+            linewidth: float,
+            alpha: float,
+            prefix: str,
+            y: float,
+        ) -> None:
+            numeric = _coerce_finite_float(value)
+            if numeric is None:
+                return
+            for axis in axes:
+                try:
+                    line = axis.axvline(
+                        numeric,
+                        color=color,
+                        linestyle=linestyle,
+                        linewidth=linewidth,
+                        alpha=alpha,
+                        label="_nolegend_",
+                        zorder=6,
+                    )
+                    line.set_gid(
+                        "transition_temp_reviewed_marker"
+                        if not prefix
+                        else "transition_temp_auto_marker"
+                    )
+                    _set_transition_marker_metadata(line, label, "reviewed" if not prefix else "auto")
+                except Exception:
+                    continue
+            try:
+                text = primary.text(
+                    numeric,
+                    y,
+                    f"{prefix}{label}",
+                    transform=primary.get_xaxis_transform(),
+                    rotation=90,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color=color,
+                    bbox={
+                        "boxstyle": "round,pad=0.14",
+                        "facecolor": "white",
+                        "edgecolor": color,
+                        "alpha": 0.84,
+                        "linewidth": 0.55,
+                    },
+                )
+                text.set_gid(
+                    "transition_temp_reviewed_label"
+                    if not prefix
+                    else "transition_temp_auto_label"
+                )
+                _set_transition_marker_metadata(text, label, "reviewed" if not prefix else "auto")
+            except Exception:
+                pass
+
+        for label in TRANSITION_TEMP_LABELS:
+            _draw(
+                label,
+                auto_values.get(label),
+                color="#d97706",
+                linestyle=":",
+                linewidth=1.1,
+                alpha=0.65,
+                prefix="auto ",
+                y=0.98,
+            )
+        for label in TRANSITION_TEMP_LABELS:
+            _draw(
+                label,
+                reviewed_values.get(label),
+                color="#16a34a",
+                linestyle="-",
+                linewidth=1.8,
+                alpha=0.95,
+                prefix="",
+                y=0.90,
+            )
+
+    def update_current_reviewed_markers(self) -> None:
+        started_s = time.perf_counter()
+        record_id = self.current_record_id()
+        if not record_id:
+            return
+        page = self._tab_widget.currentWidget()
+        if page is None or page.layout() is None or page.layout().count() < 1:
+            return
+        canvas = page.layout().itemAt(0).widget()
+        figure = getattr(canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return
+        for axis in axes:
+            for artist in list(getattr(axis, "lines", []) or []):
+                try:
+                    if artist.get_gid() == "transition_temp_reviewed_marker":
+                        artist.remove()
+                except Exception:
+                    pass
+            for artist in list(getattr(axis, "texts", []) or []):
+                try:
+                    if artist.get_gid() == "transition_temp_reviewed_label":
+                        artist.remove()
+                except Exception:
+                    pass
+        self._draw_transition_markers(
+            figure,
+            {},
+            self._tab_reviewed_values.get(record_id, {}),
+        )
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+        _log_builder_timing(
+            self._logger,
+            "vsm_transition_review_marker_update",
+            started_s,
+            record=record_id,
+        )
+
 
 class TransitionTempsSection(QtWidgets.QWidget):
     section_key = "transition_temps"
-    section_title = "Transition temps"
+    section_title = "VSM transitions"
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
@@ -14199,12 +20478,30 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self.logger = logger
         self._log_callback = log_callback
         self._vsm_temperature_section = vsm_temperature_section
-        self.store = MiniDatabaseStore(self.section_key)
-        self.data = self.store.load()
+        self.store = MiniDatabaseStore(
+            self.section_key,
+            suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+        )
+        self.data = (
+            MiniDatabaseData()
+            if MiniDatabaseSection._skip_initial_store_load
+            else self.store.load()
+        )
         self._transition_points = self._load_transition_points()
+        self._transition_reviews = self._load_transition_reviews()
+        self._transition_state_store_timer = QtCore.QTimer(self)
+        self._transition_state_store_timer.setSingleShot(True)
+        self._transition_state_store_timer.setInterval(250)
+        self._transition_state_store_timer.timeout.connect(self._persist_transition_state)
+        self._auto_values_cache: Dict[str, Dict[str, float]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._all_transition_records: List[VsmTemperatureScanRecord] = []
+        self._review_content_identity_cache: Dict[int, Tuple[object, str]] = {}
         self._last_sources: List[str] = []
-        self._current_frame = pd.DataFrame(columns=TRANSITION_TEMP_COLUMNS + ["_group_key"])
+        self._pending_preview_record_id: Optional[str] = None
+        self._current_frame = pd.DataFrame(
+            columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+        )
         self.model = DataFrameModel(self._current_frame)
         self.model.set_editable_columns(set(TRANSITION_TEMP_COLUMN_MAP.values()))
         self.model.dataChanged.connect(self._handle_model_data_changed)
@@ -14219,7 +20516,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         layout.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
-        self.refresh_button = QtWidgets.QPushButton("Recalculate")
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_data)
         controls.addWidget(self.refresh_button)
         self.export_button = QtWidgets.QPushButton("Export worksheet...")
@@ -14284,6 +20581,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         preview_panel.valuePicked.connect(self._apply_picked_value)
+        preview_panel.valueCleared.connect(self._clear_picked_value)
+        preview_panel.acceptNextRequested.connect(self._accept_current_scan_and_next)
+        preview_panel.noTransitionRequested.connect(self._mark_current_scan_no_transition)
+        preview_panel.excludeRequested.connect(self._exclude_current_scan)
+        preview_panel.previousRequested.connect(self._select_previous_scan)
+        preview_panel.nextUnreviewedRequested.connect(self._select_next_unreviewed_scan)
+        preview_panel.scanChanged.connect(self._sync_preview_status)
 
         if hasattr(self._vsm_temperature_section, "data_updated"):
             try:
@@ -14299,7 +20603,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             self.logger.log(level, message)
 
     def _load_transition_points(self) -> Dict[str, Dict[str, float]]:
-        stored = self.data.extra.get("transition_temps")
+        stored = self.data.extra.get(VSM_TRANSITION_VALUES_KEY)
         if not isinstance(stored, dict):
             return {}
         cleaned: Dict[str, Dict[str, float]] = {}
@@ -14315,7 +20619,92 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 cleaned[key] = entry
         return cleaned
 
+    def _load_transition_reviews(self) -> Dict[str, Dict[str, Any]]:
+        stored = self.data.extra.get(VSM_TRANSITION_REVIEW_EXTRA_KEY)
+        if isinstance(stored, dict) and isinstance(stored.get("records"), dict):
+            stored = stored.get("records")
+        if not isinstance(stored, dict):
+            return {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in stored.items():
+            if not isinstance(record_id, str) or not isinstance(payload, dict):
+                continue
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                cleaned[record_id] = entry
+        return cleaned
+
+    def _clean_transition_review_payload(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        status = str(payload.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED).strip()
+        if status not in {
+            TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
+        }:
+            status = TRANSITION_REVIEW_STATUS_UNREVIEWED
+        auto_values = _clean_vsm_transition_values(payload.get("auto_values_C"))
+        if not auto_values:
+            auto_values = _clean_vsm_transition_values(payload.get("auto_values"))
+        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+        if not manual_values:
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values"))
+        final_values = _clean_vsm_transition_values(payload.get("final_values_C"))
+        if not final_values:
+            final_values = _clean_vsm_transition_values(payload.get("values"))
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED and manual_values:
+            final_values = dict(manual_values)
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO and not final_values:
+            final_values = dict(auto_values)
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            final_values = {}
+            manual_values = {}
+        included = payload.get("included")
+        if status in TRANSITION_REVIEW_INCLUDED_STATUSES:
+            included = bool(final_values)
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            included = False
+        else:
+            included = bool(included)
+        cleaned: Dict[str, Any] = {
+            "status": status,
+            "included": bool(included),
+            "auto_values_C": auto_values,
+            "manual_values_C": manual_values,
+            "final_values_C": final_values,
+        }
+        for key in (
+            "sample",
+            "group_key",
+            "record_label",
+            "record_path",
+            "content_identity",
+            "source_name",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                cleaned[key] = str(value)
+        if record_id:
+            cleaned["record_id"] = str(record_id)
+        return cleaned
+
     def _store_transition_points(self) -> None:
+        self._sync_transition_points_payload()
+        self._persist_transition_state()
+
+    def _sync_transition_points_payload(self) -> None:
         snapshot: Dict[str, Dict[str, float]] = {}
         for key, payload in self._transition_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
@@ -14327,15 +20716,52 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     entry[label] = float(value)
             if entry:
                 snapshot[key] = entry
-        self.data.extra["transition_temps"] = snapshot
+        self.data.extra[VSM_TRANSITION_VALUES_KEY] = snapshot
+
+    def _persist_transition_state(self) -> None:
+        self._sync_transition_points_payload()
+        self._store_transition_reviews(update_table=False)
         self.data.table = self.model.frame()
         try:
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist transition temps")
 
-    def transition_points_snapshot(self) -> Dict[str, Dict[str, float]]:
-        snapshot: Dict[str, Dict[str, float]] = {}
+    def _schedule_transition_state_store(self) -> None:
+        self._sync_transition_points_payload()
+        self._store_transition_reviews(update_table=False)
+        self.data.table = self.model.frame()
+        try:
+            self._transition_state_store_timer.start()
+        except Exception:
+            self._persist_transition_state()
+
+    def _store_transition_reviews(self, *, update_table: bool = True) -> None:
+        records: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            if not isinstance(record_id, str) or not isinstance(payload, dict):
+                continue
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                records[record_id] = entry
+        self._transition_reviews = records
+        self.data.extra[VSM_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": VSM_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": records,
+        }
+        if update_table:
+            self.data.table = self.model.frame()
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                snapshot[record_id] = entry
+        return snapshot
+
+    def transition_points_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
         for key, payload in self._transition_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
@@ -14346,15 +20772,100 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     cleaned[label] = float(value)
             if cleaned:
                 snapshot[key] = cleaned
+        for key, records in self._record_groups.items():
+            counts = self._review_counts_for_records(records)
+            values = self._values_for_group(key, records, include_auto=True)
+            status = self._group_status_from_counts(counts)
+            if values:
+                entry: Dict[str, Any] = dict(values)
+                entry["__review_status__"] = status
+                entry["__review_counts__"] = dict(counts)
+                snapshot[key] = entry
+                continue
+            if self._group_blocks_auto(records):
+                snapshot[key] = {
+                    VSM_TRANSITION_STATUS_KEY: TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    VSM_TRANSITION_INCLUDED_KEY: False,
+                    "__review_status__": status,
+                    "__review_counts__": dict(counts),
+                }
+                continue
+            if counts.get("total", 0):
+                snapshot[key] = {
+                    "__review_status__": status,
+                    "__review_counts__": dict(counts),
+                }
         return snapshot
+
+    def export_project_payload(self) -> Dict[str, Any]:
+        self._sync_transition_points_payload()
+        self._store_transition_reviews(update_table=True)
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame()
+        columns = [str(column) for column in getattr(frame, "columns", [])]
+        rows: List[Dict[str, Any]] = []
+        if not frame.empty:
+            for record in frame.to_dict(orient="records"):
+                rows.append({column: _json_safe(record.get(column)) for column in columns})
+        index_payload = [_json_safe(index) for index in frame.index.tolist()] if not frame.empty else []
+        return {
+            "section": self.section_key,
+            "title": self.section_title,
+            "columns": columns,
+            "rows": rows,
+            "index": index_payload,
+            "extra": _json_safe(self.data.extra),
+            "sources": [],
+            "processed": {},
+        }
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:
+        if not isinstance(payload, Mapping) or not payload:
+            self.data = MiniDatabaseData()
+            self._transition_points = {}
+            self._transition_reviews = {}
+            self._current_frame = pd.DataFrame(
+                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+            )
+            self.model.set_frame(self._current_frame)
+            self.refresh_data()
+            return
+        columns = [str(column) for column in payload.get("columns", [])] if isinstance(payload.get("columns"), list) else []
+        rows = payload.get("rows")
+        frame = pd.DataFrame(rows if isinstance(rows, list) else [])
+        if columns:
+            for column in columns:
+                if column not in frame.columns:
+                    frame[column] = None
+            frame = frame.loc[:, columns]
+        index_payload = payload.get("index")
+        if isinstance(index_payload, list) and len(index_payload) == len(frame.index):
+            try:
+                frame.index = pd.Index(index_payload)
+            except Exception:
+                pass
+        extra = payload.get("extra")
+        self.data = MiniDatabaseData(
+            sources=[],
+            processed={},
+            table=frame,
+            extra=dict(extra) if isinstance(extra, Mapping) else {},
+        )
+        self._transition_points = self._load_transition_points()
+        self._transition_reviews = self._load_transition_reviews()
+        self.refresh_data()
 
     def refresh_data(self) -> None:
         previous_order = self._current_column_order()
         selected_key = self._current_selection_key()
         self._refresh_record_groups()
-        valid_keys = set(self._record_groups.keys())
-        if self._prune_transition_points(valid_keys):
-            self._store_transition_points()
+        all_groups = _group_graph_records_by_key(self._all_transition_records)
+        reconciled_points = self._reconcile_transition_points(all_groups.keys())
+        reconciled_reviews = self._reconcile_transition_reviews(self._all_transition_records)
+        if reconciled_points or reconciled_reviews:
+            self._sync_transition_points_payload()
+            self._store_transition_reviews(update_table=False)
         frame = self._build_frame()
         self._current_frame = frame
         self.model.set_frame(frame)
@@ -14368,15 +20879,17 @@ class TransitionTempsSection(QtWidgets.QWidget):
             )
         else:
             self._hide_internal_columns()
-        try:
-            self.table_view.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not MiniDatabaseSection._project_load_batch_mode:
+            try:
+                self.table_view.resizeColumnsToContents()
+            except Exception:
+                pass
         self._restore_selection(selected_key)
         self._update_preview()
 
         total = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
         annotated = 0
+        auto_estimated = 0
         if total and isinstance(frame, pd.DataFrame):
             series = []
             for column in TRANSITION_TEMP_COLUMN_MAP.values():
@@ -14384,8 +20897,18 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if series:
                 stacked = pd.concat(series, axis=1)
                 annotated = int(stacked.notna().any(axis=1).sum())
+                auto_estimated = self._auto_estimated_transition_count(
+                    frame,
+                    manually_annotated=stacked.notna().any(axis=1),
+                )
+        scan_counts = self._review_counts_for_records(
+            [record for records in self._record_groups.values() for record in records]
+        )
         status_text = (
-            f"{annotated} of {total} sample(s) have transition temps annotated."
+            f"{annotated} of {total} scan row(s) have accepted/reviewed transition temps; "
+            f"{auto_estimated} additional scan row(s) have automatic estimates; "
+            f"{scan_counts['reviewed']} of {scan_counts['total']} scan(s) reviewed "
+            f"({scan_counts['no_transition']} no transition, {scan_counts['excluded']} excluded)."
             if total
             else "No VSM temperature scan data yet."
         )
@@ -14405,8 +20928,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
             pass
 
     def _refresh_record_groups(self) -> None:
+        self._auto_values_cache.clear()
         grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
         payload = None
+        all_records: List[VsmTemperatureScanRecord] = []
         try:
             payload = self._vsm_temperature_section.store.load_payload(
                 "vsm_temperature_scan_records"
@@ -14414,12 +20939,30 @@ class TransitionTempsSection(QtWidgets.QWidget):
         except Exception:
             payload = None
         if isinstance(payload, list):
-            hidden = _hidden_paths_from_section(self._vsm_temperature_section)
-            visible_records = [
-                record
-                for record in payload
-                if _record_path_key(record) not in hidden
-            ]
+            all_records.extend(
+                record for record in payload if isinstance(record, VsmTemperatureScanRecord)
+            )
+        fallback_records = self._fallback_vsm_temperature_records(include_hidden=True)
+        if fallback_records:
+            seen = {_record_path_key(record) or repr(record) for record in all_records}
+            for record in fallback_records:
+                marker = _record_path_key(record) or repr(record)
+                if marker in seen:
+                    continue
+                all_records.append(record)
+                seen.add(marker)
+        self._all_transition_records = all_records
+        current_records_by_id = {id(record): record for record in all_records}
+        self._review_content_identity_cache = {
+            key: value
+            for key, value in self._review_content_identity_cache.items()
+            if current_records_by_id.get(key) is value[0]
+        }
+        hidden = _hidden_paths_from_section(self._vsm_temperature_section)
+        visible_records = [
+            record for record in all_records if _record_path_key(record) not in hidden
+        ]
+        if visible_records:
             grouped = _group_graph_records_by_key(visible_records)
             for records in grouped.values():
                 records.sort(key=_record_label_for_display)
@@ -14432,6 +20975,359 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     sources.append(str(path))
         self._last_sources = list(dict.fromkeys(sources))
 
+    def _fallback_vsm_temperature_records(
+        self, *, include_hidden: bool = False
+    ) -> List[VsmTemperatureScanRecord]:
+        section = self._vsm_temperature_section
+        hidden = _hidden_paths_from_section(section)
+        records: List[VsmTemperatureScanRecord] = []
+        raw_records = getattr(section, "_all_records", None)
+        if isinstance(raw_records, list):
+            records.extend(
+                record
+                for record in raw_records
+                if isinstance(record, VsmTemperatureScanRecord)
+            )
+        if not records:
+            grouped = getattr(section, "_record_groups_by_key", None)
+            if isinstance(grouped, dict):
+                for values in grouped.values():
+                    if isinstance(values, list):
+                        records.extend(
+                            record
+                            for record in values
+                            if isinstance(record, VsmTemperatureScanRecord)
+                        )
+        unique: Dict[str, VsmTemperatureScanRecord] = {}
+        for record in records:
+            key = _record_path_key(record) or repr(record)
+            if not include_hidden and key in hidden:
+                continue
+            unique.setdefault(key, record)
+        return list(unique.values())
+
+    def _review_payload_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, Any]:
+        record_id = _vsm_transition_review_record_id(record)
+        try:
+            reviews = object.__getattribute__(self, "__dict__").get("_transition_reviews", {})
+        except Exception:
+            reviews = {}
+        payload = reviews.get(record_id, {}) if isinstance(reviews, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        return self._clean_transition_review_payload(record_id, payload)
+
+    def _auto_values_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, float]:
+        record_id = _vsm_transition_review_record_id(record)
+        try:
+            cache = object.__getattribute__(self, "_auto_values_cache")
+        except Exception:
+            cache = None
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                object.__setattr__(self, "_auto_values_cache", cache)
+            except Exception:
+                pass
+        cached = cache.get(record_id)
+        if cached is not None:
+            _log_builder_cache_event(
+                self.logger,
+                "vsm_transition_auto_values",
+                hit=True,
+                record=record_id,
+            )
+            return dict(cached)
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None:
+            return {}
+        data = getattr(record, "data", None)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return {}
+        try:
+            estimated = processor.estimate_transition_points(data)
+        except Exception:
+            return {}
+        cleaned = _clean_vsm_transition_values(estimated)
+        cache[record_id] = dict(cleaned)
+        _log_builder_cache_event(
+            self.logger,
+            "vsm_transition_auto_values",
+            hit=False,
+            record=record_id,
+        )
+        return cleaned
+
+    def _refresh_group_table_row(self, group_key: str) -> None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty or "_group_key" not in frame.columns:
+            return
+        try:
+            matches = frame.index[frame["_group_key"] == group_key].tolist()
+        except Exception:
+            matches = []
+        if not matches:
+            return
+        changed_columns: List[int] = []
+        for raw_row in matches:
+            row = int(raw_row)
+            series = frame.iloc[row]
+            record = self._record_for_row(series)
+            records = [record] if record is not None else self._record_groups.get(group_key, [])
+            values = self._values_for_record(record) if record is not None else self._values_for_group(group_key, records, include_auto=False)
+            counts = self._review_counts_for_records(records)
+            updates = {
+                TRANSITION_TEMP_AS_COLUMN: values.get("As"),
+                TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
+                TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
+                TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+                "Review status": self._group_status_from_counts(counts),
+                "Scans": counts["total"],
+                "Accepted": counts["accepted"] + counts["manual"],
+                "No transition": counts["no_transition"],
+                "Excluded": counts["excluded"],
+                "Unreviewed": counts["unreviewed"],
+            }
+            for column, value in updates.items():
+                if column not in frame.columns:
+                    continue
+                col = int(frame.columns.get_loc(column))
+                try:
+                    frame.iat[row, col] = value
+                    changed_columns.append(col)
+                except Exception:
+                    continue
+        if not changed_columns:
+            return
+        try:
+            self.model._invalidate_frame_caches()
+        except Exception:
+            pass
+        left = self.model.index(min(int(row) for row in matches), min(changed_columns))
+        right = self.model.index(max(int(row) for row in matches), max(changed_columns))
+        try:
+            self.model.dataChanged.emit(left, right, [QtCore.Qt.ItemDataRole.DisplayRole])
+        except Exception:
+            pass
+        return
+
+    def _values_for_record(
+        self,
+        record: VsmTemperatureScanRecord,
+        payload: Mapping[str, Any] | None = None,
+    ) -> Dict[str, float]:
+        review = payload if isinstance(payload, Mapping) else self._review_payload_for_record(record)
+        status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+        if status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
+        manual = _clean_vsm_transition_values(
+            review.get("manual_values_C") if isinstance(review, Mapping) else None
+        )
+        final = _clean_vsm_transition_values(
+            review.get("final_values_C") if isinstance(review, Mapping) else None
+        )
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED and manual:
+            return manual
+        if status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            return final or self._auto_values_for_record(record)
+        if final and bool(review.get("included")):
+            return final
+        return {}
+
+    def _status_for_record(
+        self,
+        record: VsmTemperatureScanRecord,
+        payload: Mapping[str, Any] | None = None,
+    ) -> str:
+        review = payload if isinstance(payload, Mapping) else self._review_payload_for_record(record)
+        values = self._values_for_record(record, review)
+        auto_values = self._auto_values_for_record(record)
+        status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+        return _transition_review_status_label(
+            status,
+            has_values=bool(values),
+            has_auto_values=bool(auto_values),
+        )
+
+    def _review_counts_for_records(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Dict[str, int]:
+        counts = {
+            "total": len(records),
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            status_label = self._status_for_record(record, payload)
+            if self._auto_values_for_record(record):
+                counts["auto_candidates"] += 1
+            if status_label == "Accepted":
+                counts["accepted"] += 1
+            elif status_label == "Manual adjusted":
+                counts["manual"] += 1
+            elif status_label == "No transition":
+                counts["no_transition"] += 1
+            elif status_label == "Excluded":
+                counts["excluded"] += 1
+            elif status_label == "Needs attention":
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+        counts["reviewed"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+        )
+        return counts
+
+    @staticmethod
+    def _review_counts_text(counts: Mapping[str, int]) -> str:
+        parts = [
+            f"Total {int(counts.get('total', 0))}",
+            f"Done {int(counts.get('reviewed', 0))}",
+            f"Open {int(counts.get('unreviewed', 0))}",
+            f"Auto {int(counts.get('auto_candidates', 0))}",
+            f"Accepted {int(counts.get('accepted', 0))}",
+            f"Manual {int(counts.get('manual', 0))}",
+            f"No transition {int(counts.get('no_transition', 0))}",
+            f"Excluded {int(counts.get('excluded', 0))}",
+        ]
+        if int(counts.get("needs_attention", 0)):
+            parts.append(f"Needs attention {int(counts.get('needs_attention', 0))}")
+        return " | ".join(parts)
+
+    @staticmethod
+    def _group_status_from_counts(counts: Mapping[str, int]) -> str:
+        total = int(counts.get("total", 0))
+        if total <= 0:
+            return "No scans"
+        if int(counts.get("manual", 0)):
+            return "Manual adjusted"
+        if int(counts.get("accepted", 0)):
+            return "Accepted"
+        negative = int(counts.get("no_transition", 0)) + int(counts.get("excluded", 0))
+        if negative >= total:
+            if int(counts.get("no_transition", 0)):
+                return "No transition"
+            return "Excluded"
+        if int(counts.get("reviewed", 0)):
+            return "Partly reviewed"
+        if int(counts.get("auto_candidates", 0)):
+            return "Auto candidates"
+        return "Unreviewed"
+
+    def _group_has_review_records(self, records: Sequence[VsmTemperatureScanRecord]) -> bool:
+        try:
+            reviews = object.__getattribute__(self, "__dict__").get("_transition_reviews", {})
+        except Exception:
+            reviews = {}
+        if not isinstance(reviews, dict):
+            return False
+        for record in records:
+            if _vsm_transition_review_record_id(record) in reviews:
+                return True
+        return False
+
+    def _group_blocks_auto(self, records: Sequence[VsmTemperatureScanRecord]) -> bool:
+        if not records:
+            return False
+        saw_review = False
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            status = str(payload.get("status") or "").strip()
+            if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
+                return False
+            saw_review = True
+            if status in TRANSITION_REVIEW_INCLUDED_STATUSES and self._values_for_record(record, payload):
+                return False
+            if status not in {
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+            }:
+                return False
+        return saw_review
+
+    def _values_for_group(
+        self,
+        group_key: str,
+        records: Sequence[VsmTemperatureScanRecord],
+        *,
+        include_auto: bool = False,
+    ) -> Dict[str, float]:
+        values: Dict[str, float] = {}
+        has_review_records = self._group_has_review_records(records)
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            record_values = self._values_for_record(record, payload)
+            for label in TRANSITION_TEMP_LABELS:
+                if label not in values and label in record_values:
+                    values[label] = record_values[label]
+        if values:
+            return values
+        if not has_review_records:
+            legacy = _clean_vsm_transition_values(self._transition_points.get(group_key))
+            if legacy:
+                return legacy
+        if include_auto and not self._group_blocks_auto(records):
+            for record in records:
+                payload = self._review_payload_for_record(record)
+                if _vsm_transition_review_blocks_values(payload):
+                    continue
+                auto_values = self._auto_values_for_record(record)
+                for label in TRANSITION_TEMP_LABELS:
+                    if label not in values and label in auto_values:
+                        values[label] = auto_values[label]
+                if values:
+                    break
+        return values
+
+    def _auto_values_for_records(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Dict[str, float]:
+        for record in records:
+            if _vsm_transition_review_blocks_values(self._review_payload_for_record(record)):
+                continue
+            cleaned = self._auto_values_for_record(record)
+            if cleaned:
+                return cleaned
+        return {}
+
+    def _auto_estimated_transition_count(
+        self,
+        frame: pd.DataFrame,
+        *,
+        manually_annotated: pd.Series,
+    ) -> int:
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+            return 0
+        count = 0
+        for row_index, row in frame.iterrows():
+            try:
+                if bool(manually_annotated.loc[row_index]):
+                    continue
+            except Exception:
+                pass
+            key = row.get("_group_key")
+            if not isinstance(key, str) or not key.strip():
+                continue
+            records = self._record_groups.get(key, [])
+            if self._auto_values_for_records(records):
+                count += 1
+        return count
+
     def _build_frame(self) -> pd.DataFrame:
         rows: List[Dict[str, Any]] = []
         for key in sorted(self._record_groups.keys()):
@@ -14439,23 +21335,52 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if key_tuple is None:
                 continue
             composition, microwire = _microwire_info_from_key(key_tuple)
-            values = self._transition_points.get(key, {})
-            rows.append(
-                {
-                    "Composition": composition,
-                    "Microwire": microwire,
-                    TRANSITION_TEMP_AS_COLUMN: values.get("As"),
-                    TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
-                    TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
-                    TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
-                    "_group_key": key,
-                }
-            )
+            records = self._record_groups.get(key, [])
+            for record in records:
+                values = self._values_for_record(record)
+                counts = self._review_counts_for_records([record])
+                rows.append(
+                    {
+                        "Composition": composition,
+                        "Microwire": microwire,
+                        "Graph": _record_label_for_display(record),
+                        TRANSITION_TEMP_AS_COLUMN: values.get("As"),
+                        TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
+                        TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
+                        TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+                        "Review status": self._group_status_from_counts(counts),
+                        "Scans": counts["total"],
+                        "Accepted": counts["accepted"] + counts["manual"],
+                        "No transition": counts["no_transition"],
+                        "Excluded": counts["excluded"],
+                        "Unreviewed": counts["unreviewed"],
+                        "_group_key": key,
+                        "_record_id": _vsm_transition_review_record_id(record),
+                    }
+                )
         if not rows:
-            return pd.DataFrame(columns=TRANSITION_TEMP_COLUMNS + ["_group_key"])
+            return pd.DataFrame(
+                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key", "_record_id"]
+            )
         frame = pd.DataFrame(rows)
-        desired = [col for col in TRANSITION_TEMP_COLUMNS + ["_group_key"] if col in frame.columns]
+        desired = [
+            col
+            for col in TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key", "_record_id"]
+            if col in frame.columns
+        ]
         return frame.loc[:, desired]
+
+    def _record_for_row(self, row: Optional[pd.Series]) -> Optional[VsmTemperatureScanRecord]:
+        if row is None:
+            return None
+        record_id = str(row.get("_record_id") or "").strip()
+        group_key = str(row.get("_group_key") or "").strip()
+        if not record_id or not group_key:
+            return None
+        for record in self._record_groups.get(group_key, []):
+            if _vsm_transition_review_record_id(record) == record_id:
+                return record
+        return None
 
     def _hide_internal_columns(self) -> None:
         table = self.table_view
@@ -14497,7 +21422,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return None
         return str(key_value)
 
-    def _restore_selection(self, key: Optional[str]) -> None:
+    def _restore_selection(self, key: Optional[str], record_id: Optional[str] = None) -> None:
         if not key:
             return
         table = self.table_view
@@ -14510,6 +21435,15 @@ class TransitionTempsSection(QtWidgets.QWidget):
             matches = frame.index[frame["_group_key"] == key].tolist()
         except Exception:
             matches = []
+        if record_id and matches and "_record_id" in frame.columns:
+            try:
+                record_matches = frame.index[
+                    (frame["_group_key"] == key) & (frame["_record_id"] == record_id)
+                ].tolist()
+            except Exception:
+                record_matches = []
+            if record_matches:
+                matches = record_matches
         if not matches:
             return
         row = matches[0]
@@ -14523,6 +21457,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
             pass
 
     def _update_preview(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         panel = self._preview_panel
         if panel is None:
             return
@@ -14536,13 +21472,44 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return
         key_tuple = self._parse_group_key(key)
         if key_tuple is None:
-            panel.update_selection("Transition temps", [], {})
+            panel.update_selection("VSM transitions", [], {})
             return
         composition, microwire = _microwire_info_from_key(key_tuple)
-        title = f"{composition} — {microwire}" if composition and microwire else "Transition temps"
+        title = f"{composition} — {microwire}" if composition and microwire else "VSM transitions"
         records = self._record_groups.get(key, [])
-        values = self._transition_points.get(key, {})
-        panel.update_selection(title, records, values)
+        row = self._selected_row_series()
+        record = self._record_for_row(row)
+        if record is not None:
+            records = [record]
+        values = self._values_for_group(key, records, include_auto=False)
+        if record is not None:
+            values = self._values_for_record(record)
+        group_auto_values = self._auto_values_for_records(records)
+        auto_by_record: Dict[str, Dict[str, float]] = {}
+        reviewed_by_record: Dict[str, Dict[str, float]] = {}
+        status_by_record: Dict[str, str] = {}
+        for record in records:
+            record_id = _vsm_transition_review_record_id(record)
+            payload = self._review_payload_for_record(record)
+            auto_by_record[record_id] = self._auto_values_for_record(record)
+            if not auto_by_record[record_id] and len(records) == 1:
+                auto_by_record[record_id] = dict(group_auto_values)
+            reviewed_by_record[record_id] = self._values_for_record(record, payload)
+            status_by_record[record_id] = f"Review state: {self._status_for_record(record, payload)}"
+        selected_record_id = self._pending_preview_record_id
+        self._pending_preview_record_id = None
+        panel.update_selection(
+            title,
+            records,
+            values,
+            group_auto_values,
+            auto_values_by_record=auto_by_record,
+            reviewed_values_by_record=reviewed_by_record,
+            status_by_record=status_by_record,
+            counts_text=self._review_counts_text(self._review_counts_for_records(records)),
+            selected_record_id=selected_record_id,
+        )
+        self._sync_preview_status()
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -14600,7 +21567,16 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 value = self._coerce_transition_value(series.get(column))
                 if value is not None:
                     entry[label] = value
-            if entry:
+            record = self._record_for_row(series)
+            if record is not None:
+                self._store_review_for_record(
+                    key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if entry else TRANSITION_REVIEW_STATUS_UNREVIEWED,
+                    values=entry,
+                    included=bool(entry),
+                )
+            elif entry:
                 self._transition_points[key] = entry
             elif key in self._transition_points:
                 self._transition_points.pop(key, None)
@@ -14608,6 +21584,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         if updated:
             self._store_transition_points()
             self._update_preview()
+
+    def _selected_row_series(self) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        row = self._selected_source_row()
+        if not isinstance(frame, pd.DataFrame) or row is None or row < 0 or row >= len(frame.index):
+            return None
+        return frame.iloc[row]
 
     @staticmethod
     def _coerce_transition_value(value: Any) -> Optional[float]:
@@ -14634,48 +21617,331 @@ class TransitionTempsSection(QtWidgets.QWidget):
         return None
 
     def _apply_picked_value(self, label: str, value: float) -> None:
-        table = self.table_view
-        if not isinstance(table, QtWidgets.QTableView):
-            return
-        selection_model = table.selectionModel()
-        if selection_model is None:
-            return
-        frame = self.model.frame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return
-        column_label = TRANSITION_TEMP_COLUMN_MAP.get(label)
-        if not column_label:
-            return
+        started_s = time.perf_counter()
+        current = self._current_preview_record()
         try:
-            column_index = int(frame.columns.get_loc(column_label))
-        except Exception:
+            if current is None:
+                return
+            group_key, record = current
+            payload = self._review_payload_for_record(record)
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+            manual_values[str(label)] = float(value)
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                values=manual_values,
+                included=True,
+            )
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="click_commit_store",
+            )
+
+    def _clear_picked_value(self, label: str) -> None:
+        current = self._current_preview_record()
+        if current is None:
             return
-        current_index = selection_model.currentIndex()
-        row = self._source_row(current_index.row()) if current_index.isValid() else None
-        if row is None:
-            rows = selection_model.selectedRows()
-            if rows:
-                row = self._source_row(rows[0].row())
-        if row is None or row < 0 or row >= len(frame.index):
-            return
-        target_index = (
-            current_index
-            if current_index.isValid() and current_index.column() == column_index
-            else self.model.index(row, column_index)
+        group_key, record = current
+        payload = self._review_payload_for_record(record)
+        values = self._values_for_record(record, payload)
+        values.pop(str(label), None)
+        self._store_review_for_record(
+            group_key,
+            record,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            values=values,
+            included=bool(values),
         )
-        if not target_index.isValid():
-            return
-        if not self.model.setData(target_index, float(value)):
-            return
+
+    def _current_preview_record(self) -> Optional[Tuple[str, VsmTemperatureScanRecord]]:
+        panel = self._preview_panel
+        if panel is None:
+            return None
+        record_id = panel.current_record_id()
+        if not record_id:
+            return None
+        group_key = self._current_selection_key()
+        if not group_key:
+            return None
+        for record in self._record_groups.get(group_key, []):
+            if _vsm_transition_review_record_id(record) == record_id:
+                return group_key, record
+        return None
+
+    def _record_review_metadata(
+        self,
+        group_key: str,
+        record: VsmTemperatureScanRecord,
+    ) -> Dict[str, str]:
+        metadata: Dict[str, str] = {
+            "group_key": group_key,
+            "sample": str(getattr(record, "sample", "") or ""),
+            "record_label": _record_label_for_display(record) or str(getattr(record, "label", "") or ""),
+        }
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            metadata["record_path"] = str(path)
+        metadata["content_identity"] = _transition_review_content_identity(
+            record, "vsm-ts", self._review_content_identity_cache
+        )
+        source_name = _transition_review_source_name(record)
+        if source_name:
+            metadata["source_name"] = source_name
+        return metadata
+
+    def _store_review_for_record(
+        self,
+        group_key: str,
+        record: VsmTemperatureScanRecord,
+        status: str,
+        *,
+        values: Optional[Mapping[str, Any]] = None,
+        included: bool,
+    ) -> None:
+        started_s = time.perf_counter()
+        record_id = _vsm_transition_review_record_id(record)
+        auto_values = self._auto_values_for_record(record)
+        cleaned = _clean_vsm_transition_values(values or {})
+        payload: Dict[str, Any] = {
+            "status": status,
+            "included": bool(included),
+            "auto_values_C": auto_values,
+            "manual_values_C": {},
+            "final_values_C": {},
+            **self._record_review_metadata(group_key, record),
+        }
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+            payload["manual_values_C"] = cleaned
+            payload["final_values_C"] = cleaned
+            payload["included"] = bool(cleaned)
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            payload["final_values_C"] = cleaned or dict(auto_values)
+            payload["included"] = bool(payload["final_values_C"])
+            if not payload["included"]:
+                payload["status"] = TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            payload["included"] = False
+        self._transition_reviews[record_id] = self._clean_transition_review_payload(record_id, payload)
+        self._pending_preview_record_id = record_id
+        self._schedule_transition_state_store()
+        self._refresh_group_table_row(group_key)
+        panel = self._preview_panel
+        if panel is not None and panel.current_record_id() == record_id:
+            try:
+                panel._tab_reviewed_values[record_id] = dict(payload.get("manual_values_C") or payload.get("final_values_C") or {})
+                panel._tab_status_texts[record_id] = f"Review state: {self._status_for_record(record, payload)}"
+                panel._sync_current_tab_labels()
+                panel.update_current_reviewed_markers()
+            except Exception:
+                pass
+        self._sync_preview_status()
+        _log_builder_timing(
+            self.logger,
+            "transition_review_store",
+            started_s,
+            dialog="vsm_temperature",
+            status=status,
+            record=record_id,
+        )
+
+    def _accept_current_scan_and_next(self) -> None:
+        started_s = time.perf_counter()
         try:
-            table.setCurrentIndex(target_index)
-            table.scrollTo(target_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
-        except Exception:
-            pass
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            payload = self._review_payload_for_record(record)
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+            if manual_values:
+                self._store_review_for_record(
+                    group_key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                    values=manual_values,
+                    included=True,
+                )
+            else:
+                auto_values = self._auto_values_for_record(record)
+                self._store_review_for_record(
+                    group_key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO if auto_values else TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    values=auto_values,
+                    included=bool(auto_values),
+                )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="accept",
+            )
+
+    def _mark_current_scan_no_transition(self) -> None:
+        started_s = time.perf_counter()
+        try:
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                included=False,
+            )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="no_transition",
+            )
+
+    def _exclude_current_scan(self) -> None:
+        started_s = time.perf_counter()
+        try:
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+                included=False,
+            )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="exclude",
+            )
+
+    def _review_refs(self) -> List[Tuple[str, str]]:
+        refs: List[Tuple[str, str]] = []
+        for group_key in sorted(self._record_groups.keys()):
+            records = sorted(self._record_groups.get(group_key, []), key=_record_label_for_display)
+            for record in records:
+                refs.append((group_key, _vsm_transition_review_record_id(record)))
+        return refs
+
+    def _select_scan_ref(self, group_key: str, record_id: str) -> None:
+        self._pending_preview_record_id = record_id
+        self._restore_selection(group_key, record_id)
         self._update_preview()
+
+    def _select_previous_scan(self) -> None:
+        current = self._current_preview_record()
+        refs = self._review_refs()
+        if not refs:
+            return
+        current_ref = (
+            (current[0], _vsm_transition_review_record_id(current[1]))
+            if current is not None
+            else refs[0]
+        )
+        try:
+            index = refs.index(current_ref)
+        except ValueError:
+            index = 0
+        group_key, record_id = refs[(index - 1) % len(refs)]
+        self._select_scan_ref(group_key, record_id)
+
+    def _select_next_unreviewed_scan(self, *, fallback_next: bool = False) -> None:
+        started_s = time.perf_counter()
+        refs = self._review_refs()
+        try:
+            if not refs:
+                return
+            current = self._current_preview_record()
+            current_ref = (
+                (current[0], _vsm_transition_review_record_id(current[1]))
+                if current is not None
+                else refs[0]
+            )
+            try:
+                start = refs.index(current_ref) + 1
+            except ValueError:
+                start = 0
+            ordered = refs[start:] + refs[:start]
+            for group_key, record_id in ordered:
+                record = next(
+                    (
+                        candidate
+                        for candidate in self._record_groups.get(group_key, [])
+                        if _vsm_transition_review_record_id(candidate) == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    continue
+                payload = self._review_payload_for_record(record)
+                if not _vsm_transition_review_is_final(payload.get("status")):
+                    self._select_scan_ref(group_key, record_id)
+                    return
+            if fallback_next and refs:
+                try:
+                    index = refs.index(current_ref)
+                except ValueError:
+                    index = -1
+                group_key, record_id = refs[(index + 1) % len(refs)]
+                self._select_scan_ref(group_key, record_id)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="select_next",
+            )
+
+    def _sync_preview_status(self) -> None:
+        panel = self._preview_panel
+        current = self._current_preview_record()
+        if panel is None or current is None:
+            return
+        group_key, record = current
+        records = self._record_groups.get(group_key, [])
+        payload = self._review_payload_for_record(record)
+        panel.set_status_text(f"Review state: {self._status_for_record(record, payload)}")
+        panel.set_counts_text(self._review_counts_text(self._review_counts_for_records(records)))
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
+
+    def _selected_source_row(self) -> Optional[int]:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return None
+        selection_model = table.selectionModel()
+        if selection_model is None:
+            return None
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            row = self._source_row(current_index.row())
+            if row is not None:
+                return row
+        rows = selection_model.selectedRows()
+        if rows:
+            return self._source_row(rows[0].row())
+        return None
 
     def _handle_search_changed(self, text: str) -> None:
         self._search_proxy.set_search_text(text)
@@ -14691,14 +21957,174 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return None
         return _microwire_key_from_string(text)
 
-    def _prune_transition_points(self, valid_keys: Iterable[str]) -> bool:
-        valid_set = {str(value) for value in valid_keys if value}
-        removed = False
-        for key in list(self._transition_points.keys()):
-            if key not in valid_set:
-                self._transition_points.pop(key, None)
-                removed = True
-        return removed
+    def _reconcile_transition_points(self, current_keys: Iterable[str]) -> bool:
+        current = {str(value) for value in current_keys if value}
+        proposals: Dict[str, List[str]] = {}
+        for stored_key in self._transition_points:
+            if stored_key in current:
+                continue
+            parsed = self._parse_group_key(stored_key)
+            if parsed is None:
+                continue
+            matches = [key for key in current if self._parse_group_key(key) == parsed]
+            if len(matches) == 1 and matches[0] not in self._transition_points:
+                proposals.setdefault(matches[0], []).append(stored_key)
+        changed = False
+        for current_key, stored_keys in proposals.items():
+            if len(stored_keys) != 1:
+                continue
+            stored_key = stored_keys[0]
+            self._transition_points[current_key] = self._transition_points.pop(stored_key)
+            changed = True
+        return changed
+
+    def _vsm_review_candidates(
+        self,
+        payload: Mapping[str, Any],
+        records: Sequence[VsmTemperatureScanRecord],
+        groups: Mapping[str, Sequence[VsmTemperatureScanRecord]],
+    ) -> List[VsmTemperatureScanRecord]:
+        candidates = list(records)
+        content_identity = str(payload.get("content_identity") or "").strip()
+        if content_identity:
+            candidates = [
+                record
+                for record in candidates
+                if _transition_review_content_identity(
+                    record, "vsm-ts", self._review_content_identity_cache
+                )
+                == content_identity
+            ]
+            if len(candidates) <= 1:
+                return candidates
+        group_key = str(payload.get("group_key") or "").strip()
+        if group_key and group_key in groups:
+            grouped_records = groups[group_key]
+            narrowed = [
+                record
+                for record in candidates
+                if any(record is grouped_record for grouped_record in grouped_records)
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        sample = str(payload.get("sample") or "").strip().casefold()
+        if sample:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "sample", "") or "").strip().casefold() == sample
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        record_label = str(payload.get("record_label") or "").strip().casefold()
+        if record_label:
+            narrowed = [
+                record
+                for record in candidates
+                if _record_label_for_display(record).strip().casefold() == record_label
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        source_name = str(payload.get("source_name") or "").strip().casefold()
+        if not source_name:
+            record_path = str(payload.get("record_path") or "").strip()
+            source_name = Path(record_path).name.casefold() if record_path else ""
+        if source_name:
+            narrowed = [
+                record
+                for record in candidates
+                if _transition_review_source_name(record).casefold() == source_name
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        return candidates
+
+    def _reconcile_transition_reviews(
+        self, records: Sequence[VsmTemperatureScanRecord]
+    ) -> bool:
+        groups = _group_graph_records_by_key(records)
+        current_by_id: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        group_by_id: Dict[str, str] = {}
+        for group_key, grouped_records in groups.items():
+            for record in grouped_records:
+                record_id = _vsm_transition_review_record_id(record)
+                current_by_id.setdefault(record_id, []).append(record)
+                group_by_id[record_id] = group_key
+        proposals: Dict[str, List[str]] = {}
+        direct_mismatches: List[str] = []
+        for stored_id, payload in self._transition_reviews.items():
+            if stored_id in current_by_id:
+                content_identity = str(payload.get("content_identity") or "").strip()
+                current_records = current_by_id[stored_id]
+                if content_identity and (
+                    len(current_records) != 1
+                    or _transition_review_content_identity(
+                        current_records[0],
+                        "vsm-ts",
+                        self._review_content_identity_cache,
+                    )
+                    != content_identity
+                ):
+                    direct_mismatches.append(stored_id)
+                    candidates = self._vsm_review_candidates(
+                        payload,
+                        [
+                            record
+                            for record in records
+                            if all(
+                                record is not conflicting
+                                for conflicting in current_records
+                            )
+                        ],
+                        groups,
+                    )
+                    if len(candidates) == 1:
+                        current_id = _vsm_transition_review_record_id(candidates[0])
+                        if len(current_by_id.get(current_id, [])) == 1:
+                            proposals.setdefault(current_id, []).append(stored_id)
+                continue
+            candidates = self._vsm_review_candidates(payload, records, groups)
+            if len(candidates) == 1:
+                current_id = _vsm_transition_review_record_id(candidates[0])
+                if len(current_by_id.get(current_id, [])) == 1:
+                    proposals.setdefault(current_id, []).append(stored_id)
+        changed = False
+        for current_id, stored_ids in proposals.items():
+            if len(stored_ids) != 1 or current_id in self._transition_reviews:
+                continue
+            stored_id = stored_ids[0]
+            record = current_by_id[current_id][0]
+            payload = dict(self._transition_reviews.pop(stored_id))
+            payload.update(self._record_review_metadata(group_by_id[current_id], record))
+            self._transition_reviews[current_id] = self._clean_transition_review_payload(
+                current_id, payload
+            )
+            changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "vsm-ts"
+                    )
+                    or changed
+                )
+        for current_id, current_records in current_by_id.items():
+            if len(current_records) != 1 or current_id not in self._transition_reviews:
+                continue
+            record = current_records[0]
+            enriched = dict(self._transition_reviews[current_id])
+            enriched.update(self._record_review_metadata(group_by_id[current_id], record))
+            cleaned = self._clean_transition_review_payload(current_id, enriched)
+            if cleaned != self._transition_reviews[current_id]:
+                self._transition_reviews[current_id] = cleaned
+                changed = True
+        return changed
+
+    def _prune_transition_points(self, _valid_keys: Iterable[str]) -> bool:
+        return False
+
+    def _prune_transition_reviews(self) -> bool:
+        return False
 
     def _current_column_order(self) -> List[str]:
         header = self.table_view.horizontalHeader()
@@ -14790,14 +22216,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
             else:
                 export_frame.to_csv(path, index=False)
         except Exception as exc:
-            self.logger.exception("Failed to export transition temps worksheet")
+            self.logger.exception("Failed to export VSM transitions worksheet")
             QtWidgets.QMessageBox.critical(
                 self,
                 "Export worksheet",
                 f"Failed to export worksheet:\n{exc}",
             )
             return
-        self.log(f"Transition temps worksheet exported to {path}")
+        self.log(f"VSM transitions worksheet exported to {path}")
         QtWidgets.QMessageBox.information(
             self,
             "Export worksheet",
@@ -14912,7 +22338,10 @@ class VideoSection(MiniDatabaseSection):
     ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
         relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
         try:
-            store = MiniDatabaseStore("annealing")
+            store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -14930,10 +22359,15 @@ class VideoSection(MiniDatabaseSection):
                 bucket = relevant.setdefault(composition_key, {})
                 piece_bucket = bucket.setdefault(int(draw_value), set())
                 piece_bucket.add(int(piece_value))
-        try:
-            microscope_data = MiniDatabaseStore("microscope").load()
-        except Exception:
-            microscope_data = None
+        microscope_data = None
+        if not MiniDatabaseSection._skip_initial_store_load:
+            try:
+                microscope_data = MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load()
+            except Exception:
+                microscope_data = None
         microscope_table = (
             microscope_data.table
             if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
@@ -15331,7 +22765,10 @@ class VideoSection(MiniDatabaseSection):
 
         lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
         try:
-            raw_index = MiniDatabaseStore("fabrication").load_payload("fabrication_index_raw")
+            raw_index = MiniDatabaseStore(
+                "fabrication",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load_payload("fabrication_index_raw")
         except Exception:
             raw_index = None
         if isinstance(raw_index, FabricationIndex):
@@ -15904,8 +23341,13 @@ class VideoSection(MiniDatabaseSection):
         }
 
     def _fabrication_table(self) -> Optional[pd.DataFrame]:
+        if MiniDatabaseSection._skip_initial_store_load:
+            return None
         try:
-            store = MiniDatabaseStore("fabrication")
+            store = MiniDatabaseStore(
+                "fabrication",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             data = store.load()
         except Exception:
             return None
@@ -16473,8 +23915,13 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._all_records: List[VsmHysteresisRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[VsmHysteresisRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -16654,6 +24101,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist VSM hysteresis visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[VsmHysteresisRecord]
@@ -16690,9 +24138,11 @@ class VsmHysteresisSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -16701,14 +24151,29 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _refresh_record_groups(self) -> None:
-        grouped: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._project_previews_deferred = False
         try:
             payload = self.store.load_payload("vsm_hysteresis_records")
         except Exception:
             payload = None
         all_records = list(payload) if isinstance(payload, list) else []
+        self._set_record_groups(all_records)
+
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        merged = {
+            _record_path_key(record): record
+            for record in self._all_records
+            if isinstance(record, VsmHysteresisRecord)
+        }
+        for record in records:
+            if isinstance(record, VsmHysteresisRecord):
+                merged[_record_path_key(record)] = record
+        self._set_record_groups(list(merged.values()))
+
+    def _set_record_groups(self, all_records: Sequence[VsmHysteresisRecord]) -> None:
+        grouped: Dict[str, List[VsmHysteresisRecord]] = {}
         self._all_records = list(all_records)
-        visible_records = self._visible_records(all_records)
+        visible_records = self._visible_records(self._all_records)
         display_records = _filter_vsm_hysteresis_records_by_angle_mode(
             visible_records,
             self._current_angle_filter_mode(),
@@ -16767,12 +24232,10 @@ class VsmHysteresisSection(MiniDatabaseSection):
                         pass
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _load_preview_range_setting(self) -> None:
         stored = _load_vsm_hysteresis_preview_range_oe()
@@ -16799,16 +24262,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
 
     def _refresh_preview_pixmaps(self) -> None:
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
-        if isinstance(self.table_view, QtWidgets.QTableView):
-            try:
-                self.table_view.viewport().update()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _handle_preview_range_changed(self, _: int) -> None:
         data = self.preview_range_combo.currentData()
@@ -16832,7 +24286,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._refresh_record_groups()
 
     def _preview_icon_width(self) -> int:
-        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        count = min(max(int(getattr(self, "_preview_group_count", 1)), 1), 2)
         return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
@@ -16880,36 +24334,90 @@ class VsmHysteresisSection(MiniDatabaseSection):
             row_key = _row_to_microwire_key(row)
             if row_key:
                 records = self._record_groups_by_key.get(row_key, [])
+        if not records and bool(getattr(self, "_project_previews_deferred", False)):
+            sources = self._row_sources(row)
+            self._request_project_overview_records(cache_key, sources)
+            preview = getattr(self, "_deferred_preview_pixmap", None)
+            if not isinstance(preview, QtGui.QPixmap):
+                preview = _deferred_graph_preview_pixmap(
+                    "Loading packaged graph preview..."
+                )
+                self._deferred_preview_pixmap = preview
+            self._pixmap_cache[cache_key] = preview
+            return preview
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
-            groups = _group_vsm_hysteresis_plot_groups(records)
-            pixmaps: List[QtGui.QPixmap] = []
-            for group in groups:
-                figure = _plot_vsm_hysteresis_figure(
-                    group.records,
-                    self.logger,
-                    width_px=ANNEALING_GRAPH_WIDTH,
-                    height_px=ANNEALING_GRAPH_HEIGHT,
-                    angle_filter_mode=self._current_angle_filter_mode(),
-                )
-                preview = _figure_to_pixmap(
-                    figure,
-                    self.logger,
-                    width_px=ANNEALING_GRAPH_WIDTH,
-                    height_px=ANNEALING_GRAPH_HEIGHT,
-                )
-                if preview is not None:
-                    pixmaps.append(preview)
-            icon_width = self._preview_icon_width()
-            pixmap = _combine_pixmaps_side_by_side(
-                pixmaps,
-                width_px=icon_width,
-                height_px=self._preview_icon_height(),
-                spacing=self._preview_spacing,
-                scale_to_fit=False,
-            )
+            if self.isVisible() and not self._data_page_is_active():
+                return None
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[VsmHysteresisRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        self._refresh_table_decorations()
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[VsmHysteresisRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        groups = _group_vsm_hysteresis_plot_groups(records)
+        pixmaps: List[QtGui.QPixmap] = []
+        for group in groups:
+            figure = _plot_vsm_hysteresis_figure(
+                group.records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+                angle_filter_mode=self._current_angle_filter_mode(),
+            )
+            preview = _figure_to_pixmap(
+                figure,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            if preview is not None:
+                pixmaps.append(preview)
+        return _combine_pixmaps_side_by_side(
+            pixmaps,
+            width_px=self._preview_icon_width(),
+            height_px=self._preview_icon_height(),
+            spacing=self._preview_spacing,
+            scale_to_fit=False,
+        )
 
     def _selected_records(self) -> List[VsmHysteresisRecord]:
         rows = self._selected_rows()
@@ -17050,8 +24558,13 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self._all_records: List[VsmTemperatureScanRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[VsmTemperatureScanRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -17173,6 +24686,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             self.logger.exception(
                 "Failed to persist VSM temperature scan visibility settings"
             )
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[VsmTemperatureScanRecord]
@@ -17211,7 +24725,8 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -17241,12 +24756,10 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 max_groups = len(records)
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _load_preview_mode_setting(self) -> None:
         mode = _load_vsm_temperature_preview_mode()
@@ -17270,16 +24783,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         except Exception:
             self.logger.exception("Failed to store VSM temperature preview mode setting")
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
-        if isinstance(self.table_view, QtWidgets.QTableView):
-            try:
-                self.table_view.viewport().update()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _preview_icon_width(self) -> int:
         count = max(int(getattr(self, "_preview_group_count", 1)), 1)
@@ -17332,6 +24836,57 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            if self.isVisible() and not self._data_page_is_active():
+                return None
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        self._refresh_table_decorations()
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            # Keep table refresh responsive. The explicit Open graphs action
+            # still renders all records; table thumbnails only need a preview.
+            records = list(records)[:2]
             items = _vsm_temperature_preview_items(
                 records,
                 self.logger,
@@ -17348,7 +24903,6 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                     spacing=self._preview_spacing,
                     scale_to_fit=False,
                 )
-        self._pixmap_cache[cache_key] = pixmap
         return pixmap
 
     def _open_selected_graphs(self) -> None:
@@ -17602,6 +25156,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist DMA iso-stress visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[DmaIsoStressRecord]
@@ -17640,7 +25195,8 @@ class DmaIsoStressSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -17895,6 +25451,28 @@ class MiniDmaSection(MiniDatabaseSection):
     section_key = "mini_dma"
     section_title = "TMA"
     supported_suffixes = (".csv",)
+    excluded_refresh_dirs = set(
+        getattr(
+            mini_dma_core,
+            "MINI_DMA_EXCLUDED_DISCOVERY_DIR_NAMES",
+            {
+                ".cache",
+                ".pytest_cache",
+                "__pycache__",
+                "archive",
+                "archives",
+                "automated",
+                "automated_control_tests",
+                "automation_history",
+                "cache",
+                "scratch",
+                "temp",
+                "test",
+                "tests",
+                "tmp",
+            },
+        )
+    )
 
     def __init__(
         self,
@@ -17904,7 +25482,28 @@ class MiniDmaSection(MiniDatabaseSection):
     ) -> None:
         self._record_groups: Dict[str, List[MiniDmaRecord]] = {}
         self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
+        self._all_mini_dma_records: List[MiniDmaRecord] = []
+        self._transition_reviews: Dict[str, Dict[str, Any]] = {}
+        self._review_content_identity_cache: Dict[int, Tuple[object, str]] = {}
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._preview_group_count = 1
+        self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[MiniDmaRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
+        self._transition_review_store_timer = QtCore.QTimer(self)
+        self._transition_review_store_timer.setSingleShot(True)
+        self._transition_review_store_timer.setInterval(250)
+        self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
+        self._transition_table_apply_timer = QtCore.QTimer(self)
+        self._transition_table_apply_timer.setSingleShot(True)
+        self._transition_table_apply_timer.setInterval(300)
+        self._transition_table_apply_timer.timeout.connect(self._apply_transition_reviews_to_table)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
         self.open_pyplot_button.setToolTip("Open the selected TMA runs in PyPlot.")
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
@@ -17913,8 +25512,115 @@ class MiniDmaSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected TMA runs to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.review_transitions_button = QtWidgets.QPushButton("Review transitions")
+        self.review_transitions_button.setToolTip(
+            "Review TMA transition fits by sample, run, and stress/load."
+        )
+        self.review_transitions_button.clicked.connect(self._open_transition_review)
+        self.controls_layout.addWidget(self.review_transitions_button)
+        self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        table.setSortingEnabled(True)
+        table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setIconSize(QtCore.QSize(self._preview_icon_width(), self._preview_icon_height()))
+        vertical_header = table.verticalHeader()
+        if vertical_header is not None:
+            default_height = self._preview_icon_height() + 24
+            vertical_header.setDefaultSectionSize(default_height)
+            vertical_header.setMinimumSectionSize(default_height)
+        self.table_view = table
+        return table
+
+    def _configure_table_view(self) -> None:  # type: ignore[override]
+        super()._configure_table_view()
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        QtCore.QTimer.singleShot(0, self._ensure_preview_columns_wide)
+
+    def _ensure_preview_columns_wide(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        if MINI_DMA_COLUMN not in frame.columns:
+            return
+        idx = frame.columns.get_loc(MINI_DMA_COLUMN)
+        minimum = self._preview_icon_width() + 80
+        if table.columnWidth(idx) < minimum:
+            table.setColumnWidth(idx, minimum)
+
+    def _collect_candidates(self) -> List[Path]:
+        candidates: Dict[str, Path] = {}
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            if mini_dma_core is not None:
+                paths = mini_dma_core.iter_measurement_paths(
+                    [root],
+                    exclude_dir_names=self.excluded_refresh_dirs,
+                )
+            elif root.is_file():
+                paths = (root,)
+            else:
+                paths = root.rglob(mini_dma_core.MEASUREMENT_FILE if mini_dma_core else "measurement.csv")
+            for path in paths:
+                if not path.is_file():
+                    continue
+                if path.name.casefold() != "measurement.csv":
+                    continue
+                try:
+                    relative_parts = path.resolve().relative_to(root.resolve()).parts[:-1]
+                except Exception:
+                    relative_parts = path.parts[:-1]
+                if any(part.casefold() in self.excluded_refresh_dirs for part in relative_parts):
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    resolved = str(path)
+                candidates.setdefault(resolved, path)
+        return sorted(candidates.values())
+
+    @staticmethod
+    def reportable_measurements(
+        paths: Sequence[Path],
+        *,
+        sources: Sequence[str] = (),
+    ) -> Tuple[List[Path], List[Dict[str, Any]]]:
+        return _reportable_mini_dma_measurements(paths, sources=sources)
 
     def process(
         self,
@@ -17923,18 +25629,28 @@ class MiniDmaSection(MiniDatabaseSection):
     ) -> SectionProcessResult:
         if mini_dma_core is None:
             raise RuntimeError("TMA parser is not available.")
+        reportable_paths, reportability = self.reportable_measurements(
+            paths,
+            sources=self.data.sources,
+        )
         records: List[MiniDmaRecord] = []
         processed: Dict[str, float] = {}
-        total = len(paths)
-        for idx, path in enumerate(paths, start=1):
+        total = len(reportable_paths)
+        for idx, path in enumerate(reportable_paths, start=1):
             self._check_cancelled()
             path = Path(path)
+            progress_name = path.parent.name if path.name.casefold() == "measurement.csv" else path.name
+            if progress is not None:
+                try:
+                    progress(idx - 1, total, f"Parsing {progress_name}")
+                except Exception:
+                    pass
             try:
                 measurement_path = mini_dma_core.resolve_measurement_path(path)
             except Exception:
                 if progress is not None:
                     try:
-                        progress(idx, total, f"Skipped {path.name}")
+                        progress(idx, total, f"Skipped {progress_name}")
                     except Exception:
                         pass
                 continue
@@ -17944,7 +25660,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 self.logger.exception("Failed to parse TMA run %s", path)
                 if progress is not None:
                     try:
-                        progress(idx, total, f"Skipped {path.name}")
+                        progress(idx, total, f"Skipped {progress_name}")
                     except Exception:
                         pass
                 continue
@@ -17960,17 +25676,18 @@ class MiniDmaSection(MiniDatabaseSection):
             strain_summary: Tuple[str, ...] = ()
             transition_summary: Tuple[str, ...] = ()
             break_summary = ""
-            try:
-                sweep_summary = mini_dma_core.summarize_current_sweep(run)
-                strain_summary = tuple(
-                    mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
-                )
-                transition_summary = tuple(
-                    mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
-                )
-                break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
-            except Exception:
-                self.logger.exception("Failed to summarize TMA run %s", run_path)
+            if not mini_dma_core.is_iso_current_run(run):
+                try:
+                    sweep_summary = mini_dma_core.summarize_current_sweep(run)
+                    strain_summary = tuple(
+                        mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
+                    )
+                    transition_summary = tuple(
+                        mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
+                    )
+                    break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
+                except Exception:
+                    self.logger.exception("Failed to summarize TMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
@@ -17994,41 +25711,221 @@ class MiniDmaSection(MiniDatabaseSection):
                 except Exception:
                     pass
         table = _mini_dma_records_to_frame(records)
+        table = _normalise_tma_display_columns(table)
         return SectionProcessResult(
             table=table,
             processed=processed,
             payloads={"mini_dma_records": records},
+            extra={"mini_dma_reportability": reportability},
         )
 
     def refresh(self) -> None:
         super().refresh()
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        self._load_transition_reviews()
+        if _has_lazy_project_payloads(payload):
+            self._set_record_groups(
+                _mini_dma_records_from_project_table(self.model.frame())
+            )
+        else:
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
+        self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _refresh_record_groups(self) -> None:
-        grouped: Dict[str, List[MiniDmaRecord]] = {}
+        self._project_previews_deferred = False
         try:
             payload = self.store.load_payload("mini_dma_records")
         except Exception:
             payload = None
         records = list(payload) if isinstance(payload, list) else []
+        self._set_record_groups(records)
+
+    def _set_record_groups(self, records: Sequence[MiniDmaRecord]) -> None:
+        grouped: Dict[str, List[MiniDmaRecord]] = {}
+        records = list(records)
+        self._all_mini_dma_records = records
+        current_records_by_id = {id(record): record for record in records}
+        self._review_content_identity_cache = {
+            key: value
+            for key, value in self._review_content_identity_cache.items()
+            if current_records_by_id.get(key) is value[0]
+        }
+        if self._reconcile_transition_reviews(records):
+            self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+                "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+                "records": self.transition_reviews_snapshot(),
+            }
         for record in records:
             sample = getattr(record, "sample", None)
             if isinstance(sample, str) and sample.strip():
                 grouped.setdefault(sample.strip(), []).append(record)
         self._record_groups = grouped
         self._record_groups_by_key = _group_graph_records_by_key(records)
+        max_groups = 1
+        for records_for_sample in grouped.values():
+            if len(records_for_sample) > max_groups:
+                max_groups = len(records_for_sample)
+        self._preview_group_count = max_groups
+        self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
+        self._pixmap_cache.clear()
+        self._refresh_table_decorations()
+
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        merged = {
+            _record_path_key(record): record
+            for record in self._all_mini_dma_records
+            if isinstance(record, MiniDmaRecord)
+        }
+        for record in records:
+            if isinstance(record, MiniDmaRecord):
+                merged[_record_path_key(record)] = record
+        self._set_record_groups(list(merged.values()))
+
+    def _preview_icon_width(self) -> int:
+        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+
+    def _preview_icon_height(self) -> int:
+        return ANNEALING_GRAPH_HEIGHT
+
+    def _update_preview_icon_size(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        width = self._preview_icon_width()
+        height = self._preview_icon_height()
+        try:
+            table.setIconSize(
+                QtCore.QSize(max(width, ANNEALING_GRAPH_WIDTH), max(height, ANNEALING_GRAPH_HEIGHT))
+            )
+        except Exception:
+            pass
+        header = table.verticalHeader()
+        if header is not None:
+            try:
+                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+            except Exception:
+                pass
+        self._auto_fit_columns()
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != MINI_DMA_COLUMN:
+            return None
+        sample = _row_sample_value(row)
+        if not sample:
+            return None
+        row_key = _row_to_microwire_key(row)
+        cache_key = f"{sample}|{row_key}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        if not records and row_key:
+            records = self._record_groups_by_key.get(row_key, [])
+        if bool(getattr(self, "_project_previews_deferred", False)):
+            preview_records = [
+                record
+                for record in records
+                if isinstance(getattr(record, "data", None), pd.DataFrame)
+                and not record.data.empty
+            ]
+            if preview_records:
+                records = preview_records
+            else:
+                sources = [
+                    getattr(record, "path", "")
+                    for record in records
+                    if getattr(record, "path", None)
+                ] or self._row_sources(row)
+                self._request_project_overview_records(cache_key, sources)
+                preview = getattr(self, "_deferred_preview_pixmap", None)
+                if not isinstance(preview, QtGui.QPixmap):
+                    preview = _deferred_graph_preview_pixmap(
+                        "Loading packaged graph preview..."
+                    )
+                    self._deferred_preview_pixmap = preview
+                self._pixmap_cache[cache_key] = preview
+                return preview
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[MiniDmaRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        self._refresh_table_decorations()
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[MiniDmaRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        items = _mini_dma_preview_items(
+            records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+        return _combine_pixmaps_side_by_side(
+            pixmaps,
+            width_px=self._preview_icon_width(),
+            height_px=self._preview_icon_height(),
+            spacing=self._preview_spacing,
+            scale_to_fit=True,
+        )
 
     def _selected_records(self) -> List[MiniDmaRecord]:
         rows = self._selected_rows()
@@ -18053,6 +25950,380 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def _open_selected_in_origin(self) -> None:
         self._open_selected(open_origin=True)
+
+    def _all_records(self) -> List[MiniDmaRecord]:
+        records: List[MiniDmaRecord] = []
+        seen: Set[str] = set()
+        for grouped_records in self._record_groups.values():
+            for record in grouped_records:
+                path = getattr(record, "path", None)
+                key = str(path) if isinstance(path, Path) else repr(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(record)
+        return records
+
+    def _open_transition_review(self) -> None:
+        records = self._selected_records()
+        if not records:
+            records = self._all_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No TMA runs are available to review.",
+            )
+            return
+        dialog = _MiniDmaTransitionReviewDialog(
+            records,
+            self.logger,
+            self,
+            review_provider=self.transition_reviews_snapshot,
+            review_setter=self.set_transition_review_for_target,
+        )
+        dialog.exec()
+
+    def _load_transition_reviews(self) -> None:
+        raw = self.data.extra.get(MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY)
+        if not isinstance(raw, dict):
+            self._transition_reviews = {}
+            return
+        records = raw.get("records") if isinstance(raw.get("records"), dict) else raw
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(records, dict):
+            for record_id, payload in records.items():
+                entry = self._clean_transition_review_payload(record_id, payload)
+                if entry:
+                    cleaned[str(record_id)] = entry
+        self._transition_reviews = cleaned
+
+    @staticmethod
+    def _clean_transition_review_payload(
+        record_id: object,
+        payload: object,
+    ) -> Dict[str, Any]:
+        if not isinstance(record_id, str) or not record_id.strip() or not isinstance(payload, dict):
+            return {}
+        status = str(payload.get("status") or "").strip()
+        if status not in {
+            MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            MINI_DMA_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
+        entry: Dict[str, Any] = {"status": status}
+        for field in (
+            "sample",
+            "run_label",
+            "target_label",
+            "auto_status",
+            "content_identity",
+            "source_name",
+            "record_path",
+        ):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                entry[field] = value.strip()
+        values = payload.get("values")
+        cleaned_values = _clean_mini_dma_transition_values(values)
+        if cleaned_values:
+            entry["values"] = cleaned_values
+        auto_values = _clean_mini_dma_transition_values(payload.get("auto_values_mA"))
+        if auto_values:
+            entry["auto_values_mA"] = auto_values
+        manual_values = _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
+        if manual_values:
+            entry["manual_values_mA"] = manual_values
+        cleared_labels = _mini_dma_cleared_transition_labels(payload)
+        if cleared_labels and status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            entry["cleared_labels"] = sorted(cleared_labels)
+        return entry
+
+    def _store_transition_reviews(self) -> None:
+        self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist TMA transition reviews")
+
+    def _mini_dma_review_candidates(
+        self,
+        stored_id: str,
+        payload: Mapping[str, Any],
+        records: Sequence[MiniDmaRecord],
+    ) -> List[MiniDmaRecord]:
+        content_identity = str(payload.get("content_identity") or "").strip()
+        if content_identity:
+            candidates = [
+                record
+                for record in records
+                if _transition_review_content_identity(
+                    record, "tma", self._review_content_identity_cache
+                )
+                == content_identity
+            ]
+            if len(candidates) <= 1:
+                return candidates
+        else:
+            candidates = list(records)
+        sample = str(payload.get("sample") or "").strip().casefold()
+        if sample:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "sample", "") or "").strip().casefold() == sample
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        run_label = str(payload.get("run_label") or "").strip().casefold()
+        if run_label:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "label", "") or "").strip().casefold() == run_label
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        source_name = str(payload.get("source_name") or "").strip().casefold()
+        if not source_name:
+            record_path = str(payload.get("record_path") or "").strip()
+            if not record_path and "::" in stored_id:
+                record_path = stored_id.rsplit("::", 1)[0]
+            source_name = Path(record_path).name.casefold() if record_path else ""
+        if source_name:
+            narrowed = [
+                record
+                for record in candidates
+                if _transition_review_source_name(record).casefold() == source_name
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        return candidates
+
+    def _mini_dma_review_metadata(self, record: MiniDmaRecord) -> Dict[str, str]:
+        metadata = {
+            "content_identity": _transition_review_content_identity(
+                record, "tma", self._review_content_identity_cache
+            )
+        }
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            metadata["record_path"] = str(path)
+            metadata["source_name"] = path.name
+        return metadata
+
+    def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
+        proposals: Dict[str, List[Tuple[str, MiniDmaRecord]]] = {}
+        direct: List[Tuple[str, MiniDmaRecord]] = []
+        direct_mismatches: List[str] = []
+        for stored_id, payload in self._transition_reviews.items():
+            target_label = str(payload.get("target_label") or "").strip()
+            if not target_label and "::" in stored_id:
+                target_label = stored_id.rsplit("::", 1)[-1].strip()
+            if not target_label:
+                continue
+            direct_matches = [
+                record
+                for record in records
+                if _mini_dma_review_record_id(record, target_label) == stored_id
+            ]
+            content_identity = str(payload.get("content_identity") or "").strip()
+            if direct_matches and content_identity and (
+                len(direct_matches) != 1
+                or _transition_review_content_identity(
+                    direct_matches[0], "tma", self._review_content_identity_cache
+                )
+                != content_identity
+            ):
+                direct_mismatches.append(stored_id)
+                candidates = self._mini_dma_review_candidates(
+                    stored_id,
+                    payload,
+                    [
+                        record
+                        for record in records
+                        if all(
+                            record is not conflicting
+                            for conflicting in direct_matches
+                        )
+                    ],
+                )
+                if len(candidates) == 1:
+                    record = candidates[0]
+                    current_id = _mini_dma_review_record_id(record, target_label)
+                    proposals.setdefault(current_id, []).append((stored_id, record))
+                continue
+            if len(direct_matches) == 1:
+                direct.append((stored_id, direct_matches[0]))
+                continue
+            candidates = self._mini_dma_review_candidates(stored_id, payload, records)
+            if len(candidates) != 1:
+                continue
+            record = candidates[0]
+            current_id = _mini_dma_review_record_id(record, target_label)
+            proposals.setdefault(current_id, []).append((stored_id, record))
+        changed = False
+        for stored_id, record in direct:
+            enriched = dict(self._transition_reviews[stored_id])
+            enriched.update(self._mini_dma_review_metadata(record))
+            cleaned = self._clean_transition_review_payload(stored_id, enriched)
+            if cleaned != self._transition_reviews[stored_id]:
+                self._transition_reviews[stored_id] = cleaned
+                changed = True
+        for current_id, matches in proposals.items():
+            if len(matches) != 1 or current_id in self._transition_reviews:
+                continue
+            stored_id, record = matches[0]
+            payload = dict(self._transition_reviews.pop(stored_id))
+            payload.update(self._mini_dma_review_metadata(record))
+            self._transition_reviews[current_id] = self._clean_transition_review_payload(
+                current_id, payload
+            )
+            changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "tma"
+                    )
+                    or changed
+                )
+        return changed
+
+    def _schedule_transition_review_store(self) -> None:
+        self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+        try:
+            self._transition_review_store_timer.start()
+        except Exception:
+            self._store_transition_reviews()
+
+    def _schedule_transition_table_apply(self) -> None:
+        try:
+            self._transition_table_apply_timer.start()
+        except Exception:
+            self._apply_transition_reviews_to_table()
+
+    def export_project_payload(self) -> Dict[str, Any]:  # type: ignore[override]
+        self._store_transition_reviews()
+        self._apply_transition_reviews_to_table()
+        return super().export_project_payload()
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                snapshot[str(record_id)] = entry
+        return snapshot
+
+    def records_with_reviewed_transitions(
+        self,
+        records: Sequence[MiniDmaRecord] | None = None,
+    ) -> List[MiniDmaRecord]:
+        source_records = list(records) if records is not None else list(self._all_mini_dma_records)
+        reviews = self.transition_reviews_snapshot()
+        if not source_records or not reviews:
+            return source_records
+        result: List[MiniDmaRecord] = []
+        for record in source_records:
+            existing_lines = [
+                str(line)
+                for line in (getattr(record, "transition_summary", ()) or ())
+                if str(line).strip()
+            ]
+            target_labels: List[str] = []
+            for line in existing_lines:
+                target_label = line.split(":", 1)[0].strip()
+                if target_label and target_label not in target_labels:
+                    target_labels.append(target_label)
+            for payload in reviews.values():
+                target_label = str(payload.get("target_label") or "").strip()
+                if target_label and target_label not in target_labels:
+                    target_labels.append(target_label)
+            reviewed_lines: List[str] = []
+            for line in existing_lines:
+                target_label = line.split(":", 1)[0].strip()
+                review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
+                status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+                if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
+                    continue
+                if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                    formatted = _format_mini_dma_transition_review_line(
+                        target_label,
+                        _clean_mini_dma_transition_values(review.get("values")),
+                    )
+                    if formatted and formatted not in reviewed_lines:
+                        reviewed_lines.append(formatted)
+                    continue
+                if line not in reviewed_lines:
+                    reviewed_lines.append(line)
+            for target_label in target_labels:
+                if any(line.split(":", 1)[0].strip() == target_label for line in reviewed_lines):
+                    continue
+                review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
+                if not isinstance(review, Mapping):
+                    continue
+                if str(review.get("status") or "").strip() != MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                    continue
+                formatted = _format_mini_dma_transition_review_line(
+                    target_label,
+                    _clean_mini_dma_transition_values(review.get("values")),
+                )
+                if formatted and formatted not in reviewed_lines:
+                    reviewed_lines.append(formatted)
+            if tuple(reviewed_lines) == tuple(existing_lines):
+                result.append(record)
+                continue
+            result.append(
+                MiniDmaRecord(
+                    path=record.path,
+                    sample=record.sample,
+                    data=record.data,
+                    key=record.key,
+                    label=record.label,
+                    strain_summary=_mini_dma_peak_strain_summary(record),
+                    transition_summary=tuple(reviewed_lines),
+                    break_summary=record.break_summary,
+                )
+            )
+        return result
+
+    def set_transition_review_for_target(self, record_id: str, payload: Dict[str, Any]) -> None:
+        target_label = str(payload.get("target_label") or "").strip()
+        if target_label:
+            matches = [
+                record
+                for record in self._all_mini_dma_records
+                if _mini_dma_review_record_id(record, target_label) == str(record_id)
+            ]
+            if len(matches) == 1:
+                payload = {**payload, **self._mini_dma_review_metadata(matches[0])}
+        entry = self._clean_transition_review_payload(record_id, payload)
+        if entry:
+            self._transition_reviews[str(record_id)] = entry
+        else:
+            self._transition_reviews.pop(str(record_id), None)
+        self._schedule_transition_review_store()
+        self._schedule_transition_table_apply()
+
+    def _apply_transition_reviews_to_table(self) -> None:
+        records = self.records_with_reviewed_transitions(self._all_mini_dma_records)
+        if not records:
+            return
+        frame = _mini_dma_records_to_frame(records)
+        self.data.table = frame
+        try:
+            self.model.set_frame(frame)
+        except Exception:
+            pass
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _open_selected(self, *, open_origin: bool) -> None:
         records = self._selected_records()
@@ -18079,6 +26350,621 @@ class MiniDmaSection(MiniDatabaseSection):
             auto_plot=True,
             open_origin=open_origin,
         )
+
+
+class DmaTransitionsSection(QtWidgets.QWidget):
+    section_title = "TMA transitions"
+
+    def __init__(
+        self,
+        mini_dma_section: MiniDmaSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._mini_dma_section = mini_dma_section
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_data)
+        controls.addWidget(self.refresh_button)
+        self.review_button = QtWidgets.QPushButton("Review transition currents...")
+        self.review_button.setToolTip("Review TMA transition-current targets.")
+        self.review_button.clicked.connect(self._open_transition_review)
+        controls.addWidget(self.review_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.status_label = QtWidgets.QLabel("Waiting for TMA data.", self)
+        layout.addWidget(self.status_label)
+
+        self.summary_table = QtWidgets.QTableWidget(0, 7, self)
+        self.summary_table.setHorizontalHeaderLabels(
+            ["Composition", "Microwire", "Graph", "Target", "Review status", "Auto status", "Review counts"]
+        )
+        self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.summary_table.setAlternatingRowColors(True)
+        header = self.summary_table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.summary_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.summary_table, 1)
+
+        for signal_name in ("data_updated", "status_changed"):
+            signal = getattr(self._mini_dma_section, signal_name, None)
+            if signal is not None:
+                try:
+                    signal.connect(self.refresh_data)
+                except Exception:
+                    pass
+        QtCore.QTimer.singleShot(0, self.refresh_data)
+
+    def refresh_data(self, *_args: object) -> None:
+        records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        if not records:
+            try:
+                self._mini_dma_section._refresh_record_groups()
+            except Exception:
+                pass
+            records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        try:
+            reviews = self._mini_dma_section.transition_reviews_snapshot()
+        except Exception:
+            reviews = {}
+        rows: List[Tuple[MiniDmaRecord, str, str, str, str, str, Dict[str, float]]] = []
+        counts = {
+            "total": 0,
+            "reviewed": 0,
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+            "needs_attention": 0,
+        }
+        seen_ids: Set[str] = set()
+        for record in records:
+            cached_targets: Dict[str, Tuple[str, Dict[str, float]]] = {}
+            for line in getattr(record, "transition_summary", ()) or ():
+                target_label = str(line).split(":", 1)[0].strip()
+                if not target_label:
+                    continue
+                cached_targets[target_label] = (str(line), _mini_dma_transition_values_from_text(line))
+            run_id_prefix = f"{_MiniDmaTransitionReviewDialog._run_key(record)}::"
+            if isinstance(reviews, Mapping):
+                for record_id, payload in reviews.items():
+                    if not str(record_id).startswith(run_id_prefix) or not isinstance(payload, Mapping):
+                        continue
+                    target_label = str(payload.get("target_label") or str(record_id).rsplit("::", 1)[-1]).strip()
+                    if target_label:
+                        cached_targets.setdefault(target_label, ("", {}))
+            if not cached_targets:
+                cached_targets["Select in review"] = ("", {})
+            for target_label, (summary_line, auto_values) in cached_targets.items():
+                record_id = _mini_dma_review_record_id(record, target_label)
+                if record_id in seen_ids:
+                    continue
+                seen_ids.add(record_id)
+                payload = reviews.get(record_id, {}) if isinstance(reviews, Mapping) else {}
+                if not isinstance(payload, Mapping):
+                    payload = {}
+                review_status = str(payload.get("status") or "").strip()
+                if review_status == MINI_DMA_REVIEW_STATUS_ACCEPTED and (
+                    _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
+                    or _mini_dma_cleared_transition_labels(payload)
+                ):
+                    status_label = "Manual adjusted"
+                else:
+                    status_label = _mini_dma_review_status_label(review_status)
+                if status_label == "Unreviewed":
+                    if target_label == "Select in review":
+                        status_label = "Unreviewed"
+                    elif auto_values:
+                        status_label = "Auto candidates"
+                    else:
+                        status_label = "Needs attention"
+                observed_values = _clean_mini_dma_transition_values(payload.get("values"))
+                if not observed_values:
+                    observed_values = auto_values
+                if auto_values:
+                    auto_status = "Auto candidates"
+                elif target_label == "Select in review":
+                    auto_status = "Not loaded"
+                elif review_status:
+                    auto_status = "Reviewed"
+                else:
+                    auto_status = "No auto transition"
+                rows.append((record, target_label, status_label, auto_status, summary_line, record_id, observed_values))
+                counts["total"] += 1
+                if auto_values:
+                    counts["auto_candidates"] += 1
+                elif status_label == "Needs attention":
+                    counts["needs_attention"] += 1
+                if status_label == "Accepted":
+                    counts["reviewed"] += 1
+                    counts["accepted"] += 1
+                elif status_label == "Manual adjusted":
+                    counts["reviewed"] += 1
+                    counts["manual"] += 1
+                elif status_label == "No transition":
+                    counts["reviewed"] += 1
+                    counts["no_transition"] += 1
+                elif status_label == "Excluded":
+                    counts["reviewed"] += 1
+                    counts["excluded"] += 1
+                else:
+                    counts["unreviewed"] += 1
+        self.summary_table.setRowCount(len(rows))
+        counts_text = self._format_counts(counts)
+        for row_index, (record, target_label, status_label, auto_status, summary_line, _record_id, values) in enumerate(rows):
+            key_tuple = getattr(record, "key", None)
+            if key_tuple:
+                composition, microwire = _microwire_info_from_key((key_tuple[0], key_tuple[1], key_tuple[2], None))
+            else:
+                parsed = _microwire_key_from_path(getattr(record, "path", Path()), getattr(record, "sample", "") or "")
+                composition, microwire = _microwire_info_from_key((parsed[0], parsed[1], parsed[2], None)) if parsed else ("", getattr(record, "sample", ""))
+            run_label = str(getattr(record, "label", "") or getattr(record, "path", ""))
+            row_values = [
+                composition,
+                microwire,
+                run_label,
+                target_label,
+                status_label,
+                auto_status,
+                counts_text if row_index == 0 else "",
+            ]
+            for column, value in enumerate(row_values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                if column == 4:
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(_transition_review_status_color(status_label))))
+                if column == 6:
+                    tooltip_parts = []
+                    if values:
+                        tooltip_parts.append(", ".join(f"{label}={value:.3g} mA" for label, value in values.items()))
+                    if summary_line:
+                        tooltip_parts.append(summary_line)
+                    if tooltip_parts:
+                        item.setToolTip("\n".join(tooltip_parts))
+                self.summary_table.setItem(row_index, column, item)
+        try:
+            self.summary_table.resizeColumnsToContents()
+        except Exception:
+            pass
+        if rows:
+            self.status_label.setText(
+                f"{counts['reviewed']} of {counts['total']} TMA target row(s) reviewed across {len(records)} run(s)."
+            )
+        elif records:
+            self.status_label.setText("TMA runs are available, but no transition-current targets were found.")
+        else:
+            self.status_label.setText("No TMA runs available yet.")
+
+    @staticmethod
+    def _format_counts(counts: Mapping[str, int]) -> str:
+        return "; ".join(
+            f"{key}={int(counts.get(key, 0) or 0)}"
+            for key in ("total", "reviewed", "accepted", "manual", "no_transition", "excluded", "unreviewed", "auto_candidates")
+        )
+
+    def _open_transition_review(self) -> None:
+        opener = getattr(self._mini_dma_section, "_open_transition_review", None)
+        if callable(opener):
+            opener()
+        self.refresh_data()
+
+
+class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
+    """Embed an existing transition-review dialog as an in-tab workspace."""
+
+    def __init__(
+        self,
+        title: str,
+        dialog_factory: Callable[[QtWidgets.QWidget], QtWidgets.QDialog],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._dialog_factory = dialog_factory
+        self._dialog: QtWidgets.QDialog | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh_workspace)
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self._host = QtWidgets.QWidget(self)
+        self._host_layout = QtWidgets.QVBoxLayout(self._host)
+        self._host_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._host, 1)
+
+    def refresh_workspace(self) -> None:
+        if self._dialog is not None:
+            active_loaders = getattr(self._dialog, "has_active_loaders", None)
+            if callable(active_loaders) and active_loaders():
+                self.refresh_button.setToolTip(
+                    "Wait for the current transition graph to finish loading, then refresh again."
+                )
+                return
+            # Dialog close handlers own worker shutdown.  If close is rejected
+            # because a loader is still alive, retain the current workspace.
+            if not self._dialog.close():
+                return
+            self.refresh_button.setToolTip("")
+            self._host_layout.removeWidget(self._dialog)
+            self._dialog.setParent(None)
+            self._dialog.deleteLater()
+            self._dialog = None
+        dialog = self._dialog_factory(self._host)
+        dialog.setWindowTitle(self._title)
+        dialog.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        for button_box in dialog.findChildren(QtWidgets.QDialogButtonBox):
+            button_box.hide()
+        self._host_layout.addWidget(dialog, 1)
+        dialog.show()
+        self._dialog = dialog
+
+
+class _AnnealingTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+    def __init__(
+        self,
+        current_density_section: CurrentDensitySection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._current_density_section = current_density_section
+        super().__init__("Annealing transition review", self._create_dialog, parent)
+
+    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        annealing_section = getattr(self._current_density_section, "_annealing_section", None)
+        records_getter = getattr(annealing_section, "_transition_review_records", None)
+        records = records_getter() if callable(records_getter) else []
+        snapshot_provider = getattr(annealing_section, "transition_reviews_snapshot", None)
+        review_setter = getattr(annealing_section, "set_transition_review_for_record", None)
+        dialog = _AnnealingTransitionReviewDialog(
+            records,
+            self._current_density_section.logger,
+            parent,
+            transition_reviews_provider=snapshot_provider,
+            transition_reviews_setter=review_setter,
+        )
+        if not records:
+            dialog._summary_label.setText("No current annealing graphs are available yet.")  # noqa: SLF001
+        return dialog
+
+
+class _MiniDmaTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+    def __init__(
+        self,
+        mini_dma_section: MiniDmaSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._mini_dma_section = mini_dma_section
+        super().__init__("TMA transition review", self._create_dialog, parent)
+
+    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        if not records:
+            try:
+                self._mini_dma_section._refresh_record_groups()
+            except Exception:
+                pass
+            records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        return _MiniDmaTransitionReviewDialog(
+            records,
+            getattr(self._mini_dma_section, "logger", logging.getLogger(__name__)),
+            parent,
+            review_provider=self._mini_dma_section.transition_reviews_snapshot,
+            review_setter=self._mini_dma_section.set_transition_review_for_target,
+        )
+
+
+class _VsmTransitionWorkspace(QtWidgets.QWidget):
+    def __init__(
+        self,
+        transition_temps_section: TransitionTempsSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._section = transition_temps_section
+        self._refs: List[Tuple[str, str]] = []
+        self._items: Dict[Tuple[str, str], QtWidgets.QTreeWidgetItem] = {}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh_workspace)
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        self.tree = QtWidgets.QTreeWidget(splitter)
+        self.tree.setHeaderLabels(["VSM scan", "Status"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setColumnWidth(0, 280)
+        self.tree.setColumnWidth(1, 120)
+        self.tree.setMinimumWidth(320)
+        self.preview_panel = _TransitionTempPreviewPanel(
+            getattr(self._section, "logger", logging.getLogger(__name__)),
+            splitter,
+        )
+        self.preview_panel.acceptNextRequested.connect(self._accept_current_and_refresh)
+        self.preview_panel.noTransitionRequested.connect(self._no_transition_current_and_refresh)
+        self.preview_panel.excludeRequested.connect(self._exclude_current_and_refresh)
+        self.preview_panel.previousRequested.connect(self._previous_current_and_refresh)
+        self.preview_panel.nextUnreviewedRequested.connect(self._next_unreviewed_and_refresh)
+        self.preview_panel.valuePicked.connect(self._picked_value_and_refresh)
+        self.preview_panel.valueCleared.connect(self._clear_value_and_refresh)
+        self.preview_panel.scanChanged.connect(self._sync_selected_from_panel)
+        splitter.addWidget(self.tree)
+        splitter.addWidget(self.preview_panel)
+        splitter.setSizes([360, 900])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+        self.tree.currentItemChanged.connect(self._handle_selection_changed)
+        try:
+            object.__setattr__(self._section, "_preview_panel", self.preview_panel)
+        except Exception:
+            pass
+
+    def refresh_workspace(self) -> None:
+        selected_ref = self._current_ref()
+        try:
+            self._section.refresh_data()
+        except Exception:
+            pass
+        self.tree.clear()
+        self._items.clear()
+        self._refs = []
+        for group_key in sorted(getattr(self._section, "_record_groups", {}).keys()):
+            key_tuple = self._section._parse_group_key(group_key)
+            if key_tuple is None:
+                composition = ""
+                microwire = group_key
+            else:
+                composition, microwire = _microwire_info_from_key(key_tuple)
+            records = sorted(self._section._record_groups.get(group_key, []), key=_record_label_for_display)
+            for record in records:
+                record_id = _vsm_transition_review_record_id(record)
+                status = self._section._status_for_record(record)
+                label = " | ".join(
+                    part
+                    for part in (
+                        composition,
+                        microwire,
+                        _record_label_for_display(record),
+                    )
+                    if part
+                )
+                item = QtWidgets.QTreeWidgetItem([label or "VSM scan", status])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, (group_key, record_id))
+                _apply_transition_status_color(item, status)
+                self.tree.addTopLevelItem(item)
+                ref = (group_key, record_id)
+                self._refs.append(ref)
+                self._items[ref] = item
+        self.tree.setColumnWidth(0, 280)
+        self.tree.setColumnWidth(1, 120)
+        if selected_ref in self._items:
+            self.tree.setCurrentItem(self._items[selected_ref])
+        elif self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        else:
+            self.preview_panel.update_selection("No VSM temperature scans are available yet.", [], {})
+
+    def _handle_selection_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            self.preview_panel.update_selection("Select a VSM scan to review.", [], {})
+            return
+        ref = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(ref, tuple) or len(ref) != 2:
+            return
+        group_key, record_id = str(ref[0]), str(ref[1])
+        try:
+            self._section._select_scan_ref(group_key, record_id)
+        except Exception:
+            pass
+        self._refresh_current_item()
+
+    def _current_ref(self) -> Optional[Tuple[str, str]]:
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        ref = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(ref, tuple) and len(ref) == 2:
+            return (str(ref[0]), str(ref[1]))
+        return None
+
+    def _refresh_current_item(self) -> None:
+        ref = self._current_ref()
+        if ref is None:
+            return
+        group_key, record_id = ref
+        record = next(
+            (
+                candidate
+                for candidate in self._section._record_groups.get(group_key, [])
+                if _vsm_transition_review_record_id(candidate) == record_id
+            ),
+            None,
+        )
+        item = self._items.get(ref)
+        if record is not None and item is not None:
+            status = self._section._status_for_record(record)
+            item.setText(1, status)
+            _apply_transition_status_color(item, status)
+
+    def _select_ref(self, ref: Tuple[str, str]) -> None:
+        item = self._items.get(ref)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+
+    def _sync_selected_from_panel(self) -> None:
+        current = self._section._current_preview_record()
+        if current is None:
+            return
+        group_key, record = current
+        self._select_ref((group_key, _vsm_transition_review_record_id(record)))
+
+    def _accept_current_and_refresh(self) -> None:
+        self._section._accept_current_scan_and_next()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _no_transition_current_and_refresh(self) -> None:
+        self._section._mark_current_scan_no_transition()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _exclude_current_and_refresh(self) -> None:
+        self._section._exclude_current_scan()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _previous_current_and_refresh(self) -> None:
+        self._section._select_previous_scan()
+        self._sync_selected_from_panel()
+
+    def _next_unreviewed_and_refresh(self) -> None:
+        self._section._select_next_unreviewed_scan(fallback_next=True)
+        self._sync_selected_from_panel()
+
+    def _picked_value_and_refresh(self, label: str, value: float) -> None:
+        self._section._apply_picked_value(label, value)
+        self._refresh_current_item()
+
+    def _clear_value_and_refresh(self, label: str) -> None:
+        self._section._clear_picked_value(label)
+        self._refresh_current_item()
+
+
+class TransitionsSection(QtWidgets.QWidget):
+    section_title = "Transitions"
+
+    def __init__(
+        self,
+        annealing_transitions: CurrentDensitySection,
+        vsm_transitions: TransitionTempsSection,
+        dma_transitions: DmaTransitionsSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._view_aliases = {
+            "annealing": 0,
+            "current_density": 0,
+            "vsm": 1,
+            "transition_temps": 1,
+            "dma": 2,
+            "mini_dma": 2,
+        }
+        self._dirty_view_indexes: Set[int] = {0, 1, 2}
+        self._active = False
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tab_widget = QtWidgets.QTabWidget(self)
+        self.annealing_workspace = _AnnealingTransitionWorkspace(annealing_transitions, self)
+        self.vsm_workspace = _VsmTransitionWorkspace(vsm_transitions, self)
+        self.dma_workspace = _MiniDmaTransitionWorkspace(dma_transitions._mini_dma_section, self)
+        self.tab_widget.addTab(self.annealing_workspace, "Annealing")
+        self.tab_widget.addTab(self.vsm_workspace, "VSM")
+        self.tab_widget.addTab(self.dma_workspace, "TMA")
+        self.tab_widget.currentChanged.connect(self._handle_view_changed)
+        layout.addWidget(self.tab_widget, 1)
+
+    def _handle_view_changed(self, _index: int) -> None:
+        if self._active:
+            self.refresh_current_workspace()
+
+    def set_active(self, active: bool, *, refresh: bool = True) -> None:
+        self._active = bool(active)
+        if self._active and refresh:
+            self.refresh_current_workspace()
+
+    def show_loading(self, message: str) -> None:
+        """Show an honest placeholder while transition dependencies load."""
+
+        widget = self.tab_widget.currentWidget()
+        empty = getattr(widget, "_show_empty", None)
+        if callable(empty):
+            empty(message)
+            return
+        preview = getattr(widget, "preview_panel", None)
+        update = getattr(preview, "update_selection", None)
+        if callable(update):
+            update(message, [], {})
+
+    def mark_workspaces_dirty(self, view: str | None = None) -> None:
+        if view is None:
+            self._dirty_view_indexes = set(range(self.tab_widget.count()))
+            return
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is not None:
+            self._dirty_view_indexes.add(index)
+
+    def refresh_current_workspace(self, *, force: bool = False) -> None:
+        index = self.tab_widget.currentIndex()
+        if not force and index not in self._dirty_view_indexes:
+            return
+        widget = self.tab_widget.currentWidget()
+        refresher = getattr(widget, "refresh_workspace", None)
+        if callable(refresher):
+            refresher()
+        self._dirty_view_indexes.discard(index)
+
+    def show_view(self, view: str) -> None:
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is None:
+            return
+        if 0 <= index < self.tab_widget.count():
+            previous = self.tab_widget.currentIndex()
+            try:
+                if hasattr(self.tab_widget, "isTabVisible") and not self.tab_widget.isTabVisible(index):
+                    self.tab_widget.setTabVisible(index, True)
+            except Exception:
+                pass
+            self.tab_widget.setCurrentIndex(index)
+            if previous == index and self._active:
+                self.refresh_current_workspace()
+
+    def set_view_visible(self, view: str, visible: bool) -> None:
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is None or index < 0 or index >= self.tab_widget.count():
+            return
+        try:
+            self.tab_widget.setTabVisible(index, bool(visible))
+        except Exception:
+            pass
+        try:
+            current_visible = self.tab_widget.isTabVisible(self.tab_widget.currentIndex())
+        except Exception:
+            current_visible = True
+        if not current_visible:
+            for candidate in range(self.tab_widget.count()):
+                try:
+                    if self.tab_widget.isTabVisible(candidate):
+                        self.tab_widget.setCurrentIndex(candidate)
+                        break
+                except Exception:
+                    continue
 
 
 class ShapeMemoryStressStrainSection(MiniDatabaseSection):
@@ -18391,6 +27277,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             self.logger.exception(
                 "Failed to persist manual stress/strain visibility settings"
             )
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[ShapeMemoryStressStrainRecord]
@@ -18430,7 +27317,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._normalise_value_columns()
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
         self._apply_graph_column_visibility()
@@ -18621,7 +27509,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         microscope_frame = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
-            else MiniDatabaseStore("microscope").load().table
+            else (
+                pd.DataFrame()
+                if MiniDatabaseSection._skip_initial_store_load
+                else MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load().table
+            )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
         expanded_rows: List[Dict[str, Any]] = []
@@ -19283,7 +28178,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         microscope_frame = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
-            else MiniDatabaseStore("microscope").load().table
+            else (
+                pd.DataFrame()
+                if MiniDatabaseSection._skip_initial_store_load
+                else MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load().table
+            )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
         for row_index, row in updated.iterrows():
@@ -19490,7 +28392,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         density = None
         try:
             row_key = _row_to_microwire_key(frame.iloc[row_index])
-            microscope_section = MiniDatabaseStore("microscope").load()
+            microscope_section = MiniDatabaseStore(
+                "microscope",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load()
             microscope_frame = (
                 microscope_section.table
                 if isinstance(microscope_section.table, pd.DataFrame)
@@ -19790,6 +28695,7 @@ class FmrSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist FMR visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(self, records: Sequence[FmrRecord]) -> List[FmrRecord]:
         if not self._hidden_paths:
@@ -19826,7 +28732,8 @@ class FmrSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -21049,7 +29956,10 @@ class StrainSection(MiniDatabaseSection):
     def _load_reference_data(self) -> None:
         wire_choices: Dict[str, Dict[str, tuple[int, int, Optional[str]]]] = {}
         try:
-            annealing_store = MiniDatabaseStore("annealing")
+            annealing_store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = annealing_store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -21078,8 +29988,14 @@ class StrainSection(MiniDatabaseSection):
 
         d_lookup: Dict[MicrowireKey, float] = {}
         try:
-            microscope_data = MiniDatabaseStore("microscope").load()
-            frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
+            if MiniDatabaseSection._skip_initial_store_load:
+                frame = pd.DataFrame()
+            else:
+                microscope_data = MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load()
+                frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
         except Exception:
             frame = pd.DataFrame()
         if isinstance(frame, pd.DataFrame) and not frame.empty:
@@ -22192,7 +31108,7 @@ class CompareSection(MiniDatabaseSection):
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
         graph_row.addWidget(self.graph_panel_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button = QtWidgets.QPushButton("Open exact 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_high_plot_button)
@@ -22272,7 +31188,7 @@ class CompareSection(MiniDatabaseSection):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
         self.other_preview_display = _AnnealingPlotGallery(
@@ -22856,6 +31772,7 @@ class CompareSection(MiniDatabaseSection):
                 else:
                     target = None
                 if target is not None:
+                    diameter_um = _diameter_um_from_mapping(row.to_dict())
                     measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
                     cache_key = (
                         "annealing",
@@ -22870,6 +31787,7 @@ class CompareSection(MiniDatabaseSection):
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if pixmap is None:
                         return None
@@ -22885,12 +31803,14 @@ class CompareSection(MiniDatabaseSection):
                 if cached is not None:
                     return cached
                 pixmaps: List[QtGui.QPixmap] = []
+                diameter_um = _diameter_um_from_mapping(row.to_dict())
                 for record in other_records:
                     preview = _render_measurement_pixmap(
                         record,
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if preview is not None:
                         pixmaps.append(preview)
@@ -22990,6 +31910,18 @@ class CompareSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         return
+
+    def invalidate_source_caches(self) -> None:
+        _clear_source_record_caches(self)
+        self._matrix_pixmap_cache.clear()
+        self._matrix_view_dirty = True
+        for model_name in ("model", "matrix_model"):
+            model = getattr(self, model_name, None)
+            if isinstance(model, DataFrameModel):
+                try:
+                    model.layoutChanged.emit()
+                except Exception:
+                    pass
 
     def add_rows_from_frame(self, frame: pd.DataFrame, row_indices: Sequence[int]) -> int:
         if not isinstance(frame, pd.DataFrame) or frame.empty or not row_indices:
@@ -23112,8 +32044,10 @@ class CompareSection(MiniDatabaseSection):
     def _update_preview_graph_buttons(self, *_: Any) -> None:
         key = self._active_compare_key()
         enabled = key is not None
-        self.open_high_plot_button.setEnabled(enabled)
-        self.open_other_plot_button.setEnabled(enabled)
+        annealing_records = self._ensure_annealing_groups().get(key or "", []) if enabled else []
+        high_record, other_records = _select_anchor_and_other_records(annealing_records) if annealing_records else (None, [])
+        self.open_high_plot_button.setEnabled(bool(enabled and high_record is not None))
+        self.open_other_plot_button.setEnabled(bool(enabled and other_records))
         self.open_vsm_hysteresis_button.setEnabled(
             bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
         )
@@ -23205,7 +32139,7 @@ class CompareSection(MiniDatabaseSection):
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
-                    description="No 1000 mA measurement available for this microwire.",
+                    description=_missing_high_measurement_message(records),
                 )
                 self.other_preview_display.set_records(
                     other_records,
@@ -23306,7 +32240,7 @@ class CompareSection(MiniDatabaseSection):
                     QtWidgets.QMessageBox.information(
                         self,
                         "Microwire Data Builder",
-                        "No 1000 mA measurement available for this microwire.",
+                        _missing_high_measurement_message(records),
                     )
                     return
                 self._show_annealing_records([high_record], "1000 mA")
@@ -23594,6 +32528,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._preview_row_index_map: List[int] = []
         self._selected_columns: Optional[Set[str]] = None
         self._column_order: List[str] = []
+        self._applying_column_order = False
         self._sort_spec: List[Tuple[str, bool]] = []
         self._mandatory_columns: Set[str] = {"Composition", "Microwire"}
         self._known_columns: Set[str] = set()
@@ -23626,6 +32561,8 @@ class AssemblySection(QtWidgets.QWidget):
         self._show_imported = True
         self._show_oe_samples = False
         self._preview_search_text: str = ""
+        self._preview_source_filter_text: str = SOURCE_LABEL_ALL
+        self._preview_stale_reason: str = ""
         self._project_path_getter: Callable[[], Optional[Path]] | None = None
         self._preview_background_cache: Dict[Any, QtGui.QBrush] = {}
 
@@ -23641,11 +32578,11 @@ class AssemblySection(QtWidgets.QWidget):
             ("fabrication", "Fabrication"),
             ("annealing", "Current annealing"),
             ("microscope", "Microscope"),
-            ("current_density", "Current density"),
+            ("current_density", "Annealing transitions"),
             ("videos", "Videos"),
             ("vsm_hysteresis", "VSM hysteresis"),
             ("vsm_temperature_scan", "VSM temperature scan"),
-            ("transition_temps", "Transition temps"),
+            ("transition_temps", "VSM transitions"),
             ("dma_iso_stress", "DMA iso-stress"),
             ("mini_dma", "TMA"),
             ("shape_memory_stress_strain", "Manual stress/strain"),
@@ -23660,13 +32597,17 @@ class AssemblySection(QtWidgets.QWidget):
 
         settings_row = QtWidgets.QHBoxLayout()
         self.export_button = QtWidgets.QPushButton("Export...")
+        self.export_button.setAccessibleName("Configure and export assembled data")
         self.export_button.clicked.connect(self._open_export_dialog)
         settings_row.addWidget(self.export_button)
-        self.export_summary_label = QtWidgets.QLabel("")
-        self.export_summary_label.setWordWrap(True)
-        settings_row.addWidget(self.export_summary_label, 1)
         settings_row.addStretch(1)
         layout.addLayout(settings_row)
+        self.export_summary_label = QtWidgets.QLabel("")
+        self.export_summary_label.setWordWrap(True)
+        self.export_summary_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.export_summary_label)
         self._update_export_summary()
 
         self.status_label = QtWidgets.QLabel(
@@ -23674,60 +32615,93 @@ class AssemblySection(QtWidgets.QWidget):
         )
         layout.addWidget(self.status_label)
 
-        graph_row = QtWidgets.QHBoxLayout()
+        graph_options_row = QtWidgets.QHBoxLayout()
         self.graph_panel_checkbox = QtWidgets.QCheckBox("Show graph preview panel")
+        self.graph_panel_checkbox.setAccessibleName("Show assembled graph preview panel")
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
-        graph_row.addWidget(self.graph_panel_checkbox)
+        graph_options_row.addWidget(self.graph_panel_checkbox)
         self.oe_samples_checkbox = QtWidgets.QCheckBox("Show oe samples")
+        self.oe_samples_checkbox.setAccessibleName("Show separately grouped oe samples")
         self.oe_samples_checkbox.setChecked(self._show_oe_samples)
         self.oe_samples_checkbox.toggled.connect(self.set_show_oe_samples)
-        graph_row.addWidget(self.oe_samples_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        graph_options_row.addWidget(self.oe_samples_checkbox)
+        graph_options_row.addStretch(1)
+        layout.addLayout(graph_options_row)
+
+        graph_grid = QtWidgets.QGridLayout()
+        graph_grid.setHorizontalSpacing(6)
+        graph_grid.setVerticalSpacing(4)
+        self.open_high_plot_button = QtWidgets.QPushButton("1000 mA")
+        self.open_high_plot_button.setToolTip("Open the exact 1000 mA annealing graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_high_plot_button)
-        self.open_other_plot_button = QtWidgets.QPushButton("Open other annealing graphs")
+        graph_grid.addWidget(self.open_high_plot_button, 0, 0)
+        self.open_other_plot_button = QtWidgets.QPushButton("Other annealing")
+        self.open_other_plot_button.setToolTip("Open other annealing graphs")
         self.open_other_plot_button.clicked.connect(lambda: self._open_preview_graph("other"))
         self.open_other_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_other_plot_button)
-        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
+        graph_grid.addWidget(self.open_other_plot_button, 0, 1)
+        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("VSM hysteresis")
+        self.open_vsm_hysteresis_button.setToolTip("Open VSM hysteresis graphs")
         self.open_vsm_hysteresis_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_hysteresis")
         )
         self.open_vsm_hysteresis_button.setEnabled(False)
-        graph_row.addWidget(self.open_vsm_hysteresis_button)
-        self.open_vsm_temperature_button = QtWidgets.QPushButton("Open VSM temp graphs")
+        graph_grid.addWidget(self.open_vsm_hysteresis_button, 0, 2)
+        self.open_vsm_temperature_button = QtWidgets.QPushButton("VSM temperature")
+        self.open_vsm_temperature_button.setToolTip("Open VSM temperature graphs")
         self.open_vsm_temperature_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_temperature")
         )
         self.open_vsm_temperature_button.setEnabled(False)
-        graph_row.addWidget(self.open_vsm_temperature_button)
-        self.open_dma_button = QtWidgets.QPushButton("Open DMA iso-stress graphs")
+        graph_grid.addWidget(self.open_vsm_temperature_button, 0, 3)
+        self.open_dma_button = QtWidgets.QPushButton("DMA iso-stress")
+        self.open_dma_button.setToolTip("Open DMA iso-stress graphs")
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
-        graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
+        graph_grid.addWidget(self.open_dma_button, 1, 0)
+        self.open_shape_memory_button = QtWidgets.QPushButton("Manual stress/strain")
+        self.open_shape_memory_button.setToolTip("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
         self.open_shape_memory_button.setEnabled(False)
-        graph_row.addWidget(self.open_shape_memory_button)
-        self.open_fmr_button = QtWidgets.QPushButton("Open FMR graphs")
+        graph_grid.addWidget(self.open_shape_memory_button, 1, 1, 1, 2)
+        self.open_fmr_button = QtWidgets.QPushButton("FMR")
+        self.open_fmr_button.setToolTip("Open FMR graphs")
         self.open_fmr_button.clicked.connect(lambda: self._open_preview_graph("fmr"))
         self.open_fmr_button.setEnabled(False)
-        graph_row.addWidget(self.open_fmr_button)
-        graph_row.addStretch(1)
-        layout.addLayout(graph_row)
+        graph_grid.addWidget(self.open_fmr_button, 1, 3)
+        for button in (
+            self.open_high_plot_button,
+            self.open_other_plot_button,
+            self.open_vsm_hysteresis_button,
+            self.open_vsm_temperature_button,
+            self.open_dma_button,
+            self.open_shape_memory_button,
+            self.open_fmr_button,
+        ):
+            button.setAccessibleName(button.toolTip())
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        for column in range(4):
+            graph_grid.setColumnStretch(column, 1)
+        layout.addLayout(graph_grid)
 
         tools_row = QtWidgets.QHBoxLayout()
         self.columns_button = QtWidgets.QPushButton("Columns...")
+        self.columns_button.setAccessibleName("Choose visible Assemble columns")
         self.columns_button.clicked.connect(self._open_column_selector)
         tools_row.addWidget(self.columns_button)
         self.order_button = QtWidgets.QPushButton("Order...")
+        self.order_button.setAccessibleName("Change Assemble column order")
         self.order_button.clicked.connect(self._open_column_order_dialog)
         tools_row.addWidget(self.order_button)
         self.sort_button = QtWidgets.QPushButton("Sort...")
+        self.sort_button.setAccessibleName("Configure Assemble row sorting")
         self.sort_button.clicked.connect(self._open_sort_dialog)
         tools_row.addWidget(self.sort_button)
         self.clear_sort_button = QtWidgets.QPushButton("Clear sort")
@@ -23758,11 +32732,20 @@ class AssemblySection(QtWidgets.QWidget):
         self.search_clear_button.setEnabled(False)
         self.search_clear_button.clicked.connect(self._clear_preview_search)
         search_row.addWidget(self.search_clear_button)
+        search_row.addWidget(QtWidgets.QLabel("Source:"))
+        self.source_filter_combo = QtWidgets.QComboBox()
+        self.source_filter_combo.addItem(SOURCE_LABEL_ALL)
+        self.source_filter_combo.setEnabled(False)
+        self.source_filter_combo.currentTextChanged.connect(
+            self._handle_preview_source_filter_changed
+        )
+        search_row.addWidget(self.source_filter_combo)
         layout.addLayout(search_row)
 
         self.preview_model = DataFrameModel()
         self.preview_model.set_decoration_provider(self._preview_decoration)
         self.preview_model.set_background_provider(self._preview_background)
+        self.preview_model.set_foreground_provider(self._preview_foreground)
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
@@ -23811,7 +32794,7 @@ class AssemblySection(QtWidgets.QWidget):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
         self.other_preview_display = _AnnealingPlotGallery(
@@ -23865,6 +32848,13 @@ class AssemblySection(QtWidgets.QWidget):
         self.analyze_button.clicked.connect(self._open_eda_window)
         button_row.addWidget(self.analyze_button)
         self.preview_button = QtWidgets.QPushButton("Preview database")
+        self.preview_button.setText("Rebuild preview")
+        self.preview_button.setToolTip(
+            "Rebuild Assemble from every available measurement section."
+        )
+        self.preview_button.setAccessibleName(
+            "Rebuild Assemble preview from all measurement sections"
+        )
         self.preview_button.clicked.connect(self._preview)
         button_row.addWidget(self.preview_button)
         layout.addLayout(button_row)
@@ -23881,6 +32871,74 @@ class AssemblySection(QtWidgets.QWidget):
 
     def attach_project_context(self, path_getter: Callable[[], Optional[Path]]) -> None:
         self._project_path_getter = path_getter
+
+    def invalidate_source_caches(self) -> None:
+        _clear_source_record_caches(self)
+        self._graph_pixmap_cache.clear()
+        model = getattr(self, "preview_model", None)
+        if isinstance(model, DataFrameModel):
+            try:
+                model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _assemble_identity_keys(frame: object) -> Set[str]:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return set()
+        keys: Set[str] = set()
+        for _, row in frame.iterrows():
+            key = _row_to_microwire_key(row)
+            if key:
+                keys.add(key)
+                continue
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(float(row.get("Draw")))
+                piece = int(float(row.get("Piece")))
+            except (TypeError, ValueError):
+                continue
+            keys.add(_microwire_key_to_str((composition, draw, piece, None)))
+        return keys
+
+    def mark_preview_stale(self, reason: str = "Source data changed") -> None:
+        self._preview_stale_reason = str(reason or "Source data changed").strip()
+        self._decorate_stale_status()
+
+    def _clear_preview_stale(self) -> None:
+        self._preview_stale_reason = ""
+
+    def _assess_preview_source_coverage(self) -> None:
+        source_keys: Set[str] = set()
+        for key, section in self.sections.items():
+            if key == "compare":
+                continue
+            frame = getattr(getattr(section, "data", None), "table", None)
+            if not isinstance(frame, pd.DataFrame):
+                model = getattr(section, "model", None)
+                frame_provider = getattr(model, "frame", None)
+                frame = frame_provider() if callable(frame_provider) else None
+            source_keys.update(self._assemble_identity_keys(frame))
+        assemble_keys = self._assemble_identity_keys(self._raw_preview_frame)
+        missing = source_keys - assemble_keys
+        if missing:
+            count = len(missing)
+            self._preview_stale_reason = (
+                f"{count} source sample{'s are' if count != 1 else ' is'} missing"
+            )
+        else:
+            self._preview_stale_reason = ""
+        self._decorate_stale_status()
+
+    def _decorate_stale_status(self) -> None:
+        if not self._preview_stale_reason:
+            return
+        self.status_label.setText(
+            f"Assemble is out of date — {self._preview_stale_reason}. "
+            "Click Rebuild preview."
+        )
 
     def _analysis_filtered_rows(self) -> tuple[int, ...]:
         raw_frame = self._raw_preview_frame
@@ -23996,6 +33054,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self._raw_preview_frame if isinstance(self._raw_preview_frame, pd.DataFrame) else pd.DataFrame()
+        frame = _with_source_label_column(frame)
         frame = self._dedupe_frame_columns(frame)
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
@@ -24015,10 +33074,11 @@ class AssemblySection(QtWidgets.QWidget):
             "columns": columns,
             "rows": rows,
             "index": index_payload,
-            "selected_columns": list(self._selected_columns or []),
+            "selected_columns": sorted(self._selected_columns or []),
             "column_order": list(self._column_order),
             "sort_spec": list(self._sort_spec),
             "search_query": self._preview_search_text,
+            "source_filter": self._preview_source_filter_text,
             "export_settings": self._export_settings_payload(),
             "graph_preview": bool(self.graph_panel_checkbox.isChecked()),
             "imported_rows": [
@@ -24037,7 +33097,16 @@ class AssemblySection(QtWidgets.QWidget):
         graph_preview = payload.get("graph_preview")
         if isinstance(graph_preview, bool):
             try:
-                self.graph_panel_checkbox.setChecked(graph_preview)
+                if _builder_project_load_active():
+                    blocker = QtCore.QSignalBlocker(self.graph_panel_checkbox)
+                    try:
+                        self.graph_panel_checkbox.setChecked(False)
+                    finally:
+                        del blocker
+                    if hasattr(self, "graph_preview_panel"):
+                        self.graph_preview_panel.setVisible(False)
+                else:
+                    self.graph_panel_checkbox.setChecked(graph_preview)
             except Exception:
                 pass
         selected_columns = payload.get("selected_columns")
@@ -24089,6 +33158,12 @@ class AssemblySection(QtWidgets.QWidget):
             self.search_edit.blockSignals(False)
         if hasattr(self, "search_clear_button"):
             self.search_clear_button.setEnabled(bool(self._preview_search_text))
+        source_filter = payload.get("source_filter")
+        self._preview_source_filter_text = (
+            str(source_filter).strip()
+            if isinstance(source_filter, str) and source_filter.strip()
+            else SOURCE_LABEL_ALL
+        )
 
         columns_payload = payload.get("columns")
         if isinstance(columns_payload, (list, tuple)):
@@ -24113,6 +33188,7 @@ class AssemblySection(QtWidgets.QWidget):
                 pass
         if isinstance(frame, pd.DataFrame):
             frame = self._apply_column_universe(frame)
+            frame = _with_source_label_column(frame)
         if self._selected_columns is not None:
             self._sync_section_states_from_columns(self._selected_columns, frame.columns)
         imported_rows = payload.get("imported_rows")
@@ -24142,7 +33218,9 @@ class AssemblySection(QtWidgets.QWidget):
                 self.oe_samples_checkbox.blockSignals(False)
         self._measured_preview_frame = None
         self._raw_preview_frame = frame
+        self._refresh_preview_source_filter_options()
         self._refresh_preview_frame()
+        self._assess_preview_source_coverage()
 
     def _open_export_dialog(self) -> None:
         dialog = _AssemblyExportDialog(
@@ -24192,9 +33270,12 @@ class AssemblySection(QtWidgets.QWidget):
             self._export_origin = True
         sections = settings.get("sections")
         if isinstance(sections, Mapping):
-            for key, _label in self._section_choices:
-                if key in sections:
-                    self._section_states[key] = bool(sections.get(key))
+            # Old projects stored source-family switches derived from the visible
+            # columns.  Retain compatibility with the payload shape but migrate
+            # the behavior to complete ingestion on load.
+            self._section_states = {
+                key: True for key, _label in self._section_choices
+            }
         self._update_export_summary()
 
     def _open_import_dialog(self) -> None:
@@ -24208,7 +33289,7 @@ class AssemblySection(QtWidgets.QWidget):
         start_dir = _dialog_start_directory("sample_data")
         path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Import data workbook",
+            "Import workbook as source",
             str(start_dir),
             "Excel files (*.xlsx *.xlsm *.xltx *.xltm);;All files (*.*)",
         )
@@ -24235,7 +33316,7 @@ class AssemblySection(QtWidgets.QWidget):
             )
         if str(path) not in self._imported_sources:
             self._imported_sources.append(str(path))
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
             merged = self._merge_imported_rows(base_frame)
             self._update_preview(merged)
@@ -24246,6 +33327,7 @@ class AssemblySection(QtWidgets.QWidget):
             f"Imported workbook: {path.name}",
             f"New samples added: {stats['new_samples']}",
             f"Existing samples updated: {stats['updated_samples']}",
+            "Imported rows are tagged as Source = Imported for the Source filter.",
         ]
         if stats["added_fields"]:
             summary_lines.append(f"Fields filled: {stats['added_fields']}")
@@ -24398,35 +33480,35 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return imported
         merged_frame = frame.copy()
-        key_index: Dict[str, int] = {}
+        key_indexes: Dict[str, List[int]] = {}
         for idx, row in merged_frame.iterrows():
             key = _row_to_microwire_key(row)
-            if key and key not in key_index:
-                key_index[key] = idx
+            if key:
+                key_indexes.setdefault(key, []).append(idx)
         append_rows: List[Dict[str, Any]] = []
         for key, record in self._imported_rows.items():
-            if key in key_index:
-                row_idx = key_index[key]
-                row = merged_frame.loc[row_idx]
-                updated = False
-                for column, value in record.items():
-                    if column in {"Composition", "Microwire"}:
-                        continue
-                    if column not in merged_frame.columns:
-                        merged_frame[column] = None
-                    existing = row.get(column)
-                    if self._should_fill_import_value(existing, value):
-                        try:
-                            merged_frame[column] = merged_frame[column].astype(object)
-                        except Exception:
-                            pass
-                        merged_frame.at[row_idx, column] = value
-                        updated = True
-                if updated:
-                    current_source = str(row.get("Data source") or "").strip()
-                    merged_frame.at[row_idx, "Data source"] = _data_source_with_import(
-                        current_source
-                    )
+            if key in key_indexes:
+                for row_idx in key_indexes[key]:
+                    row = merged_frame.loc[row_idx]
+                    updated = False
+                    for column, value in record.items():
+                        if column in {"Composition", "Microwire"}:
+                            continue
+                        if column not in merged_frame.columns:
+                            merged_frame[column] = None
+                        existing = row.get(column)
+                        if self._should_fill_import_value(existing, value):
+                            try:
+                                merged_frame[column] = merged_frame[column].astype(object)
+                            except Exception:
+                                pass
+                            merged_frame.at[row_idx, column] = value
+                            updated = True
+                    if updated:
+                        current_source = str(row.get("Data source") or "").strip()
+                        merged_frame.at[row_idx, "Data source"] = _data_source_with_import(
+                            current_source
+                        )
             else:
                 append_rows.append(record)
         if append_rows:
@@ -24469,9 +33551,17 @@ class AssemblySection(QtWidgets.QWidget):
             "updated_labels": updated_labels,
         }
 
+    def _base_preview_frame(self) -> Optional[pd.DataFrame]:
+        if isinstance(self._measured_preview_frame, pd.DataFrame):
+            return self._measured_preview_frame
+        if isinstance(self._raw_preview_frame, pd.DataFrame):
+            return self._raw_preview_frame
+        return None
+
     def set_show_imported(self, enabled: bool) -> None:
+        changed = self._show_imported != bool(enabled)
         self._show_imported = bool(enabled)
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
             merged = self._merge_imported_rows(base_frame)
             self._update_preview(merged)
@@ -24479,8 +33569,11 @@ class AssemblySection(QtWidgets.QWidget):
             self._update_preview(pd.DataFrame(list(self._imported_rows.values())))
         else:
             self._update_preview(pd.DataFrame())
+        if changed:
+            self._mark_dirty()
 
     def set_show_oe_samples(self, enabled: bool) -> None:
+        changed = self._show_oe_samples != bool(enabled)
         self._show_oe_samples = bool(enabled)
         if hasattr(self, "oe_samples_checkbox"):
             try:
@@ -24489,17 +33582,20 @@ class AssemblySection(QtWidgets.QWidget):
             finally:
                 self.oe_samples_checkbox.blockSignals(False)
         self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
 
     def clear_imported_data(self) -> None:
         if not self._imported_rows and not self._imported_sources:
             return
         self._imported_rows = {}
         self._imported_sources = []
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame):
             self._update_preview(base_frame)
         else:
             self._update_preview(pd.DataFrame())
+        self._mark_dirty()
 
     @staticmethod
     def _row_is_oe_sample(row: pd.Series) -> bool:
@@ -24516,7 +33612,6 @@ class AssemblySection(QtWidgets.QWidget):
             return False
         suffix = str(parsed[2] or "").strip().lower()
         return suffix == "oe"
-        self._mark_dirty()
 
     def imported_sources(self) -> List[str]:
         return list(self._imported_sources)
@@ -24590,7 +33685,9 @@ class AssemblySection(QtWidgets.QWidget):
             return None
 
     def _selected_sections(self) -> set[str]:
-        return {key for key, enabled in self._section_states.items() if enabled}
+        # Assemble is the integrated database.  Column visibility is a display
+        # and public-export projection, not a source-ingestion switch.
+        return {key for key, _label in self._section_choices}
 
     @staticmethod
     def _merge_fabrication_indexes(
@@ -24631,6 +33728,7 @@ class AssemblySection(QtWidgets.QWidget):
             Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, float]],
             Dict[str, Dict[str, float]],
+            Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, float]],
             Dict[str, Dict[str, Any]],
         ]
@@ -24688,6 +33786,22 @@ class AssemblySection(QtWidgets.QWidget):
                 table = None
             if isinstance(payload, dict) and payload:
                 microscope_index = payload
+                if isinstance(table, pd.DataFrame) and not table.empty:
+                    table_index = self._build_microscope_index_from_table(table)
+                    if table_index and self._microscope_payload_stale(payload, table_index):
+                        self.logger.warning(
+                            "Microscope saved payload is stale; using the visible table values and repairing the payload."
+                        )
+                        microscope_index = table_index
+                        if isinstance(microscope_section, MicroscopeSection):
+                            try:
+                                microscope_section.store.save_payload("microscope_index", table_index)
+                                payload_map = dict(microscope_section.data.extra.get("payloads", {}))
+                                payload_map["microscope_index"] = "microscope_index"
+                                microscope_section.data.extra["payloads"] = payload_map
+                                microscope_section.store.save(microscope_section.data)
+                            except Exception:
+                                self.logger.exception("Failed to repair stale microscope payload")
             elif isinstance(table, pd.DataFrame) and not table.empty:
                 microscope_index = self._build_microscope_index_from_table(table)
             else:
@@ -24768,10 +33882,15 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_dma_isostress_groups = _group_graph_records_by_key(dma_isostress_records)
 
         mini_dma_records: List[MiniDmaRecord] = []
+        mini_dma_transition_reviews: Dict[str, Dict[str, Any]] = {}
         if "mini_dma" in selected:
             payload = self._load_payload("mini_dma", "mini_dma_records")
             if isinstance(payload, list):
                 mini_dma_records = list(payload)
+                section = self.sections.get("mini_dma")
+                if isinstance(section, MiniDmaSection):
+                    mini_dma_transition_reviews = section.transition_reviews_snapshot()
+                    mini_dma_records = section.records_with_reviewed_transitions(mini_dma_records)
             else:
                 _mark_missing("TMA")
         self._cached_mini_dma_records = list(mini_dma_records)
@@ -24852,8 +33971,13 @@ class AssemblySection(QtWidgets.QWidget):
         if "current_density" in selected:
             annealing_section = self.sections.get("annealing")
             if isinstance(annealing_section, AnnealingSection):
-                phase_points = dict(getattr(annealing_section, "_phase_points", {}))
-        transition_points: Dict[str, Dict[str, float]] = {}
+                current_section = self.sections.get("current_density")
+                if isinstance(current_section, CurrentDensitySection):
+                    phase_points = {
+                        _microwire_key_to_str(key): values
+                        for key, values in current_section._collect_phase_points().items()
+                    }
+        transition_points: Dict[str, Dict[str, Any]] = {}
         if "transition_temps" in selected:
             transition_section = self.sections.get("transition_temps")
             if isinstance(transition_section, TransitionTempsSection):
@@ -24884,6 +34008,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         )
 
@@ -25011,6 +34136,36 @@ class AssemblySection(QtWidgets.QWidget):
                 measurements.brittle = True
         return index
 
+    def _microscope_payload_stale(
+        self,
+        payload: Mapping[MicrowireKey, MicroscopeMeasurements],
+        table_index: Mapping[MicrowireKey, MicroscopeMeasurements],
+    ) -> bool:
+        if set(payload.keys()) != set(table_index.keys()):
+            return True
+        for key, table_measurements in table_index.items():
+            payload_measurements = payload.get(key)
+            if payload_measurements is None:
+                return True
+            for getter in ("best_core", "best_glass"):
+                table_value = getattr(table_measurements, getter)()
+                payload_value = getattr(payload_measurements, getter)()
+                if table_value is None:
+                    continue
+                if payload_value is None:
+                    return True
+                try:
+                    if not math.isclose(float(table_value), float(payload_value), rel_tol=0.0, abs_tol=1e-9):
+                        return True
+                except (TypeError, ValueError):
+                    return True
+            for attr in ("core", "glass"):
+                table_entries = getattr(table_measurements, attr, [])
+                payload_entries = getattr(payload_measurements, attr, [])
+                if table_entries and not payload_entries:
+                    return True
+        return False
+
     def _update_preview(self, frame: pd.DataFrame) -> None:
         previous_order = self._column_order or self._current_preview_column_order()
         if previous_order:
@@ -25019,9 +34174,11 @@ class AssemblySection(QtWidgets.QWidget):
         if isinstance(frame, pd.DataFrame):
             frame = self._expand_shape_memory_preview_rows(frame)
             frame = self._apply_column_universe(frame)
+            frame = _with_source_label_column(frame)
             self._raw_preview_frame = frame.copy()
         else:
             self._raw_preview_frame = pd.DataFrame()
+        self._refresh_preview_source_filter_options()
         self._refresh_preview_frame()
 
     def _column_universe(self) -> List[str]:
@@ -25059,9 +34216,13 @@ class AssemblySection(QtWidgets.QWidget):
         if not universe:
             return frame
         updated = frame.copy()
-        for column in universe:
-            if column not in updated.columns:
-                updated[column] = None
+        missing_columns = [column for column in universe if column not in updated.columns]
+        if missing_columns:
+            missing_frame = pd.DataFrame(
+                {column: [None] * len(updated.index) for column in missing_columns},
+                index=updated.index,
+            )
+            updated = pd.concat([updated, missing_frame], axis=1)
         ordered = [column for column in universe if column in updated.columns]
         for column in updated.columns:
             if column not in ordered:
@@ -25608,7 +34769,10 @@ class AssemblySection(QtWidgets.QWidget):
         return pd.DataFrame(expanded_rows)
 
     def _refresh_preview_frame(self) -> None:
+        started_s = time.perf_counter()
+        loading = _builder_project_load_active()
         raw_frame = self._raw_preview_frame
+        raw_row_count = len(raw_frame.index) if isinstance(raw_frame, pd.DataFrame) else 0
         total_rows = 0
         if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
             display_frame = pd.DataFrame()
@@ -25626,6 +34790,7 @@ class AssemblySection(QtWidgets.QWidget):
                 row_map = keep_positions
             sorted_frame, sorted_row_map = self._apply_sort_spec(working_frame)
             row_map = [row_map[idx] for idx in sorted_row_map if 0 <= int(idx) < len(row_map)]
+            sorted_frame, row_map = self._apply_source_filter(sorted_frame, row_map)
             selected_columns = self._resolve_selected_columns(sorted_frame.columns)
             display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
             total_rows = len(display_frame.index)
@@ -25673,27 +34838,50 @@ class AssemblySection(QtWidgets.QWidget):
                     header.setDefaultSectionSize(self.preview_table.fontMetrics().height() + 8)
         except Exception:
             pass
-        try:
-            self.preview_table.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not loading:
+            try:
+                resize_started_s = time.perf_counter()
+                self.preview_table.resizeColumnsToContents()
+                _log_builder_timing(
+                    self.logger,
+                    "assemble_preview_resize",
+                    resize_started_s,
+                    rows=len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0,
+                    columns=len(display_frame.columns) if isinstance(display_frame, pd.DataFrame) else 0,
+                )
+            except Exception:
+                pass
         self._update_preview_graph_buttons()
-        self._update_graph_preview_panel()
+        if not loading:
+            self._update_graph_preview_panel()
         row_count = len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0
         if row_count:
-            if self._preview_search_text and total_rows != row_count:
+            if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows != row_count:
                 self.status_label.setText(
                     f"Preview ready - {row_count} of {total_rows} row(s) shown."
+                )
+            elif not self._show_oe_samples and raw_row_count and raw_row_count != row_count:
+                self.status_label.setText(
+                    f"Preview ready - {row_count} of {raw_row_count} row(s) shown (OE samples hidden)."
                 )
             else:
                 self.status_label.setText(f"Preview ready - {row_count} row(s).")
         else:
-            if self._preview_search_text and total_rows:
+            if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows:
                 self.status_label.setText("No preview rows match the current search.")
             else:
                 self.status_label.setText("Preview is empty.")
         if hasattr(self, "clear_sort_button"):
             self.clear_sort_button.setEnabled(bool(self._sort_spec))
+        _log_builder_timing(
+            self.logger,
+            "assemble_preview_refresh",
+            started_s,
+            rows=row_count,
+            columns=len(display_frame.columns) if isinstance(display_frame, pd.DataFrame) else 0,
+            load=loading,
+        )
+        self._decorate_stale_status()
 
     @staticmethod
     def _normalise_search_text(value: object) -> str:
@@ -25718,14 +34906,69 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_search_changed(self, text: str) -> None:
         query = self._normalise_search_text(text)
+        changed = query != self._preview_search_text
         self._preview_search_text = query
         if hasattr(self, "search_clear_button"):
             self.search_clear_button.setEnabled(bool(query))
         self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
 
     def _clear_preview_search(self) -> None:
         if hasattr(self, "search_edit"):
             self.search_edit.clear()
+
+    def _refresh_preview_source_filter_options(self) -> None:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        frame = self._raw_preview_frame
+        labels: List[str] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                for label in _source_labels_from_row(row):
+                    if label and label not in labels:
+                        labels.append(label)
+        labels = sorted(labels, key=str.casefold)
+        current = self._preview_source_filter_text or SOURCE_LABEL_ALL
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(SOURCE_LABEL_ALL)
+            for label in labels:
+                combo.addItem(label)
+            target = current if current in labels else SOURCE_LABEL_ALL
+            combo.setCurrentText(target)
+            combo.setEnabled(bool(labels))
+            self._preview_source_filter_text = target
+        finally:
+            combo.blockSignals(False)
+
+    def _handle_preview_source_filter_changed(self, text: str) -> None:
+        selected = str(text or "").strip() or SOURCE_LABEL_ALL
+        changed = selected != self._preview_source_filter_text
+        self._preview_source_filter_text = selected
+        self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
+
+    def _apply_source_filter(
+        self,
+        frame: pd.DataFrame,
+        row_map: Sequence[int],
+    ) -> Tuple[pd.DataFrame, List[int]]:
+        selected = self._preview_source_filter_text
+        if not selected or selected == SOURCE_LABEL_ALL:
+            return frame, list(row_map)
+        keep_rows: List[int] = []
+        for idx, row in frame.iterrows():
+            if selected in _source_labels_from_row(row):
+                keep_rows.append(int(idx))
+        if not keep_rows:
+            return frame.iloc[0:0].copy(), []
+        filtered = frame.iloc[keep_rows].reset_index(drop=True)
+        mapped_rows = [int(row_map[idx]) for idx in keep_rows if idx < len(row_map)]
+        return filtered, mapped_rows
 
     def _apply_search_filter(
         self,
@@ -25780,15 +35023,19 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _resolve_selected_columns(self, columns: Sequence[str]) -> List[str]:
         column_names = [str(column) for column in columns]
+        selected_was_explicit = self._selected_columns is not None
         if self._selected_columns is None:
             self._selected_columns = {
                 column
                 for column in column_names
-                if column not in self._graph_columns and not column.startswith("_")
+                if column not in self._graph_columns
+                and column not in ASSEMBLE_DEFAULT_HIDDEN_COLUMNS
+                and not column.startswith("_")
             }
         self._known_columns.update(column_names)
         self._selected_columns.update(self._mandatory_columns)
-        self._sync_section_states_from_columns(self._selected_columns, column_names)
+        if selected_was_explicit:
+            self._sync_section_states_from_columns(self._selected_columns, column_names)
         return [column for column in column_names if column in self._selected_columns]
 
     def _apply_sort_spec(self, frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[int]]:
@@ -25929,6 +35176,7 @@ class AssemblySection(QtWidgets.QWidget):
         cached = self._graph_pixmap_cache.get(cache_key)
         if cached is not None:
             return cached
+        started_s = time.perf_counter()
         pixmaps = [item.pixmap for item in items if item.pixmap is not None]
         count = max(len(pixmaps), 1)
         spacing = 6
@@ -25950,11 +35198,19 @@ class AssemblySection(QtWidgets.QWidget):
             )
         if combined is not None:
             self._graph_pixmap_cache[cache_key] = combined
+        _log_builder_timing(
+            self.logger,
+            "assemble_preview_pixmap_miss",
+            started_s,
+            key=cache_key[0] if cache_key else "",
+            count=len(pixmaps),
+        )
         return combined
 
     def _preview_decoration(
         self, row: pd.Series, column_label: str
     ) -> Optional[QtGui.QPixmap]:
+        started_s = time.perf_counter()
         if column_label not in self._inline_graph_columns:
             return None
         key = _row_to_microwire_key(row)
@@ -25971,6 +35227,7 @@ class AssemblySection(QtWidgets.QWidget):
                 else:
                     target = None
                 if target is not None:
+                    diameter_um = _diameter_um_from_mapping(row.to_dict())
                     measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
                     cache_key = (
                         "annealing",
@@ -25985,10 +35242,17 @@ class AssemblySection(QtWidgets.QWidget):
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if pixmap is None:
                         return None
                     self._graph_pixmap_cache[cache_key] = pixmap
+                    _log_builder_timing(
+                        self.logger,
+                        "assemble_preview_decoration_miss",
+                        started_s,
+                        column=column_label,
+                    )
                     return pixmap
                 if not other_records:
                     return None
@@ -26000,12 +35264,14 @@ class AssemblySection(QtWidgets.QWidget):
                 if cached is not None:
                     return cached
                 pixmap_stack: List[QtGui.QPixmap] = []
+                diameter_um = _diameter_um_from_mapping(row.to_dict())
                 for record in other_records:
                     preview = _render_measurement_pixmap(
                         record,
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if preview is not None:
                         pixmap_stack.append(preview)
@@ -26019,13 +35285,25 @@ class AssemblySection(QtWidgets.QWidget):
                 )
                 if combined is not None:
                     self._graph_pixmap_cache[cache_key] = combined
+                _log_builder_timing(
+                    self.logger,
+                    "assemble_preview_decoration_miss",
+                    started_s,
+                    column=column_label,
+                )
                 return combined
             if column_label == VSM_HYSTERESIS_COLUMN:
                 records = self._ensure_vsm_hysteresis_groups().get(key, [])
                 if not records:
                     return None
                 signature = self._record_signature(records)
-                cache_key = ("vsm_hysteresis", key, signature)
+                cache_key = (
+                    "vsm_hysteresis",
+                    key,
+                    signature,
+                    _load_vsm_hysteresis_angle_filter_mode(),
+                    _load_vsm_hysteresis_preview_range_oe(),
+                )
                 items = _vsm_hysteresis_preview_items(
                     records,
                     self.logger,
@@ -26038,7 +35316,12 @@ class AssemblySection(QtWidgets.QWidget):
                 if not records:
                     return None
                 signature = self._record_signature(records)
-                cache_key = ("vsm_temperature", key, signature)
+                cache_key = (
+                    "vsm_temperature",
+                    key,
+                    signature,
+                    _load_vsm_temperature_preview_mode(),
+                )
                 items = _vsm_temperature_preview_items(
                     records,
                     self.logger,
@@ -26100,6 +35383,21 @@ class AssemblySection(QtWidgets.QWidget):
         except Exception:
             brush = None
         return brush
+
+    def _preview_foreground(
+        self,
+        row: pd.Series,
+        column_label: str,
+    ) -> Optional[QtGui.QBrush]:
+        """Pair custom dark group backgrounds with readable table text."""
+        _ = column_label
+        try:
+            has_custom_background = row.name in self._preview_background_cache
+        except Exception:
+            has_custom_background = False
+        if not has_custom_background:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#f5f7fa"))
 
     def _rebuild_preview_background_cache(self, frame: pd.DataFrame) -> None:
         cache: Dict[Any, QtGui.QBrush] = {}
@@ -26177,6 +35475,9 @@ class AssemblySection(QtWidgets.QWidget):
                         break
             _assign_if_present(piece_data, "length_m", row.get("Length (m)"))
             _assign_if_present(piece_data, "piece_date", row.get("Piece date"))
+            _assign_if_present(piece_data, "d_um", row.get(MICROSCOPE_D_COLUMN))
+            _assign_if_present(piece_data, "D_um", row.get(MICROSCOPE_CAP_D_COLUMN))
+            _assign_if_present(piece_data, "d_over_D", row.get("d/D"))
             _assign_if_present(piece_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
             _assign_if_present(piece_data, "glass_pull_off", row.get(GLASS_PULL_COLUMN))
             _assign_if_present(piece_data, "notes", row.get("Notes"))
@@ -26406,10 +35707,12 @@ class AssemblySection(QtWidgets.QWidget):
             row = self._selected_preview_row(raw=True)
             key = _row_to_microwire_key(row) if row is not None else None
             enabled = row_index is not None and key is not None
+            annealing_records = self._ensure_annealing_groups().get(key or "", []) if enabled else []
+            high_record, other_records = _select_anchor_and_other_records(annealing_records) if annealing_records else (None, [])
             if hasattr(self, "open_high_plot_button"):
-                self.open_high_plot_button.setEnabled(enabled)
+                self.open_high_plot_button.setEnabled(bool(enabled and high_record is not None))
             if hasattr(self, "open_other_plot_button"):
-                self.open_other_plot_button.setEnabled(enabled)
+                self.open_other_plot_button.setEnabled(bool(enabled and other_records))
             if hasattr(self, "open_vsm_hysteresis_button"):
                 self.open_vsm_hysteresis_button.setEnabled(
                     bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
@@ -26448,6 +35751,9 @@ class AssemblySection(QtWidgets.QWidget):
     def _toggle_graph_preview_panel(self, checked: bool) -> None:
         if not hasattr(self, "graph_preview_panel"):
             return
+        if _builder_project_load_active():
+            self.graph_preview_panel.setVisible(False)
+            return
         self.graph_preview_panel.setVisible(bool(checked))
         splitter = getattr(self, "preview_splitter", None)
         if isinstance(splitter, QtWidgets.QSplitter):
@@ -26459,9 +35765,12 @@ class AssemblySection(QtWidgets.QWidget):
             else:
                 splitter.setSizes([1, 0])
         self._update_graph_preview_panel()
+        self._mark_dirty()
 
     def _update_graph_preview_panel(self, *_: Any) -> None:
         try:
+            if _builder_project_load_active():
+                return
             if not getattr(self, "graph_preview_panel", None):
                 return
             if not self.graph_preview_panel.isVisible():
@@ -26504,7 +35813,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
-                    description="No 1000 mA measurement available for this microwire.",
+                    description=_missing_high_measurement_message(records),
                 )
                 self.other_preview_display.set_records(
                     other_records,
@@ -26611,7 +35920,14 @@ class AssemblySection(QtWidgets.QWidget):
                 *ORIGIN_FIGURE_COLUMNS,
             ],
         )
-        add("current_density", CURRENT_DENSITY_COLUMNS)
+        add(
+            "current_density",
+            [
+                column
+                for column in CURRENT_DENSITY_COLUMNS
+                if column not in SUPERSEDED_CURRENT_DENSITY_COLUMNS
+            ],
+        )
         add(
             "transition_temps",
             [
@@ -26619,6 +35935,8 @@ class AssemblySection(QtWidgets.QWidget):
                 TRANSITION_TEMP_AF_COLUMN,
                 TRANSITION_TEMP_MS_COLUMN,
                 TRANSITION_TEMP_MF_COLUMN,
+                VSM_TRANSITION_TEMP_STATUS_COLUMN,
+                VSM_TRANSITION_TEMP_COUNTS_COLUMN,
             ],
         )
         add(
@@ -26670,6 +35988,8 @@ class AssemblySection(QtWidgets.QWidget):
                 MINI_DMA_ORIGIN_COLUMN,
                 MINI_DMA_STRAIN_COLUMN,
                 MINI_DMA_TRANSITION_COLUMN,
+                MINI_DMA_TRANSITION_STATUS_COLUMN,
+                MINI_DMA_TRANSITION_COUNTS_COLUMN,
                 MINI_DMA_BREAK_COLUMN,
             ],
         )
@@ -26698,14 +36018,13 @@ class AssemblySection(QtWidgets.QWidget):
         selected_columns: Set[str],
         available_columns: Sequence[str],
     ) -> None:
-        mapping = self._section_column_map(available_columns)
-        for key, _label in self._section_choices:
-            section_columns = mapping.get(key, [])
-            if not section_columns:
-                continue
-            self._section_states[key] = any(
-                column in selected_columns for column in section_columns
-            )
+        # Kept as a compatibility hook for older project payloads.  Historically
+        # this coupled hidden columns to disabled input sections, which could
+        # silently remove measurements and even whole samples on the next rebuild.
+        # All source sections now remain enabled; selected_columns controls only
+        # the preview/export projection.
+        del selected_columns, available_columns
+        self._section_states = {key: True for key, _label in self._section_choices}
         self._update_export_summary()
 
     def _column_groups(self, columns: Sequence[str]) -> Dict[str, List[str]]:
@@ -26725,10 +36044,23 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("Core", ["Composition", "Microwire"])
         add_group("Microscope", section_map.get("microscope", []))
         add_group("Current annealing", section_map.get("annealing", []))
-        add_group("Current density", section_map.get("current_density", []))
+        add_group(
+            "Annealing transitions",
+            [
+                *(
+                    [ANNEALING_TRANSITION_COLUMN]
+                    if ANNEALING_TRANSITION_COLUMN in available_set
+                    else []
+                ),
+                *section_map.get("current_density", []),
+            ],
+        )
+        included.update(
+            column for column in SUPERSEDED_CURRENT_DENSITY_COLUMNS if column in available_set
+        )
         add_group("VSM hysteresis", section_map.get("vsm_hysteresis", []))
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
-        add_group("Transition temps", section_map.get("transition_temps", []))
+        add_group("VSM transitions", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
         add_group("TMA", section_map.get("mini_dma", []))
         add_group(
@@ -26772,6 +36104,7 @@ class AssemblySection(QtWidgets.QWidget):
             self._selected_columns = dialog.selected_columns()
             self._sync_section_states_from_columns(self._selected_columns, columns)
             self._refresh_preview_frame()
+            self._mark_dirty()
 
     def _open_column_order_dialog(self) -> None:
         frame = self.preview_model.frame()
@@ -26788,6 +36121,7 @@ class AssemblySection(QtWidgets.QWidget):
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._column_order = dialog.ordered_columns()
             self._apply_preview_column_order(self._column_order)
+            self._mark_dirty()
 
     def _open_sort_dialog(self) -> None:
         frame = self._raw_preview_frame
@@ -26816,12 +36150,14 @@ class AssemblySection(QtWidgets.QWidget):
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._sort_spec = dialog.sort_spec()
             self._refresh_preview_frame()
+            self._mark_dirty()
 
     def _clear_sort(self) -> None:
         if not self._sort_spec:
             return
         self._sort_spec = []
         self._refresh_preview_frame()
+        self._mark_dirty()
 
     def _reset_column_order(self) -> None:
         frame = self.preview_model.frame()
@@ -26829,6 +36165,7 @@ class AssemblySection(QtWidgets.QWidget):
             return
         self._column_order = [str(column) for column in frame.columns]
         self._apply_preview_column_order(self._column_order)
+        self._mark_dirty()
 
     def _add_selected_to_compare(self) -> None:
         compare_section = self._compare_section
@@ -26906,7 +36243,7 @@ class AssemblySection(QtWidgets.QWidget):
                     QtWidgets.QMessageBox.information(
                         self,
                         "Microwire Data Builder",
-                        "No 1000 mA measurement available for this microwire.",
+                        _missing_high_measurement_message(records),
                     )
                     return
                 self._show_annealing_records([high_record], "1000 mA")
@@ -27020,6 +36357,9 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_column_moved(self, *_: Any) -> None:
         self._column_order = self._current_preview_column_order()
+        if self._applying_column_order:
+            return
+        self._mark_dirty()
 
     def _apply_preview_column_order(self, order: Sequence[str]) -> None:
         if not order:
@@ -27029,14 +36369,18 @@ class AssemblySection(QtWidgets.QWidget):
         if header is None or not isinstance(frame, pd.DataFrame):
             return
         mapping = {str(column): idx for idx, column in enumerate(frame.columns)}
-        for target_visual, column_name in enumerate(order):
-            logical = mapping.get(column_name)
-            if logical is None:
-                continue
-            current_visual = header.visualIndex(logical)
-            if current_visual == target_visual:
-                continue
-            header.moveSection(current_visual, target_visual)
+        self._applying_column_order = True
+        try:
+            for target_visual, column_name in enumerate(order):
+                logical = mapping.get(column_name)
+                if logical is None:
+                    continue
+                current_visual = header.visualIndex(logical)
+                if current_visual == target_visual:
+                    continue
+                header.moveSection(current_visual, target_visual)
+        finally:
+            self._applying_column_order = False
 
     def _ordered_preview_frame(self) -> pd.DataFrame:
         frame = self.preview_model.frame()
@@ -27108,7 +36452,7 @@ class AssemblySection(QtWidgets.QWidget):
                 suffix = ".csv"
         try:
             if suffix == ".xlsx":
-                frame.to_excel(path, index=False)
+                self._write_expanded_excel_export(path, frame)
             else:
                 frame.to_csv(path, index=False)
         except Exception as exc:
@@ -27133,6 +36477,59 @@ class AssemblySection(QtWidgets.QWidget):
             if getattr(series, "dtype", None) == object:
                 export_frame[column] = series.map(self._serialise_preview_value)
         return export_frame
+
+    def _current_project_section_payloads(self) -> Dict[str, Dict[str, Any]]:
+        payloads: Dict[str, Dict[str, Any]] = {}
+        for key, section in self.sections.items():
+            exporter = getattr(section, "export_project_payload", None)
+            if not callable(exporter):
+                continue
+            try:
+                payload = exporter()
+            except Exception:
+                self.logger.exception("Failed to collect %s payload for expanded export", key)
+                continue
+            if isinstance(payload, dict):
+                payloads[str(key)] = payload
+        return payloads
+
+    def _write_expanded_excel_export(self, path: Path, frame: pd.DataFrame) -> None:
+        try:
+            import launcher as launcher_module
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            raise RuntimeError("Expanded workbook exporter is unavailable.") from exc
+
+        section_payloads = self._current_project_section_payloads()
+        extra_frames = {
+            launcher_module.ANNEALING_TRANSITION_EXPORT_SHEET: (
+                launcher_module._expanded_annealing_transition_frame_from_sections(section_payloads)
+            ),
+            launcher_module.VSM_TRANSITION_EXPORT_SHEET: (
+                launcher_module._expanded_vsm_transition_frame_from_sections(section_payloads)
+            ),
+            launcher_module.TMA_TARGET_EXPORT_SHEET: (
+                launcher_module._expanded_tma_export_frame_from_sections(section_payloads)
+            ),
+        }
+        analysis_frame = self._raw_preview_frame
+        if not isinstance(analysis_frame, pd.DataFrame) or analysis_frame.empty:
+            analysis_frame = frame
+        projection = resolve_assemble_projection(
+            analysis_frame.columns,
+            selected_columns=tuple(self._selected_columns or ()),
+            column_order=self._current_column_order_for_export(),
+        )
+        launcher_module._write_assemble_workbook(
+            output_path=path,
+            frame=frame,
+            preset="public",
+            extra_frames=extra_frames,
+            analysis_frame=analysis_frame,
+            selected_columns=(
+                tuple(self._selected_columns or ()) if projection.explicit else None
+            ),
+            column_order=self._current_column_order_for_export(),
+        )
 
     def analysis_source_frame(self) -> pd.DataFrame:
         raw_frame = self._raw_preview_frame
@@ -27487,9 +36884,9 @@ class AssemblySection(QtWidgets.QWidget):
               <div class="preview-title">Annealing graphs</div>
               <div class="preview-grid">
                 <div class="preview-card">
-                  <div class="preview-label">1000 mA</div>
-                  <img id="preview-high" class="preview-image" alt="1000 mA graph" />
-                  <div id="preview-high-empty" class="preview-empty">No 1000 mA graph</div>
+                  <div class="preview-label">Exact 1000 mA</div>
+                  <img id="preview-high" class="preview-image" alt="Exact 1000 mA graph" />
+                  <div id="preview-high-empty" class="preview-empty">No exact 1000 mA graph</div>
                 </div>
                 <div class="preview-card">
                   <div class="preview-label">Other annealing</div>
@@ -28165,6 +37562,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         ) = inputs
 
@@ -28222,6 +37620,9 @@ class AssemblySection(QtWidgets.QWidget):
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
             "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
+            "mini_dma_transition_reviews": (
+                mini_dma_transition_reviews if "mini_dma" in selected else {}
+            ),
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
@@ -28303,6 +37704,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         ) = inputs
 
@@ -28342,6 +37744,9 @@ class AssemblySection(QtWidgets.QWidget):
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
             "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
+            "mini_dma_transition_reviews": (
+                mini_dma_transition_reviews if "mini_dma" in selected else {}
+            ),
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
@@ -28422,6 +37827,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_finished(self, dataframe: object) -> None:
         self._close_preview_progress()
+        self._clear_preview_stale()
         if isinstance(dataframe, pd.DataFrame):
             self._measured_preview_frame = dataframe.copy()
             merged = self._merge_imported_rows(dataframe)
@@ -28500,6 +37906,7 @@ class AssemblySection(QtWidgets.QWidget):
             self.logger.error("Combine finished with unexpected result type: %s", type(result))
             return
         exports: Dict[str, Path] = dict(result.exports or {})
+        self._clear_preview_stale()
         self._update_preview(result.dataframe)
         export_frame = self._preview_export_frame()
         output_dir = self._combine_output_dir or Path(self._output_dir or Path.cwd())
@@ -28515,7 +37922,7 @@ class AssemblySection(QtWidgets.QWidget):
         excel_path = exports.get("excel")
         if excel_path is not None:
             try:
-                export_frame.to_excel(excel_path, index=False)
+                self._write_expanded_excel_export(excel_path, export_frame)
             except Exception:
                 self.logger.exception("Failed to rewrite Excel export from Assemble preview")
         if self._export_html:
@@ -28562,17 +37969,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
     """New workbench for preparing and assembling microwire databases."""
 
     PROJECT_EXTENSION = ".pydpj"
-    PROJECT_VERSION = 1
+    PROJECT_VERSION = PACKAGED_PROJECT_VERSION
     PROJECT_KIND = "MicrowireDataBuilder"
 
     def __init__(self) -> None:
         super().__init__()
+        window_init_started_s = time.perf_counter()
         self.logger = logging.getLogger(LOGGER_NAME)
+        self._ui_heartbeat: _BuilderUiHeartbeat | None = None
+        if _builder_ui_telemetry_enabled():
+            self._ui_heartbeat = _BuilderUiHeartbeat(self.logger, self)
+            self._ui_heartbeat.start()
         self._base_title = "Microwire Data Builder"
         self.setWindowTitle(self._base_title)
         self.resize(1100, 720)
 
         self._project_path: Optional[Path] = None
+        self._project_degraded_safe_mode = False
+        self._project_package_index: ProjectIndex | None = None
+        self._project_payload_resolver: ProjectPayloadResolver | None = None
+        self._migration_process: QtCore.QProcess | None = None
+        self._migration_progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._migration_cancel_file: Path | None = None
+        self._migration_error_lines: List[str] = []
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
         downloads_dir = Path.home() / "Downloads"
@@ -28597,10 +38016,25 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         if stored_database_dir:
             self._database_project_dir = Path(stored_database_dir)
+        self._startup_auto_open_candidate = self._startup_auto_open_project_candidate()
+        # Builder intentionally starts as a blank project, so do not load every
+        # persisted section store only to reset it at the end of construction.
+        self._skip_startup_persisted_section_load = True
+        _log_builder_timing(
+            self.logger,
+            "builder_window_settings",
+            window_init_started_s,
+            auto_open_last=self._auto_open_last,
+            auto_open_latest=self._auto_open_latest_database,
+            startup_candidate=self._startup_auto_open_candidate or "",
+            skip_persisted_sections=self._skip_startup_persisted_section_load,
+        )
         self._auto_open_last_action: QtGui.QAction | None = None
         self._auto_open_latest_database_action: QtGui.QAction | None = None
         self._database_project_dir_action: QtGui.QAction | None = None
         self._data_menu: QtWidgets.QMenu | None = None
+        self._hidden_section_keys = self._load_hidden_section_keys()
+        self._section_visibility_actions: Dict[str, QtGui.QAction] = {}
         self._show_imported_action: QtGui.QAction | None = None
         self._separate_imported_action: QtGui.QAction | None = None
         self._remove_imported_action: QtGui.QAction | None = None
@@ -28623,7 +38057,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._dirty = False
         self._suppress_dirty = False
         self._project_load_in_progress = False
+        self._project_package_generation = 0
+        self._deferred_project_section_pending: Set[str] = set()
+        self._deferred_project_section_threads: List[Tuple[QtCore.QThread, QtCore.QObject]] = []
         self._auto_open_in_progress = False
+        self._project_load_thread: QtCore.QThread | None = None
+        self._project_load_worker: _ProjectLoadWorker | None = None
+        self._project_restore_state: Dict[str, Any] | None = None
+        self._project_restore_timer = QtCore.QTimer(self)
+        self._project_restore_timer.setSingleShot(True)
+        self._project_restore_timer.timeout.connect(self._run_project_restore_callback)
+        self._project_load_cancelled = False
+        self._close_after_project_load = False
+        self._project_load_started_s: float = 0.0
+        self._project_load_auto_open = False
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -28666,81 +38113,100 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        self.annealing_section = AnnealingSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.annealing_section, "Current annealing")
-        self.sections["annealing"] = self.annealing_section
-        _pump_events()
-
-        self.fabrication_section = FabricationSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.fabrication_section, "Fabrication")
-        self.sections["fabrication"] = self.fabrication_section
-        _pump_events()
-
-        self.microscope_section = MicroscopeSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.microscope_section, "Microscope")
-        self.sections["microscope"] = self.microscope_section
-        _pump_events()
-
-        self.current_density_section = CurrentDensitySection(
-            self.annealing_section,
-            self.microscope_section,
-            self.logger,
-            _append_log,
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
         )
-        self.tab_widget.addTab(self.current_density_section, "Current density")
-        self.sections["current_density"] = self.current_density_section
-        _pump_events()
+        try:
+            self.annealing_section = AnnealingSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.annealing_section, "Current annealing")
+            self.sections["annealing"] = self.annealing_section
+            _pump_events()
 
-        self.video_section = VideoSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.video_section, "Videos")
-        self.sections["videos"] = self.video_section
-        _pump_events()
+            self.fabrication_section = FabricationSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.fabrication_section, "Fabrication")
+            self.sections["fabrication"] = self.fabrication_section
+            _pump_events()
 
-        self.vsm_hysteresis_section = VsmHysteresisSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.vsm_hysteresis_section, "VSM hysteresis")
-        self.sections["vsm_hysteresis"] = self.vsm_hysteresis_section
-        _pump_events()
+            self.microscope_section = MicroscopeSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.microscope_section, "Microscope")
+            self.sections["microscope"] = self.microscope_section
+            _pump_events()
 
-        self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
-        self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
-        _pump_events()
+            self.current_density_section = CurrentDensitySection(
+                self.annealing_section,
+                self.microscope_section,
+                self.logger,
+                _append_log,
+            )
+            self.sections["current_density"] = self.current_density_section
+            _pump_events()
 
-        self.transition_temps_section = TransitionTempsSection(
-            self.vsm_temperature_section,
-            self.logger,
-            _append_log,
-        )
-        self.tab_widget.addTab(self.transition_temps_section, "Transition temps")
-        self.sections["transition_temps"] = self.transition_temps_section
-        _pump_events()
+            self.video_section = VideoSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.video_section, "Videos")
+            self.sections["videos"] = self.video_section
+            _pump_events()
 
-        self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
-        self.sections["dma_iso_stress"] = self.dma_iso_stress_section
-        _pump_events()
+            self.vsm_hysteresis_section = VsmHysteresisSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.vsm_hysteresis_section, "VSM hysteresis")
+            self.sections["vsm_hysteresis"] = self.vsm_hysteresis_section
+            _pump_events()
 
-        self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.mini_dma_section, "TMA")
-        self.sections["mini_dma"] = self.mini_dma_section
-        _pump_events()
+            self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
+            self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
+            self.vsm_temperature_transitions_button = QtWidgets.QPushButton("Transitions...")
+            self.vsm_temperature_transitions_button.setToolTip("Open VSM transitions in the Transitions workspace.")
+            self.vsm_temperature_section.controls_layout.addWidget(self.vsm_temperature_transitions_button)
+            _pump_events()
 
-        self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
-            self.logger, _append_log
-        )
-        self.tab_widget.addTab(
-            self.shape_memory_stress_strain_section,
-            "Manual stress/strain",
-        )
-        self.sections["shape_memory_stress_strain"] = (
-            self.shape_memory_stress_strain_section
-        )
-        _pump_events()
+            self.transition_temps_section = TransitionTempsSection(
+                self.vsm_temperature_section,
+                self.logger,
+                _append_log,
+            )
+            self.sections["transition_temps"] = self.transition_temps_section
+            _pump_events()
 
-        self.fmr_section = FmrSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.fmr_section, "FMR")
-        self.sections["fmr"] = self.fmr_section
-        _pump_events()
+            self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
+            self.sections["dma_iso_stress"] = self.dma_iso_stress_section
+            _pump_events()
+
+            self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.mini_dma_section, "TMA")
+            self.sections["mini_dma"] = self.mini_dma_section
+            _pump_events()
+
+            self.dma_transitions_section = DmaTransitionsSection(self.mini_dma_section)
+            self.transitions_section = TransitionsSection(
+                self.current_density_section,
+                self.transition_temps_section,
+                self.dma_transitions_section,
+            )
+            self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
+            self.tab_widget.currentChanged.connect(self._handle_builder_tab_changed)
+            self._install_transition_shortcuts()
+            _pump_events()
+
+            self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
+                self.logger, _append_log
+            )
+            self.tab_widget.addTab(
+                self.shape_memory_stress_strain_section,
+                "Manual stress/strain",
+            )
+            self.sections["shape_memory_stress_strain"] = (
+                self.shape_memory_stress_strain_section
+            )
+            _pump_events()
+
+            self.fmr_section = FmrSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.fmr_section, "FMR")
+            self.sections["fmr"] = self.fmr_section
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
 
         self._developer_options = developer_options()
         if hasattr(self._developer_options, "message_log_capture_changed"):
@@ -28756,10 +38222,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 initial_capture = False
             self._handle_log_capture_changed(initial_capture)
 
-        self.strain_section = StrainSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.strain_section, "Strain")
-        self.sections["strain"] = self.strain_section
-        _pump_events()
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
+        )
+        try:
+            self.strain_section = StrainSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.strain_section, "Strain")
+            self.sections["strain"] = self.strain_section
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
 
         assembly = AssemblySection(
             self.sections,
@@ -28778,21 +38251,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
             pass
         _pump_events()
 
-        self.compare_section = CompareSection(
-            self.sections,
-            self.logger,
-            _append_log,
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
         )
-        self.sections["compare"] = self.compare_section
-        self.tab_widget.addTab(self.compare_section, "Compare")
-        _pump_events()
+        try:
+            self.compare_section = CompareSection(
+                self.sections,
+                self.logger,
+                _append_log,
+            )
+            self.sections["compare"] = self.compare_section
+            self.tab_widget.addTab(self.compare_section, "Compare")
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
         assembly.attach_compare_section(self.compare_section)
 
         self.fabrication_section.sources_changed.connect(
             self._handle_fabrication_sources_changed
         )
-        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
-        self._sync_microscope_dependent_sections()
+        if not self._skip_startup_persisted_section_load:
+            self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+            self._sync_microscope_dependent_sections()
         try:
             self.microscope_section.data_updated.connect(self._sync_microscope_dependent_sections)
         except Exception:
@@ -28821,7 +38302,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             section.status_changed.connect(partial(self._handle_section_status_changed, key))
             section.sources_changed.connect(partial(self._handle_section_sources_changed, key))
             try:
-                section.data_updated.connect(self._handle_section_data_updated)
+                section.data_updated.connect(partial(self._handle_section_data_updated, key))
             except Exception:
                 pass
             initial_sources: Iterable[str] = []
@@ -28829,7 +38310,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 initial_sources = section.data.sources
             self._handle_section_sources_changed(key, initial_sources)
 
-        self._imported_item = QtWidgets.QTreeWidgetItem(["Imported data", ""])
+        self._imported_item = QtWidgets.QTreeWidgetItem([ANNEALING_IMPORTED_ITEM_LABEL, ""])
         self.project_tree.addTopLevelItem(self._imported_item)
         self._update_imported_data_item()
 
@@ -28888,6 +38369,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+        self._apply_section_visibility()
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
         self._setup_settings_menu(menu_bar)
@@ -28895,15 +38377,283 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._setup_analysis_menu(menu_bar)
         self._update_project_actions()
         self._suppress_dirty = True
-        for section in self.sections.values():
-            if isinstance(section, MiniDatabaseSection):
-                section.reset_to_blank()
+        if not self._skip_startup_persisted_section_load:
+            for section in self.sections.values():
+                if isinstance(section, MiniDatabaseSection):
+                    section.reset_to_blank()
         self._suppress_dirty = False
         self._dirty = False
         self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
-        QtCore.QTimer.singleShot(150, self._maybe_auto_open_last_project)
+        self._startup_auto_open_scheduled = False
+        _log_builder_timing(self.logger, "builder_window_init_total", window_init_started_s)
+
+    def _install_transition_shortcuts(self) -> None:
+        shortcuts = (
+            (
+                getattr(self.annealing_section, "review_transitions_button", None),
+                "Annealing",
+                "Open Annealing transitions in the Transitions workspace.",
+                "annealing",
+            ),
+            (
+                getattr(self, "vsm_temperature_transitions_button", None),
+                "VSM",
+                "Open VSM transitions in the Transitions workspace.",
+                "vsm",
+            ),
+            (
+                getattr(self.mini_dma_section, "review_transitions_button", None),
+                "TMA",
+                "Open TMA transitions in the Transitions workspace.",
+                "dma",
+            ),
+        )
+        for button, _label, tooltip, view in shortcuts:
+            if not isinstance(button, QtWidgets.QPushButton):
+                continue
+            try:
+                button.clicked.disconnect()
+            except Exception:
+                pass
+            button.setText("Transitions...")
+            button.setToolTip(tooltip)
+            button.clicked.connect(partial(self.show_transitions_view, view))
+
+    def show_transitions_view(self, view: str = "annealing") -> None:
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            transitions.show_view(view)
+            index = self.tab_widget.indexOf(transitions)
+            if index >= 0:
+                self.tab_widget.setCurrentIndex(index)
+
+    def _handle_builder_tab_changed(self, _index: int) -> None:
+        self._load_current_deferred_project_sections()
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            active = self.tab_widget.currentWidget() is transitions
+            dependencies = {
+                "annealing", "current_density", "vsm_temperature_scan",
+                "transition_temps", "mini_dma",
+            }
+            pending = getattr(self, "_deferred_project_section_pending", set())
+            deferred = getattr(self, "_deferred_project_section_keys", set())
+            waiting = active and bool(
+                dependencies
+                & (
+                    (pending if isinstance(pending, set) else set())
+                    | (deferred if isinstance(deferred, set) else set())
+                )
+            )
+            transitions.set_active(active, refresh=not waiting)
+            if waiting:
+                transitions.show_loading("Loading transition review data...")
+
+    def _invalidate_deferred_project_loads(self) -> int:
+        """Invalidate results/loaders tied to the previously active package."""
+
+        self._project_package_generation = int(
+            getattr(self, "_project_package_generation", 0)
+        ) + 1
+        # Old workers retain their captured set and drain normally; a fresh set
+        # ensures they cannot clear or block work for the new project.
+        self._deferred_project_section_pending = set()
+        self._update_project_actions()
+        return self._project_package_generation
+
+    def _load_current_deferred_project_sections(self) -> None:
+        deferred = getattr(self, "_deferred_project_section_keys", set())
+        if not isinstance(deferred, set) or not deferred:
+            return
+        current = self.tab_widget.currentWidget()
+        keys = {
+            key for key, section in self.sections.items() if section is current
+        }
+        if current is getattr(self, "annealing_section", None):
+            keys.add("current_density")
+        if current is getattr(self, "vsm_temperature_section", None):
+            keys.add("transition_temps")
+        if current is getattr(self, "assembly_section", None):
+            keys.add("assemble")
+        if current is getattr(self, "transitions_section", None):
+            keys.update(self._active_transition_project_section_keys())
+        transitions_active = current is getattr(self, "transitions_section", None)
+        for key in sorted(keys & deferred):
+            overview_active = (
+                not transitions_active
+                and key in PROJECT_EAGER_OVERVIEW_SECTIONS
+                and self.sections.get(key) is current
+            )
+            self._load_deferred_project_section_async(
+                key,
+                decode_payloads=(
+                    overview_active
+                    or (
+                        transitions_active
+                        and key in {"annealing", "vsm_temperature_scan"}
+                    )
+                ),
+            )
+
+    def _active_transition_project_section_keys(self) -> Set[str]:
+        transitions = getattr(self, "transitions_section", None)
+        if not isinstance(transitions, TransitionsSection):
+            return set()
+        try:
+            index = int(transitions.tab_widget.currentIndex())
+        except Exception:
+            index = 0
+        if index == 1:
+            return {"vsm_temperature_scan", "transition_temps"}
+        if index == 2:
+            return {"mini_dma"}
+        return {"annealing", "current_density"}
+
+    def _configure_project_overview_loader(
+        self,
+        section_key: str,
+        section: object,
+        payload: object,
+        resolver: ProjectPayloadResolver | None,
+    ) -> None:
+        setter = getattr(section, "_set_project_overview_loader", None)
+        if not callable(setter):
+            return
+        payload_id = PROJECT_OVERVIEW_PAYLOADS.get(str(section_key))
+        if (
+            payload_id is None
+            or not isinstance(resolver, ProjectPayloadResolver)
+            or not _has_lazy_project_payloads(payload)
+        ):
+            setter(None)
+            return
+        setter(
+            partial(
+                resolver.load_records_for_paths,
+                str(section_key),
+                payload_id,
+            )
+        )
+
+    def _load_deferred_project_section_async(
+        self, section_key: str, *, decode_payloads: bool = False
+    ) -> None:
+        pending = getattr(self, "_deferred_project_section_pending", set())
+        if not isinstance(pending, set):
+            pending = set()
+            self._deferred_project_section_pending = pending
+        if section_key in pending:
+            return
+        package_index = getattr(self, "_project_package_index", None)
+        resolver = getattr(self, "_project_payload_resolver", None)
+        if not isinstance(package_index, ProjectIndex) or not isinstance(
+            resolver, ProjectPayloadResolver
+        ):
+            return
+        pending.add(section_key)
+        self._update_project_actions()
+        generation = int(getattr(self, "_project_package_generation", 0))
+        thread = QtCore.QThread(self)
+        worker = _ProjectSectionLoadWorker(
+            package_index,
+            resolver,
+            section_key,
+            decode_payloads=decode_payloads,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _import(payload: object) -> None:
+            transaction = None
+            try:
+                if (
+                    generation != getattr(self, "_project_package_generation", -1)
+                    or getattr(self, "_project_package_index", None) is not package_index
+                    or getattr(self, "_project_payload_resolver", None) is not resolver
+                ):
+                    self.logger.info(
+                        "Ignored stale deferred project section %s", section_key
+                    )
+                    return
+                transaction = MiniDatabaseStore.begin_memory_transaction()
+                MiniDatabaseSection._project_load_batch_mode = True
+                if section_key == "assemble":
+                    section = getattr(self, "assembly_section", None)
+                else:
+                    section = self.sections.get(section_key)
+                importer = getattr(section, "import_project_payload", None)
+                if callable(importer):
+                    importer(payload if isinstance(payload, Mapping) else {})
+                self._configure_project_overview_loader(
+                    section_key,
+                    section,
+                    payload,
+                    resolver,
+                )
+                transaction.commit_memory_only()
+                self._deferred_project_section_keys.discard(section_key)
+                self.logger.info("Loaded deferred project section %s", section_key)
+            except Exception:
+                if transaction is not None and not transaction.finished:
+                    transaction.rollback()
+                self.logger.exception("Failed to load deferred project section %s", section_key)
+            finally:
+                MiniDatabaseSection._project_load_batch_mode = False
+                pending.discard(section_key)
+                self._update_project_actions()
+                transitions = getattr(self, "transitions_section", None)
+                transition_dependencies = self._active_transition_project_section_keys()
+                still_deferred = getattr(self, "_deferred_project_section_keys", set())
+                if (
+                    isinstance(transitions, TransitionsSection)
+                    and self.tab_widget.currentWidget() is transitions
+                    and not (transition_dependencies & pending)
+                    and not (
+                        transition_dependencies
+                        & (still_deferred if isinstance(still_deferred, set) else set())
+                    )
+                ):
+                    transitions.mark_workspaces_dirty()
+                    transitions.refresh_current_workspace(force=True)
+
+        worker.finished.connect(_import)
+        def _failed(exc: object) -> None:
+            if (
+                generation == getattr(self, "_project_package_generation", -1)
+                and getattr(self, "_project_package_index", None) is package_index
+            ):
+                self.logger.error(
+                    "Failed to read deferred project section %s: %s", section_key, exc
+                )
+
+        worker.failed.connect(_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        def _thread_finished() -> None:
+            pending.discard(section_key)
+            self._update_project_actions()
+
+        thread.finished.connect(_thread_finished)
+        refs = getattr(self, "_deferred_project_section_threads", None)
+        if not isinstance(refs, list):
+            refs = []
+            self._deferred_project_section_threads = refs
+        refs.append((thread, worker))
+        thread.finished.connect(
+            lambda: refs.__setitem__(slice(None), [item for item in refs if item[0] is not thread])
+        )
+        thread.start()
+
+    def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
+        if getattr(self, "_startup_auto_open_scheduled", False):
+            return
+        self._startup_auto_open_scheduled = True
+        QtCore.QTimer.singleShot(max(int(delay_ms), 0), self._maybe_auto_open_last_project)
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
@@ -29012,6 +38762,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 switcher.set_tab_alert(dock, highlight)
 
     def _handle_fabrication_sources_changed(self, sources: Iterable[str]) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         video = getattr(self, "video_section", None)
         if isinstance(video, MiniDatabaseSection):
             video.set_sources(sources)
@@ -29187,7 +38939,286 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    @staticmethod
+    def _clone_load_data(data: MiniDatabaseData) -> MiniDatabaseData:
+        return MiniDatabaseData(
+            sources=list(data.sources),
+            processed=dict(data.processed),
+            table=data.table.copy(deep=True),
+            extra=copy.deepcopy(data.extra),
+        )
+
+    def _capture_project_load_state(self) -> Dict[str, Any]:
+        attr_names = (
+            "_phase_points", "_transition_points", "_transition_reviews",
+            "_hidden_paths",
+            "_overrides", "_validated", "_prepopulated_keys",
+            "_expected_keys_current", "_expected_key_source_labels", "_show_other_ends",
+            "_strain_offsets", "_strain_mode", "_clamp_span_mm", "_wire_choices",
+            "_row_keys", "_compare_columns", "_compare_view_mode",
+            "_compare_fields", "_compare_field_order", "_current_frame",
+            "_auto_values_cache", "_last_sources", "_pending_preview_record_id",
+        )
+        section_states: Dict[str, Dict[str, Any]] = {}
+        for key, section in self.sections.items():
+            state: Dict[str, Any] = {}
+            data = getattr(section, "data", None)
+            if isinstance(data, MiniDatabaseData):
+                state["data"] = self._clone_load_data(data)
+            for name in attr_names:
+                if hasattr(section, name):
+                    value = getattr(section, name)
+                    state[name] = (
+                        value.copy(deep=True)
+                        if isinstance(value, pd.DataFrame)
+                        else copy.deepcopy(value)
+                    )
+            if isinstance(section, TransitionTempsSection):
+                # Record frames can be large. Project import replaces these derived
+                # containers rather than mutating records, so shallow snapshots keep
+                # rollback cheap and preserve the old preview objects by identity.
+                state["transition_record_state"] = {
+                    "all_records": list(section._all_transition_records),
+                    "record_groups": {
+                        group_key: list(records)
+                        for group_key, records in section._record_groups.items()
+                    },
+                }
+            status_label = getattr(section, "status_label", None)
+            if isinstance(status_label, QtWidgets.QLabel):
+                state["status_text"] = status_label.text()
+            section_states[key] = state
+        assembly = self.assembly_section
+        assembly_state = {
+            name: (
+                value.copy(deep=True)
+                if isinstance(value, pd.DataFrame)
+                else copy.deepcopy(value)
+            )
+            for name in (
+                "_raw_preview_frame", "_measured_preview_frame", "_selected_columns",
+                "_column_order", "_sort_spec", "_preview_search_text",
+                "_preview_source_filter_text", "_imported_rows", "_imported_sources",
+                "_show_imported", "_show_oe_samples", "_known_columns",
+            )
+            if hasattr(assembly, name)
+            for value in (getattr(assembly, name),)
+        }
+        assembly_state["export_settings"] = copy.deepcopy(assembly._export_settings_payload())
+        assembly_state["graph_preview"] = bool(assembly.graph_panel_checkbox.isChecked())
+        paused_timers: List[Tuple[QtCore.QTimer, bool, int]] = []
+        timer_names = (
+            "_transition_state_store_timer",
+            "_transition_review_store_timer",
+            "_transition_review_update_timer",
+            "_pending_state_save_timer",
+            "_transition_table_apply_timer",
+        )
+        for section in self.sections.values():
+            for timer_name in timer_names:
+                timer = getattr(section, timer_name, None)
+                if isinstance(timer, QtCore.QTimer):
+                    active = timer.isActive()
+                    remaining = timer.remainingTime() if active else -1
+                    timer.stop()
+                    paused_timers.append((timer, active, remaining))
+        return {
+            "sections": section_states,
+            "assembly": assembly_state,
+            "show_imported_action_checked": (
+                self._show_imported_action.isChecked()
+                if isinstance(self._show_imported_action, QtGui.QAction)
+                else None
+            ),
+            "project_path": self._project_path,
+            "project_degraded_safe_mode": self._project_degraded_safe_mode,
+            "project_package_index": self._project_package_index,
+            "project_payload_resolver": self._project_payload_resolver,
+            "dirty": self._dirty,
+            "paused_timers": paused_timers,
+        }
+
+    @staticmethod
+    def _resume_project_load_timers(snapshot: Mapping[str, Any]) -> None:
+        if snapshot.get("timers_resumed"):
+            return
+        if isinstance(snapshot, dict):
+            snapshot["timers_resumed"] = True
+        for timer, was_active, remaining in snapshot.get("paused_timers", []):
+            if isinstance(timer, QtCore.QTimer) and was_active:
+                timer.start(max(int(remaining), 1))
+
+    @staticmethod
+    def _discard_project_load_timers(snapshot: Mapping[str, Any]) -> None:
+        """Keep old-project deferred work from running against newly loaded state."""
+        if isinstance(snapshot, dict):
+            snapshot["timers_resumed"] = True
+        for timer, _was_active, _remaining in snapshot.get("paused_timers", []):
+            if isinstance(timer, QtCore.QTimer):
+                timer.stop()
+
+    def _restore_project_load_state(self, snapshot: Mapping[str, Any]) -> None:
+        section_states = snapshot.get("sections", {})
+        with MiniDatabaseStore.discard_writes():
+            for key, section in self.sections.items():
+                state = section_states.get(key, {}) if isinstance(section_states, Mapping) else {}
+                data = state.get("data") if isinstance(state, Mapping) else None
+                if isinstance(section, MiniDatabaseSection) and isinstance(data, MiniDatabaseData):
+                    section.apply_data(self._clone_load_data(data))
+                elif isinstance(section, TransitionTempsSection) and isinstance(data, MiniDatabaseData):
+                    section.data = self._clone_load_data(data)
+                if isinstance(state, Mapping):
+                    for name, value in state.items():
+                        if name not in {"data", "status_text", "transition_record_state"}:
+                            setattr(section, name, copy.deepcopy(value))
+
+                if isinstance(section, AnnealingSection):
+                    section._sanitize_graph_columns()
+                    section._refresh_record_groups()
+                    section._update_export_enabled()
+                elif isinstance(section, MicroscopeSection):
+                    section._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
+                    section._refresh_status_column()
+                    section._update_missing_summary()
+                    section._update_review_buttons()
+                elif isinstance(section, TransitionTempsSection):
+                    record_state = (
+                        state.get("transition_record_state")
+                        if isinstance(state, Mapping)
+                        else None
+                    )
+                    if isinstance(record_state, Mapping):
+                        section._all_transition_records = list(
+                            record_state.get("all_records", [])
+                        )
+                        section._record_groups = dict(
+                            record_state.get("record_groups", {})
+                        )
+                        section._review_content_identity_cache = {}
+                    frame = state.get("_current_frame") if isinstance(state, Mapping) else None
+                    if isinstance(frame, pd.DataFrame):
+                        section._current_frame = frame
+                        section.model.set_frame(frame)
+                    section._hide_internal_columns()
+                    section._sync_preview_status()
+                elif isinstance(section, MiniDmaSection):
+                    section.model.set_frame(_normalise_tma_display_columns(section.model.frame()))
+                    _drop_visible_sample_column(section)
+                    section._refresh_record_groups()
+                elif isinstance(section, StrainSection):
+                    section._reload_strain_settings_from_extra()
+                    section._recompute_table_metrics()
+                    section._refresh_table_view()
+                    section._update_status()
+                elif isinstance(section, CompareSection):
+                    section._set_compare_view_mode(section._compare_view_mode)
+                    section._update_matrix_view()
+                    section._update_preview_graph_buttons()
+                status_label = getattr(section, "status_label", None)
+                if isinstance(status_label, QtWidgets.QLabel) and isinstance(state, Mapping):
+                    status_label.setText(str(state.get("status_text", status_label.text())))
+
+            assembly_state = snapshot.get("assembly", {})
+            if isinstance(assembly_state, Mapping):
+                for name, value in assembly_state.items():
+                    if name not in {"export_settings", "graph_preview"}:
+                        setattr(self.assembly_section, name, copy.deepcopy(value))
+                self.assembly_section._apply_export_settings(
+                    assembly_state.get("export_settings", {})
+                )
+                self.assembly_section.graph_panel_checkbox.setChecked(
+                    bool(assembly_state.get("graph_preview", False))
+                )
+                self.assembly_section._refresh_preview_source_filter_options()
+                self.assembly_section._refresh_preview_frame()
+                # Refresh helpers enforce mandatory display columns and may normalise
+                # filters. Rollback must nevertheless restore the user's exact saved
+                # view choices, not a close approximation of them.
+                for name in (
+                    "_selected_columns",
+                    "_column_order",
+                    "_preview_search_text",
+                    "_preview_source_filter_text",
+                    "_imported_rows",
+                    "_imported_sources",
+                ):
+                    if name in assembly_state:
+                        setattr(
+                            self.assembly_section,
+                            name,
+                            copy.deepcopy(assembly_state[name]),
+                        )
+            action_checked = snapshot.get("show_imported_action_checked")
+            if (
+                isinstance(self._show_imported_action, QtGui.QAction)
+                and isinstance(action_checked, bool)
+            ):
+                blocker = QtCore.QSignalBlocker(self._show_imported_action)
+                try:
+                    self._show_imported_action.setChecked(action_checked)
+                finally:
+                    del blocker
+        self._project_path = snapshot.get("project_path")
+        self._project_degraded_safe_mode = bool(
+            snapshot.get("project_degraded_safe_mode", False)
+        )
+        package_index = snapshot.get("project_package_index")
+        self._project_package_index = (
+            package_index if isinstance(package_index, ProjectIndex) else None
+        )
+        payload_resolver = snapshot.get("project_payload_resolver")
+        self._project_payload_resolver = (
+            payload_resolver
+            if isinstance(payload_resolver, ProjectPayloadResolver)
+            else None
+        )
+        self._dirty = bool(snapshot.get("dirty", False))
+        self._update_project_title()
+        self._update_project_actions()
+
+    def _run_project_restore_callback(self) -> None:
+        state = self._project_restore_state
+        callback = state.get("next_callback") if isinstance(state, Mapping) else None
+        if callable(callback):
+            callback()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        migration = self._migration_process
+        if isinstance(migration, QtCore.QProcess) and migration.state() != QtCore.QProcess.ProcessState.NotRunning:
+            if not _builder_dialogs_suppressed():
+                box = QtWidgets.QMessageBox(self)
+                box.setWindowTitle("Migration still running")
+                box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+                box.setText("A packaged project copy is still being created.")
+                box.setInformativeText(
+                    "Keep this window open, or request cancellation. Cancellation takes "
+                    "effect at the next safe payload boundary; no partial output is published."
+                )
+                cancel_migration = box.addButton(
+                    "Cancel migration", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+                )
+                keep_open = box.addButton("Keep window open", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+                box.setDefaultButton(keep_open)
+                box.exec()
+                if box.clickedButton() is cancel_migration and isinstance(
+                    self._migration_cancel_file, Path
+                ):
+                    try:
+                        self._migration_cancel_file.write_text("cancel", encoding="ascii")
+                    except OSError:
+                        pass
+            event.ignore()
+            return
+        if self._project_restore_state is not None:
+            self._abort_project_restore(RuntimeError("Project load cancelled"), report=False)
+        thread = self._project_load_thread
+        if isinstance(thread, QtCore.QThread) and thread.isRunning():
+            self._project_load_cancelled = True
+            self._close_after_project_load = True
+            thread.requestInterruption()
+            thread.quit()
+            event.ignore()
+            return
         if self._dirty:
             box = QtWidgets.QMessageBox(self)
             box.setWindowTitle("Unsaved project")
@@ -29298,7 +39329,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         path = self._log_capture_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             level_name = logging.getLevelName(int(level))
             append_text_with_rotation(path, f"{timestamp} [{level_name}] {message}\n")
         except Exception as exc:
@@ -29336,7 +39367,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         previous_hook = sys.excepthook
 
         def _exception_hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             trace = "".join(traceback.format_exception(exc_type, exc, tb))
             try:
                 self._crash_log_handle.write(
@@ -29400,7 +39431,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_actions()
         self._mark_dirty()
 
-    def _handle_section_data_updated(self) -> None:
+    def _handle_section_data_updated(self, key: str | None = None) -> None:
+        if key and key != "compare":
+            assembly = getattr(self, "assembly_section", None)
+            if isinstance(assembly, AssemblySection):
+                assembly.invalidate_source_caches()
+                assembly.mark_preview_stale(
+                    f"{getattr(self.sections.get(key), 'section_title', key)} changed"
+                )
+            compare = getattr(self, "compare_section", None)
+            if isinstance(compare, CompareSection):
+                compare.invalidate_source_caches()
         self._mark_dirty()
         self._update_project_actions()
 
@@ -29471,10 +39512,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _update_project_actions(self, *_: object) -> None:
         has_data = self._has_project_data_to_save()
+        save_busy = bool(getattr(self, "_project_load_in_progress", False)) or bool(
+            getattr(self, "_deferred_project_section_pending", set())
+        )
         if self._save_project_action is not None:
-            self._save_project_action.setEnabled(has_data)
+            self._save_project_action.setEnabled(has_data and not save_busy)
         if self._save_project_as_action is not None:
-            self._save_project_as_action.setEnabled(has_data)
+            self._save_project_as_action.setEnabled(has_data and not save_busy)
 
     def _update_project_title(self) -> None:
         title = self._base_title
@@ -29486,6 +39530,97 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(self._database_project_dir, Path):
             return f"Database folder: {self._database_project_dir}"
         return "Set database folder..."
+
+    def _load_hidden_section_keys(self) -> Set[str]:
+        allowed = {key for key, _label in OPTIONAL_BUILDER_SECTIONS}
+        try:
+            raw = self.settings.value(self._project_settings_key("hidden_sections"), "[]")
+        except Exception:
+            raw = "[]"
+        values: Iterable[Any]
+        if isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            text = str(raw or "").strip()
+            try:
+                decoded = json.loads(text) if text else []
+            except Exception:
+                decoded = [part.strip() for part in text.split(",")]
+            values = decoded if isinstance(decoded, list) else []
+        return {str(value) for value in values if str(value) in allowed}
+
+    def _save_hidden_section_keys(self) -> None:
+        try:
+            self.settings.setValue(
+                self._project_settings_key("hidden_sections"),
+                json.dumps(sorted(self._hidden_section_keys)),
+            )
+        except Exception:
+            pass
+
+    def _apply_section_visibility(self) -> None:
+        tab_widget = getattr(self, "tab_widget", None)
+        if isinstance(tab_widget, QtWidgets.QTabWidget):
+            for key, _label in OPTIONAL_BUILDER_SECTIONS:
+                section = self.sections.get(key)
+                if key == "current_density":
+                    transitions = getattr(self, "transitions_section", None)
+                    if isinstance(transitions, TransitionsSection):
+                        transitions.set_view_visible(
+                            "annealing",
+                            key not in self._hidden_section_keys,
+                        )
+                if not isinstance(section, QtWidgets.QWidget):
+                    continue
+                index = tab_widget.indexOf(section)
+                if index < 0:
+                    continue
+                visible = key not in self._hidden_section_keys
+                try:
+                    tab_widget.setTabVisible(index, visible)
+                except Exception:
+                    pass
+            if tab_widget.count() and hasattr(tab_widget, "isTabVisible"):
+                current = tab_widget.currentIndex()
+                try:
+                    current_visible = bool(tab_widget.isTabVisible(current))
+                except Exception:
+                    current_visible = True
+                if not current_visible:
+                    for index in range(tab_widget.count()):
+                        try:
+                            if tab_widget.isTabVisible(index):
+                                tab_widget.setCurrentIndex(index)
+                                break
+                        except Exception:
+                            continue
+        project_items = getattr(self, "_project_items", {})
+        if isinstance(project_items, dict):
+            for key, _label in OPTIONAL_BUILDER_SECTIONS:
+                item = project_items.get(key)
+                if item is not None:
+                    try:
+                        item.setHidden(key in self._hidden_section_keys)
+                    except Exception:
+                        pass
+        for key, action in getattr(self, "_section_visibility_actions", {}).items():
+            if isinstance(action, QtGui.QAction):
+                try:
+                    action.blockSignals(True)
+                    action.setChecked(key not in self._hidden_section_keys)
+                finally:
+                    action.blockSignals(False)
+
+    def _toggle_section_visibility(self, section_key: str, visible: bool) -> None:
+        allowed = {key for key, _label in OPTIONAL_BUILDER_SECTIONS}
+        if section_key not in allowed:
+            return
+        if visible:
+            self._hidden_section_keys.discard(section_key)
+        else:
+            self._hidden_section_keys.add(section_key)
+        self._save_hidden_section_keys()
+        self._apply_section_visibility()
 
     def _update_database_settings_actions(self) -> None:
         if self._database_project_dir_action is not None:
@@ -29518,21 +39653,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
         database_dir_action.triggered.connect(self._choose_database_project_dir)
         settings_menu.addAction(database_dir_action)
         self._database_project_dir_action = database_dir_action
+
+        sections_menu = settings_menu.addMenu("Sections")
+        for key, label in OPTIONAL_BUILDER_SECTIONS:
+            action = QtGui.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(key not in self._hidden_section_keys)
+            action.toggled.connect(
+                lambda checked, section_key=key: self._toggle_section_visibility(section_key, bool(checked))
+            )
+            sections_menu.addAction(action)
+            self._section_visibility_actions[key] = action
         self._update_database_settings_actions()
 
     def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         data_menu = menu_bar.addMenu("Data")
-        import_action = QtGui.QAction("Import workbook…", self)
+        import_action = QtGui.QAction("Import workbook as source…", self)
         import_action.triggered.connect(self._handle_import_data)
         data_menu.addAction(import_action)
 
-        show_imported_action = QtGui.QAction("Show imported data", self)
+        show_imported_action = QtGui.QAction("Show imported workbook rows", self)
         show_imported_action.setCheckable(True)
         show_imported_action.setChecked(True)
         show_imported_action.toggled.connect(self._toggle_show_imported)
         data_menu.addAction(show_imported_action)
 
-        separate_action = QtGui.QAction("Separate imported data", self)
+        separate_action = QtGui.QAction("Separate imported source rows", self)
         separate_action.setCheckable(True)
         initial_separate = bool(
             self.settings.value(self._project_settings_key("separate_imported"), False)
@@ -29541,7 +39687,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         separate_action.toggled.connect(self._toggle_separate_imported)
         data_menu.addAction(separate_action)
 
-        remove_action = QtGui.QAction("Remove imported data", self)
+        remove_action = QtGui.QAction("Remove imported workbook data", self)
         remove_action.triggered.connect(self._remove_imported_data)
         data_menu.addAction(remove_action)
 
@@ -29695,28 +39841,45 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _default_project_filename(self) -> str:
         return f"microwire_project{self.PROJECT_EXTENSION}"
 
-    def _build_project_payload(self) -> Dict[str, Any]:
+    def _build_project_payload(
+        self, payload_staging_root: Path | None = None
+    ) -> Dict[str, Any]:
+        global _ACTIVE_PROJECT_PAYLOAD_STAGER
         sections_payload: Dict[str, Any] = {}
-        for key, section in self.sections.items():
-            exporter = getattr(section, "export_project_payload", None)
-            if not callable(exporter):
-                continue
-            try:
+        deferred = getattr(self, "_deferred_project_section_keys", set())
+        deferred_keys = set(deferred) if isinstance(deferred, set) else set()
+        previous_stager = _ACTIVE_PROJECT_PAYLOAD_STAGER
+        staged_count = 0
+
+        def _stage(value: Any) -> Any:
+            nonlocal staged_count
+            if payload_staging_root is None:
+                return _encode_project_payload(value)
+            staged_count += 1
+            return stage_payload_value(
+                value, payload_staging_root / f"payload-{staged_count:04d}"
+            )
+
+        _ACTIVE_PROJECT_PAYLOAD_STAGER = _stage if payload_staging_root is not None else None
+        try:
+            for key, section in self.sections.items():
+                if key in deferred_keys:
+                    continue
+                exporter = getattr(section, "export_project_payload", None)
+                if not callable(exporter):
+                    continue
                 sections_payload[key] = exporter()
-            except Exception as exc:
-                self.logger.error("Failed to export section %s: %s", key, exc)
-        assembly = getattr(self, "assembly_section", None)
-        if assembly is not None:
-            exporter = getattr(assembly, "export_project_payload", None)
-            if callable(exporter):
-                try:
+            assembly = getattr(self, "assembly_section", None)
+            if assembly is not None and "assemble" not in deferred_keys:
+                exporter = getattr(assembly, "export_project_payload", None)
+                if callable(exporter):
                     sections_payload["assemble"] = exporter()
-                except Exception as exc:
-                    self.logger.error("Failed to export section assemble: %s", exc)
+        finally:
+            _ACTIVE_PROJECT_PAYLOAD_STAGER = previous_stager
         return {
             "version": self.PROJECT_VERSION,
             "kind": self.PROJECT_KIND,
-            "saved_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "saved_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M"),
             "sections": sections_payload,
         }
 
@@ -29758,25 +39921,94 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._write_project_file(target)
 
     def _write_project_file(self, target: Path) -> None:
-        payload = self._build_project_payload()
-        sections = payload.get("sections", {})
-        if not sections:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Save Project",
-                "No processed sections are available to save.",
+        pending = getattr(self, "_deferred_project_section_pending", set())
+        if isinstance(pending, set) and pending:
+            message = (
+                "Project Save is temporarily unavailable while the selected "
+                "section finishes loading. Try again in a moment."
             )
+            self.logger.warning(message)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.information(self, "Section still loading", message)
+            return
+        if self._project_degraded_safe_mode:
+            message = (
+                "This legacy project is open read-only in degraded safe mode because "
+                "its blocked payloads were not loaded. Normal Save and Save As are "
+                "disabled; use the explicit trusted-copy migration command with a "
+                "distinct output path."
+            )
+            self.logger.warning(message)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.warning(self, "Trusted migration required", message)
             return
         try:
-            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Save Project",
-                f"Failed to write project file:\\n{exc}",
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging_parent = Path(
+                os.environ.get("MICROWIRE_BUILDER_STORAGE_ROOT")
+                or os.environ.get("TEMP")
+                or os.environ.get("TMP")
+                or gettempdir()
             )
+            staging_parent.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(
+                prefix="microwire-builder-save-payloads-", dir=staging_parent
+            ) as staging_name:
+                payload = self._build_project_payload(Path(staging_name))
+                sections = payload.get("sections", {})
+                if not sections:
+                    if not _builder_dialogs_suppressed():
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Save Project",
+                            "No processed sections are available to save.",
+                        )
+                    return
+                source_index = self._project_package_index
+                package_index = write_project_package(
+                    target,
+                    payload,
+                    source_index=source_index,
+                    loaded_sections=set(payload.get("sections", {})),
+                )
+        except Exception as exc:
+            self.logger.exception("Failed to save Builder project to %s", target)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Save Project",
+                    "Project save was blocked or failed safely; the existing file was "
+                    f"not changed:\n{exc}",
+                )
             return
         self._project_path = target
+        self._project_degraded_safe_mode = False
+        self._invalidate_deferred_project_loads()
+        self._project_package_index = package_index
+        self._project_payload_resolver = ProjectPayloadResolver(package_index)
+        for section_key, section in self.sections.items():
+            store = getattr(section, "store", None)
+            deleted_payloads = payload.get("sections", {}).get(section_key, {}).get(
+                DELETED_PAYLOADS_KEY, ()
+            )
+            if isinstance(store, MiniDatabaseStore) and isinstance(
+                deleted_payloads, (list, tuple, set)
+            ):
+                store.acknowledge_payload_tombstones(deleted_payloads)
+            descriptor = package_index.sections.get(section_key, {})
+            payload_paths = descriptor.get("payloads", {}) if isinstance(descriptor, Mapping) else {}
+            if not isinstance(store, MiniDatabaseStore) or not isinstance(payload_paths, Mapping):
+                continue
+            for payload_id in payload_paths:
+                if store.has_payload_loader(payload_id):
+                    store.register_payload_loader(
+                        payload_id,
+                        partial(
+                            self._project_payload_resolver.load,
+                            section_key,
+                            payload_id,
+                        ),
+                    )
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
         try:
@@ -29787,11 +40019,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_actions()
         self._dirty = False
         self.logger.info("Project saved to %s", target)
-        QtWidgets.QMessageBox.information(
-            self,
-            "Save Project",
-            f"Project saved to {target}",
-        )
+        if not _builder_dialogs_suppressed():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project",
+                f"Project saved to {target}",
+            )
 
     def _load_recent_projects_setting(self) -> None:
         raw = self.settings.value(self._project_settings_key("recent"), "[]")
@@ -29852,6 +40085,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
             pass
         self._update_database_settings_actions()
 
+    def _startup_auto_open_project_candidate(self) -> Optional[Path]:
+        candidate: Optional[Path] = None
+        if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
+            candidate = _latest_database_project_in_dir(self._database_project_dir)
+        if candidate is None and self._auto_open_last:
+            last_path = _sanitise_existing_file(
+                self.settings.value(self._project_settings_key("last_path"), "")
+            )
+            if last_path:
+                path_obj = Path(last_path)
+                if path_obj.exists():
+                    candidate = _resolve_latest_database_project(path_obj)
+            else:
+                try:
+                    self.settings.remove(self._project_settings_key("last_path"))
+                except Exception:
+                    pass
+            if candidate is None and self._recent_projects:
+                fallback = Path(self._recent_projects[0])
+                if fallback.exists():
+                    candidate = _resolve_latest_database_project(fallback)
+        return candidate
+
     def _choose_database_project_dir(self) -> None:
         start_dir = self._database_project_dir
         if start_dir is None:
@@ -29896,31 +40152,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self, "_project_load_in_progress", False
         ):
             return
-        candidate: Optional[Path] = None
+        candidate = self._startup_auto_open_project_candidate()
         if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
-            candidate = _latest_database_project_in_dir(self._database_project_dir)
             if candidate is None:
                 self.logger.warning(
                     "No latest Microwire database project found in %s",
                     self._database_project_dir,
                 )
-        if candidate is None and self._auto_open_last:
-            last_path = _sanitise_existing_file(
-                self.settings.value(self._project_settings_key("last_path"), "")
-            )
-            if last_path:
-                path_obj = Path(last_path)
-                if path_obj.exists():
-                    candidate = _resolve_latest_database_project(path_obj)
-            else:
-                try:
-                    self.settings.remove(self._project_settings_key("last_path"))
-                except Exception:
-                    pass
-            if candidate is None and self._recent_projects:
-                fallback = Path(self._recent_projects[0])
-                if fallback.exists():
-                    candidate = _resolve_latest_database_project(fallback)
         if candidate is None:
             return
         try:
@@ -29975,11 +40213,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self._save_project()
                 if getattr(self, "_dirty", False):
                     return
+        self._invalidate_deferred_project_loads()
+        self._deferred_project_section_keys = set()
         self._suppress_dirty = True
         for section in self.sections.values():
             if isinstance(section, MiniDatabaseSection):
                 section.reset_to_blank()
         self._project_path = None
+        self._project_package_index = None
+        self._project_payload_resolver = None
         self._dirty = False
         self._suppress_dirty = False
         self._update_project_title()
@@ -30051,11 +40293,374 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if getattr(self, "_project_load_in_progress", False):
             self.logger.warning("Project load already in progress; ignoring request for %s", target)
             return
+        load_started_s = time.perf_counter()
+        self._invalidate_deferred_project_loads()
+        self._project_load_cancelled = False
         self._project_load_in_progress = True
+        self._update_project_actions()
+        try:
+            self.statusBar().showMessage(f"Inspecting project…  {target.name}")
+        except Exception:
+            pass
+        auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
+        self._begin_project_load_prepare_worker(
+            target,
+            load_started_s,
+            auto_open_load=auto_open_load,
+        )
+
+    def load_project_synchronously_for_automation(self, target: Path) -> None:
+        """Restore a project completely before a noninteractive caller consumes it."""
+
+        target = Path(target)
+        self._invalidate_deferred_project_loads()
+        started = time.perf_counter()
+        prepared = _prepare_project_payload_for_gui(target)
+        if isinstance(prepared.package_index, ProjectIndex) and isinstance(
+            prepared.payload_resolver, ProjectPayloadResolver
+        ):
+            sections: Dict[str, Any] = {}
+            for section_key, descriptor in prepared.package_index.sections.items():
+                raw = prepared.package_index.read_section(
+                    section_key,
+                    load_payloads=False,
+                    budget=prepared.payload_resolver.budget,
+                )
+                payload_paths = descriptor.get("payloads", {})
+                if isinstance(payload_paths, Mapping) and payload_paths:
+                    raw[PROJECT_LAZY_PAYLOAD_LOADERS_KEY] = {
+                        payload_id: partial(
+                            prepared.payload_resolver.load, section_key, payload_id
+                        )
+                        for payload_id in payload_paths
+                    }
+                sections[section_key], _count, diagnostics = (
+                    _prepare_project_section_payload(section_key, raw, strict=True)
+                )
+                if diagnostics:
+                    raise SafeCodecError(
+                        f"Unexpected diagnostics in packaged section {section_key}"
+                    )
+            prepared.payload["sections"] = sections
+        self._project_load_in_progress = True
+        try:
+            self.statusBar().showMessage(f"Inspecting project…  {target.name}")
+        except Exception:
+            pass
+        self._apply_prepared_project_load(
+            prepared,
+            load_started_s=started,
+            auto_open_load=False,
+            staged=False,
+        )
+        if self._project_load_in_progress:
+            raise RuntimeError("Synchronous Builder project restore did not finish")
+        self._project_package_index = prepared.package_index
+        self._project_payload_resolver = prepared.payload_resolver
+        if isinstance(prepared.payload_resolver, ProjectPayloadResolver):
+            restored_sections = prepared.payload.get("sections", {})
+            if isinstance(restored_sections, Mapping):
+                for section_key, section in self.sections.items():
+                    self._configure_project_overview_loader(
+                        section_key,
+                        section,
+                        restored_sections.get(section_key),
+                        prepared.payload_resolver,
+                    )
+
+    def _begin_project_load_prepare_worker(
+        self,
+        target: Path,
+        load_started_s: float,
+        *,
+        auto_open_load: bool,
+    ) -> None:
+        self._project_load_started_s = load_started_s
+        self._project_load_auto_open = bool(auto_open_load)
+        self.logger.info("Preparing project load in background: %s", target)
+        thread = QtCore.QThread(self)
+        worker = _ProjectLoadWorker(target)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_project_load_prepared)
+        worker.failed.connect(partial(self._handle_project_load_worker_failed, target))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_project_load_worker)
+        self._project_load_thread = thread
+        self._project_load_worker = worker
+        thread.start()
+
+    def _cleanup_project_load_worker(self) -> None:
+        self._project_load_thread = None
+        self._project_load_worker = None
+        self._update_project_actions()
+        if self._close_after_project_load:
+            self._close_after_project_load = False
+            QtCore.QTimer.singleShot(0, self.close)
+
+    def _handle_project_load_prepared(self, prepared_obj: object) -> None:
+        if self._project_load_cancelled:
+            self._project_load_in_progress = False
+            return
+        if not isinstance(prepared_obj, _PreparedProjectLoad):
+            self._handle_project_load_worker_failed(
+                Path("<unknown>"),
+                RuntimeError("Project load worker returned an invalid result."),
+            )
+            return
+        load_started_s = self._project_load_started_s or time.perf_counter()
+        _log_builder_timing(
+            self.logger,
+            "project_load_prepare_worker",
+            load_started_s,
+            path=prepared_obj.target,
+            bytes=prepared_obj.byte_count,
+            decoded_payloads=prepared_obj.decoded_payload_count,
+            read_ms=f"{prepared_obj.read_ms:.1f}",
+            json_ms=f"{prepared_obj.json_ms:.1f}",
+            decode_ms=f"{prepared_obj.decode_ms:.1f}",
+        )
+        if prepared_obj.diagnostics:
+            diagnostic_text = "\n".join(prepared_obj.diagnostics)
+            self.logger.warning(
+                "Project opened in degraded safe mode; legacy payloads were blocked:\n%s",
+                diagnostic_text,
+            )
+            if not self._project_load_auto_open and not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Legacy project payloads blocked",
+                    "This project contains legacy executable pickle payloads. "
+                    "Safe fields will be opened, but those payloads were not decoded.\n\n"
+                    f"{diagnostic_text}",
+                )
+        self._apply_prepared_project_load(
+            prepared_obj,
+            load_started_s=load_started_s,
+            auto_open_load=self._project_load_auto_open,
+            staged=True,
+        )
+
+    def _handle_project_load_worker_failed(self, target: Path, exc: object) -> None:
+        if self._project_load_cancelled:
+            self._project_load_in_progress = False
+            return
+        load_started_s = self._project_load_started_s or time.perf_counter()
+        error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+        self._handle_project_load_failed(target, error, load_started_s)
+
+    def _handle_project_load_failed(
+        self,
+        target: Path,
+        exc: Exception,
+        load_started_s: float,
+    ) -> None:
+        self.logger.exception("Failed to load project %s", target, exc_info=exc)
+        if not self._project_load_auto_open and not _builder_dialogs_suppressed():
+            if isinstance(exc, SafeCodecError) and "safe JSON limit" in str(exc):
+                self._offer_trusted_legacy_project_migration(target, exc)
+            else:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Open Project",
+                    f"Failed to load project file:\n{exc}",
+                )
+        _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+        self._project_load_in_progress = False
+        self._project_load_auto_open = False
+        MiniDatabaseSection._project_load_batch_mode = False
+        self._suppress_dirty = False
+        self._update_project_actions()
+
+    def _offer_trusted_legacy_project_migration(
+        self, source: Path, error: Exception
+    ) -> None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Legacy project needs migration")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText(
+            f"Create a safe packaged copy of {source.name}?"
+        )
+        size = source.stat().st_size
+        friendly_size = (
+            f"{size / (1024 ** 3):.2f} GiB" if size >= 1024 ** 3
+            else f"{size / (1024 ** 2):.1f} MiB"
+        )
+        box.setInformativeText(
+            f"Source: {source}\nSize: {friendly_size} ({size:,} bytes)\n\n"
+            "Only continue if you trust who created this legacy project. Its old pickle "
+            "payloads can execute arbitrary code during conversion. Process isolation "
+            "limits UI disruption but is not a security sandbox.\n\n"
+            "Builder first makes and verifies a disposable input copy, then creates a "
+            "distinct packaged .pydpj output. The selected source is verified unchanged.\n\n"
+            f"Technical detail: {error}"
+        )
+        migrate_button = box.addButton(
+            "Create safe packaged copy…", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        if box.clickedButton() is not migrate_button:
+            return
+        suggested = source.with_name(f"{source.stem}.packaged{source.suffix}")
+        output_text, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save packaged project copy",
+            str(suggested),
+            f"Microwire Project (*{self.PROJECT_EXTENSION});;All files (*)",
+        )
+        if not output_text:
+            return
+        output = Path(output_text)
+        if output.suffix.lower() != self.PROJECT_EXTENSION:
+            output = output.with_suffix(self.PROJECT_EXTENSION)
+        try:
+            same_output = output.resolve() == source.resolve()
+        except OSError:
+            same_output = str(output) == str(source)
+        if same_output:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Choose a distinct output",
+                "Migration must create a distinct packaged copy; the legacy source is never overwritten.",
+            )
+            return
+        if output.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Migration output exists",
+                "Choose a new output path. Trusted migration never overwrites an existing file.",
+            )
+            return
+        self._start_trusted_legacy_project_migration(source, output)
+
+    def _start_trusted_legacy_project_migration(
+        self, source: Path, output: Path
+    ) -> None:
+        if isinstance(self._migration_process, QtCore.QProcess):
+            return
+        cancel_file = Path(gettempdir()) / f"pyplot-builder-migration-{os.getpid()}-{time.time_ns()}.cancel"
+        process = QtCore.QProcess(self)
+        environment = QtCore.QProcessEnvironment.systemEnvironment()
+        environment.insert("MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE", str(cancel_file))
+        process.setProcessEnvironment(environment)
+        process.setProgram(sys.executable)
+        process.setArguments(
+            [
+                str(Path(__file__).resolve().parents[1] / "launcher.py"),
+                "--microwire-builder-trusted-migrate",
+                str(source),
+                "--microwire-builder-migration-output",
+                str(output),
+            ]
+        )
+        progress_dialog = QtWidgets.QProgressDialog(
+            f"Inspecting {source.name}…\nDestination: {output}", "Cancel", 0, 0, self
+        )
+        progress_dialog.setWindowTitle("Migrate legacy project")
+        progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
+        self._migration_cancel_file = cancel_file
+        self._migration_error_lines = []
+        migration_started = time.monotonic()
+
+        def _cancel() -> None:
+            try:
+                cancel_file.write_text("cancel", encoding="ascii")
+            except OSError:
+                pass
+            progress_dialog.setLabelText(
+                "Cancel requested — waiting for the next safe payload boundary…"
+            )
+            cancel_button = progress_dialog.findChild(QtWidgets.QPushButton)
+            if isinstance(cancel_button, QtWidgets.QPushButton):
+                cancel_button.setText("Cancel requested")
+                cancel_button.setEnabled(False)
+
+        def _read_progress() -> None:
+            raw = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+            for line in raw.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    if line.strip():
+                        self._migration_error_lines.append(line.strip())
+                        self._migration_error_lines = self._migration_error_lines[-12:]
+                    continue
+                if not isinstance(event, Mapping):
+                    continue
+                current = str(event.get("current") or "project data")
+                current = current.replace("_", " ").replace(".", " › ")
+                phase = str(event.get("phase") or "migrate").replace("_", " ").title()
+                done = event.get("bytes_done")
+                total = event.get("bytes_total")
+                elapsed = event.get("elapsed_seconds")
+                if isinstance(done, int) and isinstance(total, int) and total > 0:
+                    progress_dialog.setRange(0, 1000)
+                    progress_dialog.setValue(min(1000, int(done * 1000 / total)))
+                    byte_text = f"{done / (1024 ** 2):.1f} / {total / (1024 ** 2):.1f} MiB"
+                else:
+                    byte_text = "Working…"
+                elapsed_text = (
+                    f"{float(elapsed):.1f} s"
+                    if isinstance(elapsed, (int, float))
+                    else f"{time.monotonic() - migration_started:.1f} s"
+                )
+                progress_dialog.setLabelText(
+                    f"{phase}: {current}\n{byte_text} • elapsed {elapsed_text}\n"
+                    f"Source: {source.name}\nDestination: {output}"
+                )
+
+        def _finished(exit_code: int, _status: QtCore.QProcess.ExitStatus) -> None:
+            progress_dialog.close()
+            try:
+                cancel_file.unlink()
+            except FileNotFoundError:
+                pass
+            self._migration_process = None
+            self._migration_progress_dialog = None
+            self._migration_cancel_file = None
+            process.deleteLater()
+            if exit_code == 0 and output.exists():
+                self._load_project_from_path(output)
+            elif not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Project migration failed",
+                    "The packaged copy was not created.\n\n"
+                    f"Source (left unchanged): {source}\nDestination: {output}\n\n"
+                    "Cause:\n"
+                    + ("\n".join(self._migration_error_lines[-6:]) or f"Worker exit code {exit_code}"),
+                )
+
+        progress_dialog.canceled.connect(_cancel)
+        process.readyReadStandardError.connect(_read_progress)
+        process.finished.connect(_finished)
+        self._migration_process = process
+        self._migration_progress_dialog = progress_dialog
+        process.start()
+
+    def _apply_prepared_project_load(
+        self,
+        prepared: _PreparedProjectLoad,
+        *,
+        load_started_s: float,
+        auto_open_load: bool,
+        staged: bool,
+    ) -> None:
+        target = prepared.target
+        payload = prepared.payload
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
         show_progress_dialog = not _builder_dialogs_suppressed()
+        self._project_load_auto_open = bool(auto_open_load)
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -30084,7 +40689,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 progress_dialog = QtWidgets.QProgressDialog(
                     "Loading project…", "", 0, total_steps, self
                 )
-                progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+                progress_dialog.setWindowModality(
+                    QtCore.Qt.WindowModality.NonModal
+                    if auto_open_load
+                    else QtCore.Qt.WindowModality.ApplicationModal
+                )
                 progress_dialog.setCancelButton(None)
                 progress_dialog.setMinimumDuration(150)
                 progress_dialog.setAutoClose(False)
@@ -30096,20 +40705,37 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         self._suppress_dirty = True
         try:
-            payload = json.loads(target.read_text(encoding="utf-8"))
-            _pump_events(0)
-
             if payload.get("kind") != self.PROJECT_KIND:
-                QtWidgets.QMessageBox.critical(
-                    self,
-                    "Open Project",
-                    "The selected file is not a Microwire Data Builder project.",
+                self._handle_project_load_failed(
+                    target,
+                    ValueError("The selected file is not a Microwire Data Builder project."),
+                    load_started_s,
                 )
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        pass
                 return
 
             sections_payload = payload.get("sections", {})
             if not isinstance(sections_payload, Mapping):
                 sections_payload = {}
+
+            if staged:
+                self._restore_project_sections_staged(
+                    target=target,
+                    sections_payload=sections_payload,
+                    progress_dialog=progress_dialog,
+                    total_steps=total_steps,
+                    load_started_s=load_started_s,
+                    auto_open_load=auto_open_load,
+                    pump_events=_pump_events,
+                    degraded_safe_mode=bool(prepared.diagnostics),
+                    package_index=prepared.package_index,
+                    payload_resolver=prepared.payload_resolver,
+                )
+                return
 
             MiniDatabaseSection._project_load_batch_mode = True
             with MiniDatabaseStore.suspend_disk_writes():
@@ -30122,7 +40748,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             section.reset_to_blank()
                         section_payload = sections_payload.get(key)
                         try:
+                            section_started_s = time.perf_counter()
                             importer(section_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                section_started_s,
+                                section=key,
+                            )
                         except Exception as exc:
                             self.logger.error("Failed to load section %s from project: %s", key, exc)
                     _pump_events(index)
@@ -30133,7 +40766,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     importer = getattr(assembly, "import_project_payload", None)
                     if callable(importer):
                         try:
+                            assembly_started_s = time.perf_counter()
                             importer(assembly_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                assembly_started_s,
+                                section="assemble",
+                            )
                         except Exception as exc:
                             self.logger.error("Failed to load section assemble: %s", exc)
             self._update_imported_data_item()
@@ -30151,6 +40791,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     fabrication.set_import_separation(separate)
 
             self._project_path = target
+            self._project_degraded_safe_mode = bool(prepared.diagnostics)
             self._remember_project_directory(target.parent)
             self._remember_recent_project(target)
             try:
@@ -30158,37 +40799,422 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._update_project_title()
+            refresh_started_s = time.perf_counter()
             self._refresh_sections_after_project_load()
+            _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
             self._update_project_actions()
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
+            self.statusBar().clearMessage()
             _pump_events(total_steps, "Finishing…")
             MiniDatabaseSection._project_load_batch_mode = False
-            if not _builder_dialogs_suppressed():
+            if not auto_open_load and not _builder_dialogs_suppressed():
                 QtWidgets.QMessageBox.information(
                     self,
                     "Open Project",
                     f"Loaded project from {target}",
                 )
         except Exception as exc:
-            self.logger.exception("Failed to load project %s", target, exc_info=exc)
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Open Project",
-                f"Failed to load project file:\n{exc}",
-            )
-        finally:
-            self._project_load_in_progress = False
-            MiniDatabaseSection._project_load_batch_mode = False
-            self._suppress_dirty = False
-            if progress_dialog is not None:
-                try:
-                    progress_dialog.close()
-                except Exception:
+            if staged:
+                self._handle_project_load_failed(target, exc, load_started_s)
+                if progress_dialog is not None:
                     try:
-                        progress_dialog.cancel()
+                        progress_dialog.close()
                     except Exception:
                         pass
+            else:
+                self.logger.exception("Failed to load project %s", target, exc_info=exc)
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Open Project",
+                    f"Failed to load project file:\n{exc}",
+                )
+        finally:
+            if not staged:
+                _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+                self._project_load_in_progress = False
+                MiniDatabaseSection._project_load_batch_mode = False
+                self._suppress_dirty = False
+                self._update_project_actions()
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        try:
+                            progress_dialog.cancel()
+                        except Exception:
+                            pass
+
+    def _abort_project_restore(self, exc: Exception, *, report: bool = True) -> None:
+        state = self._project_restore_state
+        if not isinstance(state, dict):
+            return
+        self._project_restore_timer.stop()
+        self._project_restore_state = None
+        transaction = state.get("transaction")
+        try:
+            if transaction is not None and not transaction.finished:
+                transaction.rollback()
+        except Exception:
+            self.logger.exception("Failed to roll back project store transaction")
+        try:
+            self._restore_project_load_state(state["snapshot"])
+        except Exception:
+            self.logger.exception("Failed to rebuild previous project UI after load failure")
+        try:
+            self._resume_project_load_timers(state["snapshot"])
+        except Exception:
+            self.logger.exception("Failed to resume project timers after load failure")
+        finally:
+            MiniDatabaseSection._project_load_batch_mode = False
+            self._suppress_dirty = False
+            progress_dialog = state.get("progress_dialog")
+            if isinstance(progress_dialog, QtWidgets.QProgressDialog):
+                progress_dialog.close()
+        if report:
+            try:
+                self._project_load_auto_open = bool(state.get("auto_open_load", False))
+                self._handle_project_load_failed(state["target"], exc, state["load_started_s"])
+            except Exception:
+                self.logger.exception("Failed to report project load failure")
+        else:
+            self._project_load_auto_open = False
+        self._project_load_in_progress = False
+        self._update_project_actions()
+
+    def _restore_project_sections_staged(
+        self,
+        *,
+        target: Path,
+        sections_payload: Mapping[str, Any],
+        progress_dialog: QtWidgets.QProgressDialog | None,
+        total_steps: int,
+        load_started_s: float,
+        auto_open_load: bool,
+        pump_events: Callable[[int | None, str | None], None],
+        degraded_safe_mode: bool,
+        package_index: ProjectIndex | None,
+        payload_resolver: ProjectPayloadResolver | None,
+    ) -> None:
+        all_items = list(self.sections.items())
+        current_widget = self.tab_widget.currentWidget()
+        if not isinstance(package_index, ProjectIndex):
+            # Legacy JSON has already been read and decoded by the preparation
+            # worker. Preserve its historical complete-restore behavior; only
+            # packaged projects have independently readable deferred sections.
+            items = all_items
+            eager_assembly = True
+        else:
+            eager_keys = {
+                key for key, section in all_items if section is current_widget
+            }
+            if current_widget is getattr(self, "annealing_section", None):
+                eager_keys.add("current_density")
+            if current_widget is getattr(self, "vsm_temperature_section", None):
+                eager_keys.add("transition_temps")
+            if current_widget is getattr(self, "transitions_section", None):
+                eager_keys.update({
+                    "annealing", "current_density", "vsm_temperature_scan",
+                    "transition_temps", "mini_dma",
+                })
+            items = [(key, section) for key, section in all_items if key in eager_keys]
+            eager_assembly = current_widget is getattr(self, "assembly_section", None)
+        try:
+            snapshot = self._capture_project_load_state()
+            transaction = MiniDatabaseStore.begin_memory_transaction()
+        except Exception as exc:
+            self._handle_project_load_failed(target, exc, load_started_s)
+            return
+        state: Dict[str, Any] = {
+            "index": 0,
+            "assembly_done": False,
+            "transaction": transaction,
+            "snapshot": snapshot,
+            "target": target,
+            "load_started_s": load_started_s,
+            "auto_open_load": auto_open_load,
+            "progress_dialog": progress_dialog,
+            "next_callback": None,
+            "degraded_safe_mode": bool(degraded_safe_mode),
+            "package_index": package_index,
+            "payload_resolver": payload_resolver,
+            "section_thread": None,
+            "section_worker": None,
+        }
+        # Hide every old section cache before the first importer runs. Some
+        # importers consult peer stores, and must never observe a later section
+        # from the previous project merely because its own staged turn has not
+        # run yet.
+        for key, section in all_items:
+            store = getattr(section, "store", None)
+            if isinstance(store, MiniDatabaseStore):
+                section_key = str(getattr(section, "section_key", key))
+                transaction.save_data(section_key, MiniDatabaseData())
+                transaction.clear_section_payloads(section_key)
+        self._project_restore_state = state
+        MiniDatabaseSection._project_load_batch_mode = True
+
+        def _schedule(callback: Callable[[], None]) -> None:
+            if self._project_restore_state is not state:
+                return
+            state["next_callback"] = callback
+            self._project_restore_timer.start(0)
+
+        def _finish() -> None:
+            if self._project_restore_state is not state:
+                return
+            try:
+                assembly = getattr(self, "assembly_section", None)
+                self._update_imported_data_item()
+                if isinstance(assembly, AssemblySection):
+                    show_imported = getattr(assembly, "_show_imported", True)
+                    if self._show_imported_action is not None:
+                        self._show_imported_action.setChecked(bool(show_imported))
+                if self._separate_imported_action is not None:
+                    separate = bool(
+                        self.settings.value(self._project_settings_key("separate_imported"), False)
+                    )
+                    self._separate_imported_action.setChecked(separate)
+                    fabrication = getattr(self, "fabrication_section", None)
+                    if isinstance(fabrication, FabricationSection):
+                        fabrication.set_import_separation(separate)
+                self._project_path = target
+                self._project_degraded_safe_mode = bool(state["degraded_safe_mode"])
+                self._project_package_index = state["package_index"]
+                self._project_payload_resolver = state["payload_resolver"]
+                if isinstance(package_index, ProjectIndex):
+                    loaded_keys = {key for key, _section in items}
+                    if eager_assembly:
+                        loaded_keys.add("assemble")
+                    self._deferred_project_section_keys = (
+                        set(package_index.sections) - loaded_keys
+                    )
+                self._update_project_title()
+                refresh_started_s = time.perf_counter()
+                self._refresh_sections_after_project_load()
+                _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
+                self._update_project_actions()
+                pump_events(total_steps, "Finishing...")
+                MiniDatabaseSection._project_load_batch_mode = False
+                transitions = getattr(self, "transitions_section", None)
+                if (
+                    isinstance(transitions, TransitionsSection)
+                    and self.tab_widget.currentWidget() is transitions
+                ):
+                    transitions.refresh_current_workspace()
+                self._dirty = False
+                self._update_project_actions()
+                transaction.commit_memory_only()
+                self._discard_project_load_timers(snapshot)
+                self._project_restore_state = None
+                try:
+                    self._remember_project_directory(target.parent)
+                    self._remember_recent_project(target)
+                    self.settings.setValue(self._project_settings_key("last_path"), str(target))
+                except Exception:
+                    self.logger.exception("Failed to update project history after load")
+                self.logger.info("Project loaded from %s", target)
+                self.statusBar().clearMessage()
+                if not auto_open_load and not _builder_dialogs_suppressed():
+                    try:
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Open Project",
+                            f"Loaded project from {target}",
+                        )
+                    except Exception:
+                        self.logger.exception("Failed to show project load confirmation")
+                _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+            except Exception as exc:
+                self._abort_project_restore(exc)
+            finally:
+                if self._project_restore_state is None:
+                    self._project_load_in_progress = False
+                    self._project_load_auto_open = False
+                    self._suppress_dirty = False
+                    MiniDatabaseSection._project_load_batch_mode = False
+                    self._resume_project_load_timers(snapshot)
+                    self._update_project_actions()
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        try:
+                            progress_dialog.cancel()
+                        except Exception:
+                            pass
+
+        def _step() -> None:
+            if self._project_restore_state is not state:
+                return
+            try:
+                index = int(state["index"])
+                if index < len(items):
+                    key, section = items[index]
+                    label = getattr(section, "section_title", key)
+                    pump_events(index, f"Loading {label}...")
+                    def _import_section(section_payload: object) -> None:
+                        if self._project_restore_state is not state:
+                            return
+                        section_started_s = time.perf_counter()
+                        try:
+                            importer = getattr(section, "import_project_payload", None)
+                            if callable(importer):
+                                importer(section_payload if isinstance(section_payload, Mapping) else {})
+                            self._configure_project_overview_loader(
+                                key,
+                                section,
+                                section_payload,
+                                payload_resolver,
+                            )
+                        except Exception as exc:
+                            self._abort_project_restore(
+                                RuntimeError(f"Failed to load section {key}: {exc}")
+                            )
+                            return
+                        _log_builder_timing(
+                            self.logger,
+                            "project_load_section",
+                            section_started_s,
+                            section=key,
+                            staged=True,
+                        )
+                        state["index"] = index + 1
+                        pump_events(index + 1, f"Loaded {label}")
+                        _schedule(_step)
+
+                    if isinstance(package_index, ProjectIndex) and key in package_index.sections:
+                        overview_active = (
+                            current_widget is section
+                            and key in PROJECT_EAGER_OVERVIEW_SECTIONS
+                        )
+                        transition_payload_required = (
+                            current_widget is getattr(self, "transitions_section", None)
+                            and key in {"annealing", "vsm_temperature_scan"}
+                        )
+                        self._read_packaged_project_section_async(
+                            state=state,
+                            section_key=key,
+                            callback=_import_section,
+                            decode_payloads=(
+                                overview_active or transition_payload_required
+                            ),
+                        )
+                    else:
+                        _import_section(sections_payload.get(key))
+                    return
+
+                if not state["assembly_done"] and eager_assembly:
+                    state["assembly_done"] = True
+                    def _import_assembly(assembly_payload: object) -> None:
+                        if self._project_restore_state is not state:
+                            return
+                        assembly_started_s = time.perf_counter()
+                        try:
+                            assembly = getattr(self, "assembly_section", None)
+                            importer = getattr(assembly, "import_project_payload", None)
+                            if callable(importer):
+                                importer(
+                                    assembly_payload
+                                    if isinstance(assembly_payload, Mapping)
+                                    else {}
+                                )
+                        except Exception as exc:
+                            self._abort_project_restore(
+                                RuntimeError(f"Failed to load section assemble: {exc}")
+                            )
+                            return
+                        _log_builder_timing(
+                            self.logger,
+                            "project_load_section",
+                            assembly_started_s,
+                            section="assemble",
+                            staged=True,
+                        )
+                        pump_events(total_steps, "Finishing...")
+                        _schedule(_finish)
+
+                    if (
+                        isinstance(package_index, ProjectIndex)
+                        and "assemble" in package_index.sections
+                    ):
+                        self._read_packaged_project_section_async(
+                            state=state,
+                            section_key="assemble",
+                            callback=_import_assembly,
+                        )
+                    else:
+                        _import_assembly(sections_payload.get("assemble"))
+                    return
+                _schedule(_finish)
+                return
+            except Exception as exc:
+                self._abort_project_restore(exc)
+
+        _schedule(_step)
+
+    def _read_packaged_project_section_async(
+        self,
+        *,
+        state: Dict[str, Any],
+        section_key: str,
+        callback: Callable[[object], None],
+        decode_payloads: bool = False,
+    ) -> None:
+        """Read and decode one v3 section off the GUI thread."""
+
+        package_index = state.get("package_index")
+        payload_resolver = state.get("payload_resolver")
+        if not isinstance(package_index, ProjectIndex) or not isinstance(
+            payload_resolver, ProjectPayloadResolver
+        ):
+            callback({})
+            return
+        thread = QtCore.QThread(self)
+        worker = _ProjectSectionLoadWorker(
+            package_index,
+            payload_resolver,
+            section_key,
+            decode_payloads=decode_payloads,
+        )
+        worker.moveToThread(thread)
+        state["section_thread"] = thread
+        state["section_worker"] = worker
+        state["section_result"] = None
+        state["section_error"] = None
+
+        def _store_result(result: object) -> None:
+            state["section_result"] = result
+
+        def _store_error(error: object) -> None:
+            state["section_error"] = (
+                error if isinstance(error, Exception) else RuntimeError(str(error))
+            )
+
+        def _complete() -> None:
+            if self._project_restore_state is not state:
+                return
+            state["section_thread"] = None
+            state["section_worker"] = None
+            error = state.pop("section_error", None)
+            result = state.pop("section_result", None)
+            if isinstance(error, Exception):
+                self._abort_project_restore(
+                    RuntimeError(f"Failed to read packaged section {section_key}: {error}")
+                )
+                return
+            callback(result)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(_store_result)
+        worker.failed.connect(_store_error)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(_complete)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def _refresh_sections_after_project_load(self) -> None:
         self._sync_microscope_dependent_sections()
@@ -30210,11 +41236,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if isinstance(section, MiniDatabaseSection):
                 sources = section.data.sources
             self._handle_section_sources_changed(key, sources)
-        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        batch_mode = MiniDatabaseSection._project_load_batch_mode
+        MiniDatabaseSection._project_load_batch_mode = False
         try:
-            self.video_section.sync_with_fabrication()
-        except Exception:
-            pass
+            self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        finally:
+            MiniDatabaseSection._project_load_batch_mode = batch_mode
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            transitions.mark_workspaces_dirty()
+            if (
+                not MiniDatabaseSection._project_load_batch_mode
+                and self.tab_widget.currentWidget() is transitions
+            ):
+                transitions.refresh_current_workspace()
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:
@@ -30234,6 +41269,7 @@ def main() -> QtWidgets.QWidget | None:
         app = QtWidgets.QApplication(sys.argv)
         ensure_app_theme(app)
         owns_app = True
+
     placeholder = QtWidgets.QMainWindow()
     placeholder.setWindowTitle("Microwire Data Builder")
     placeholder.resize(420, 260)
@@ -30252,11 +41288,15 @@ def main() -> QtWidgets.QWidget | None:
     def _launch() -> None:
         window = BuilderWindow()
         window_holder["window"] = window
+        window.show()
         try:
-            window.show()
+            app.processEvents()
         except Exception:
-            window.show()
+            pass
         placeholder.close()
+        scheduler = getattr(window, "schedule_startup_auto_open", None)
+        if callable(scheduler):
+            scheduler(150)
 
     if owns_app:
         QtCore.QTimer.singleShot(0, _launch)

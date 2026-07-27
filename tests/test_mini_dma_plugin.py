@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import matplotlib
 import numpy as np
@@ -13,7 +14,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from plotting.plugins import builtin_plugin_registry
 from plotting.plugins.mini_dma import core
-from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin
+from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin, TmaPlugin
 from plotting.pyplot.window import PyPlotWindow
 
 
@@ -30,6 +31,212 @@ def _ensure_qapp() -> QtWidgets.QApplication:
     return app
 
 
+def _write_iso_current_run(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-current"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni50Fe27Ga23 12_2 iso-current", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "constant_current_strain_sweep"}'
+        '}',
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for current_mA, offset in ((20.0, 0.0), (40.0, 0.12)):
+        for index, strain_pct in enumerate((0.0, 0.25, 0.5, 0.75), start=1):
+            stress_mpa = 35.0 + offset * 30.0 + strain_pct * 42.0
+            rows.append(
+                {
+                    "elapsed_s": len(rows),
+                    "recipe_mode": "constant_current_strain_sweep",
+                    "automation_phase": "target_ramp",
+                    "automation_target_value": 0.0,
+                    "plateau_index": index,
+                    "strain_pct": strain_pct + offset,
+                    "current_relative_strain_pct": strain_pct,
+                    "current_l0_mm": 58.0,
+                    "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                    "stress_mpa": stress_mpa,
+                    "load_g": 1.0 + strain_pct * 2.0 + offset,
+                    "resistance_ohm": 100.0 + current_mA,
+                    "current_measured_mA": current_mA,
+                    "current_set_mA": current_mA,
+                }
+            )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
+def _write_short_iso_current_run(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni46Fe27Ga23Cu2Co2 2_7 iso-current"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni46Fe27Ga23Cu2Co2 2_7 iso-current", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "constant_current_strain_sweep"}'
+        '}',
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "elapsed_s": 0.0,
+                "recipe_mode": "constant_current_strain_sweep",
+                "automation_phase": "target_ramp",
+                "automation_target_value": 0.0,
+                "plateau_index": 1,
+                "strain_pct": 0.0,
+                "current_relative_strain_pct": 0.0,
+                "current_l0_mm": 58.0,
+                "current_relative_position_mm": 0.0,
+                "stress_mpa": 35.0,
+                "load_g": 1.0,
+                "resistance_ohm": 120.0,
+                "current_measured_mA": 20.0,
+                "current_set_mA": 20.0,
+            },
+            {
+                "elapsed_s": 1.0,
+                "recipe_mode": "constant_current_strain_sweep",
+                "automation_phase": "target_ramp",
+                "automation_target_value": 0.0,
+                "plateau_index": 2,
+                "strain_pct": 0.5,
+                "current_relative_strain_pct": 0.5,
+                "current_l0_mm": 58.0,
+                "current_relative_position_mm": 0.29,
+                "stress_mpa": 55.0,
+                "load_g": 2.0,
+                "resistance_ohm": 121.0,
+                "current_measured_mA": 20.0,
+                "current_set_mA": 20.0,
+            },
+        ]
+    ).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
+def _write_current_sweep_with_iso_current_columns(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni50Fe27Ga23 12_2 iso-stress", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "current_sweep_stress"}'
+        '}',
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for stress_mpa in (50.0, 100.0):
+        for current_mA, strain_pct in ((10.0, 0.1), (20.0, 0.3), (30.0, 0.6)):
+            rows.append(
+                {
+                    "elapsed_s": len(rows),
+                    "recipe_mode": "current_sweep_stress",
+                    "automation_phase": "current",
+                    "automation_target_value": stress_mpa,
+                    "plateau_index": int(stress_mpa),
+                    "strain_pct": strain_pct,
+                    "current_relative_strain_pct": strain_pct,
+                    "current_l0_mm": 58.0,
+                    "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                    "stress_mpa": stress_mpa,
+                    "load_g": stress_mpa / 50.0,
+                    "resistance_ohm": 100.0 + current_mA,
+                    "current_measured_mA": current_mA,
+                    "current_set_mA": current_mA,
+                }
+            )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
+def _write_iso_strain_named_current_sweep(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 11_1 iso-strain_run09"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni50Fe27Ga23 11_1 iso-strain", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "current_sweep_stress"}'
+        '}',
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for current_mA, strain_pct in ((10.0, 0.1), (20.0, 0.3), (30.0, 0.6)):
+        rows.append(
+            {
+                "elapsed_s": len(rows),
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 50,
+                "strain_pct": strain_pct,
+                "current_relative_strain_pct": strain_pct,
+                "current_l0_mm": 58.0,
+                "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 100.0 + current_mA,
+                "current_measured_mA": current_mA,
+                "current_set_mA": current_mA,
+            }
+        )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
+def _write_minimal_mini_dma_run(run_path: Path, *, sample_name: str | None = None) -> Path:
+    run_path.mkdir(parents=True)
+    (run_path / "metadata.json").write_text(
+        "{"
+        f'"sample_name": "{sample_name or run_path.name}", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "current_sweep_stress"}'
+        "}",
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "elapsed_s": 0.0,
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 1,
+                "strain_pct": 0.1,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 100.0,
+                "current_measured_mA": 10.0,
+                "current_set_mA": 10.0,
+            },
+            {
+                "elapsed_s": 1.0,
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 1,
+                "strain_pct": 0.4,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 101.0,
+                "current_measured_mA": 20.0,
+                "current_set_mA": 20.0,
+            },
+        ]
+    ).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
     run = core.load_run(SAMPLE_RUN)
 
@@ -42,19 +249,34 @@ def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
 
 def test_iter_measurement_paths_discovers_run_folders_under_parent(tmp_path: Path) -> None:
     parent = tmp_path / "mini_dma_runs"
-    first_run = parent / "sample_run01"
-    second_run = parent / "sample_run02"
-    first_run.mkdir(parents=True)
-    second_run.mkdir(parents=True)
-    first_measurement = first_run / "measurement.csv"
-    second_measurement = second_run / "measurement.csv"
-    first_measurement.write_text("", encoding="utf-8")
-    second_measurement.write_text("", encoding="utf-8")
+    first_run = _write_minimal_mini_dma_run(parent / "sample_run01")
+    second_run = _write_minimal_mini_dma_run(parent / "sample_run02")
     (parent / "notes.txt").write_text("not a run", encoding="utf-8")
 
-    paths = core.iter_measurement_paths([parent, first_run, second_measurement])
+    paths = core.iter_measurement_paths([parent, first_run, second_run / "measurement.csv"])
 
-    assert paths == [first_measurement.resolve(), second_measurement.resolve()]
+    assert paths == [
+        (first_run / "measurement.csv").resolve(),
+        (second_run / "measurement.csv").resolve(),
+    ]
+
+
+def test_iter_measurement_paths_skips_sidecar_and_invalid_measurements(tmp_path: Path) -> None:
+    parent = tmp_path / "mini_dma_runs"
+    valid_run = _write_minimal_mini_dma_run(parent / "Ni50Fe27Ga23 12_2 iso-stress_run01")
+    archived_run = _write_minimal_mini_dma_run(parent / "archive" / "old_run")
+    tests_run = _write_minimal_mini_dma_run(parent / "tests" / "fixture_run")
+    automation_run = _write_minimal_mini_dma_run(parent / "automation_history" / "campaign_run")
+    invalid_run = parent / "Ni50Fe27Ga23 12_3 notes"
+    invalid_run.mkdir(parents=True)
+    (invalid_run / "measurement.csv").write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
+
+    paths = core.iter_measurement_paths([parent])
+
+    assert paths == [(valid_run / "measurement.csv").resolve()]
+    assert (archived_run / "measurement.csv").resolve() not in paths
+    assert (tests_run / "measurement.csv").resolve() not in paths
+    assert (automation_run / "measurement.csv").resolve() not in paths
 
 
 def test_current_sweep_groups_by_target_mpa() -> None:
@@ -84,6 +306,102 @@ def test_current_sweep_groups_preserve_return_leg_duplicate_states() -> None:
     assert len(groups) == 1
     _target, group = groups[0]
     assert group["current_mA"].tolist() == [10.0, 20.0, 10.0]
+
+
+def test_current_sweep_summary_groups_include_current_hold_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current", "current_hold", "current_hold", "current"],
+            "automation_target_value": [50.0] * 4,
+            "plateau_index": [1] * 4,
+            "strain_pct": [0.0, 0.4, 1.2, 0.1],
+            "resistance_ohm": [100.0] * 4,
+            "current_mA": [30.0, 30.0, 30.0, 31.0],
+            "position_mm": [0.0, 0.04, 0.12, 0.01],
+        }
+    )
+
+    plot_groups = core.current_sweep_groups(frame)
+    summary_groups = core.current_sweep_groups(frame, phases=core.SUMMARY_PHASES)
+
+    assert len(plot_groups) == 1
+    assert plot_groups[0][1]["automation_phase"].tolist() == ["current", "current"]
+    assert len(summary_groups) == 1
+    assert summary_groups[0][1]["automation_phase"].tolist() == [
+        "current",
+        "current_hold",
+        "current_hold",
+        "current",
+    ]
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+        initial_length_mm=10.0,
+    )
+    summary = core.summarize_current_sweep(run)
+
+    assert summary.targets[0].max_strain_pct == pytest.approx(1.2)
+
+
+def test_iso_current_run_classifies_and_groups_by_current(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_current_run(tmp_path))
+
+    assert core.is_iso_current_run(run) is True
+    groups = core.iso_current_groups(run)
+
+    assert [current for current, _group in groups] == [20.0, 40.0]
+    assert groups[0][1]["_mini_dma_iso_strain_pct"].tolist() == [0.0, 0.25, 0.5, 0.75]
+
+
+def test_short_iso_current_run_does_not_produce_curve(tmp_path: Path) -> None:
+    run = core.load_run(_write_short_iso_current_run(tmp_path))
+
+    assert core.is_iso_current_run(run) is True
+    assert core.iso_current_groups(run) == []
+    with pytest.raises(ValueError, match="No iso-current stress/strain groups"):
+        core.make_iso_current_figure(run)
+
+
+def test_current_sweep_with_iso_current_columns_is_not_iso_current(tmp_path: Path) -> None:
+    run = core.load_run(_write_current_sweep_with_iso_current_columns(tmp_path))
+
+    assert core.is_iso_current_run(run) is False
+    assert core.supports_transition_review(run) is True
+    groups = core.current_sweep_groups(run.frame)
+    assert [target for target, _group in groups] == [50.0, 100.0]
+
+
+def test_iso_strain_run_name_disables_transition_review(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_strain_named_current_sweep(tmp_path))
+
+    assert core.is_iso_current_run(run) is False
+    assert core.supports_transition_review(run) is False
+
+
+def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_current_run(tmp_path))
+
+    fig = core.make_iso_current_figure(run)
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "Strain [%] (l\u2080 = 58 mm)"
+        assert ax.get_ylabel() == "Stress [MPa] (d = 20 \u00b5m)"
+        assert ax.lines[0].get_xdata().tolist() == [0.0, 0.25, 0.5, 0.75]
+        assert ax.lines[0].get_ydata().tolist() == pytest.approx([35.0, 45.5, 56.0, 66.5])
+        assert ax.lines[0].get_label() == "20 mA / 64 A/mm\u00b2"
+        assert ax.get_legend().get_title().get_text() == "Current / current density"
+        assert len(fig.axes) == 3
+        top_ax = fig.axes[1]
+        right_ax = fig.axes[2]
+        assert top_ax.get_xlabel() == "Displacement [mm]"
+        assert top_ax.get_ylabel() == ""
+        assert right_ax.get_xlabel() == ""
+        assert right_ax.get_ylabel() == "Load [g]"
+    finally:
+        plt.close(fig)
 
 
 def test_make_figures_create_one_line_per_target() -> None:
@@ -368,13 +686,14 @@ def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -
     assert first.l0_mm == pytest.approx(52.8, abs=0.1)
     assert first.max_current_mA == pytest.approx(79.9, abs=0.2)
     assert first.max_strain_pct >= first.strain_at_max_current_pct >= 0.0
+    assert first.current_at_max_strain_mA == pytest.approx(3.7, abs=0.1)
     lines = core.format_current_sweep_strain_summary(summary)
     assert lines[0].startswith("50 MPa / 1.46 g:")
-    assert "@ 80 mA" in lines[0]
+    assert "10.81% @ 4 mA" in lines[0]
     assert core.format_current_sweep_break_summary(summary) == ""
 
 
-def test_strain_summary_reports_strain_at_max_current_not_absolute_max() -> None:
+def test_strain_summary_reports_peak_strain_not_strain_at_max_current() -> None:
     summary = core.CurrentSweepSummary(
         targets=(
             core.CurrentSweepTargetSummary(
@@ -384,12 +703,13 @@ def test_strain_summary_reports_strain_at_max_current_not_absolute_max() -> None
                 max_current_mA=80.0,
                 max_strain_pct=2.5,
                 strain_at_max_current_pct=1.25,
+                current_at_max_strain_mA=42.0,
             ),
         ),
     )
 
     assert core.format_current_sweep_strain_summary(summary) == [
-        "50 MPa / 1.56 g: 1.25% @ 80 mA"
+        "50 MPa / 1.56 g: 2.5% @ 42 mA"
     ]
 
 
@@ -398,11 +718,11 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     cooling_current = np.linspace(100.0, 1.0, 120)
 
     def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
-        before = 0.1 + current * 0.002
-        start_value = 0.1 + start * 0.002
-        transition = start_value + (current - start) * 0.04
-        finish_value = start_value + (finish - start) * 0.04
-        after = finish_value + (current - finish) * 0.003
+        before = 12.0 - current * 0.002
+        start_value = 12.0 - start * 0.002
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.003
         return np.where(current < start, before, np.where(current <= finish, transition, after))
 
     frame = pd.DataFrame(
@@ -439,6 +759,180 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     assert target.mf_current_mA == pytest.approx(25.0, abs=1.5)
     lines = core.format_current_sweep_transition_summary(summary)
     assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
+
+
+def test_summarize_current_sweep_large_multi_target_trace_stays_fast() -> None:
+    rows: list[dict[str, float | str | int]] = []
+
+    def piecewise(current: np.ndarray, start: float, finish: float, offset: float) -> np.ndarray:
+        before = offset + 12.0 - current * 0.002
+        start_value = offset + 12.0 - start * 0.002
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.003
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    for target_index, target in enumerate((50.0, 100.0, 150.0, 200.0, 250.0, 300.0)):
+        heating_current = np.linspace(1.0, 120.0, 600)
+        cooling_current = np.linspace(120.0, 1.0, 600)
+        strain = np.concatenate(
+            [
+                piecewise(heating_current, 35.0, 80.0, target_index * 0.25),
+                piecewise(cooling_current, 30.0, 75.0, target_index * 0.25),
+            ]
+        )
+        current = np.concatenate([heating_current, cooling_current])
+        for index, (current_mA, strain_pct) in enumerate(zip(current, strain, strict=True)):
+            rows.append(
+                {
+                    "elapsed_s": float(len(rows)),
+                    "automation_phase": "current",
+                    "automation_target_value": target,
+                    "plateau_index": target_index,
+                    "strain_pct": float(strain_pct),
+                    "resistance_ohm": 100.0,
+                    "current_mA": float(current_mA),
+                    "current_set_mA": float(current_mA),
+                    "current_measured_mA": float(current_mA),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    run = core.MiniDmaRun(
+        path=Path("large-run"),
+        measurement_path=Path("large-run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    started = time.perf_counter()
+    summary = core.summarize_current_sweep(run)
+    elapsed_s = time.perf_counter() - started
+
+    assert len(summary.targets) == 6
+    assert summary.targets[0].as_current_mA == pytest.approx(35.0, abs=2.0)
+    assert summary.targets[0].af_current_mA == pytest.approx(80.0, abs=2.0)
+    assert elapsed_s < 5.0
+
+
+def test_summarize_current_sweep_prefers_horizontal_heating_after_fit() -> None:
+    heating_current = np.linspace(1.0, 100.0, 160)
+    cooling_current = np.linspace(100.0, 1.0, 160)
+
+    def heating_piecewise(current: np.ndarray) -> np.ndarray:
+        start = 30.0
+        finish = 94.0
+        before = 12.0 - current * 0.002
+        start_value = 12.0 - start * 0.002
+        transition = start_value - (current - start) * 0.045
+        finish_value = start_value - (finish - start) * 0.045
+        after = finish_value - (current - finish) * 0.001
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    def cooling_piecewise(current: np.ndarray) -> np.ndarray:
+        start = 30.0
+        finish = 70.0
+        before = 8.0 - current * 0.001
+        start_value = 8.0 - start * 0.001
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.001
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": np.arange(320, dtype=float),
+            "automation_phase": ["current"] * 320,
+            "automation_target_value": [50.0] * 320,
+            "plateau_index": [1] * 320,
+            "strain_pct": np.concatenate(
+                [
+                    heating_piecewise(heating_current),
+                    cooling_piecewise(cooling_current),
+                ]
+            ),
+            "resistance_ohm": [100.0] * 320,
+            "current_mA": np.concatenate([heating_current, cooling_current]),
+            "current_set_mA": np.concatenate([heating_current, cooling_current]),
+            "current_measured_mA": np.concatenate([heating_current, cooling_current]),
+        }
+    )
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    summary = core.summarize_current_sweep(run)
+    heating, cooling = core._split_current_sweep_legs(frame)
+    fit = core._fit_current_transition(
+        heating,
+        frame["strain_pct"],
+        after_slope_hint=core._high_current_cooling_slope(cooling, frame["strain_pct"]),
+        prefer_horizontal_after=True,
+    )
+
+    target = summary.targets[0]
+    assert target.af_current_mA == pytest.approx(94.0, abs=1.5)
+    assert fit is not None
+    assert fit.finish_x == pytest.approx(94.0, abs=1.5)
+    assert abs(fit.after.slope) < 0.005
+    assert fit.transition.slope < 0.0
+
+
+def test_summarize_current_sweep_rejects_wrong_signed_strain_transition() -> None:
+    heating_current = np.linspace(1.0, 100.0, 120)
+    cooling_current = np.linspace(100.0, 1.0, 120)
+
+    def wrong_signed_piecewise(
+        current: np.ndarray,
+        start: float,
+        finish: float,
+    ) -> np.ndarray:
+        before = 0.1 + current * 0.002
+        start_value = 0.1 + start * 0.002
+        transition = start_value + (current - start) * 0.04
+        finish_value = start_value + (finish - start) * 0.04
+        after = finish_value + (current - finish) * 0.003
+        return np.where(
+            current < start,
+            before,
+            np.where(current <= finish, transition, after),
+        )
+
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": np.arange(240, dtype=float),
+            "automation_phase": ["current"] * 240,
+            "automation_target_value": [50.0] * 240,
+            "plateau_index": [1] * 240,
+            "strain_pct": np.concatenate(
+                [
+                    wrong_signed_piecewise(heating_current, 30.0, 70.0),
+                    wrong_signed_piecewise(cooling_current, 25.0, 65.0),
+                ]
+            ),
+            "resistance_ohm": [100.0] * 240,
+            "current_mA": np.concatenate([heating_current, cooling_current]),
+            "current_set_mA": np.concatenate([heating_current, cooling_current]),
+            "current_measured_mA": np.concatenate([heating_current, cooling_current]),
+        }
+    )
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    summary = core.summarize_current_sweep(run)
+
+    target = summary.targets[0]
+    assert target.as_current_mA is None
+    assert target.af_current_mA is None
+    assert target.ms_current_mA is None
+    assert target.mf_current_mA is None
+    assert core.format_current_sweep_transition_summary(summary) == []
 
 
 def test_summarize_current_sweep_detects_voltage_limit_break() -> None:
@@ -479,12 +973,14 @@ def test_plugin_is_registered() -> None:
     registry = builtin_plugin_registry()
 
     assert "TMA" in registry
+    assert registry["TMA"] is TmaPlugin
+    assert MiniDmaPlugin is TmaPlugin
 
 
 def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
     app = _ensure_qapp()
     host = QtWidgets.QWidget()
-    plugin = MiniDmaPlugin(host, "TMA")
+    plugin = TmaPlugin(host, "TMA")
     try:
         plugin.settings_widget()
         assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_GLOBAL_MINIMUM

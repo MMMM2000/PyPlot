@@ -9,24 +9,36 @@ import traceback
 import json
 import csv
 import math
+import hashlib
 import re
 import shutil
+import base64
 import secrets
 import socket
 import socketserver
 import tempfile
 import threading
 import uuid
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Tuple, Sequence, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Dict, Iterable, Mapping, Tuple, Sequence, cast, Protocol
 
 import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
+
+from microwire_data_builder.safe_codec import SafeCodecError, decode_envelope, read_json_file
+from microwire_data_builder.project_package import (
+    PACKAGE_VERSION as BUILDER_PACKAGE_VERSION,
+    inspect_project_package,
+    is_project_package,
+    load_project as load_builder_project,
+    write_project_package,
+)
 
 from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
@@ -77,6 +89,27 @@ def _experiment_process_launcher(
                 resource_tag=resource_tag,
             )
         )
+        return None
+
+    return factory
+
+
+_BUILDER_PROCESSES: list[subprocess.Popen[Any]] = []
+
+
+def _builder_process_launcher(module: str) -> LauncherFactory:
+    def factory(*_args: Any, **_kwargs: Any) -> QtWidgets.QWidget | None:
+        env = os.environ.copy()
+        env.pop("QT_QPA_PLATFORM", None)
+        env.setdefault("PYPLOT_NO_PAUSE", "1")
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process = subprocess.Popen(
+            [sys.executable, "-m", module],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env,
+            creationflags=creationflags,
+        )
+        _BUILDER_PROCESSES.append(process)
         return None
 
     return factory
@@ -326,6 +359,8 @@ def _normalise_project_path(path: Path, *, suffix: str = ".pypj") -> Path:
 def _validate_pyplot_plugin_name(plugin_name: str | None) -> None:
     if plugin_name is None:
         return
+    if plugin_name == "Mini DMA":
+        plugin_name = "TMA"
     _pyplot_main, plugin_names = _load_pyplot_metadata()
     if plugin_name not in plugin_names:
         raise _AutomationRecipeError(
@@ -371,19 +406,178 @@ def _resolve_recipe_path_value(
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    if not path.exists():
+        raise _AutomationRecipeError(f"{label} file not found: {path}")
     try:
-        raw = path.read_text(encoding="utf-8")
+        payload = read_json_file(path)
     except FileNotFoundError as exc:
         raise _AutomationRecipeError(f"{label} file not found: {path}") from exc
+    except SafeCodecError as exc:
+        if "Invalid JSON file" in str(exc):
+            raise _AutomationRecipeError(
+                f"{label} file is not valid JSON: {path}"
+            ) from exc
+        raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
     except Exception as exc:
         raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise _AutomationRecipeError(f"{label} file is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise _AutomationRecipeError(f"{label} file must contain a JSON object.")
     return payload
+
+
+def _load_builder_project_object(
+    path: Path,
+    *,
+    label: str,
+    section_keys: Collection[str] | None = None,
+    load_payloads: bool = True,
+) -> dict[str, Any]:
+    if not path.exists():
+        raise _AutomationRecipeError(f"{label} file not found: {path}")
+    try:
+        if is_project_package(path):
+            index = inspect_project_package(path)
+            selected = (
+                set(index.sections)
+                if section_keys is None
+                else {str(key) for key in section_keys} & set(index.sections)
+            )
+            payload = index.project_header()
+            with index.open_reader() as reader:
+                payload["sections"] = {
+                    key: reader.read_section(key, load_payloads=load_payloads)
+                    for key in selected
+                }
+        else:
+            payload = load_builder_project(path)
+    except Exception as exc:
+        raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError(f"{label} file must contain a project object.")
+    return payload
+
+
+def _write_builder_project_object(path: Path, payload: Mapping[str, Any]) -> None:
+    source_index = inspect_project_package(path) if path.exists() and is_project_package(path) else None
+    write_project_package(
+        path,
+        payload,
+        source_index=source_index,
+        loaded_sections=set(payload.get("sections", {}))
+        if isinstance(payload.get("sections"), Mapping)
+        else set(),
+    )
+
+
+_BUILDER_LEGACY_PICKLE_WARNING_EMITTED = False
+
+
+def _warn_builder_legacy_pickle_blocked() -> None:
+    global _BUILDER_LEGACY_PICKLE_WARNING_EMITTED
+    if _BUILDER_LEGACY_PICKLE_WARNING_EMITTED:
+        return
+    _BUILDER_LEGACY_PICKLE_WARNING_EMITTED = True
+    LOGGER.warning(
+        "Legacy Builder pickle payload was blocked; ordinary CLI reads never execute "
+        "pickle. Use --microwire-builder-trusted-migrate with "
+        "--microwire-builder-migration-output pointing to a distinct disposable copy."
+    )
+
+
+@dataclass(frozen=True)
+class _PreparedFileArchive:
+    temp_path: Path
+    archive_path: Path
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _temporary_sibling_path(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, raw_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    os.close(handle)
+    return Path(raw_path)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    temp_path = _temporary_sibling_path(path)
+    try:
+        with temp_path.open("w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+
+
+def _copy_file_atomic(source: Path, target: Path) -> None:
+    temp_path = _temporary_sibling_path(target)
+    try:
+        shutil.copyfile(source, temp_path)
+        _fsync_file(temp_path)
+        os.replace(temp_path, target)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+
+
+def _next_available_path(path: Path) -> Path:
+    target = path
+    counter = 1
+    while target.exists():
+        target = path.with_name(f"{path.stem}_{counter}{path.suffix}")
+        counter += 1
+    return target
+
+
+def _prepare_file_archive(source: Path, archive_path: Path) -> _PreparedFileArchive | None:
+    if not source.exists():
+        return None
+    target = _next_available_path(archive_path)
+    temp_path = _temporary_sibling_path(target)
+    try:
+        shutil.copyfile(source, temp_path)
+        _fsync_file(temp_path)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+    return _PreparedFileArchive(temp_path=temp_path, archive_path=target)
+
+
+def _prepared_archive_path(prepared: _PreparedFileArchive | None) -> str | None:
+    if prepared is None:
+        return None
+    return _absolute_path(prepared.archive_path)
+
+
+def _finish_prepared_file_archive(prepared: _PreparedFileArchive | None) -> str | None:
+    if prepared is None:
+        return None
+    os.replace(prepared.temp_path, prepared.archive_path)
+    return _absolute_path(prepared.archive_path)
+
+
+def _discard_prepared_file_archive(prepared: _PreparedFileArchive | None) -> None:
+    if prepared is not None:
+        _unlink_quietly(prepared.temp_path)
 
 
 def _validate_pyplot_project_file(path: Path) -> None:
@@ -403,7 +597,7 @@ def _validate_builder_project_payload(payload: dict[str, Any], *, path: Path) ->
         raise _AutomationRecipeError(
             f"Project '{path}' is not a Microwire Data Builder project."
         )
-    if payload.get("version") != 1:
+    if payload.get("version") not in {1, 2, BUILDER_PACKAGE_VERSION}:
         raise _AutomationRecipeError(
             f"Project '{path}' uses unsupported Microwire Data Builder project version {payload.get('version')!r}."
         )
@@ -414,30 +608,39 @@ def _collect_builder_paths(
     *,
     supported_suffixes: Sequence[str],
     exclude_dir_names: Sequence[str] = (),
+    exclude_dir_prefixes: Sequence[str] = (),
+    max_depth: int | None = None,
 ) -> list[Path]:
     suffixes = {suffix.lower() for suffix in supported_suffixes}
     excluded_names = {str(name).strip().lower() for name in exclude_dir_names if str(name).strip()}
-
-    def _is_excluded(candidate: Path, root: Path) -> bool:
-        if not excluded_names:
-            return False
-        try:
-            relative_parts = candidate.relative_to(root).parts
-        except ValueError:
-            relative_parts = candidate.parts
-        return any(part.lower() in excluded_names for part in relative_parts[:-1])
+    excluded_prefixes = tuple(
+        str(prefix).strip().lower()
+        for prefix in exclude_dir_prefixes
+        if str(prefix).strip()
+    )
 
     collected: list[Path] = []
     for path in paths:
         if path.is_dir():
-            for candidate in sorted(path.rglob("*")):
-                if not candidate.is_file():
-                    continue
-                if _is_excluded(candidate, path):
-                    continue
-                if suffixes and candidate.suffix.lower() not in suffixes:
-                    continue
-                collected.append(candidate)
+            for directory, dirnames, filenames in os.walk(path):
+                try:
+                    depth = len(Path(directory).relative_to(path).parts)
+                except ValueError:
+                    depth = 0
+                dirnames[:] = sorted(
+                    name
+                    for name in dirnames
+                    if name.lower() not in excluded_names
+                    and not name.lower().startswith(excluded_prefixes)
+                )
+                if max_depth is not None and depth >= max_depth:
+                    dirnames[:] = []
+                base = Path(directory)
+                for filename in sorted(filenames):
+                    candidate = base / filename
+                    if suffixes and candidate.suffix.lower() not in suffixes:
+                        continue
+                    collected.append(candidate)
         elif path.is_file():
             if suffixes and path.suffix.lower() not in suffixes:
                 continue
@@ -453,8 +656,69 @@ def _record_path_key(record: object) -> str:
         return str(raw_path)
 
 
+def _path_matches_refresh_root(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve()
+    except Exception:
+        resolved_path = path
+    try:
+        resolved_root = root.resolve()
+    except Exception:
+        resolved_root = root
+    try:
+        if resolved_root.is_file():
+            return resolved_path == resolved_root
+    except OSError:
+        pass
+    if resolved_path == resolved_root:
+        return True
+    try:
+        return resolved_path.is_relative_to(resolved_root)
+    except AttributeError:
+        try:
+            resolved_path.relative_to(resolved_root)
+            return True
+        except ValueError:
+            return False
+    except ValueError:
+        return False
+
+
+def _filter_builder_records_outside_refresh_roots(
+    records: Sequence[object],
+    roots: Sequence[Path],
+) -> list[object]:
+    if not roots:
+        return list(records)
+    filtered: list[object] = []
+    for record in records:
+        key = _record_path_key(record)
+        if not key:
+            filtered.append(record)
+            continue
+        record_path = Path(key)
+        if any(_path_matches_refresh_root(record_path, root) for root in roots):
+            continue
+        filtered.append(record)
+    return filtered
+
+
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
+        "fabrication": {
+            "class": builder_ui.FabricationSection,
+            "payload": "fabrication_index",
+            "payload_kind": "object",
+        },
+        "microscope": {
+            "class": builder_ui.MicroscopeSection,
+            "payload": "microscope_index",
+            "payload_kind": "mapping",
+            "table_builder": lambda records, extra: builder_ui._microscope_index_to_frame(
+                records,
+                extra.get("overrides", {}) if isinstance(extra, Mapping) else {},
+            ),
+        },
         "annealing": {
             "class": builder_ui.AnnealingSection,
             "payload": "annealing_records",
@@ -486,6 +750,12 @@ def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
             "payload": "shape_memory_stress_strain_records",
             "graph_column": builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
         },
+        "videos": {
+            "class": builder_ui.VideoSection,
+            "payload": "video_index",
+            "payload_kind": "mapping",
+            "table_builder": lambda records: builder_ui._video_index_to_frame(records),
+        },
         "fmr": {
             "class": builder_ui.FmrSection,
             "payload": "fmr_records",
@@ -504,6 +774,22 @@ def _merge_builder_records(existing_records: Sequence[object], new_records: Sequ
             key = f"record-{fallback_index}"
         merged[key] = record
     return list(merged.values())
+
+
+def _builder_payload_record_count(payload: object) -> int:
+    if payload is None:
+        return 0
+    if isinstance(payload, Mapping):
+        return len(payload)
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        return len(payload)
+    draw_level = getattr(payload, "draw_level", None)
+    piece_level = getattr(payload, "piece_level", None)
+    if isinstance(piece_level, Mapping):
+        return len(piece_level)
+    if isinstance(draw_level, Mapping):
+        return len(draw_level)
+    return 1
 
 
 def _run_builder_update_section_command(
@@ -552,19 +838,120 @@ def _run_builder_update_section_command(
         raise _AutomationRecipeError(
             f"{section_name} update field 'exclude_dir_names' must be an array when provided."
         )
-    candidates = _collect_builder_paths(
-        input_paths,
-        supported_suffixes=supported_suffixes,
-        exclude_dir_names=[str(name) for name in raw_exclude_dir_names],
-    )
+    raw_exclude_dir_prefixes = command.get("exclude_dir_prefixes", [])
+    if raw_exclude_dir_prefixes in (None, ""):
+        raw_exclude_dir_prefixes = []
+    if not isinstance(raw_exclude_dir_prefixes, list):
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'exclude_dir_prefixes' must be an array when provided."
+        )
+    raw_max_depth = command.get("max_depth")
+    if raw_max_depth is None:
+        max_depth = None
+    elif isinstance(raw_max_depth, bool) or not isinstance(raw_max_depth, int) or raw_max_depth < 0:
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'max_depth' must be a non-negative integer when provided."
+        )
+    else:
+        max_depth = raw_max_depth
     section = section_class(LOGGER, lambda *_args: None)
+    exclude_names = [str(name) for name in raw_exclude_dir_names]
+    exclude_prefixes = [str(prefix) for prefix in raw_exclude_dir_prefixes]
+    if section_name == "mini_dma":
+        default_excludes = getattr(section_class, "excluded_refresh_dirs", ())
+        if max_depth == 1:
+            excluded = {
+                str(name).strip().casefold()
+                for name in [*default_excludes, *exclude_names]
+                if str(name).strip()
+            }
+            excluded_prefixes = tuple(
+                prefix.strip().casefold()
+                for prefix in exclude_prefixes
+                if prefix.strip()
+            )
+            shallow_candidates: list[Path] = []
+            for input_path in input_paths:
+                if input_path.is_file():
+                    if input_path.name.casefold() == "measurement.csv":
+                        shallow_candidates.append(input_path)
+                    continue
+                direct_measurement = input_path / "measurement.csv"
+                if direct_measurement.is_file():
+                    shallow_candidates.append(direct_measurement)
+                for child in sorted(input_path.iterdir(), key=lambda item: item.name.casefold()):
+                    child_name = child.name.casefold()
+                    if (
+                        child_name in excluded
+                        or child_name.startswith(excluded_prefixes)
+                        or not child.is_dir()
+                    ):
+                        continue
+                    measurement = child / "measurement.csv"
+                    print(
+                        f"[builder-automation] mini_dma: checking {measurement}",
+                        flush=True,
+                    )
+                    if measurement.is_file():
+                        shallow_candidates.append(measurement)
+            candidates = list(dict.fromkeys(shallow_candidates))
+        else:
+            candidates = [
+                candidate
+                for candidate in _collect_builder_paths(
+                    input_paths,
+                    supported_suffixes=supported_suffixes,
+                    exclude_dir_names=[*default_excludes, *exclude_names],
+                    exclude_dir_prefixes=exclude_prefixes,
+                    max_depth=max_depth,
+                )
+                if candidate.name.casefold() == "measurement.csv"
+            ]
+    else:
+        candidates = _collect_builder_paths(
+            input_paths,
+            supported_suffixes=supported_suffixes,
+            exclude_dir_names=exclude_names,
+            exclude_dir_prefixes=exclude_prefixes,
+            max_depth=max_depth,
+        )
+    print(
+        f"[builder-automation] {section_name}: discovered {len(candidates)} candidate(s)",
+        flush=True,
+    )
     try:
+        print(
+            f"[builder-automation] {section_name}: loading saved section state",
+            flush=True,
+        )
         section.import_project_payload(sections.get(section_name, {}))
         existing_payload = section.store.load_payload(payload_name)
+        print(
+            f"[builder-automation] {section_name}: saved section state loaded",
+            flush=True,
+        )
         existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
+        existing_records = _filter_builder_records_outside_refresh_roots(
+            existing_records,
+            input_paths,
+        )
         source_strings = [str(path) for path in input_paths]
         section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
-        result = section.process(candidates)
+        if section_name == "mini_dma":
+            def report_tma_progress(
+                current: int,
+                total: int,
+                label: str | None,
+            ) -> None:
+                detail = f": {label}" if label else ""
+                print(
+                    f"[builder-automation] TMA {current}/{total}{detail}",
+                    flush=True,
+                )
+
+            result = section.process(candidates, progress=report_tma_progress)
+        else:
+            result = section.process(candidates)
 
         processed_keys = set()
         for processed_path in result.processed:
@@ -581,12 +968,27 @@ def _run_builder_update_section_command(
             if candidate_key not in processed_keys:
                 skipped_sources.append(str(candidate))
 
-        new_payload = result.payloads.get(payload_name, [])
-        new_records = list(new_payload) if isinstance(new_payload, list) else []
-        merged_records = _merge_builder_records(existing_records, new_records)
-        if callable(table_builder):
-            section.data.table = table_builder(merged_records)
+        payload_kind = spec.get("payload_kind", "sequence")
+        if payload_kind == "mapping":
+            existing_mapping = dict(existing_payload) if isinstance(existing_payload, Mapping) else {}
+            new_payload = result.payloads.get(payload_name, {})
+            new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
+            merged_records = {**existing_mapping, **new_mapping}
+        elif payload_kind == "object":
+            merged_records = result.payloads.get(payload_name)
         else:
+            new_payload = result.payloads.get(payload_name, [])
+            new_records = list(new_payload) if isinstance(new_payload, list) else []
+            merged_records = _merge_builder_records(existing_records, new_records)
+
+        if payload_kind == "object":
+            section.data.table = result.table
+        if callable(table_builder):
+            try:
+                section.data.table = table_builder(merged_records, result.extra)
+            except TypeError:
+                section.data.table = table_builder(merged_records)
+        elif payload_kind != "object":
             section.data.table = builder_ui._graph_records_to_frame(
                 merged_records,
                 str(graph_column),
@@ -595,8 +997,14 @@ def _run_builder_update_section_command(
         section.data.processed = {**section.data.processed, **result.processed}
         if isinstance(result.extra, dict):
             section.data.extra.update(result.extra)
-        section.data.extra["payloads"] = {payload_name: payload_name}
-        section.store.save_payload(payload_name, merged_records)
+        payload_refs: dict[str, str] = {payload_name: payload_name}
+        for result_payload_name, result_payload in result.payloads.items():
+            name = str(result_payload_name)
+            section.store.save_payload(name, result_payload)
+            payload_refs[name] = name
+        if payload_name not in result.payloads:
+            section.store.save_payload(payload_name, merged_records)
+        section.data.extra["payloads"] = payload_refs
         section.store.save(section.data)
         sections[section_name] = section.export_project_payload()
         return {
@@ -608,9 +1016,12 @@ def _run_builder_update_section_command(
             "updated_count": len(processed_keys),
             "skipped_count": len(skipped_sources),
             "skipped_sources": skipped_sources,
-            "record_count": len(merged_records),
+            "record_count": _builder_payload_record_count(merged_records),
             "row_count": int(len(section.data.table.index)),
             "sources": source_strings,
+            "exclude_dir_names": list(dict.fromkeys(exclude_names)),
+            "exclude_dir_prefixes": list(dict.fromkeys(exclude_prefixes)),
+            "max_depth": max_depth,
         }
     finally:
         section.close()
@@ -666,6 +1077,17 @@ def _decode_builder_section_payload(
     if not isinstance(payloads, Mapping):
         return None
     encoded = payloads.get(payload_name)
+    if isinstance(encoded, Mapping) and encoded.get("encoding") == "pickle-base64":
+        _warn_builder_legacy_pickle_blocked()
+    if not (
+        isinstance(encoded, Mapping)
+        and encoded.get("encoding") == "microwire-json"
+    ):
+        # Automation keeps freshly updated payloads raw in its isolated memory
+        # transaction until all dependent commands (notably Assemble rebuild)
+        # have consumed them. They are staged with the v3 streaming codec
+        # immediately before the final package write.
+        return encoded
     decoder = getattr(builder_ui, "_decode_project_payload", None)
     if not callable(decoder):
         return None
@@ -691,10 +1113,129 @@ def _builder_section_rows_as_frame(
     return frame
 
 
-def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
+def _builder_section_entries_from_rows(
+    *,
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    section_name: str,
+    value_columns: Sequence[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Return saved per-sample table edits in the form expected by build_database."""
+
+    frame = _builder_section_rows_as_frame(sections, section_name)
     if frame.empty:
         return {}
-    result: dict[str, dict[str, float]] = {}
+    entries: dict[str, dict[str, object]] = {}
+    for _, row in frame.iterrows():
+        key = builder_ui._row_to_microwire_key(row)
+        if not key:
+            continue
+        entry = entries.setdefault(str(key), {})
+        columns = value_columns or tuple(str(column) for column in frame.columns)
+        for column in columns:
+            value = row.get(column)
+            if value_columns is not None and not builder_ui._shape_memory_has_value(value):
+                continue
+            entry[str(column)] = value
+    return entries
+
+
+def _builder_section_extra_mapping(
+    sections: Mapping[str, Any], section_name: str, key: str
+) -> dict[str, Any]:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return {}
+    extra = section.get("extra")
+    if not isinstance(extra, Mapping):
+        return {}
+    value = extra.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(item_key): item_value for item_key, item_value in value.items()}
+
+
+def _overlay_saved_imported_assemble_rows(
+    dataframe: pd.DataFrame,
+    previous_assemble: object,
+) -> pd.DataFrame:
+    """Reapply saved workbook imports after a non-interactive Assemble rebuild."""
+
+    if not isinstance(previous_assemble, Mapping):
+        return dataframe
+    if previous_assemble.get("show_imported", True) is False:
+        return dataframe
+    imported_rows = previous_assemble.get("imported_rows")
+    if not isinstance(imported_rows, list) or not imported_rows:
+        return dataframe
+
+    result = dataframe.copy() if isinstance(dataframe, pd.DataFrame) else pd.DataFrame()
+    key_to_indexes: dict[tuple[str, str], list[object]] = {}
+    if not result.empty:
+        for index, row in result.iterrows():
+            key = _analysis_identity_key(row)
+            if key[0] and key[1]:
+                key_to_indexes.setdefault(key, []).append(index)
+    append_rows: list[dict[str, object]] = []
+    for raw_row in imported_rows:
+        if not isinstance(raw_row, Mapping):
+            continue
+        imported = {str(column): value for column, value in raw_row.items()}
+        key = _analysis_identity_key(imported)
+        if not key[0] or not key[1]:
+            continue
+        existing_indexes = key_to_indexes.get(key)
+        if not existing_indexes:
+            append_rows.append(imported)
+            continue
+        for existing_index in existing_indexes:
+            for column, value in imported.items():
+                if column in {"Composition", "Microwire"} or _is_blank_export_value(value):
+                    continue
+                if column not in result.columns:
+                    result[column] = None
+                if _is_blank_export_value(result.at[existing_index, column]):
+                    result.at[existing_index, column] = value
+    if append_rows:
+        result = pd.concat([result, pd.DataFrame(append_rows)], ignore_index=True, sort=False)
+    return result
+
+
+def _rebuilt_assemble_payload(
+    previous_assemble: object,
+    dataframe: pd.DataFrame,
+    *,
+    builder_ui: Any,
+) -> dict[str, Any]:
+    """Replace only Assemble table data while retaining user-controlled state."""
+
+    state: dict[str, Any] = {}
+    if isinstance(previous_assemble, Mapping):
+        state = {
+            str(key): value
+            for key, value in previous_assemble.items()
+            if key not in {"section", "title", "columns", "rows", "index", "payloads"}
+        }
+    rows = [
+        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
+        for row in dataframe.to_dict(orient="records")
+    ]
+    state.update(
+        {
+            "section": "assemble",
+            "title": "Assemble",
+            "columns": [str(column) for column in dataframe.columns],
+            "rows": rows,
+            "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
+        }
+    )
+    return state
+
+
+def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if frame.empty:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
     for row in frame.to_dict(orient="records"):
         key = str(row.get("_group_key") or "").strip()
         if not key:
@@ -704,7 +1245,7 @@ def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
                 key = f"{composition}|{microwire.replace('/', '|')}"
         if not key:
             continue
-        entry: dict[str, float] = {}
+        entry: dict[str, Any] = {}
         for label, column in {
             "As": "As (°C)",
             "Af": "Af (°C)",
@@ -718,8 +1259,89 @@ def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
                 continue
             if math.isfinite(numeric):
                 entry[label] = numeric
+        status = row.get("Review status")
+        if status not in (None, ""):
+            entry["__review_status__"] = status
+        counts: dict[str, int] = {}
+        for source_column, target_key in {
+            "Scans": "total",
+            "Accepted": "accepted",
+            "No transition": "no_transition",
+            "Excluded": "excluded",
+            "Unreviewed": "unreviewed",
+        }.items():
+            try:
+                counts[target_key] = int(row.get(source_column) or 0)
+            except (TypeError, ValueError):
+                counts[target_key] = 0
+        if any(counts.values()):
+            entry["__review_counts__"] = counts
         if entry:
             result[key] = entry
+    return result
+
+
+def _transition_reviews_to_compact_map(
+    reviews: Mapping[str, Mapping[str, object]],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(reviews, Mapping):
+        return result
+    for _record_id, review in reviews.items():
+        if not isinstance(review, Mapping):
+            continue
+        key = str(review.get("group_key") or "").strip()
+        if not key:
+            composition, microwire = _transition_sample_identity_from_review(review, sample_key="sample")
+            if composition and microwire:
+                key = f"{composition}|{microwire.replace('/', '|')}"
+        if not key:
+            continue
+        entry = result.setdefault(key, {})
+        counts = entry.setdefault(
+            "__review_counts__",
+            {
+                "total": 0,
+                "accepted": 0,
+                "manual": 0,
+                "no_transition": 0,
+                "excluded": 0,
+                "unreviewed": 0,
+            },
+        )
+        if isinstance(counts, dict):
+            counts["total"] = int(counts.get("total", 0) or 0) + 1
+        status = _normalise_transition_review_status(review.get("status"))
+        if isinstance(counts, dict):
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                counts["excluded"] = int(counts.get("excluded", 0) or 0) + 1
+            elif status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                counts["no_transition"] = int(counts.get("no_transition", 0) or 0) + 1
+            elif status == "manual_adjusted":
+                counts["manual"] = int(counts.get("manual", 0) or 0) + 1
+            elif status in {"accepted", "accepted_auto"}:
+                counts["accepted"] = int(counts.get("accepted", 0) or 0) + 1
+            else:
+                counts["unreviewed"] = int(counts.get("unreviewed", 0) or 0) + 1
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            entry.setdefault("__review_status__", "Excluded")
+            entry.setdefault("__included__", False)
+            continue
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            entry.setdefault("__review_status__", "No transition")
+            entry.setdefault("__included__", False)
+            continue
+        values = _clean_numeric_transition_values(review.get("final_values_C"), _VSM_LABELS)
+        if not values:
+            values = _clean_numeric_transition_values(review.get("manual_values_C"), _VSM_LABELS)
+        if not values and status in {"accepted", "accepted_auto"}:
+            values = _clean_numeric_transition_values(review.get("auto_values_C"), _VSM_LABELS)
+        if values:
+            entry.update(values)
+            entry["__review_status__"] = (
+                "Manual adjusted" if status == "manual_adjusted" else "Accepted"
+            )
+            entry["__included__"] = True
     return result
 
 
@@ -731,19 +1353,53 @@ def _run_builder_rebuild_assemble_command_lightweight(
     sections: dict[str, Any],
     output_project: Path,
 ) -> dict[str, Any]:
-    selected = _builder_rebuild_sections_from_command(
+    requested_sections = _builder_rebuild_sections_from_command(
         command,
         sections=sections,
         command_index=command_index,
     )
-    if not selected:
+    if not requested_sections:
         raise _AutomationRecipeError(
             f"Builder rebuild_assemble command {command_index} has no section payloads to assemble."
         )
+    # Assemble is one integrated database.  A command-level section list identifies
+    # what triggered the rebuild; it must never turn the rebuild into a destructive
+    # one-family replacement of the existing Assemble table.
+    selected = {
+        str(key)
+        for key, payload in sections.items()
+        if key not in {"assemble", "compare"} and _builder_section_has_payload(payload)
+    }
 
     def _payload(section_name: str, payload_name: str, fallback: Any) -> Any:
         value = _decode_builder_section_payload(builder_ui, sections, section_name, payload_name)
         return value if value is not None else fallback
+
+    def _visible_records(section_name: str, payload_name: str) -> list[Any]:
+        records = _payload(section_name, payload_name, [])
+        if not isinstance(records, (list, tuple)):
+            return []
+        section = sections.get(section_name)
+        extra = section.get("extra") if isinstance(section, Mapping) else None
+        hidden_values = extra.get("hidden_paths") if isinstance(extra, Mapping) else None
+        hidden = {
+            str(path)
+            for path in hidden_values
+            if path
+        } if isinstance(hidden_values, (list, tuple, set)) else set()
+        if not hidden:
+            return list(records)
+        path_key = getattr(builder_ui, "_record_path_key", None)
+        visible: list[Any] = []
+        for record in records:
+            try:
+                key = str(path_key(record) or "") if callable(path_key) else str(getattr(record, "path", "") or "")
+            except Exception:
+                key = str(getattr(record, "path", "") or "")
+            if key and key in hidden:
+                continue
+            visible.append(record)
+        return visible
 
     config = builder_ui.BuilderConfig(
         annealing_files=[],
@@ -761,51 +1417,139 @@ def _run_builder_rebuild_assemble_command_lightweight(
     transition_points = _transition_rows_to_map(
         _builder_section_rows_as_frame(sections, "transition_temps")
     )
+    transition_points.update(
+        _transition_reviews_to_compact_map(
+            _review_records_from_section_extra(sections, "transition_temps")
+        )
+    )
+    mini_dma_transition_reviews: dict[str, Any] = {}
+    mini_dma_section = sections.get("mini_dma")
+    if isinstance(mini_dma_section, Mapping):
+        extra = mini_dma_section.get("extra")
+        if isinstance(extra, Mapping):
+            raw_reviews = extra.get("mini_dma_transition_reviews")
+            if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+                raw_reviews = raw_reviews.get("records")
+            if isinstance(raw_reviews, Mapping):
+                mini_dma_transition_reviews = {
+                    str(key): dict(value)
+                    for key, value in raw_reviews.items()
+                    if isinstance(value, Mapping)
+                }
+    fabrication_index = _payload(
+        "fabrication", "fabrication_index", builder_ui.FabricationIndex()
+    )
+    fabrication_frame = _builder_section_rows_as_frame(sections, "fabrication")
+    if not fabrication_frame.empty:
+        table_index = builder_ui.AssemblySection._fabrication_index_from_frame(
+            fabrication_frame
+        )
+        fabrication_index = builder_ui.AssemblySection._merge_fabrication_indexes(
+            fabrication_index,
+            table_index,
+        )
+    shape_memory_columns = tuple(
+        dict.fromkeys(
+            [
+                *getattr(builder_ui.ShapeMemoryStressStrainSection, "VALUE_COLUMNS", ()),
+                *getattr(builder_ui.ShapeMemoryStressStrainSection, "FRACTURE_COLUMNS", ()),
+            ]
+        )
+    )
+    shape_memory_entries = _builder_section_entries_from_rows(
+        builder_ui=builder_ui,
+        sections=sections,
+        section_name="shape_memory_stress_strain",
+        value_columns=shape_memory_columns,
+    )
+    strain_entries = _builder_section_entries_from_rows(
+        builder_ui=builder_ui,
+        sections=sections,
+        section_name="strain",
+    )
+    video_overrides = _builder_section_extra_mapping(
+        sections, "videos", "overrides"
+    )
+    microscope_index = _payload("microscope", "microscope_index", {})
+    if not isinstance(microscope_index, dict):
+        microscope_index = {}
+    microscope_frame = _builder_section_rows_as_frame(sections, "microscope")
+    table_microscope_index = builder_ui.MicroscopeSection._build_microscope_index_from_table(
+        microscope_frame
+    )
+    if table_microscope_index:
+        microscope_index = table_microscope_index
+    microscope_overrides = _builder_section_extra_mapping(
+        sections, "microscope", "overrides"
+    )
+    if microscope_overrides:
+        microscope_index = builder_ui._apply_microscope_overrides(
+            microscope_index,
+            microscope_overrides,
+        )
+    microscope_section = sections.get("microscope")
+    microscope_extra = (
+        microscope_section.get("extra")
+        if isinstance(microscope_section, Mapping)
+        else None
+    )
+    show_other_ends = (
+        bool(microscope_extra.get("show_other_ends", True))
+        if isinstance(microscope_extra, Mapping)
+        else True
+    )
+    microscope_index = builder_ui._filter_other_end_microscope_index(
+        microscope_index,
+        show_other_ends=show_other_ends,
+    )
+    previous_assemble = sections.get("assemble")
     result = builder_ui.build_database(
         config,
         logger=LOGGER,
-        fabrication_index=_payload("fabrication", "fabrication_index", builder_ui.FabricationIndex()),
+        fabrication_index=fabrication_index,
         measurement_records=(
-            _payload("annealing", "annealing_records", [])
+            _visible_records("annealing", "annealing_records")
             if "annealing" in selected
             else []
         ),
         vsm_hysteresis_records=(
-            _payload("vsm_hysteresis", "vsm_hysteresis_records", [])
+            _visible_records("vsm_hysteresis", "vsm_hysteresis_records")
             if "vsm_hysteresis" in selected
             else []
         ),
         vsm_temperature_scan_records=(
-            _payload("vsm_temperature_scan", "vsm_temperature_scan_records", [])
+            _visible_records("vsm_temperature_scan", "vsm_temperature_scan_records")
             if "vsm_temperature_scan" in selected
             else []
         ),
         dma_iso_stress_records=(
-            _payload("dma_iso_stress", "dma_iso_stress_records", [])
+            _visible_records("dma_iso_stress", "dma_iso_stress_records")
             if "dma_iso_stress" in selected
             else []
         ),
         mini_dma_records=(
-            _payload("mini_dma", "mini_dma_records", [])
+            _visible_records("mini_dma", "mini_dma_records")
             if "mini_dma" in selected
             else []
         ),
         shape_memory_stress_strain_records=(
-            _payload(
+            _visible_records(
                 "shape_memory_stress_strain",
                 "shape_memory_stress_strain_records",
-                [],
             )
             if "shape_memory_stress_strain" in selected
             else []
         ),
+        shape_memory_entries=(
+            shape_memory_entries if "shape_memory_stress_strain" in selected else {}
+        ),
         fmr_records=(
-            _payload("fmr", "fmr_records", [])
+            _visible_records("fmr", "fmr_records")
             if "fmr" in selected
             else []
         ),
         microscope_index=(
-            _payload("microscope", "microscope_index", {})
+            microscope_index
             if "microscope" in selected
             else {}
         ),
@@ -819,30 +1563,1923 @@ def _run_builder_rebuild_assemble_command_lightweight(
             if "strain" in selected
             else {}
         ),
+        strain_entries=strain_entries if "strain" in selected else {},
         transition_temps=transition_points if "transition_temps" in selected else {},
+        mini_dma_transition_reviews=(
+            mini_dma_transition_reviews if "mini_dma" in selected else {}
+        ),
+        video_overrides=video_overrides if "videos" in selected else {},
         skip_exports=True,
         include_fabrication_draw_siblings=True,
     )
     dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
     if not isinstance(dataframe, pd.DataFrame):
         dataframe = pd.DataFrame()
-    rows = [
-        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
-        for row in dataframe.to_dict(orient="records")
-    ]
-    sections["assemble"] = {
-        "section": "assemble",
-        "title": "Assemble",
-        "columns": [str(column) for column in dataframe.columns],
-        "rows": rows,
-        "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
-    }
+    if "videos" in selected:
+        dataframe = _overlay_saved_video_table_values(dataframe, sections)
+    if "annealing" in selected:
+        dataframe = _overlay_builder_current_density_snapshot(
+            builder_ui=builder_ui,
+            sections=sections,
+            dataframe=dataframe,
+        )
+    dataframe = _overlay_saved_imported_assemble_rows(dataframe, previous_assemble)
+    sections["assemble"] = _rebuilt_assemble_payload(
+        previous_assemble,
+        dataframe,
+        builder_ui=builder_ui,
+    )
     return {
         "action": "rebuild_assemble",
         "status": "ok",
         "sections": sorted(selected),
+        "requested_sections": sorted(requested_sections),
         "row_count": int(len(dataframe.index)),
         "column_count": int(len(dataframe.columns)),
+    }
+
+
+def _overlay_builder_current_density_snapshot(
+    *,
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return dataframe
+    annealing_payload = sections.get("annealing")
+    if not isinstance(annealing_payload, Mapping):
+        return dataframe
+    microscope_payload = sections.get("microscope")
+    if not isinstance(microscope_payload, Mapping):
+        microscope_payload = {}
+    annealing_section = builder_ui.AnnealingSection(LOGGER, lambda *_args: None)
+    microscope_section = builder_ui.MicroscopeSection(LOGGER, lambda *_args: None)
+    current_density_section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        LOGGER,
+        lambda *_args: None,
+    )
+    try:
+        annealing_section.import_project_payload(annealing_payload)
+        microscope_section.import_project_payload(microscope_payload)
+        current_density_section.refresh_data()
+        snapshot_provider = getattr(current_density_section, "current_density_snapshot", None)
+        if not callable(snapshot_provider):
+            return dataframe
+        snapshot = snapshot_provider()
+        if not isinstance(snapshot, Mapping) or not snapshot:
+            return dataframe
+        output = dataframe.copy()
+        for column in getattr(builder_ui, "CURRENT_DENSITY_COLUMNS", ()):
+            if column not in output.columns:
+                output[column] = None
+
+        def _row_key(row: Mapping[str, Any]) -> str:
+            key = str(row.get("_key") or row.get("_group_key") or "").strip()
+            if key:
+                return key
+            composition = str(row.get("Composition") or "").strip()
+            microwire = str(row.get("Microwire") or "").strip()
+            if composition and microwire:
+                return f"{composition}|{microwire.replace('/', '|')}"
+            return ""
+
+        for index, row in output.iterrows():
+            key = _row_key(row)
+            values = snapshot.get(key)
+            if not isinstance(values, Mapping):
+                continue
+            for column, value in values.items():
+                if column == "_group_key":
+                    continue
+                if column not in output.columns:
+                    output[column] = None
+                elif isinstance(value, str) and getattr(output[column], "dtype", None) != object:
+                    output[column] = output[column].astype(object)
+                try:
+                    output.at[index, column] = value
+                except (TypeError, ValueError):
+                    output[column] = output[column].astype(object)
+                    output.at[index, column] = value
+        return output
+    finally:
+        for widget in (current_density_section, annealing_section, microscope_section):
+            try:
+                widget.close()
+            except Exception:
+                pass
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
+
+
+_ASSEMBLE_PUBLIC_DROP_EXACT = {
+    "Data source",
+    "Source files",
+    "Possible mismatch",
+    "As (mA)",
+    "Ms (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "Current annealing transition currents",
+    "TMA strain by stress/load",
+    "Mini DMA strain by stress/load",
+    "TMA transition currents by stress/load",
+    "Mini DMA transition currents by stress/load",
+}
+_ASSEMBLE_PUBLIC_DROP_TOKENS = ("source", "provenance", "internal")
+
+
+def _assemble_public_drop_column(column: object) -> bool:
+    name = str(column)
+    if name.startswith("_"):
+        return True
+    if name in _ASSEMBLE_PUBLIC_DROP_EXACT:
+        return True
+    folded = name.casefold()
+    return any(token in folded for token in _ASSEMBLE_PUBLIC_DROP_TOKENS)
+
+
+def _serialise_assemble_export_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(_serialise_assemble_export_value(item)) for item in value)
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return value
+
+
+def _assemble_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    assemble = sections.get("assemble")
+    if not isinstance(assemble, Mapping):
+        return pd.DataFrame()
+    rows = _project_section_rows(dict(assemble))
+    columns = assemble.get("columns")
+    if isinstance(columns, list):
+        column_names = [str(column) for column in columns]
+        frame = pd.DataFrame(rows, columns=column_names)
+    else:
+        frame = pd.DataFrame(rows)
+    return _normalise_tma_assemble_export_columns(frame)
+
+
+def _normalise_tma_assemble_export_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    aliases = {
+        "Mini DMA graphs": "TMA graphs",
+        "Mini DMA graphs (Origin)": "TMA graphs (Origin)",
+        "Mini DMA strain by stress/load": "TMA strain by stress/load",
+        "Mini DMA transition currents by stress/load": "TMA transition currents by stress/load",
+        "Mini DMA transition status": "TMA transition status",
+        "Mini DMA transition review counts": "TMA transition review counts",
+        "Mini DMA break point": "TMA break point",
+    }
+    rename_map = {
+        old: new
+        for old, new in aliases.items()
+        if old in frame.columns and new not in frame.columns
+    }
+    if not rename_map:
+        return frame
+    return frame.rename(columns=rename_map)
+
+
+def _serialise_assemble_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    export_frame = frame.copy()
+    for column in export_frame.columns:
+        series = export_frame[column]
+        if getattr(series, "dtype", None) == object:
+            export_frame[column] = series.map(_serialise_assemble_export_value)
+    return export_frame
+
+
+_PUBLIC_MICROWIRE_LABEL_RE = re.compile(
+    r"^\s*(?P<draw>\d+)\s*[/\-]\s*(?P<piece>\d+)\s*(?P<suffix>[A-Za-z][A-Za-z0-9]*)?\s*$"
+)
+
+
+def _public_microwire_label_parts(value: object) -> tuple[str, str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _PUBLIC_MICROWIRE_LABEL_RE.match(text)
+    if match is None:
+        return None
+    try:
+        draw = str(int(match.group("draw")))
+        piece = str(int(match.group("piece")))
+    except (TypeError, ValueError):
+        return None
+    suffix = str(match.group("suffix") or "").strip()
+    return draw, piece, suffix
+
+
+def _public_base_microwire_label(value: object) -> str:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return str(value or "").strip()
+    draw, piece, _suffix = parts
+    return f"{draw}/{piece}"
+
+
+def _is_public_other_end_microwire(value: object) -> bool:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return False
+    _draw, _piece, suffix = parts
+    return suffix.casefold() == "oe"
+
+
+def _public_microwire_has_non_identity_suffix(value: object) -> bool:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return False
+    _draw, _piece, suffix = parts
+    return bool(suffix) and suffix.casefold() != "oe"
+
+
+def _is_blank_export_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _prepare_public_assemble_main_frame(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    info = {
+        "excluded_oe_rows": 0,
+        "normalised_suffix_rows": 0,
+        "collapsed_suffix_rows": 0,
+    }
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Microwire" not in frame.columns:
+        return frame.copy(), info
+
+    working = frame.copy()
+    oe_mask = working["Microwire"].map(_is_public_other_end_microwire)
+    info["excluded_oe_rows"] = int(oe_mask.sum())
+    working = working.loc[~oe_mask].copy()
+    if working.empty:
+        return working, info
+
+    suffix_mask = working["Microwire"].map(_public_microwire_has_non_identity_suffix)
+    info["normalised_suffix_rows"] = int(suffix_mask.sum())
+    working["Microwire"] = working["Microwire"].map(_public_base_microwire_label)
+
+    if not {"Composition", "Microwire"}.issubset(working.columns):
+        return working, info
+
+    grouped_rows: list[dict[str, object]] = []
+    collapsed = 0
+    for _key, group in working.groupby(["Composition", "Microwire"], sort=False, dropna=False):
+        base = group.iloc[0].to_dict()
+        if len(group.index) > 1:
+            collapsed += int(len(group.index) - 1)
+        for _idx, row in group.iloc[1:].iterrows():
+            for column, value in row.items():
+                if _is_blank_export_value(base.get(column)) and not _is_blank_export_value(value):
+                    base[column] = value
+        grouped_rows.append(base)
+
+    info["collapsed_suffix_rows"] = collapsed
+    return pd.DataFrame(grouped_rows, columns=list(working.columns)), info
+
+
+def _prepare_public_extra_export_frame(frame: pd.DataFrame | None) -> tuple[pd.DataFrame | None, dict[str, int]]:
+    info = {
+        "excluded_oe_rows": 0,
+        "normalised_suffix_rows": 0,
+    }
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty or "Microwire" not in frame.columns:
+        return frame, info
+
+    working = frame.copy()
+    oe_mask = working["Microwire"].map(_is_public_other_end_microwire)
+    info["excluded_oe_rows"] = int(oe_mask.sum())
+    working = working.loc[~oe_mask].copy()
+    if working.empty:
+        return working, info
+
+    suffix_mask = working["Microwire"].map(_public_microwire_has_non_identity_suffix)
+    info["normalised_suffix_rows"] = int(suffix_mask.sum())
+    working["Microwire"] = working["Microwire"].map(_public_base_microwire_label)
+    return working, info
+
+
+ANNEALING_TRANSITION_EXPORT_SHEET = "Annealing transitions"
+VSM_TRANSITION_EXPORT_SHEET = "VSM transitions"
+TMA_TARGET_EXPORT_SHEET = "TMA targets"
+ANALYSIS_EXPORT_SHEET = "Analysis"
+ANNEALING_TRANSITION_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "Annealing run",
+    "Annealing current (mA)",
+    "Annealing As1",
+    "Annealing Af1",
+    "Annealing Ms1",
+    "Annealing Mf1",
+    "Annealing As2",
+    "Annealing Af2",
+    "Annealing Ms2",
+    "Annealing Mf2",
+]
+VSM_TRANSITION_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "VSM scan",
+    "VSM As",
+    "VSM Af",
+    "VSM Ms",
+    "VSM Mf",
+]
+TMA_TARGET_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "TMA run",
+    "TMA target",
+    "TMA target type",
+    "TMA stress (MPa)",
+    "TMA load (g)",
+    "TMA strain (%)",
+    "TMA strain peak current (mA)",
+    "TMA As",
+    "TMA Af",
+    "TMA Ms",
+    "TMA Mf",
+]
+ANALYSIS_BASE_PREFERRED_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "e/a",
+    "Tt est (°C)",
+    "d (µm)",
+    "D (µm)",
+    "d/D",
+    "Brittle",
+    "Core temperature (°C)",
+    "Glass temperature (°C)",
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    "Glass pull-off",
+    "Length (m)",
+    "Mass (g)",
+    "Resistance (Ω)",
+    "Production datetime",
+]
+ANALYSIS_BASE_EXTRA_COLUMNS = set(ANALYSIS_BASE_PREFERRED_COLUMNS) | {
+    "J_As1 (A/mm^2)",
+    "J_Af1 (A/mm^2)",
+    "J_Ms1 (A/mm^2)",
+    "J_Mf1 (A/mm^2)",
+    "J_As2 (A/mm^2)",
+    "J_Af2 (A/mm^2)",
+    "J_Ms2 (A/mm^2)",
+    "J_Mf2 (A/mm^2)",
+}
+ANALYSIS_BASE_EXCLUDED_COLUMNS = {
+    "As (mA)",
+    "Ms (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "As1 (mA)",
+    "Af1 (mA)",
+    "Ms1 (mA)",
+    "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
+    "As2-As1 (mA)",
+    "Af2-Af1 (mA)",
+    "Ms2-Ms1 (mA)",
+    "Mf2-Mf1 (mA)",
+    "Mf1-Af1 (mA)",
+    "Mf2-Af2 (mA)",
+    "Current annealing transition currents",
+    "Current annealing transition status",
+    "Current annealing transition review counts",
+    "As (°C)",
+    "Af (°C)",
+    "Ms (°C)",
+    "Mf (°C)",
+    "VSM transition temp status",
+    "VSM transition temp review counts",
+    "TMA transition currents by stress/load",
+    "TMA strain by stress/load",
+    "TMA transition status",
+    "TMA transition review counts",
+}
+ANALYSIS_CA_COLUMN_MAP = {
+    "Annealing run": "CA graph",
+    "Annealing As1": "CA As1 (mA)",
+    "Annealing Af1": "CA Af1 (mA)",
+    "Annealing Ms1": "CA Ms1 (mA)",
+    "Annealing Mf1": "CA Mf1 (mA)",
+    "Annealing As2": "CA As2 (mA)",
+    "Annealing Af2": "CA Af2 (mA)",
+    "Annealing Ms2": "CA Ms2 (mA)",
+    "Annealing Mf2": "CA Mf2 (mA)",
+}
+ANALYSIS_VSM_COLUMN_MAP = {
+    "VSM scan": "VSM scan",
+    "VSM As": "VSM As (°C)",
+    "VSM Af": "VSM Af (°C)",
+    "VSM Ms": "VSM Ms (°C)",
+    "VSM Mf": "VSM Mf (°C)",
+}
+ANALYSIS_TMA_COLUMN_MAP = {
+    "TMA run": "TMA run",
+    "TMA target": "TMA target",
+    "TMA target type": "TMA target type",
+    "TMA stress (MPa)": "TMA stress (MPa)",
+    "TMA load (g)": "TMA load (g)",
+    "TMA strain (%)": "TMA strain (%)",
+    "TMA strain peak current (mA)": "TMA strain peak current (mA)",
+    "TMA As": "TMA As (mA)",
+    "TMA Af": "TMA Af (mA)",
+    "TMA Ms": "TMA Ms (mA)",
+    "TMA Mf": "TMA Mf (mA)",
+}
+ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP = {
+    "TMA As (mA)": "TMA J_As (A/mm^2)",
+    "TMA Af (mA)": "TMA J_Af (A/mm^2)",
+    "TMA Ms (mA)": "TMA J_Ms (A/mm^2)",
+    "TMA Mf (mA)": "TMA J_Mf (A/mm^2)",
+}
+ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP = {
+    "J_As1 (A/mm^2)": "CA J_As1 (A/mm^2)",
+    "J_Af1 (A/mm^2)": "CA J_Af1 (A/mm^2)",
+    "J_Ms1 (A/mm^2)": "CA J_Ms1 (A/mm^2)",
+    "J_Mf1 (A/mm^2)": "CA J_Mf1 (A/mm^2)",
+    "J_As2 (A/mm^2)": "CA J_As2 (A/mm^2)",
+    "J_Af2 (A/mm^2)": "CA J_Af2 (A/mm^2)",
+    "J_Ms2 (A/mm^2)": "CA J_Ms2 (A/mm^2)",
+    "J_Mf2 (A/mm^2)": "CA J_Mf2 (A/mm^2)",
+}
+ANALYSIS_STRUCTURAL_COLUMNS_BY_FAMILY = {
+    "current_annealing": tuple(
+        dict.fromkeys(
+            [
+                *ANALYSIS_CA_COLUMN_MAP.values(),
+                *ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP.values(),
+            ]
+        )
+    ),
+    "vsm": tuple(ANALYSIS_VSM_COLUMN_MAP.values()),
+    "tma": tuple(
+        dict.fromkeys(
+            [
+                *ANALYSIS_TMA_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.values(),
+            ]
+        )
+    ),
+}
+ANALYSIS_EXPORT_SHEET_FAMILIES = {
+    ANNEALING_TRANSITION_EXPORT_SHEET: "current_annealing",
+    VSM_TRANSITION_EXPORT_SHEET: "vsm",
+    TMA_TARGET_EXPORT_SHEET: "tma",
+}
+_TRANSITION_REVIEW_FINAL_STATUSES = {"accepted_auto", "manual_adjusted", "no_transition"}
+_TRANSITION_REVIEW_EXCLUDED_STATUSES = {"excluded"}
+_TRANSITION_REVIEW_NO_TRANSITION_STATUSES = {"no_transition", "No transition"}
+_ANNEALING_LABELS = ("As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2")
+_VSM_LABELS = ("As", "Af", "Ms", "Mf")
+_TMA_TARGET_RE = re.compile(
+    r"(?:^|:\s*)(?P<stress>[-+]?\d+(?:\.\d+)?)\s*MPa"
+    r"(?:\s*/\s*(?P<load>[-+]?\d+(?:\.\d+)?)\s*g)?",
+    re.IGNORECASE,
+)
+_TMA_TRANSITION_RE = re.compile(
+    r"\b(?P<label>As|Af|Ms|Mf)\s+(?P<value>[-+]?\d+(?:\.\d+)?)\s*mA\b",
+    re.IGNORECASE,
+)
+_TMA_STRAIN_RE = re.compile(
+    r":\s*(?P<strain>[-+]?\d+(?:\.\d+)?)\s*%\s*@\s*"
+    r"(?P<current>[-+]?\d+(?:\.\d+)?)\s*mA\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_tma_target_label(target_label: object) -> dict[str, object]:
+    text = str(target_label or "").strip()
+    target_type = "First overheating" if _tma_target_prefix(text) == "1st" else "Stress/load target"
+    result: dict[str, object] = {"TMA target": text, "TMA target type": target_type}
+    match = _TMA_TARGET_RE.search(text)
+    if match is None:
+        return result
+    for group_name, column in (("stress", "TMA stress (MPa)"), ("load", "TMA load (g)")):
+        value = match.group(group_name)
+        if value is None:
+            continue
+        try:
+            result[column] = float(value)
+        except ValueError:
+            pass
+    return result
+
+
+def _tma_target_prefix(target_label: object) -> str:
+    text = str(target_label or "").strip()
+    if ":" not in text:
+        return ""
+    prefix = text.split(":", 1)[0].strip().casefold()
+    if prefix in {"1st", "first", "first overheating"}:
+        return "1st"
+    return prefix
+
+
+def _tma_target_identity(target_label: object) -> tuple[object, ...]:
+    parsed = _parse_tma_target_label(target_label)
+    prefix = _tma_target_prefix(target_label)
+    stress = parsed.get("TMA stress (MPa)")
+    load = parsed.get("TMA load (g)")
+    if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
+        load_value: object = None
+        if isinstance(load, (int, float)) and math.isfinite(float(load)):
+            load_value = round(float(load), 6)
+        return ("stress_load", prefix, round(float(stress), 6), load_value)
+    return ("label", prefix, str(target_label or "").strip().casefold())
+
+
+def _tma_target_stress_identity(target_label: object) -> tuple[object, ...] | None:
+    parsed = _parse_tma_target_label(target_label)
+    prefix = _tma_target_prefix(target_label)
+    stress = parsed.get("TMA stress (MPa)")
+    if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
+        return ("stress", prefix, round(float(stress), 6))
+    return None
+
+
+def _parse_tma_transition_line(line: object) -> tuple[str, dict[str, float]]:
+    text = str(line or "").strip()
+    target, _separator, body = text.rpartition(":")
+    values: dict[str, float] = {}
+    for match in _TMA_TRANSITION_RE.finditer(body):
+        try:
+            values[match.group("label").title()] = float(match.group("value"))
+        except ValueError:
+            continue
+    return target.strip(), values
+
+
+def _parse_tma_strain_line(line: object) -> tuple[str, dict[str, float]]:
+    text = str(line or "").strip()
+    target, _separator, _body = text.rpartition(":")
+    match = _TMA_STRAIN_RE.search(text)
+    if match is None:
+        return target.strip(), {}
+    try:
+        return target.strip(), {
+            "TMA strain (%)": float(match.group("strain")),
+            "TMA strain peak current (mA)": float(match.group("current")),
+        }
+    except ValueError:
+        return target.strip(), {}
+
+
+def _coerce_tma_values(value: object) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, float] = {}
+    for label in ("As", "Af", "Ms", "Mf"):
+        raw = value.get(label)
+        if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            result[label] = float(raw)
+    return result
+
+
+def _coerce_tma_cleared_labels(value: object) -> set[str]:
+    if isinstance(value, str):
+        candidates: object = value.replace(";", ",").split(",")
+    else:
+        candidates = value
+    if not isinstance(candidates, Iterable):
+        return set()
+    valid = {"As", "Af", "Ms", "Mf"}
+    return {
+        str(label).strip().title()
+        for label in candidates
+        if str(label).strip().title() in valid
+    }
+
+
+def _sample_to_tma_identity(sample: object) -> tuple[str, str]:
+    text = str(sample or "").strip()
+    if not text:
+        return "", ""
+    parts = text.split()
+    composition = parts[0] if parts else ""
+    microwire = parts[1].replace("_", "/").replace("-", "/") if len(parts) >= 2 else ""
+    return composition, microwire
+
+
+def _normalise_tma_status(value: object) -> str:
+    return str(value or "").strip().replace("-", "_").replace(" ", "_").casefold()
+
+
+def _mini_dma_review_records_from_sections(sections: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    mini_dma = sections.get("mini_dma")
+    if not isinstance(mini_dma, Mapping):
+        return {}
+    extra = mini_dma.get("extra")
+    if not isinstance(extra, Mapping):
+        return {}
+    raw_reviews = extra.get("mini_dma_transition_reviews")
+    if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+        raw_reviews = raw_reviews.get("records")
+    if not isinstance(raw_reviews, Mapping):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in raw_reviews.items()
+        if isinstance(value, Mapping)
+    }
+
+
+def _mini_dma_records_from_sections(sections: Mapping[str, object]) -> list[object]:
+    mini_dma = sections.get("mini_dma")
+    if not isinstance(mini_dma, Mapping):
+        return []
+    payloads = mini_dma.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return []
+    raw_records = payloads.get("mini_dma_records")
+    if isinstance(raw_records, Mapping):
+        if raw_records.get("encoding") == "pickle-base64":
+            _warn_builder_legacy_pickle_blocked()
+        try:
+            decoded = decode_envelope(raw_records)
+        except SafeCodecError:
+            return []
+        return list(decoded) if isinstance(decoded, Iterable) else []
+    if isinstance(raw_records, Iterable) and not isinstance(raw_records, (str, bytes, Mapping)):
+        return list(raw_records)
+    return []
+
+
+def _tma_source_identity(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    return text.casefold()
+
+
+def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple[object, ...]:
+    for column in columns:
+        value = row.get(column)
+        if value:
+            if isinstance(value, str):
+                return (value,)
+            if isinstance(value, Iterable) and not isinstance(value, Mapping):
+                return tuple(value)
+            return (value,)
+    return ()
+
+
+def _tma_record_strain_summary_lines(record: object) -> tuple[object, ...]:
+    saved = tuple(getattr(record, "strain_summary", ()) or ())
+    raw_path = Path(str(getattr(record, "path", "") or ""))
+    if not raw_path.exists():
+        return saved
+    try:
+        mini_dma_core = import_module("plotting.plugins.mini_dma.core")
+        run = mini_dma_core.load_run(raw_path)
+        summary = mini_dma_core.summarize_current_sweep(run)
+        recalculated = tuple(mini_dma_core.format_current_sweep_strain_summary(summary))
+    except Exception:
+        return saved
+    return recalculated or saved
+
+
+def _normalise_transition_review_status(value: object) -> str:
+    return str(value or "").strip().replace("-", "_").replace(" ", "_").casefold()
+
+
+def _section_extra_mapping(sections: Mapping[str, object], section_name: str) -> Mapping[str, object]:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return {}
+    extra = section.get("extra")
+    return extra if isinstance(extra, Mapping) else {}
+
+
+def _review_records_from_section_extra(
+    sections: Mapping[str, object],
+    section_name: str,
+    extra_key: str = "transition_reviews",
+) -> dict[str, dict[str, object]]:
+    extra = _section_extra_mapping(sections, section_name)
+    raw_reviews = extra.get(extra_key)
+    if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+        raw_reviews = raw_reviews.get("records")
+    if not isinstance(raw_reviews, Mapping):
+        return {}
+    return {
+        str(record_id): dict(payload)
+        for record_id, payload in raw_reviews.items()
+        if isinstance(record_id, str) and isinstance(payload, Mapping)
+    }
+
+
+def _clean_numeric_transition_values(value: object, labels: Sequence[str]) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, float] = {}
+    for label in labels:
+        raw = value.get(label)
+        if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            result[label] = float(raw)
+    return result
+
+
+def _transition_sample_identity_from_review(
+    review: Mapping[str, object],
+    *,
+    composition_key: str = "composition",
+    microwire_key: str = "microwire",
+    sample_key: str = "sample_key",
+) -> tuple[str, str]:
+    composition = str(review.get(composition_key) or "").strip()
+    microwire = str(review.get(microwire_key) or "").strip()
+    if composition and microwire:
+        return composition, microwire
+    sample = str(review.get("sample") or "").strip()
+    if sample:
+        parts = sample.split()
+        if parts:
+            composition = composition or parts[0]
+        if len(parts) >= 2:
+            microwire = microwire or parts[1].replace("_", "/").replace("-", "/")
+    key = str(review.get(sample_key) or "").strip()
+    if key:
+        parts = key.split("|")
+        if len(parts) >= 3:
+            composition = composition or parts[0]
+            try:
+                microwire = microwire or f"{int(parts[1])}/{int(parts[2])}"
+            except (TypeError, ValueError):
+                microwire = microwire or f"{parts[1]}/{parts[2]}"
+    return composition, microwire
+
+
+def _compact_transition_status_text(row: Mapping[str, object], *columns: str) -> str:
+    for column in columns:
+        value = row.get(column)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _compact_transition_value(row: Mapping[str, object], *columns: str) -> object:
+    for column in columns:
+        value = row.get(column)
+        if not _is_blank_export_value(value):
+            return value
+    return None
+
+
+def _expanded_annealing_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for _record_id, review in _review_records_from_section_extra(sections, "annealing").items():
+        status = _normalise_transition_review_status(review.get("status"))
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            continue
+        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+            continue
+        composition, microwire = _transition_sample_identity_from_review(review)
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "Annealing run": str(review.get("graph_label") or review.get("source_path") or "").strip(),
+            "Annealing current (mA)": review.get("setpoint_mA"),
+        }
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            for label in _ANNEALING_LABELS:
+                row[f"Annealing {label}"] = "No transition"
+        else:
+            values = _clean_numeric_transition_values(review.get("final_values_mA"), _ANNEALING_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("manual_values_mA"), _ANNEALING_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("auto_values_mA"), _ANNEALING_LABELS)
+            for label in _ANNEALING_LABELS:
+                if label in values:
+                    row[f"Annealing {label}"] = values[label]
+        rows.append(row)
+
+    if not rows:
+        for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
+            status_text = _compact_transition_status_text(compact_row, "Current annealing transition status")
+            status = _normalise_transition_review_status(status_text)
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                continue
+            has_values = any(
+                not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (mA)", label))
+                for label in _ANNEALING_LABELS
+            )
+            if status not in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES and not has_values:
+                continue
+            row = {
+                "Composition": compact_row.get("Composition"),
+                "Microwire": compact_row.get("Microwire"),
+                "Annealing run": "",
+                "Annealing current (mA)": "",
+            }
+            if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                for label in _ANNEALING_LABELS:
+                    row[f"Annealing {label}"] = "No transition"
+            else:
+                for label in _ANNEALING_LABELS:
+                    value = _compact_transition_value(compact_row, f"{label} (mA)", label)
+                    if not _is_blank_export_value(value):
+                        row[f"Annealing {label}"] = value
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=ANNEALING_TRANSITION_EXPORT_COLUMNS)
+
+
+def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    review_records = _review_records_from_section_extra(sections, "vsm_temperature_scan")
+    review_records.update(_review_records_from_section_extra(sections, "transition_temps"))
+    for _record_id, review in review_records.items():
+        status = _normalise_transition_review_status(review.get("status"))
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            continue
+        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+            continue
+        composition, microwire = _transition_sample_identity_from_review(review, sample_key="group_key")
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "VSM scan": str(review.get("record_label") or review.get("record_path") or "").strip(),
+        }
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            for label in _VSM_LABELS:
+                row[f"VSM {label}"] = "No transition"
+        else:
+            values = _clean_numeric_transition_values(review.get("final_values_C"), _VSM_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("manual_values_C"), _VSM_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("auto_values_C"), _VSM_LABELS)
+            for label in _VSM_LABELS:
+                if label in values:
+                    row[f"VSM {label}"] = values[label]
+        rows.append(row)
+
+    if not rows:
+        for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
+            status_text = _compact_transition_status_text(compact_row, "VSM transition temp status")
+            status = _normalise_transition_review_status(status_text)
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                continue
+            has_values = any(
+                not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (°C)", f"{label} (C)", label))
+                for label in _VSM_LABELS
+            )
+            if status not in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES and not has_values:
+                continue
+            row = {
+                "Composition": compact_row.get("Composition"),
+                "Microwire": compact_row.get("Microwire"),
+                "VSM scan": "",
+            }
+            if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                for label in _VSM_LABELS:
+                    row[f"VSM {label}"] = "No transition"
+            else:
+                for label in _VSM_LABELS:
+                    value = _compact_transition_value(compact_row, f"{label} (°C)", f"{label} (C)", label)
+                    if not _is_blank_export_value(value):
+                        row[f"VSM {label}"] = value
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=VSM_TRANSITION_EXPORT_COLUMNS)
+
+
+def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    assemble_frame = _assemble_export_frame_from_sections(sections)
+    compact_rows = assemble_frame.to_dict(orient="records")
+    rows: list[dict[str, object]] = []
+    reviewed_targets: set[tuple[str, str, tuple[object, ...]]] = set()
+    emitted_record_targets: set[tuple[str, tuple[object, ...]]] = set()
+    record_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
+    strain_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    strain_by_stress: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    record_strain_by_target: dict[tuple[str, tuple[object, ...]], dict[str, float]] = {}
+    record_strain_rows: list[dict[str, object]] = []
+    transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+
+    for compact_row in compact_rows:
+        composition = str(compact_row.get("Composition") or "").strip()
+        microwire = str(compact_row.get("Microwire") or "").strip()
+        for raw_line in _compact_tma_export_lines(
+            compact_row,
+            "TMA strain by stress/load",
+            "Mini DMA strain by stress/load",
+        ):
+            target, values = _parse_tma_strain_line(raw_line)
+            if target and values:
+                strain_by_target[(composition, microwire, _tma_target_identity(target))] = values
+                stress_key = _tma_target_stress_identity(target)
+                if stress_key is not None:
+                    strain_by_stress[(composition, microwire, stress_key)] = values
+        for raw_line in _compact_tma_export_lines(
+            compact_row,
+            "TMA transition currents by stress/load",
+            "Mini DMA transition currents by stress/load",
+        ):
+            target, values = _parse_tma_transition_line(raw_line)
+            if target and values:
+                transition_by_target[(composition, microwire, _tma_target_identity(target))] = values
+
+    for record in _mini_dma_records_from_sections(sections):
+        composition, microwire = _sample_to_tma_identity(getattr(record, "sample", ""))
+        if not composition or not microwire:
+            continue
+        source_key = _tma_source_identity(getattr(record, "path", ""))
+        run_label = str(getattr(record, "label", "") or "").strip()
+        if not run_label:
+            run_label = Path(str(getattr(record, "path", "") or "")).name
+        for raw_line in _tma_record_strain_summary_lines(record):
+            target, strain_values = _parse_tma_strain_line(raw_line)
+            if not target or not strain_values:
+                continue
+            target_key = _tma_target_identity(target)
+            record_sample_targets.add((composition, microwire, target_key))
+            if source_key:
+                record_strain_by_target[(source_key, target_key)] = strain_values
+            record_strain_rows.append(
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                    "TMA run": run_label,
+                    **_parse_tma_target_label(target),
+                    **strain_values,
+                    "_source_key": source_key,
+                    "_target_key": target_key,
+                }
+            )
+
+    for record_id, review in _mini_dma_review_records_from_sections(sections).items():
+        status = _normalise_tma_status(review.get("status"))
+        if status == "excluded":
+            continue
+        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        if not target:
+            continue
+        composition, microwire = _sample_to_tma_identity(review.get("sample"))
+        if not composition or not microwire:
+            for compact_row in compact_rows:
+                compact_targets = " ".join(
+                    str(line)
+                    for line in _compact_tma_export_lines(
+                        compact_row,
+                        "TMA transition currents by stress/load",
+                        "Mini DMA transition currents by stress/load",
+                    )
+                )
+                if target in compact_targets:
+                    composition = composition or str(compact_row.get("Composition") or "").strip()
+                    microwire = microwire or str(compact_row.get("Microwire") or "").strip()
+                    break
+        run_label = str(review.get("run_label") or "").strip()
+        source_key = ""
+        if "::" in record_id:
+            source_key = _tma_source_identity(record_id.rsplit("::", 1)[0])
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "TMA run": run_label,
+            **_parse_tma_target_label(target),
+        }
+        target_key = _tma_target_identity(target)
+        strain_values = record_strain_by_target.get((source_key, target_key)) if source_key else None
+        if not strain_values:
+            strain_values = strain_by_target.get((composition, microwire, target_key))
+        if not strain_values:
+            stress_key = _tma_target_stress_identity(target)
+            if stress_key is not None:
+                strain_values = strain_by_stress.get((composition, microwire, stress_key))
+        if strain_values:
+            row.update(strain_values)
+        values = _coerce_tma_values(review.get("manual_values_mA"))
+        if not values:
+            values = _coerce_tma_values(review.get("values"))
+        if not values:
+            values = _coerce_tma_values(review.get("auto_values_mA"))
+        cleared = _coerce_tma_cleared_labels(review.get("cleared_labels"))
+        if status == "no_transition":
+            for label in ("As", "Af", "Ms", "Mf"):
+                row[f"TMA {label}"] = "No transition"
+        else:
+            for label in ("As", "Af", "Ms", "Mf"):
+                if label in cleared:
+                    row[f"TMA {label}"] = "Not observed"
+                elif label in values:
+                    row[f"TMA {label}"] = values[label]
+        rows.append(row)
+        reviewed_targets.add((composition, microwire, target_key))
+        if source_key:
+            emitted_record_targets.add((source_key, target_key))
+
+    for compact_row in compact_rows:
+        composition = str(compact_row.get("Composition") or "").strip()
+        microwire = str(compact_row.get("Microwire") or "").strip()
+        raw_runs = compact_row.get("TMA graphs") or compact_row.get("Mini DMA graphs")
+        if isinstance(raw_runs, str):
+            run_label = raw_runs
+        elif isinstance(raw_runs, Iterable):
+            run_label = ", ".join(str(run) for run in raw_runs if str(run).strip())
+        else:
+            run_label = ""
+        for (parent_composition, parent_microwire, target_key), values in transition_by_target.items():
+            if (parent_composition, parent_microwire) != (composition, microwire):
+                continue
+            if (composition, microwire, target_key) in reviewed_targets:
+                continue
+            if (composition, microwire, target_key) in record_sample_targets:
+                continue
+            target = ""
+            for raw_line in _compact_tma_export_lines(
+                compact_row,
+                "TMA transition currents by stress/load",
+                "Mini DMA transition currents by stress/load",
+            ):
+                candidate_target, _candidate_values = _parse_tma_transition_line(raw_line)
+                if _tma_target_identity(candidate_target) == target_key:
+                    target = candidate_target
+                    break
+            row = {
+                "Composition": composition,
+                "Microwire": microwire,
+                "TMA run": run_label,
+                **_parse_tma_target_label(target),
+            }
+            strain_values = strain_by_target.get((composition, microwire, target_key))
+            if not strain_values:
+                stress_key = _tma_target_stress_identity(target)
+                if stress_key is not None:
+                    strain_values = strain_by_stress.get((composition, microwire, stress_key))
+            if strain_values:
+                row.update(strain_values)
+            for label in ("As", "Af", "Ms", "Mf"):
+                if label in values:
+                    row[f"TMA {label}"] = values[label]
+            rows.append(row)
+
+    for record_row in record_strain_rows:
+        source_key = str(record_row.pop("_source_key", "") or "")
+        target_key = record_row.pop("_target_key", ())
+        if source_key and (source_key, target_key) in emitted_record_targets:
+            continue
+        composition = str(record_row.get("Composition") or "").strip()
+        microwire = str(record_row.get("Microwire") or "").strip()
+        transition_values = transition_by_target.get((composition, microwire, target_key), {})
+        for label in ("As", "Af", "Ms", "Mf"):
+            if label in transition_values:
+                record_row[f"TMA {label}"] = transition_values[label]
+        rows.append(record_row)
+
+    return pd.DataFrame(rows, columns=TMA_TARGET_EXPORT_COLUMNS)
+
+
+def _sections_represented_in_builder_project(sections: Mapping[str, object]) -> list[str]:
+    represented: list[str] = []
+    for section_name, payload in sections.items():
+        if section_name == "compare":
+            continue
+        if section_name == "assemble":
+            frame = _assemble_export_frame_from_sections(sections)
+            if not frame.empty:
+                represented.append(section_name)
+            continue
+        if _builder_section_has_payload(payload) or _project_section_rows(payload):
+            represented.append(str(section_name))
+    return sorted(dict.fromkeys(represented))
+
+
+def _analysis_base_columns(
+    frame: pd.DataFrame,
+    *,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
+) -> list[str]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    if selected_columns:
+        from microwire_data_builder.core import resolve_assemble_projection
+
+        return list(
+            resolve_assemble_projection(
+                frame.columns,
+                selected_columns=selected_columns,
+                column_order=column_order,
+            ).columns
+        )
+    columns = [str(column) for column in frame.columns]
+    preferred = [column for column in ANALYSIS_BASE_PREFERRED_COLUMNS if column in columns]
+    remaining = [
+        column
+        for column in columns
+        if column not in preferred
+        and column in ANALYSIS_BASE_EXTRA_COLUMNS
+        and column not in ANALYSIS_BASE_EXCLUDED_COLUMNS
+        and not _assemble_public_drop_column(column)
+    ]
+    return list(dict.fromkeys([*preferred, *remaining]))
+
+
+def _analysis_identity_key(row: Mapping[str, object]) -> tuple[str, str]:
+    return (
+        str(row.get("Composition") or "").strip(),
+        str(row.get("Microwire") or "").strip(),
+    )
+
+
+def _analysis_microwire_sort_key(value: object) -> tuple[object, ...]:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return (1, str(value or "").strip().casefold())
+    draw, piece, suffix = parts
+    try:
+        draw_value = int(draw)
+        piece_value = int(piece)
+    except ValueError:
+        return (1, str(value or "").strip().casefold())
+    return (0, draw_value, piece_value, suffix.casefold())
+
+
+def _analysis_numeric_sort_value(value: object) -> tuple[int, float]:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return (0, float(value))
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                pass
+            else:
+                if math.isfinite(parsed):
+                    return (0, parsed)
+    return (1, 0.0)
+
+
+def _analysis_numeric_value(value: object) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                return None
+            if math.isfinite(parsed):
+                return parsed
+    return None
+
+
+def _analysis_tma_current_density_value(current_mA: object, diameter_um: object) -> object:
+    if isinstance(current_mA, str):
+        status = current_mA.strip()
+        if status in {"No transition", "Not observed"}:
+            return status
+    current = _analysis_numeric_value(current_mA)
+    diameter = _analysis_numeric_value(diameter_um)
+    if current is None or diameter is None or diameter <= 0:
+        return None
+    area_mm2 = math.pi * (diameter / 2000.0) ** 2
+    if area_mm2 <= 0:
+        return None
+    return (current / 1000.0) / area_mm2
+
+
+def _analysis_measurement_rank(row: Mapping[str, object]) -> int:
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_CA_COLUMN_MAP.values()):
+        return 0
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_VSM_COLUMN_MAP.values()):
+        return 1
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_TMA_COLUMN_MAP.values()):
+        return 2
+    return 9
+
+
+def _analysis_tma_target_type_rank(value: object) -> int:
+    text = str(value or "").strip().casefold()
+    if text == "first overheating":
+        return 0
+    if text == "stress/load target":
+        return 1
+    return 9
+
+
+def _analysis_sort_key(row: Mapping[str, object]) -> tuple[object, ...]:
+    rank = _analysis_measurement_rank(row)
+    common = (
+        str(row.get("Composition") or "").strip().casefold(),
+        _analysis_microwire_sort_key(row.get("Microwire")),
+        rank,
+    )
+    if rank == 0:
+        return (
+            *common,
+            _analysis_numeric_sort_value(row.get("CA current (mA)")),
+            str(row.get("CA graph") or "").strip().casefold(),
+        )
+    if rank == 1:
+        return (
+            *common,
+            str(row.get("VSM scan") or "").strip().casefold(),
+        )
+    if rank == 2:
+        return (
+            *common,
+            str(row.get("TMA run") or "").strip().casefold(),
+            _analysis_tma_target_type_rank(row.get("TMA target type")),
+            _analysis_numeric_sort_value(row.get("TMA stress (MPa)")),
+            _analysis_numeric_sort_value(row.get("TMA load (g)")),
+            str(row.get("TMA target") or "").strip().casefold(),
+        )
+    return common
+
+
+_VIDEO_TABLE_EXPORT_COLUMNS = (
+    "Production datetime",
+    "Length (m)",
+    "Mass (g)",
+    "Resistance (Ω)",
+    "Core temperature (°C)",
+    "Glass temperature (°C)",
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    "Glass pull-off",
+    "Video end length (m)",
+    "Video wire range (m)",
+    "Notes",
+)
+
+
+def _overlay_saved_video_table_values(
+    dataframe: pd.DataFrame,
+    sections: Mapping[str, object],
+) -> pd.DataFrame:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return dataframe
+    rows = _project_section_rows(sections.get("videos") if isinstance(sections, Mapping) else None)
+    if not rows:
+        return dataframe
+    lookup: dict[tuple[str, str], Mapping[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        key = _analysis_identity_key(row)
+        if not key[0] or not key[1]:
+            continue
+        if key not in lookup:
+            lookup[key] = row
+    if not lookup:
+        return dataframe
+
+    result = dataframe.copy()
+    for column in _VIDEO_TABLE_EXPORT_COLUMNS:
+        if column not in result.columns:
+            result[column] = None
+        else:
+            # Saved table edits may legitimately be textual ranges (for example
+            # ``194-202``) even when an all-empty rebuilt column was inferred as
+            # float.  Use object dtype before applying those saved values.
+            result[column] = result[column].astype(object)
+
+    def _is_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        try:
+            return bool(pd.isna(value))
+        except (TypeError, ValueError):
+            return False
+
+    for idx, row in result.iterrows():
+        source = lookup.get(_analysis_identity_key(row))
+        if source is None:
+            continue
+        for column in _VIDEO_TABLE_EXPORT_COLUMNS:
+            candidate = source.get(column)
+            if _is_missing(candidate):
+                continue
+            if _is_missing(result.at[idx, column]):
+                result.at[idx, column] = candidate
+    return result
+
+
+def _analysis_rows_from_detail_frame(
+    *,
+    detail_frame: pd.DataFrame | None,
+    base_lookup: Mapping[tuple[str, str], Mapping[str, object]],
+    base_columns: Sequence[str],
+    column_map: Mapping[str, str],
+    base_column_map: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    if detail_frame is None or not isinstance(detail_frame, pd.DataFrame) or detail_frame.empty:
+        return []
+    rows: list[dict[str, object]] = []
+    for detail in detail_frame.to_dict(orient="records"):
+        key = _analysis_identity_key(detail)
+        if not key[0] or not key[1]:
+            continue
+        base = dict(base_lookup.get(key, {}))
+        if not base:
+            base = {column: "" for column in base_columns}
+            base["Composition"], base["Microwire"] = key
+        row = {
+            column: base.get(column, "")
+            for column in base_columns
+            if column not in ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP
+        }
+        for source, target in (base_column_map or {}).items():
+            if source in base:
+                row[target] = base.get(source)
+        for source, target in column_map.items():
+            if source in detail:
+                row[target] = detail.get(source)
+        if column_map is ANALYSIS_TMA_COLUMN_MAP:
+            diameter = base.get("d (µm)", base.get("d (Âµm)"))
+            for current_column, density_column in ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.items():
+                density = _analysis_tma_current_density_value(row.get(current_column), diameter)
+                if density is not None:
+                    row[density_column] = density
+        rows.append(row)
+    return rows
+
+
+def _expanded_analysis_frame(
+    assemble_frame: pd.DataFrame,
+    extra_frames: Mapping[str, pd.DataFrame | None],
+    *,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
+) -> pd.DataFrame:
+    if not isinstance(assemble_frame, pd.DataFrame) or assemble_frame.empty:
+        return pd.DataFrame()
+    base_columns = _analysis_base_columns(
+        assemble_frame,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    base_lookup: dict[tuple[str, str], dict[str, object]] = {}
+    for base in assemble_frame.to_dict(orient="records"):
+        key = _analysis_identity_key(base)
+        if key[0] and key[1] and key not in base_lookup:
+            base_lookup[key] = {column: base.get(column, "") for column in base_columns}
+
+    rows: list[dict[str, object]] = []
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(ANNEALING_TRANSITION_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            column_map=ANALYSIS_CA_COLUMN_MAP,
+            base_column_map=ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP,
+        )
+    )
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(VSM_TRANSITION_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            column_map=ANALYSIS_VSM_COLUMN_MAP,
+        )
+    )
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(TMA_TARGET_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            column_map=ANALYSIS_TMA_COLUMN_MAP,
+        )
+    )
+    if selected_columns:
+        represented_identities = {_analysis_identity_key(row) for row in rows}
+        for identity, base in base_lookup.items():
+            if identity in represented_identities:
+                continue
+            rows.append({column: base.get(column, "") for column in base_columns})
+
+    analysis_columns = list(
+        dict.fromkeys(
+            [
+                *[
+                    column
+                    for column in base_columns
+                    if column not in ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP
+                ],
+                *ANALYSIS_CA_COLUMN_MAP.values(),
+                *ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP.values(),
+                *ANALYSIS_VSM_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.values(),
+            ]
+        )
+    )
+    rows.sort(key=_analysis_sort_key)
+    return pd.DataFrame(rows, columns=analysis_columns)
+
+
+def _current_git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def _assemble_projection_metadata_from_sections(
+    sections: Mapping[str, object],
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    assemble = sections.get("assemble")
+    if not isinstance(assemble, Mapping):
+        return None, None
+
+    def _values(key: str) -> tuple[str, ...] | None:
+        raw = assemble.get(key)
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        values = tuple(
+            dict.fromkeys(str(value) for value in raw if str(value or "").strip())
+        )
+        return values or None
+
+    return _values("selected_columns"), _values("column_order")
+
+
+def _write_assemble_workbook(
+    *,
+    output_path: Path,
+    frame: pd.DataFrame,
+    preset: str,
+    tma_frame: pd.DataFrame | None = None,
+    extra_frames: Mapping[str, pd.DataFrame | None] | None = None,
+    analysis_frame: pd.DataFrame | None = None,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
+) -> dict[str, Any]:
+    from microwire_data_builder.core import resolve_assemble_projection
+
+    output_path = output_path.with_suffix(".xlsx")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    export_frame = frame
+    export_extra_frames: dict[str, pd.DataFrame | None] = {}
+    if extra_frames:
+        export_extra_frames.update(dict(extra_frames))
+    if tma_frame is not None and TMA_TARGET_EXPORT_SHEET not in export_extra_frames:
+        export_extra_frames[TMA_TARGET_EXPORT_SHEET] = tma_frame
+    projection = resolve_assemble_projection(
+        (analysis_frame.columns if isinstance(analysis_frame, pd.DataFrame) else frame.columns),
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    if preset == "public" and projection.explicit:
+        export_extra_frames = {
+            sheet_name: sheet_frame
+            for sheet_name, sheet_frame in export_extra_frames.items()
+            if ANALYSIS_EXPORT_SHEET_FAMILIES.get(sheet_name) in projection.enabled_families
+        }
+    public_filters: dict[str, dict[str, int]] = {}
+    if preset == "public":
+        export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
+        for sheet_name, sheet_frame in list(export_extra_frames.items()):
+            export_extra_frames[sheet_name], public_filters[sheet_name] = _prepare_public_extra_export_frame(sheet_frame)
+    analysis_source_frame = analysis_frame if isinstance(analysis_frame, pd.DataFrame) else export_frame
+    if preset == "public" and analysis_source_frame is not export_frame:
+        analysis_source_frame, public_filters["analysis_base"] = _prepare_public_assemble_main_frame(
+            analysis_source_frame
+        )
+    analysis_frame = _expanded_analysis_frame(
+        analysis_source_frame,
+        export_extra_frames,
+        selected_columns=selected_columns if preset == "public" else None,
+        column_order=column_order if preset == "public" else None,
+    )
+
+    serialised = _serialise_assemble_export_frame(export_frame)
+    if preset == "public":
+        dropped_columns = [
+            str(column)
+            for column in serialised.columns
+            if _assemble_public_drop_column(column)
+        ]
+        visible_columns = [
+            str(column)
+            for column in serialised.columns
+            if str(column) not in dropped_columns
+        ]
+    else:
+        dropped_columns = []
+        visible_columns = [str(column) for column in serialised.columns]
+
+    main_frame = serialised.loc[:, visible_columns].copy() if visible_columns else pd.DataFrame(index=serialised.index)
+    if preset == "public" and projection.explicit:
+        compact_projection = resolve_assemble_projection(
+            main_frame.columns,
+            selected_columns=selected_columns,
+            column_order=column_order,
+        )
+        main_frame = main_frame.loc[:, compact_projection.columns].copy()
+    identity_columns = [
+        column
+        for column in ("Composition", "Microwire")
+        if column in serialised.columns and column not in dropped_columns
+    ]
+    audit_columns = list(dict.fromkeys([*identity_columns, *dropped_columns]))
+    hidden_sheets: list[str] = []
+    extra_sheets: dict[str, dict[str, object]] = {}
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        analysis_sheet: dict[str, object] | None = None
+        if not analysis_frame.empty:
+            serialised_analysis = _serialise_assemble_export_frame(analysis_frame)
+            if preset == "public" and projection.explicit:
+                analysis_projection = resolve_assemble_projection(
+                    serialised_analysis.columns,
+                    selected_columns=selected_columns,
+                    column_order=column_order,
+                    structural_columns_by_family=ANALYSIS_STRUCTURAL_COLUMNS_BY_FAMILY,
+                )
+                serialised_analysis = serialised_analysis.loc[
+                    :, analysis_projection.columns
+                ].copy()
+            serialised_analysis.to_excel(writer, sheet_name=ANALYSIS_EXPORT_SHEET, index=False)
+            analysis_sheet = {
+                "row_count": int(len(serialised_analysis.index)),
+                "column_count": int(len(serialised_analysis.columns)),
+                "columns": [str(column) for column in serialised_analysis.columns],
+            }
+        if preset == "public":
+            if analysis_frame.empty:
+                main_frame.to_excel(writer, sheet_name=ANALYSIS_EXPORT_SHEET, index=False)
+                analysis_sheet = {
+                    "row_count": int(len(main_frame.index)),
+                    "column_count": int(len(main_frame.columns)),
+                    "columns": [str(column) for column in main_frame.columns],
+                }
+            written_frame = serialised_analysis if not analysis_frame.empty else main_frame
+            visible_columns = [str(column) for column in written_frame.columns]
+            main_frame = written_frame
+        else:
+            main_frame.to_excel(writer, sheet_name="Assemble", index=False)
+            for sheet_name, sheet_frame in export_extra_frames.items():
+                if sheet_frame is None or sheet_frame.empty:
+                    continue
+                serialised_extra = _serialise_assemble_export_frame(sheet_frame)
+                serialised_extra.to_excel(writer, sheet_name=sheet_name, index=False)
+                extra_sheets[sheet_name] = {
+                    "row_count": int(len(serialised_extra.index)),
+                    "column_count": int(len(serialised_extra.columns)),
+                    "columns": [str(column) for column in serialised_extra.columns],
+                }
+            if audit_columns:
+                audit_frame = serialised.loc[:, audit_columns].copy()
+                audit_frame.to_excel(writer, sheet_name="Assemble audit", index=False)
+                try:
+                    writer.book["Assemble audit"].sheet_state = "hidden"
+                    hidden_sheets.append("Assemble audit")
+                except Exception:
+                    pass
+
+    return {
+        "workbook": str(output_path.resolve()),
+        "sheet": ANALYSIS_EXPORT_SHEET if preset == "public" else "Assemble",
+        "audit_sheet": None if preset == "public" else ("Assemble audit" if audit_columns else None),
+        "hidden_sheets": hidden_sheets,
+        "visible_columns": visible_columns,
+        "dropped_columns": dropped_columns,
+        "row_count": int(len(main_frame.index)),
+        "column_count": int(len(main_frame.columns)),
+        "analysis_sheet": analysis_sheet,
+        "extra_sheets": extra_sheets,
+        "public_filters": public_filters,
+    }
+
+
+def _prepare_assemble_export_project_payload(
+    *,
+    source_project: Path,
+    output_path: Path,
+    working_copy_dir: Path | None,
+    copy_project: bool,
+    force_rebuild: bool,
+    rebuild_sections: Sequence[str] | None,
+) -> tuple[dict[str, Any], Path | None, dict[str, Any] | None]:
+    project_path = source_project.expanduser()
+    if not project_path.exists():
+        raise _AutomationRecipeError(f"Assemble export project does not exist: {project_path}")
+    export_sections = {
+        "assemble", "annealing", "vsm_temperature_scan", "mini_dma"
+    }
+    selected_sections: Collection[str] | None = export_sections
+    include_payloads = False
+    if force_rebuild:
+        # Rebuilding Assemble must see every available measurement family.  The
+        # optional list records the trigger/focus, not permission to erase all
+        # other families from the integrated table.
+        selected_sections = None
+        include_payloads = True
+    source_payload = _load_builder_project_object(
+        project_path,
+        label="Microwire Data Builder project",
+        section_keys=selected_sections,
+        load_payloads=include_payloads,
+    )
+    _validate_builder_project_payload(source_payload, path=project_path)
+
+    copied_project: Path | None = None
+    payload = source_payload
+    if copy_project or force_rebuild:
+        copy_dir = working_copy_dir or (output_path.parent / "_assemble_export_project_copy")
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        copied_project = _next_available_path(copy_dir / f"{project_path.stem}.assemble-export{project_path.suffix}")
+        shutil.copy2(project_path, copied_project)
+        payload = _load_builder_project_object(
+            copied_project,
+            label="Microwire Data Builder project copy",
+            section_keys=selected_sections,
+            load_payloads=include_payloads,
+        )
+        _validate_builder_project_payload(payload, path=copied_project)
+
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        sections = {}
+        payload["sections"] = sections
+
+    rebuild_result: dict[str, Any] | None = None
+    if force_rebuild:
+        previous_dialog_setting = os.environ.get(
+            "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
+        )
+        previous_qt_platform = os.environ.get("QT_QPA_PLATFORM")
+        builder_storage: Any = None
+        original_storage_root: Any = None
+        try:
+            os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                app = QtWidgets.QApplication([])
+            from microwire_data_builder import storage as builder_storage
+            from microwire_data_builder import ui as builder_ui
+
+            store_root = (
+                working_copy_dir
+                or (output_path.parent / "_assemble_export_project_copy")
+            ) / "_builder_store"
+            if store_root.exists():
+                shutil.rmtree(store_root)
+            original_storage_root = builder_storage._storage_root
+            builder_storage._storage_root = lambda: store_root  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            command: dict[str, Any] = {"action": "rebuild_assemble"}
+            if rebuild_sections:
+                command["sections"] = list(rebuild_sections)
+            rebuild_result = _run_builder_rebuild_assemble_command_lightweight(
+                builder_ui=builder_ui,
+                command=command,
+                command_index=0,
+                sections=sections,
+                output_project=copied_project or output_path.with_suffix(".pydpj"),
+            )
+        finally:
+            if builder_storage is not None and original_storage_root is not None:
+                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+                builder_storage.MiniDatabaseStore._memory_data = {}
+                builder_storage.MiniDatabaseStore._memory_payloads = {}
+                builder_storage.MiniDatabaseStore._pending_sections = set()
+                builder_storage.MiniDatabaseStore._pending_payloads = set()
+                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if previous_dialog_setting is None:
+                os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
+            else:
+                os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = (
+                    previous_dialog_setting
+                )
+            if previous_qt_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_qt_platform
+
+    return payload, copied_project, rebuild_result
+
+
+def _export_builder_assemble_workbook(
+    *,
+    source_project: Path,
+    output_path: Path,
+    manifest_path: Path | None = None,
+    preset: str = "public",
+    force_rebuild: bool = False,
+    rebuild_sections: Sequence[str] | None = None,
+    working_copy_dir: Path | None = None,
+    copy_project: bool = True,
+) -> dict[str, Any]:
+    preset = str(preset or "public").strip().casefold()
+    if preset not in {"public", "full"}:
+        raise _AutomationRecipeError("Assemble export preset must be 'public' or 'full'.")
+    output_path = output_path.expanduser().with_suffix(".xlsx")
+    payload, copied_project, rebuild_result = _prepare_assemble_export_project_payload(
+        source_project=source_project,
+        output_path=output_path,
+        working_copy_dir=working_copy_dir,
+        copy_project=copy_project,
+        force_rebuild=force_rebuild,
+        rebuild_sections=rebuild_sections,
+    )
+    sections = payload.get("sections")
+    if not isinstance(sections, Mapping):
+        sections = {}
+    frame = _assemble_export_frame_from_sections(sections)
+    if frame.empty:
+        raise _AutomationRecipeError(
+            "Builder project has no saved Assemble rows. Re-run with Assemble rebuild enabled."
+        )
+    extra_frames = {
+        ANNEALING_TRANSITION_EXPORT_SHEET: _expanded_annealing_transition_frame_from_sections(sections),
+        VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
+        TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
+    }
+    selected_columns, column_order = _assemble_projection_metadata_from_sections(sections)
+
+    workbook_info = _write_assemble_workbook(
+        output_path=output_path,
+        frame=frame,
+        preset=preset,
+        extra_frames=extra_frames,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    manifest_target = manifest_path.expanduser() if manifest_path is not None else output_path.with_suffix(".manifest.json")
+    export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest = {
+        "kind": "builder_assemble_export",
+        "version": 1,
+        "status": "ok",
+        "preset": preset,
+        "source_project": str(source_project.expanduser().resolve()),
+        "copied_project": str(copied_project.resolve()) if copied_project is not None else None,
+        "source_saved_at": payload.get("saved_at"),
+        "exported_at": export_time,
+        "workbook": workbook_info["workbook"],
+        "manifest_path": str(manifest_target.resolve()),
+        "source_row_count": int(len(frame.index)),
+        "source_column_count": int(len(frame.columns)),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "sections_represented": _sections_represented_in_builder_project(sections),
+        "visible_columns": workbook_info["visible_columns"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+        "audit_sheet": workbook_info["audit_sheet"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
+        "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
+        "rebuild": rebuild_result,
+        "git_commit": _current_git_commit(),
+    }
+    _write_json(manifest_target, manifest)
+    return manifest
+
+
+def _run_builder_export_assemble_command(
+    *,
+    command: Mapping[str, Any],
+    command_index: int,
+    project_path: Path,
+    output_project: Path,
+    base_dir: Path,
+    sections: Mapping[str, object],
+) -> dict[str, Any]:
+    raw_output = command.get("output") or command.get("workbook") or command.get("output_path")
+    output_path = _resolve_recipe_path_value(
+        raw_output,
+        base_dir=base_dir,
+        field_name=f"commands[{command_index}].output",
+    )
+    if output_path is None:
+        output_path = output_project.with_suffix(".assemble.xlsx")
+    raw_manifest = command.get("manifest_path")
+    manifest_path = _resolve_recipe_path_value(
+        raw_manifest,
+        base_dir=base_dir,
+        field_name=f"commands[{command_index}].manifest_path",
+    )
+    preset = str(command.get("preset") or "public")
+    if preset not in {"public", "full"}:
+        raise _AutomationRecipeError(
+            f"Builder export_assemble command {command_index} preset must be 'public' or 'full'."
+        )
+    frame = _assemble_export_frame_from_sections(sections)
+    if frame.empty:
+        raise _AutomationRecipeError(
+            f"Builder export_assemble command {command_index} has no Assemble rows to export."
+        )
+    extra_frames = {
+        ANNEALING_TRANSITION_EXPORT_SHEET: _expanded_annealing_transition_frame_from_sections(sections),
+        VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
+        TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
+    }
+    selected_columns, column_order = _assemble_projection_metadata_from_sections(sections)
+    workbook_info = _write_assemble_workbook(
+        output_path=output_path,
+        frame=frame,
+        preset=preset,
+        extra_frames=extra_frames,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
+    payload = (
+        _load_builder_project_object(
+            output_project,
+            label="Microwire Data Builder project copy",
+            section_keys={"assemble"},
+            load_payloads=False,
+        )
+        if output_project.exists()
+        else {}
+    )
+    export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest = {
+        "kind": "builder_assemble_export",
+        "version": 1,
+        "status": "ok",
+        "preset": preset,
+        "source_project": str(project_path.resolve()),
+        "copied_project": str(output_project.resolve()),
+        "source_saved_at": payload.get("saved_at") if isinstance(payload, Mapping) else None,
+        "exported_at": export_time,
+        "workbook": workbook_info["workbook"],
+        "manifest_path": str(manifest_target.resolve()),
+        "source_row_count": int(len(frame.index)),
+        "source_column_count": int(len(frame.columns)),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "sections_represented": _sections_represented_in_builder_project(sections),
+        "visible_columns": workbook_info["visible_columns"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+        "audit_sheet": workbook_info["audit_sheet"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
+        "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
+        "rebuild": None,
+        "git_commit": _current_git_commit(),
+    }
+    _write_json(manifest_target, manifest)
+    return {
+        "action": "export_assemble",
+        "status": "ok",
+        "preset": preset,
+        "workbook": workbook_info["workbook"],
+        "manifest": str(manifest_target.resolve()),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
+        "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
     }
 
 
@@ -888,38 +3525,53 @@ def _builder_database_paths(
     }
 
 
-def _archive_existing_builder_database_latest(database_paths: Mapping[str, Path | str]) -> dict[str, str | None]:
+def _promote_builder_database_latest(
+    *,
+    database_paths: Mapping[str, Path | str],
+    output_project: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    database_dir = cast(Path, database_paths["database_dir"])
     latest_project = cast(Path, database_paths["latest_project"])
     latest_manifest = cast(Path, database_paths["latest_manifest"])
     archive_project = cast(Path, database_paths["archive_project"])
     archive_manifest = cast(Path, database_paths["archive_manifest"])
     archive_dir = cast(Path, database_paths["archive_dir"])
+
+    database_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
-    archived_project: str | None = None
-    archived_manifest: str | None = None
-    if latest_project.exists():
-        target = archive_project
-        counter = 1
-        while target.exists():
-            target = archive_project.with_name(f"{archive_project.stem}_{counter}{archive_project.suffix}")
-            counter += 1
-        shutil.move(str(latest_project), str(target))
-        archived_project = str(target.resolve())
-    if latest_manifest.exists():
-        target = archive_manifest
-        counter = 1
-        while target.exists():
-            target = archive_manifest.with_name(f"{archive_manifest.stem}_{counter}{archive_manifest.suffix}")
-            counter += 1
-        shutil.move(str(latest_manifest), str(target))
-        archived_manifest = str(target.resolve())
-    return {
-        "archived_project": archived_project,
-        "archived_manifest": archived_manifest,
-    }
+    project_archive = _prepare_file_archive(latest_project, archive_project)
+    manifest_archive = _prepare_file_archive(latest_manifest, archive_manifest)
+    project_promoted = False
+    manifest_promoted = False
+    try:
+        _copy_file_atomic(output_project, latest_project)
+        project_promoted = True
+        archived_project = _finish_prepared_file_archive(project_archive)
+        manifest["database"] = {
+            "database_dir": str(database_dir.resolve()),
+            "database_name": str(database_paths["database_name"]),
+            "timestamp": str(database_paths["timestamp"]),
+            "latest_project": str(latest_project.resolve()),
+            "latest_manifest": str(latest_manifest.resolve()),
+            "archived_project": archived_project,
+            "archived_manifest": _prepared_archive_path(manifest_archive),
+        }
+        _write_json(manifest_path, manifest)
+        _write_json(latest_manifest, manifest)
+        manifest_promoted = True
+        _finish_prepared_file_archive(manifest_archive)
+    except Exception:
+        if not project_promoted:
+            _discard_prepared_file_archive(project_archive)
+        if not manifest_promoted:
+            _discard_prepared_file_archive(manifest_archive)
+        raise
 
 
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
+    payload_staging_root: Path | None = None
     try:
         recipe = _load_json_object(recipe_path, label="Automation recipe")
         base_dir = recipe_path.parent
@@ -943,7 +3595,12 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         if project_path is None or not project_path.exists():
             raise _AutomationRecipeError("Builder automation field 'project' must point to an existing .pydpj file.")
 
-        source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+        source_payload = _load_builder_project_object(
+            project_path,
+            label="Microwire Data Builder project",
+            section_keys=set(),
+            load_payloads=False,
+        )
         _validate_builder_project_payload(source_payload, path=project_path)
 
         working_copy_dir = _resolve_recipe_path_value(
@@ -957,6 +3614,10 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             else:
                 working_copy_dir = (base_dir / "builder_automation").resolve()
         working_copy_dir.mkdir(parents=True, exist_ok=True)
+        payload_staging_root = working_copy_dir / "_payload_staging"
+        if payload_staging_root.exists():
+            shutil.rmtree(payload_staging_root)
+        payload_staging_root.mkdir(parents=True, exist_ok=True)
 
         output_project = _resolve_recipe_path_value(
             recipe.get("output_project"),
@@ -984,16 +3645,34 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         if not same_project:
             shutil.copy2(project_path, output_project)
 
-        project_payload = _load_json_object(output_project, label="Microwire Data Builder project copy")
+        commands = recipe.get("commands")
+        if not isinstance(commands, list) or not commands:
+            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
+        required_sections: set[str] = {"assemble"}
+        load_all_sections = False
+        for command in commands:
+            if not isinstance(command, Mapping):
+                continue
+            action = str(command.get("action") or "").strip()
+            if action == "update_section":
+                required_sections.add(str(command.get("section") or "").strip())
+            elif action == "rebuild_assemble":
+                load_all_sections = True
+            elif action == "export_assemble":
+                required_sections.update({
+                    "annealing", "vsm_temperature_scan", "mini_dma"
+                })
+        project_payload = _load_builder_project_object(
+            output_project,
+            label="Microwire Data Builder project copy",
+            section_keys=None if load_all_sections else required_sections,
+            load_payloads=True,
+        )
         _validate_builder_project_payload(project_payload, path=output_project)
         sections = project_payload.get("sections")
         if not isinstance(sections, dict):
             sections = {}
             project_payload["sections"] = sections
-
-        commands = recipe.get("commands")
-        if not isinstance(commands, list) or not commands:
-            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
 
         manifest_path = _resolve_recipe_path_value(
             recipe.get("manifest_path"),
@@ -1009,32 +3688,60 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             else:
                 manifest_path = output_project.with_suffix(".manifest.json")
 
-        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            app = QtWidgets.QApplication([])
-
-        from microwire_data_builder import storage as builder_storage
-        from microwire_data_builder import ui as builder_ui
-
-        original_storage_root = builder_storage._storage_root
-        automation_store = working_copy_dir / "_builder_store"
-        if automation_store.exists():
-            shutil.rmtree(automation_store)
-        builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
-        builder_storage.MiniDatabaseStore._memory_data = {}
-        builder_storage.MiniDatabaseStore._memory_payloads = {}
-        builder_storage.MiniDatabaseStore._pending_sections = set()
-        builder_storage.MiniDatabaseStore._pending_payloads = set()
-        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
-
+        previous_dialog_setting = os.environ.get(
+            "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
+        )
+        builder_storage: Any = None
+        builder_ui_module: Any = None
+        original_storage_root: Any = None
+        builder_transaction: Any = None
+        previous_payload_stager: Any = None
+        payload_stager_installed = False
+        staged_payload_count = 0
         command_results: list[dict[str, Any]] = []
         try:
+            os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                app = QtWidgets.QApplication([])
+
+            from microwire_data_builder import storage as builder_storage
+            from microwire_data_builder import ui as builder_ui
+
+            builder_ui_module = builder_ui
+            original_storage_root = builder_storage._storage_root
+            automation_store = working_copy_dir / "_builder_store"
+            if automation_store.exists():
+                shutil.rmtree(automation_store)
+            builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            builder_storage.MiniDatabaseStore._memory_transactions = []
+            builder_transaction = (
+                builder_storage.MiniDatabaseStore.begin_memory_transaction()
+            )
+
+            previous_payload_stager = builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER
+            builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER = lambda value: value
+            payload_stager_installed = True
             for index, command in enumerate(commands):
                 if not isinstance(command, dict):
                     raise _AutomationRecipeError(f"Builder command {index} must be an object.")
                 action = str(command.get("action") or "").strip()
                 section_name = str(command.get("section") or "").strip()
+                command_label = (
+                    f"{action} {section_name}".strip()
+                    if section_name
+                    else action
+                )
+                print(
+                    f"[builder-automation] Starting command {index + 1}/{len(commands)}: "
+                    f"{command_label}",
+                    flush=True,
+                )
                 if action == "rebuild_assemble":
                     command_results.append(
                         _run_builder_rebuild_assemble_command_lightweight(
@@ -1044,6 +3751,28 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                             sections=sections,
                             output_project=output_project,
                         )
+                    )
+                    print(
+                        f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                        f"{command_label}",
+                        flush=True,
+                    )
+                    continue
+                if action == "export_assemble":
+                    command_results.append(
+                        _run_builder_export_assemble_command(
+                            command=command,
+                            command_index=index,
+                            project_path=project_path,
+                            output_project=output_project,
+                            base_dir=base_dir,
+                            sections=sections,
+                        )
+                    )
+                    print(
+                        f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                        f"{command_label}",
+                        flush=True,
                     )
                     continue
                 if action != "update_section":
@@ -1060,19 +3789,54 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                         base_dir=base_dir,
                     )
                 )
+                print(
+                    f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                    f"{command_label}",
+                    flush=True,
+                )
+            for section_payload in sections.values():
+                if not isinstance(section_payload, dict):
+                    continue
+                raw_payloads = section_payload.get("payloads")
+                if not isinstance(raw_payloads, dict):
+                    continue
+                for payload_id, value in list(raw_payloads.items()):
+                    if (
+                        isinstance(value, Mapping)
+                        and value.get("encoding") == "microwire-json"
+                    ):
+                        continue
+                    staged_payload_count += 1
+                    raw_payloads[payload_id] = builder_ui.stage_payload_value(
+                        value,
+                        payload_staging_root
+                        / f"payload-{staged_payload_count:04d}",
+                    )
+            builder_transaction.commit_memory_only()
         finally:
-            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
-            builder_storage.MiniDatabaseStore._memory_data = {}
-            builder_storage.MiniDatabaseStore._memory_payloads = {}
-            builder_storage.MiniDatabaseStore._pending_sections = set()
-            builder_storage.MiniDatabaseStore._pending_payloads = set()
-            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if payload_stager_installed and builder_ui_module is not None:
+                builder_ui_module._ACTIVE_PROJECT_PAYLOAD_STAGER = (
+                    previous_payload_stager
+                )
+            if builder_transaction is not None and not builder_transaction.finished:
+                builder_transaction.rollback()
+            if builder_storage is not None and original_storage_root is not None:
+                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+                builder_storage.MiniDatabaseStore._memory_data = {}
+                builder_storage.MiniDatabaseStore._memory_payloads = {}
+                builder_storage.MiniDatabaseStore._pending_sections = set()
+                builder_storage.MiniDatabaseStore._pending_payloads = set()
+                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+                builder_storage.MiniDatabaseStore._memory_transactions = []
+            if previous_dialog_setting is None:
+                os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
+            else:
+                os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = (
+                    previous_dialog_setting
+                )
 
         project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        output_project.write_text(
-            json.dumps(project_payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_builder_project_object(output_project, project_payload)
         manifest = {
             "kind": "builder",
             "version": 1,
@@ -1083,32 +3847,27 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             "commands": command_results,
         }
         if database_paths is not None:
-            database_dir = cast(Path, database_paths["database_dir"])
-            latest_project = cast(Path, database_paths["latest_project"])
-            latest_manifest = cast(Path, database_paths["latest_manifest"])
-            database_dir.mkdir(parents=True, exist_ok=True)
-            archive_result = _archive_existing_builder_database_latest(database_paths)
-            shutil.copy2(output_project, latest_project)
-            manifest["database"] = {
-                "database_dir": str(database_dir.resolve()),
-                "database_name": str(database_paths["database_name"]),
-                "timestamp": str(database_paths["timestamp"]),
-                "latest_project": str(latest_project.resolve()),
-                "latest_manifest": str(latest_manifest.resolve()),
-                **archive_result,
-            }
-        _write_json(manifest_path, manifest)
-        if database_paths is not None:
-            latest_manifest = cast(Path, database_paths["latest_manifest"])
-            _write_json(latest_manifest, manifest)
+            _promote_builder_database_latest(
+                database_paths=database_paths,
+                output_project=output_project,
+                manifest_path=manifest_path,
+                manifest=manifest,
+            )
+        else:
+            _write_json(manifest_path, manifest)
         print(json.dumps(manifest, ensure_ascii=False))
         return 0
     except _AutomationRecipeError as exc:
         print(f"[automation-recipe] {exc}")
         return 2
     except Exception as exc:
+        if os.environ.get("PYPLOT_AUTOMATION_TRACEBACK"):
+            traceback.print_exc()
         print(f"[automation-recipe] {type(exc).__name__}: {exc}")
         return 1
+    finally:
+        if payload_staging_root is not None:
+            shutil.rmtree(payload_staging_root, ignore_errors=True)
 
 
 def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:
@@ -1471,6 +4230,82 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         ),
     )
     parser.add_argument(
+        "--microwire-word-job",
+        default=None,
+        help=(
+            "Run a Microwire Word export job request JSON and write machine-readable "
+            "status/progress artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-assemble-export",
+        default=None,
+        help="Export saved Assemble rows from a Builder .pydpj to an Excel workbook without opening the Builder UI.",
+    )
+    parser.add_argument(
+        "--microwire-builder-trusted-migrate",
+        default=None,
+        help=(
+            "Explicitly trust and migrate a legacy Builder .pydpj or storage root. "
+            "This is the only path that may deserialize legacy pickle data."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-builder-migration-output",
+        default=None,
+        help=(
+            "Required new output .pydpj or storage root for trusted migration; "
+            "must differ from the source and must not already exist."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-assemble-output",
+        default=None,
+        help="Output .xlsx path for --microwire-assemble-export. Defaults to <project>_assemble_public.xlsx.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-manifest",
+        default=None,
+        help="Manifest JSON path for --microwire-assemble-export. Defaults next to the workbook.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-preset",
+        choices=("public", "full"),
+        default="public",
+        help="Workbook preset for Assemble export. The public preset hides provenance/internal columns from the main sheet.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-rebuild",
+        action="store_true",
+        help="Rebuild Assemble rows transiently from section payloads before writing the workbook.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-rebuild-section",
+        action="append",
+        default=None,
+        help=(
+            "Record which section triggered --microwire-assemble-rebuild. "
+            "Can be repeated; the integrated rebuild still includes every available section."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-assemble-working-copy-dir",
+        default=None,
+        help="Directory for the disposable project copy used during Assemble export CLI runs.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-copy-project",
+        dest="microwire_assemble_copy_project",
+        action="store_true",
+        help="Copy .pydpj inputs to a disposable working path before Assemble export (default).",
+    )
+    parser.add_argument(
+        "--no-microwire-assemble-copy-project",
+        dest="microwire_assemble_copy_project",
+        action="store_false",
+        help="Read the source .pydpj directly for Assemble export when no rebuild is requested.",
+    )
+    parser.add_argument(
         "--microwire-word-sample",
         default=None,
         help='Limit the Word export to one sample, e.g. "Ni50Fe27Ga23 12/2".',
@@ -1567,6 +4402,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         microwire_eda_composition_splits=True,
         microwire_eda_findings=True,
         microwire_eda_force_project_rebuild=False,
+        microwire_assemble_copy_project=True,
         microwire_word_origin=True,
     )
     args, qt_args = parser.parse_known_args(argv)
@@ -1609,8 +4445,233 @@ def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_eda", None))
 
 
+def _is_microwire_assemble_export_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_assemble_export", None))
+
+
+def _is_builder_trusted_migration_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_builder_trusted_migrate", None))
+
+
 def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_report", None))
+
+
+def _is_microwire_word_job_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_word_job", None))
+
+
+def _run_builder_trusted_migration_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.legacy_migration import (
+        migrate_legacy_project_trusted,
+        migrate_legacy_store_trusted,
+    )
+
+    source = Path(
+        str(getattr(args, "microwire_builder_trusted_migrate", "") or "")
+    ).expanduser()
+    raw_output = getattr(args, "microwire_builder_migration_output", None)
+    if not raw_output:
+        raise _AutomationRecipeError(
+            "--microwire-builder-migration-output is required for trusted migration"
+        )
+    output = Path(str(raw_output)).expanduser()
+    if (
+        source.is_file()
+        and os.environ.get("MICROWIRE_BUILDER_MIGRATION_WORKER") != "1"
+    ):
+        if not source.exists():
+            raise _AutomationRecipeError(f"Trusted Builder migration source not found: {source}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        source_stat_before = source.stat()
+
+        def _sha256(path: Path) -> str:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        source_sha256 = _sha256(source)
+        disposable_fd, disposable_name = tempfile.mkstemp(
+            prefix=f".{source.stem}.migration-input.",
+            suffix=source.suffix,
+        )
+        os.close(disposable_fd)
+        disposable = Path(disposable_name)
+        print(
+            "WARNING: trusted legacy Builder migration can execute arbitrary code "
+            "contained in pickle payloads. Process isolation is not a security sandbox.",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            shutil.copyfile(source, disposable)
+            _fsync_file(disposable)
+            disposable_sha256 = _sha256(disposable)
+            if (
+                disposable_sha256 != source_sha256
+                or disposable.stat().st_size != source_stat_before.st_size
+            ):
+                raise _AutomationRecipeError(
+                    "Disposable Builder migration input failed hash/size verification"
+                )
+            disposable_stat = disposable.stat()
+            disposable_fingerprint = (
+                disposable_stat.st_dev,
+                disposable_stat.st_ino,
+                disposable_stat.st_size,
+                disposable_stat.st_mtime_ns,
+            )
+            print(
+                json.dumps({
+                    "kind": "builder_migration_progress",
+                    "phase": "verified_disposable_copy",
+                    "current": disposable.name,
+                    "bytes_done": disposable.stat().st_size,
+                    "bytes_total": source_stat_before.st_size,
+                    "source": str(source),
+                    "destination": str(output),
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            worker_env = dict(os.environ)
+            worker_env["MICROWIRE_BUILDER_MIGRATION_WORKER"] = "1"
+            worker_env["MICROWIRE_BUILDER_MIGRATION_ORIGINAL_NAME"] = source.name
+            worker_env["MICROWIRE_BUILDER_MIGRATION_SOURCE_SHA256"] = source_sha256
+            worker_env["MICROWIRE_BUILDER_MIGRATION_SOURCE_BYTES"] = str(
+                source_stat_before.st_size
+            )
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--microwire-builder-trusted-migrate",
+                str(disposable),
+                "--microwire-builder-migration-output",
+                str(output),
+            ]
+            completed = subprocess.run(command, env=worker_env, check=False)
+            source_stat_after = source.stat()
+            source_sha256_after = _sha256(source)
+            if (
+                source_sha256_after != source_sha256
+                or source_stat_after.st_size != source_stat_before.st_size
+                or source_stat_after.st_mtime_ns != source_stat_before.st_mtime_ns
+                or source_stat_after.st_dev != source_stat_before.st_dev
+                or source_stat_after.st_ino != source_stat_before.st_ino
+            ):
+                raise _AutomationRecipeError(
+                    "Legacy Builder source changed during migration. The new output was "
+                    "left in place for quarantine/review and must not be treated as verified."
+                )
+            if completed.returncode:
+                raise _AutomationRecipeError(
+                    f"Trusted Builder migration worker failed with exit code {completed.returncode}"
+                )
+            print(
+                json.dumps({
+                    "kind": "builder_migration_source_verified",
+                    "source": str(source),
+                    "sha256": source_sha256_after,
+                    "bytes": source_stat_after.st_size,
+                    "unchanged": True,
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 0
+        finally:
+            try:
+                current_stat = disposable.stat()
+                current_fingerprint = (
+                    current_stat.st_dev,
+                    current_stat.st_ino,
+                    current_stat.st_size,
+                    current_stat.st_mtime_ns,
+                )
+                if current_fingerprint == disposable_fingerprint:
+                    disposable.unlink()
+                else:
+                    print(
+                        "WARNING: disposable migration input path changed; the replacement "
+                        f"was left untouched: {disposable}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except (FileNotFoundError, UnboundLocalError):
+                pass
+    result = (
+        migrate_legacy_store_trusted(source, output)
+        if source.is_dir()
+        else migrate_legacy_project_trusted(
+            source,
+            output,
+            progress=lambda value: print(
+                json.dumps(
+                    {"kind": "builder_migration_progress", **value}
+                    if isinstance(value, Mapping)
+                    else {"kind": "builder_migration_progress", "current": value}
+                ),
+                file=sys.stderr,
+                flush=True,
+            ),
+            cancelled=lambda: bool(
+                os.environ.get("MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE")
+                and Path(
+                    os.environ["MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE"]
+                ).exists()
+            ),
+        )
+    )
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _run_microwire_assemble_export_cli(args: argparse.Namespace) -> int:
+    try:
+        source_project = Path(str(getattr(args, "microwire_assemble_export", "")).strip()).expanduser()
+        output_value = getattr(args, "microwire_assemble_output", None)
+        out_dir_value = getattr(args, "out", None)
+        if output_value:
+            output_path = Path(str(output_value)).expanduser()
+        elif out_dir_value:
+            output_path = (
+                Path(str(out_dir_value)).expanduser()
+                / f"{source_project.stem}_assemble_public.xlsx"
+            )
+        else:
+            output_path = source_project.with_name(f"{source_project.stem}_assemble_public.xlsx")
+        manifest_value = getattr(args, "microwire_assemble_manifest", None)
+        manifest_path = Path(str(manifest_value)).expanduser() if manifest_value else None
+        working_copy_value = getattr(args, "microwire_assemble_working_copy_dir", None)
+        working_copy_dir = Path(str(working_copy_value)).expanduser() if working_copy_value else None
+        rebuild_sections = getattr(args, "microwire_assemble_rebuild_section", None)
+        manifest = _export_builder_assemble_workbook(
+            source_project=source_project,
+            output_path=output_path,
+            manifest_path=manifest_path,
+            preset=str(getattr(args, "microwire_assemble_preset", "public") or "public"),
+            force_rebuild=bool(getattr(args, "microwire_assemble_rebuild", False)),
+            rebuild_sections=[str(section) for section in rebuild_sections] if rebuild_sections else None,
+            working_copy_dir=working_copy_dir,
+            copy_project=bool(getattr(args, "microwire_assemble_copy_project", True)),
+        )
+    except _AutomationRecipeError as exc:
+        print(f"[microwire-assemble-export] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[microwire-assemble-export] {type(exc).__name__}: {exc}")
+        return 1
+    print(f"[microwire-assemble-export] workbook={manifest['workbook']}")
+    print(f"[microwire-assemble-export] manifest={manifest['manifest_path']}")
+    print(f"[microwire-assemble-export] rows={manifest['row_count']}")
+    print(f"[microwire-assemble-export] columns={manifest['column_count']}")
+    if manifest.get("copied_project"):
+        print(f"[microwire-assemble-export] copied_project={manifest['copied_project']}")
+    if manifest.get("rebuild"):
+        print("[microwire-assemble-export] rebuilt_assemble=true")
+    return 0
 
 
 def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
@@ -1667,6 +4728,12 @@ _MINI_DMA_REQUIRED_COLUMNS = {
     "strain_pct",
     "resistance_ohm",
 }
+_MINI_DMA_EXCLUDED_SCAN_DIRS = {
+    "archive",
+    "automation_history",
+    "automated_control_tests",
+    "automated",
+}
 
 
 def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
@@ -1714,6 +4781,12 @@ def _looks_like_mini_dma_measurement(path: Path) -> bool:
         return False
     columns = {column.strip().casefold() for column in header.split(",")}
     return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+
+
+def _is_active_mini_dma_measurement(path: Path) -> bool:
+    if any(part.casefold() in _MINI_DMA_EXCLUDED_SCAN_DIRS for part in path.parts):
+        return False
+    return path.is_file() and _looks_like_mini_dma_measurement(path)
 
 
 def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
@@ -1981,6 +5054,81 @@ def _project_section_rows(section: object) -> list[dict[str, Any]]:
     return []
 
 
+def _decode_word_project_payload(payload: object) -> object:
+    if isinstance(payload, Mapping) and payload.get("encoding") == "pickle-base64":
+        _warn_builder_legacy_pickle_blocked()
+    try:
+        return decode_envelope(payload)
+    except SafeCodecError:
+        return None
+
+
+def _word_project_section_payload(section: object, payload_name: str) -> object:
+    if not isinstance(section, Mapping):
+        return None
+    payloads = section.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return None
+    return _decode_word_project_payload(payloads.get(payload_name))
+
+
+def _word_project_record_sample(record: object) -> tuple[str, str]:
+    key = getattr(record, "key", None)
+    if isinstance(key, (list, tuple)) and len(key) >= 3:
+        composition = str(key[0] or "").strip()
+        draw = str(key[1] or "").strip()
+        piece = str(key[2] or "").strip()
+        suffix = str(key[3] or "").strip() if len(key) >= 4 and key[3] is not None else ""
+        if composition and draw and piece:
+            microwire = f"{draw}/{piece}"
+            if suffix:
+                microwire = f"{microwire} {suffix}"
+            return composition, microwire
+    sample = getattr(record, "sample", "")
+    composition, microwire = _parse_microwire_word_sample(sample)
+    return composition or "", microwire or ""
+
+
+def _word_project_record_path(record: object) -> Path | None:
+    for attr in ("path", "source_path"):
+        value = getattr(record, attr, None)
+        if value:
+            return Path(value)
+    if isinstance(record, Mapping):
+        for key in ("path", "source_path", "Source path", "Path"):
+            value = record.get(key)
+            if value:
+                return Path(str(value))
+    return None
+
+
+def _word_project_shape_memory_payload_sources(
+    section: object,
+) -> dict[tuple[str, str], list[str]]:
+    records = _word_project_section_payload(
+        section,
+        "shape_memory_stress_strain_records",
+    )
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
+        return {}
+    sources_by_key: dict[tuple[str, str], list[str]] = {}
+    for record in records:
+        composition, microwire = _word_project_record_sample(record)
+        path = _word_project_record_path(record)
+        if not composition or not microwire or path is None:
+            continue
+        key = (
+            _normalise_microwire_word_part(composition),
+            _normalise_microwire_word_key(microwire),
+        )
+        sources_by_key.setdefault(key, []).append(str(path))
+    return {
+        key: list(dict.fromkeys(paths))
+        for key, paths in sources_by_key.items()
+        if paths
+    }
+
+
 def _word_project_row_sample(row: dict[str, Any]) -> tuple[str, str]:
     composition = str(row.get("Composition") or "").strip()
     microwire = str(row.get("Microwire") or "").strip()
@@ -2149,7 +5297,7 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
     (
         "TMA",
         ("_word_mini_dma_sources",),
-        ("TMA graphs", "TMA graphs (Origin)"),
+        ("TMA graphs", "TMA graphs (Origin)", "Mini DMA graphs", "Mini DMA graphs (Origin)"),
     ),
     (
         "Manual stress/strain",
@@ -2299,9 +5447,19 @@ def _load_project_word_report_frame(
         _plot_measurement_origin,
         _safe_plot_stem,
     )
+    from microwire_data_builder import ui as builder_ui
     from plotting.plugins.r_vs_t.core import load_file
 
-    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    payload = _load_builder_project_object(
+        source_path,
+        label="Microwire Data Builder Word-report project",
+        section_keys={
+            "assemble", "annealing", "fabrication", "microscope",
+            "current_density", "vsm_hysteresis", "vsm_temperature_scan",
+            "dma_iso_stress", "mini_dma", "shape_memory_stress_strain", "fmr",
+        },
+        load_payloads=True,
+    )
     sections = payload.get("sections") if isinstance(payload, dict) else {}
     if not isinstance(sections, dict):
         raise ValueError("Project file does not contain Builder sections.")
@@ -2313,6 +5471,9 @@ def _load_project_word_report_frame(
     for root in extra_search_roots or ():
         if root not in rvt_search_roots:
             rvt_search_roots.append(root)
+    shape_memory_payload_sources = _word_project_shape_memory_payload_sources(
+        sections.get("shape_memory_stress_strain")
+    )
 
     def _remember_rvt_search_root(value: object) -> None:
         for item in _word_project_value_items(value):
@@ -2336,6 +5497,20 @@ def _load_project_word_report_frame(
     for section_name, section in sections.items():
         if section_name in {"compare"}:
             continue
+        if section_name == "mini_dma" and isinstance(section, Mapping):
+            for item in _word_project_value_items(section.get("sources")):
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                path = Path(text)
+                try:
+                    if not path.exists():
+                        continue
+                except OSError:
+                    continue
+                search_root = path.parent if path.name.casefold() in {"mini dma", "mini_dma"} else path
+                if search_root not in rvt_search_roots:
+                    rvt_search_roots.append(search_root)
         for source_row in _project_section_rows(section):
             if section_name == "shape_memory_stress_strain":
                 source_row = _word_project_enrich_shape_memory_row(source_row)
@@ -2394,6 +5569,15 @@ def _load_project_word_report_frame(
             if column in assemble_row:
                 target[column] = assemble_row.get(column)
 
+    for key, sources in shape_memory_payload_sources.items():
+        target = rows_by_key.get(key)
+        if target is None:
+            continue
+        target["_word_shape_memory_stress_strain_sources"] = _word_project_merge_value(
+            target.get("_word_shape_memory_stress_strain_sources"),
+            sources,
+        )
+
     frame = pd.DataFrame(list(rows_by_key.values()))
     for index, row in frame.iterrows():
         diameter = row.get(DIAMETER_COLUMN)
@@ -2446,7 +5630,7 @@ def _load_project_word_report_frame(
         else:
             frame[column] = frame[column].astype(object)
 
-    mini_dma_paths: list[Path] = []
+    mini_dma_candidates: list[Path] = []
     seen_mini_dma_paths: set[Path] = set()
     for root in rvt_search_roots:
         for mini_root_name in ("mini DMA", "TMA", "mini_dma"):
@@ -2454,23 +5638,39 @@ def _load_project_word_report_frame(
             if not mini_root.exists():
                 continue
             for path in mini_root.rglob("measurement.csv"):
+                excluded_parts = {"archive", "automated", "automated_control_tests", "automation_history"}
+                if any(part.casefold() in excluded_parts for part in path.relative_to(mini_root).parts[:-1]):
+                    continue
                 try:
                     resolved = path.resolve()
                 except OSError:
                     resolved = path
                 if resolved in seen_mini_dma_paths or not path.is_file():
                     continue
-                if not _looks_like_mini_dma_measurement(path):
+                if not _is_active_mini_dma_measurement(path):
                     continue
                 seen_mini_dma_paths.add(resolved)
-                mini_dma_paths.append(path)
+                mini_dma_candidates.append(path)
 
-    if mini_dma_paths:
+    mini_dma_paths: list[Path] = []
+    mini_dma_reportability: list[dict[str, Any]] = []
+    if mini_dma_candidates:
+        mini_dma_paths, mini_dma_reportability = builder_ui._reportable_mini_dma_measurements(
+            mini_dma_candidates,
+            sources=[str(path) for path in rvt_search_roots],
+            excluded_dirs=_MINI_DMA_EXCLUDED_SCAN_DIRS,
+        )
+
+    if mini_dma_paths or mini_dma_reportability:
         source_column = "_word_mini_dma_sources"
         if source_column not in frame.columns:
             frame[source_column] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[source_column] = frame[source_column].astype(object)
         if MINI_DMA_COLUMN not in frame.columns:
             frame[MINI_DMA_COLUMN] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[MINI_DMA_COLUMN] = frame[MINI_DMA_COLUMN].astype(object)
         for index, row in frame.iterrows():
             composition = row.get("Composition")
             microwire = row.get("Microwire")
@@ -2486,14 +5686,31 @@ def _load_project_word_report_frame(
                     matching_mini_dma.append(path.parent)
             if matching_mini_dma:
                 values = [str(path) for path in dict.fromkeys(matching_mini_dma)]
-                frame.at[index, source_column] = _word_project_merge_value(
-                    row.get(source_column),
-                    values,
+                frame.at[index, source_column] = values if len(values) > 1 else values[0]
+                graph_values = [path.name for path in dict.fromkeys(matching_mini_dma)]
+                frame.at[index, MINI_DMA_COLUMN] = (
+                    graph_values if len(graph_values) > 1 else graph_values[0]
                 )
-                frame.at[index, MINI_DMA_COLUMN] = _word_project_merge_value(
-                    row.get(MINI_DMA_COLUMN),
-                    [path.name for path in dict.fromkeys(matching_mini_dma)],
-                )
+                continue
+            blocked_mini_dma = []
+            for entry in mini_dma_reportability:
+                if bool(entry.get("reportable")):
+                    continue
+                measurement = entry.get("measurement")
+                if not isinstance(measurement, str) or not measurement:
+                    continue
+                path = Path(measurement)
+                inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
+                if (
+                    _normalise_microwire_word_part(inferred_composition)
+                    == _normalise_microwire_word_part(composition)
+                    and _normalise_microwire_word_key(inferred_microwire)
+                    == _normalise_microwire_word_key(microwire)
+                ):
+                    blocked_mini_dma.append(entry)
+            if blocked_mini_dma:
+                frame.at[index, source_column] = None
+                frame.at[index, MINI_DMA_COLUMN] = None
 
     if include_origin:
         origin_dir = output_dir / "_origin_objects"
@@ -2749,6 +5966,19 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
         copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
         shutil.copy2(source_path, copied_source)
         setattr(args, "_microwire_word_copied_project", str(copied_source))
+        project_payload = _load_builder_project_object(
+            copied_source,
+            label="Microwire Data Builder project copy",
+            section_keys={"assemble"},
+            load_payloads=False,
+        )
+        sections = project_payload.get("sections")
+        if isinstance(sections, Mapping):
+            selected_columns, column_order = _assemble_projection_metadata_from_sections(
+                sections
+            )
+            setattr(args, "_microwire_word_selected_columns", selected_columns)
+            setattr(args, "_microwire_word_column_order", column_order)
         print(f"[microwire-word] copied_project={copied_source}")
         return _load_project_word_report_frame(
             copied_source,
@@ -2776,46 +6006,75 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
     )
 
 
-def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list[str]]]:
-    sections: dict[str, dict[str, list[str]]] = {}
+def _microwire_word_graph_sections_for_row(
+    row: Any,
+    origin_artifacts: Mapping[str, Any] | None = None,
+    *,
+    include_all: bool = False,
+    ole_embedding_results: Sequence[Any] | Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    from microwire_data_builder.core import word_report_section_manifest_for_row
+
+    row_data = row if hasattr(row, "index") else pd.Series(row)
+    sections: dict[str, dict[str, Any]] = {}
+    evaluated = {
+        str(item.get("title") or ""): item
+        for item in word_report_section_manifest_for_row(
+            row_data,
+            origin_artifacts or {},
+            ole_embedding_results=ole_embedding_results,
+        )
+    }
     for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
         source_values: list[str] = []
-        graph_values: list[str] = []
-        origin_values: list[str] = []
         for column in source_columns:
             source_values.extend(
                 str(item)
-                for item in _word_project_value_items(row.get(column))
+                for item in _word_project_value_items(row_data.get(column))
                 if str(item or "").strip()
             )
-        for column in graph_columns:
-            values = [
-                str(item)
-                for item in _word_project_value_items(row.get(column))
-                if str(item or "").strip()
-            ]
-            graph_values.extend(values)
-            if str(column).endswith("(Origin)"):
-                origin_values.extend(values)
         source_values = list(dict.fromkeys(source_values))
-        graph_values = list(dict.fromkeys(graph_values))
-        origin_values = list(dict.fromkeys(origin_values))
-        if origin_values:
+        summary = evaluated.get(section_name, {})
+        included = bool(summary.get("included"))
+        if included or include_all:
             sections[section_name] = {
+                "included": included,
+                "status": str(summary.get("status") or ("included" if included else "skipped")),
+                "reason": str(summary.get("reason") or ""),
                 "sources": source_values,
-                "graphs": origin_values,
-                "references": graph_values,
+                "graphs": list(summary.get("origin_descriptors") or []),
+                "origin_artifacts_accepted": list(summary.get("origin_artifacts_accepted") or []),
+                "origin_artifacts_attempted": list(summary.get("origin_artifacts_attempted") or []),
+                "ole_insertions": list(summary.get("ole_insertions") or []),
+                "ole_insertions_attempted": list(summary.get("ole_insertions_attempted") or []),
+                "ole_insertions_succeeded": list(summary.get("ole_insertions_succeeded") or []),
+                "ole_insertions_failed": list(summary.get("ole_insertions_failed") or []),
+                "ole_insertions_skipped": list(summary.get("ole_insertions_skipped") or []),
+                "ole_insertions_missing_artifact": list(summary.get("ole_insertions_missing_artifact") or []),
+                "references": list(summary.get("references") or []),
+                "invalid_origin_descriptors": list(summary.get("invalid_origin_descriptors") or []),
+                "missing_origin_descriptors": list(summary.get("missing_origin_descriptors") or []),
+                "invalid_references": list(summary.get("invalid_references") or []),
             }
     return sections
 
 
-def _filter_microwire_word_graph_rows(frame: Any):
+def _filter_microwire_word_graph_rows(
+    frame: Any,
+    origin_artifacts: Mapping[str, Any] | None = None,
+):
     if frame.empty:
         return frame
     keep_indices = [
         index
         for index, row in frame.iterrows()
-        if _microwire_word_graph_sections_for_row(row)
+        if any(
+            section.get("included")
+            for section in _microwire_word_graph_sections_for_row(
+                row,
+                origin_artifacts,
+            ).values()
+        )
     ]
     return frame.loc[keep_indices].reset_index(drop=True)
 
@@ -2879,12 +6138,38 @@ def _write_microwire_word_manifest(
     source_path: Path,
     copied_project: str | None,
     include_origin: bool,
+    origin_artifacts: Mapping[str, Any] | None = None,
+    ole_embedding_results: Mapping[Path, Sequence[Any]] | None = None,
 ) -> tuple[Path, Path]:
     exported_at = datetime.now(timezone.utc).isoformat()
     rows: list[dict[str, Any]] = []
     for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
         report_path = Path(reports[index]) if index < len(reports) else output_dir / _word_report_output_filenames(frame)[index]
-        sections = _microwire_word_graph_sections_for_row(row)
+        sections = _microwire_word_graph_sections_for_row(
+            row,
+            origin_artifacts,
+            include_all=True,
+            ole_embedding_results=(
+                ole_embedding_results.get(report_path)
+                if ole_embedding_results is not None
+                else None
+            ),
+        )
+        included_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if section_data.get("included")
+        )
+        skipped_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if not section_data.get("included") and section_data.get("status") == "skipped"
+        )
+        invalid_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if section_data.get("status") == "invalid"
+        )
         source_entries = {
             section_name: [
                 _word_manifest_source_entry(source)
@@ -2898,7 +6183,10 @@ def _write_microwire_word_manifest(
                 "microwire": str(row.get("Microwire") or "").strip(),
                 "docx": str(report_path),
                 "docx_name": report_path.name,
-                "graph_sections": sorted(sections.keys()),
+                "graph_sections": included_sections,
+                "included_sections": included_sections,
+                "skipped_sections": skipped_sections,
+                "invalid_sections": invalid_sections,
                 "sections": sections,
                 "source_files": source_entries,
             }
@@ -3030,13 +6318,22 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
         frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
         if bool(getattr(args, "microwire_word_graphs_only", False)):
             before_count = len(frame)
-            frame = _filter_microwire_word_graph_rows(frame)
+            frame = _filter_microwire_word_graph_rows(frame, origin_artifacts)
             print(f"[microwire-word] graph_rows={len(frame)}")
             print(f"[microwire-word] skipped_graphless_rows={before_count - len(frame)}")
         archived_reports = _archive_existing_microwire_word_reports(frame, output_dir)
         for archived in archived_reports:
             print(f"[microwire-word] archived={archived}")
-        reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+        ole_embedding_results: dict[Path, list[Any]] = {}
+        reports = export_word_reports(
+            frame,
+            output_dir,
+            origin_artifacts=origin_artifacts,
+            ole_embedding_results=ole_embedding_results,
+            logger=LOGGER,
+            selected_columns=getattr(args, "_microwire_word_selected_columns", None),
+            column_order=getattr(args, "_microwire_word_column_order", None),
+        )
         manifest_json, manifest_csv = _write_microwire_word_manifest(
             frame,
             reports,
@@ -3044,6 +6341,8 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
             source_path=source_path,
             copied_project=getattr(args, "_microwire_word_copied_project", None),
             include_origin=bool(getattr(args, "microwire_word_origin", True)),
+            origin_artifacts=origin_artifacts,
+            ole_embedding_results=ole_embedding_results,
         )
         print(f"[microwire-word] output_dir={output_dir}")
         print(f"[microwire-word] reports={len(reports)}")
@@ -3054,6 +6353,147 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
         return 0
     finally:
         _disable_originpro_exit_detach()
+
+
+def _run_microwire_word_job_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.jobs import (
+        JobRequestError,
+        append_progress,
+        error_payload,
+        load_microwire_word_job_request,
+        microwire_word_command,
+        write_manifest,
+        write_status,
+    )
+
+    job_path = Path(str(getattr(args, "microwire_word_job", "")).strip()).expanduser()
+    request = None
+    try:
+        request = load_microwire_word_job_request(job_path)
+        command = microwire_word_command(request)
+        request.paths.log.parent.mkdir(parents=True, exist_ok=True)
+        request.paths.log.write_text(
+            f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} loaded job {request.job_id}\n",
+            encoding="utf-8",
+        )
+        write_status(request, state="running", step="validate", message="Validating Microwire Word export job.")
+        append_progress(
+            request,
+            event="started",
+            step="validate",
+            message="Microwire Word export job accepted.",
+            fraction=0.0,
+        )
+        if request.paths.cancel.exists():
+            write_status(
+                request,
+                state="cancelled",
+                step="validate",
+                message="Job was cancelled before export started.",
+                exit_code=130,
+            )
+            append_progress(
+                request,
+                event="cancelled",
+                step="validate",
+                message="Cancel marker existed before export started.",
+                fraction=1.0,
+            )
+            write_manifest(request, state="cancelled", exit_code=130, command=command)
+            print(f"[microwire-word-job] status={request.paths.status}")
+            print(f"[microwire-word-job] manifest={request.paths.manifest}")
+            return 130
+        if not request.source.exists():
+            raise FileNotFoundError(request.source)
+        if request.dry_run:
+            append_progress(
+                request,
+                event="validated",
+                step="dry_run",
+                message="Dry run validated the request without generating DOCX files.",
+                fraction=1.0,
+            )
+            write_status(
+                request,
+                state="succeeded",
+                step="dry_run",
+                message="Dry run complete; no DOCX or Origin objects were generated.",
+                exit_code=0,
+            )
+            write_manifest(request, state="succeeded", exit_code=0, command=command)
+            print(f"[microwire-word-job] dry_run=true")
+            print(f"[microwire-word-job] status={request.paths.status}")
+            print(f"[microwire-word-job] progress={request.paths.progress}")
+            print(f"[microwire-word-job] manifest={request.paths.manifest}")
+            return 0
+
+        append_progress(
+            request,
+            event="export_started",
+            step="export",
+            message="Starting existing Microwire Word export path.",
+            fraction=0.1,
+        )
+        export_args = argparse.Namespace(
+            microwire_word_report=str(request.source),
+            microwire_word_sample=request.sample,
+            microwire_word_force_project_rebuild=request.force_project_rebuild,
+            microwire_word_origin=request.include_origin,
+            microwire_word_graphs_only=request.graphs_only,
+            out=str(request.output_dir) if request.output_dir is not None else None,
+        )
+        exit_code = _run_microwire_word_report_cli(export_args)
+        state = "succeeded" if exit_code == 0 else "failed"
+        append_progress(
+            request,
+            event="export_finished",
+            step="export",
+            message=f"Microwire Word export finished with exit code {exit_code}.",
+            fraction=1.0,
+        )
+        write_status(
+            request,
+            state=state,
+            step="export",
+            message=f"Microwire Word export finished with exit code {exit_code}.",
+            exit_code=exit_code,
+        )
+        write_manifest(request, state=state, exit_code=exit_code, command=command)
+        print(f"[microwire-word-job] status={request.paths.status}")
+        print(f"[microwire-word-job] progress={request.paths.progress}")
+        print(f"[microwire-word-job] manifest={request.paths.manifest}")
+        return exit_code
+    except (JobRequestError, FileNotFoundError) as exc:
+        print(f"[microwire-word-job] {exc}")
+        if request is not None:
+            payload = error_payload(exc, user_message=str(exc))
+            write_status(
+                request,
+                state="failed",
+                step="validate",
+                message=str(exc),
+                exit_code=2,
+                error=payload,
+            )
+            append_progress(request, event="failed", step="validate", message=str(exc), fraction=1.0)
+            write_manifest(request, state="failed", exit_code=2, command=microwire_word_command(request))
+        return 2
+    except Exception as exc:
+        LOGGER.exception("Microwire Word job failed")
+        print(f"[microwire-word-job] {type(exc).__name__}: {exc}")
+        if request is not None:
+            payload = error_payload(exc, user_message="Microwire Word job failed. See status JSON for details.")
+            write_status(
+                request,
+                state="failed",
+                step="export",
+                message=str(exc),
+                exit_code=1,
+                error=payload,
+            )
+            append_progress(request, event="failed", step="export", message=str(exc), fraction=1.0)
+            write_manifest(request, state="failed", exit_code=1, command=microwire_word_command(request))
+        return 1
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
@@ -3138,8 +6578,11 @@ def _pyplot_summary(window: "PyPlotWorkbench", plugin_name: str | None) -> dict[
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _write_text_atomic(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
@@ -4176,7 +7619,7 @@ EMULATORS: Dict[str, LauncherFactory] = {
 }
 
 BUILDERS: Dict[str, LauncherFactory] = {
-    "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
+    "Microwire Data Builder": _builder_process_launcher("microwire_data_builder"),
     "Universal Video Builder": _lazy("microwire_data_builder.universal_video_builder", "main"),
     "Microwire EDA": _lazy("microwire_eda", "main"),
 }
@@ -4745,6 +8188,16 @@ class MasterLauncher(QtWidgets.QWidget):
             result = func()
             if isinstance(result, QtWidgets.QWidget):
                 self._register_window(result)
+            elif category == "builders" and item_text == "Microwire Data Builder":
+                self.run_button.setText("Starting...")
+                self.run_button.setEnabled(False)
+                QtCore.QTimer.singleShot(
+                    3500,
+                    lambda: (
+                        self.run_button.setText("Run"),
+                        self.run_button.setEnabled(True),
+                    ),
+                )
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
@@ -4827,6 +8280,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
     if _is_experiment_process_requested(args):
         raise SystemExit(_run_experiment_process(args))
+    if _is_microwire_word_job_requested(args):
+        raise SystemExit(_run_microwire_word_job_cli(args))
+    if _is_builder_trusted_migration_requested(args):
+        raise SystemExit(_run_builder_trusted_migration_cli(args))
+    if _is_microwire_assemble_export_requested(args):
+        raise SystemExit(_run_microwire_assemble_export_cli(args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):
