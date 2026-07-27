@@ -8223,6 +8223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_workspace_user_prefers_custom = False
         self._adaptive_summary_labels: dict[str, QtWidgets.QLabel] = {}
         self._adaptive_sweep_progress: QtWidgets.QProgressBar | None = None
+        self._adaptive_sweep_progress_label: QtWidgets.QLabel | None = None
         self._adaptive_return_to_active_button: QtWidgets.QPushButton | None = None
         self._adaptive_inspector_tabs: QtWidgets.QTabWidget | None = None
         self._adaptive_remaining_recipe_labels: dict[str, QtWidgets.QLabel] = {}
@@ -9053,7 +9054,7 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QLabel[role="metricSecondary"] {
                 color: #9ca5af;
-                font-size: 9px;
+                font-size: 10px;
             }
             QTabBar#tmaControlViewTabs::tab,
             QTabBar#dashboardViewTabs::tab {
@@ -9072,18 +9073,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 0;
                 background: transparent;
             }
-            QTabWidget#adaptiveInspectorTabs QTabBar::tab,
             QTabWidget#adaptiveResultTabs QTabBar::tab {
                 background: transparent;
                 color: #9ca5af;
                 border: 0;
                 border-bottom: 1px solid #343a42;
-                padding: 8px 12px;
+                padding: 9px 13px 8px 13px;
+                font-size: 9pt;
+            }
+            QTabWidget#adaptiveInspectorTabs QTabBar::tab {
+                background: transparent;
+                color: #9ca5af;
+                border: 0;
+                border-bottom: 1px solid #343a42;
+                padding: 8px 12px 7px 12px;
+                font-size: 8.5pt;
             }
             QTabWidget#adaptiveInspectorTabs QTabBar::tab:selected,
             QTabWidget#adaptiveResultTabs QTabBar::tab:selected {
                 color: #edf0f3;
                 border-bottom: 2px solid #e8ad43;
+            }
+            QTabWidget#adaptiveInspectorTabs QTabBar::tab:hover,
+            QTabWidget#adaptiveResultTabs QTabBar::tab:hover {
+                color: #d7dce2;
             }
             QFrame#adaptiveSweepInspector {
                 background: #191c20;
@@ -9119,7 +9132,7 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QLabel#adaptiveWorkspacePhaseHint {
                 color: #9ca5af;
-                font-size: 9px;
+                font-size: 10px;
             }
             QLabel#adaptiveTemperature {
                 color: #edf0f3;
@@ -9137,7 +9150,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-color: #343a42;
                 color: #69727d;
             }
-            QProgressBar#adaptiveSweepProgress,
             QProgressBar#recipeProgress {
                 background: #14171a;
                 border: 1px solid #343a42;
@@ -9146,9 +9158,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 min-height: 18px;
                 text-align: left;
             }
-            QProgressBar#adaptiveSweepProgress::chunk,
             QProgressBar#recipeProgress::chunk {
                 background: #e8ad43;
+            }
+            QProgressBar#adaptiveSweepProgress {
+                background: #14171a;
+                border: 1px solid #3b4149;
+                border-radius: 3px;
+                min-height: 22px;
+            }
+            QProgressBar#adaptiveSweepProgress::chunk {
+                background: #e8ad43;
+                border: 0;
+            }
+            QLabel#adaptiveSweepProgressLabel {
+                background: transparent;
+                color: #f7f8fa;
+                font-size: 9pt;
+                font-weight: 600;
+            }
+            QFrame#tmaBottomDock QPushButton {
+                min-height: 30px;
+                padding-left: 13px;
+                padding-right: 13px;
             }
             """
         )
@@ -12234,8 +12266,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_sweep_progress.setObjectName("adaptiveSweepProgress")
         self._adaptive_sweep_progress.setRange(0, 100)
         self._adaptive_sweep_progress.setValue(0)
-        self._adaptive_sweep_progress.setFormat("Idle")
-        active_layout.addWidget(self._adaptive_sweep_progress)
+        self._adaptive_sweep_progress.setTextVisible(False)
+        progress_container = QtWidgets.QWidget(active_card)
+        progress_stack = QtWidgets.QStackedLayout(progress_container)
+        progress_stack.setContentsMargins(0, 0, 0, 0)
+        progress_stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
+        progress_stack.addWidget(self._adaptive_sweep_progress)
+        self._adaptive_sweep_progress_label = QtWidgets.QLabel(
+            "Idle",
+            progress_container,
+        )
+        self._adaptive_sweep_progress_label.setObjectName(
+            "adaptiveSweepProgressLabel"
+        )
+        self._adaptive_sweep_progress_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        self._adaptive_sweep_progress_label.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        progress_stack.addWidget(self._adaptive_sweep_progress_label)
+        active_layout.addWidget(progress_container)
 
         values = QtWidgets.QGridLayout()
         values.setContentsMargins(0, 4, 0, 0)
@@ -30017,7 +30069,37 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         progress.setRange(self.recipe_progress.minimum(), self.recipe_progress.maximum())
         progress.setValue(self.recipe_progress.value())
-        progress.setFormat(self.recipe_progress.format())
+        if not self._automation_active:
+            if self._adaptive_sweep_progress_label is not None:
+                self._adaptive_sweep_progress_label.setText("Idle")
+            return
+        minimum = self.recipe_progress.minimum()
+        maximum = self.recipe_progress.maximum()
+        if maximum > minimum:
+            percent = int(
+                round(
+                    100.0
+                    * (self.recipe_progress.value() - minimum)
+                    / (maximum - minimum)
+                )
+            )
+        else:
+            percent = 0
+        eta_text = next(
+            (
+                part.strip()
+                for part in str(self.recipe_progress.format()).split("|")
+                if part.strip().startswith("ETA ")
+            ),
+            "",
+        )
+        progress_text = (
+            f"{percent}%"
+            if not eta_text
+            else f"{percent}%  |  {eta_text}"
+        )
+        if self._adaptive_sweep_progress_label is not None:
+            self._adaptive_sweep_progress_label.setText(progress_text)
 
     def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
         pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())

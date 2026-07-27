@@ -428,3 +428,16 @@ def test_active_sweep_keeps_update_action_discoverable(window: object) -> None:
 
     window._automation_active = False
     window._automation_name = ""
+
+
+def test_adaptive_progress_uses_stable_overlay_text(window: object) -> None:
+    window._automation_active = True
+    window.recipe_progress.setRange(0, 100)
+    window.recipe_progress.setValue(48)
+    window.recipe_progress.setFormat("Overall 48% | 500 MPa | ETA 54 min")
+
+    window._sync_adaptive_sweep_progress()
+
+    assert not window._adaptive_sweep_progress.isTextVisible()
+    assert window._adaptive_sweep_progress_label.text() == "48%  |  ETA 54 min"
+    window._automation_active = False
