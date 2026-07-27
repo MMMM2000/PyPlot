@@ -9158,6 +9158,7 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(tabs)
 
         hardware_tab = QtWidgets.QWidget(tabs)
+        self.hardware_tab = hardware_tab
         hardware_layout = QtWidgets.QVBoxLayout(hardware_tab)
         hardware_layout.setContentsMargins(0, 0, 0, 0)
         hardware_layout.setSpacing(10)
@@ -11383,6 +11384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
+        self.manual_actions_box = manual_box
         manual_layout = QtWidgets.QVBoxLayout(manual_box)
         manual_hint = QtWidgets.QLabel(
             "Use manual controls for setup, preloading, or quick checks before launching a recipe."
@@ -14116,6 +14118,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_supply_status.setText(message)
 
     def _emergency_stop(self) -> None:
+        if self._isolated_recipe_active:
+            process = self._production_control_process
+            if process is None:
+                detail = (
+                    "EMERGENCY STOP could not signal the dedicated control process "
+                    "because its supervisor is unavailable."
+                )
+                self._log(detail)
+                self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+                self.label_control_process_status.setText(detail)
+                self.label_control_process_status.setVisible(True)
+                return
+            try:
+                process.emergency_stop()
+            except Exception as exc:
+                detail = f"EMERGENCY STOP could not signal the control process: {exc}"
+                self._log(detail)
+                self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+                self.label_control_process_status.setText(detail)
+                self.label_control_process_status.setVisible(True)
+                return
+            self._isolated_command_pending = "emergency"
+            self._isolated_pending_sequence = None
+            self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+            self.label_control_process_status.setText(
+                "Controller: EMERGENCY STOP requested; awaiting child safe-state confirmation"
+            )
+            self.label_control_process_status.setVisible(True)
+            self._log(
+                "EMERGENCY STOP sent through the dedicated process out-of-band safety path."
+            )
+            self._update_recipe_buttons()
+            return
+
         messages: list[str] = []
         automation_was_active = self._automation_active
         # Fence the control worker first.  Physical output removal below must
@@ -30685,6 +30721,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.button_pause_recipe.setEnabled(self._automation_active)
             self.button_stop_recipe.setEnabled(self._automation_active)
+        child_owns_hardware = self._isolated_recipe_active
+        self.manual_actions_box.setEnabled(not child_owns_hardware)
+        self.hardware_tab.setEnabled(not child_owns_hardware)
+        self.button_emergency_stop.setEnabled(True)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
@@ -31359,6 +31399,7 @@ class MainWindow(QtWidgets.QMainWindow):
             starting_length_mm=starting_length_mm,
             cadence_downgrade_accepted=True,
         )
+        self._stop_manual_jog()
         if (
             self._scale_thread is not None
             or self._supply_controller is not None

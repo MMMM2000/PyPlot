@@ -42,8 +42,12 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
 5. During the run the visible UI sends only session-scoped lifecycle or
    explicitly permitted runtime-edit commands and renders coalesced immutable
    snapshots. UI repaint or event-loop stalls cannot clock the child recipe.
+   Emergency Stop uses the child's out-of-band event even when the ordinary
+   command queue is full or another lifecycle command is awaiting confirmation.
 6. Parent-side scale, PSU, and Tic construction is fenced while the child owns
-   the recipe. The child retains the existing cross-process Tic device lease.
+   the recipe. Manual Actions and Hardware controls are disabled until the
+   child reports completion, stop, emergency, or fault. The child retains the
+   existing cross-process Tic device lease.
 7. The production child runs the existing recipe implementation unchanged, so
    Prague legacy-seek and Košice adaptive policies stay separate while sharing
    the isolated process and hardware infrastructure.

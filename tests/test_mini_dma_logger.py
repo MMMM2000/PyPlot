@@ -1835,6 +1835,116 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         _close_test_window(window)
 
 
+def test_isolated_emergency_uses_out_of_band_path_and_waits_for_confirmation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="emergency-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_command_pending = "pause"
+    local_safety_calls: list[str] = []
+    window._disable_motor_supply_output = (  # type: ignore[method-assign]
+        lambda: local_safety_calls.append("motor")
+    )
+    window._disable_supply_output = (  # type: ignore[method-assign]
+        lambda: local_safety_calls.append("supply")
+    )
+    window._stop_auto_ramp = (  # type: ignore[method-assign]
+        lambda **_kwargs: local_safety_calls.append("stop")
+    )
+
+    try:
+        window._emergency_stop()
+
+        assert process.commands == [("emergency", None)]
+        assert local_safety_calls == []
+        assert window._isolated_command_pending == "emergency"
+        assert window._isolated_pending_sequence is None
+        assert "awaiting child safe-state confirmation" in (
+            window.label_control_process_status.text()
+        )
+        assert window.button_emergency_stop.isEnabled()
+
+        process.next_snapshot = SimpleNamespace(
+            state=mini_dma_mod.ControlState.EMERGENCY,
+            last_command_sequence=0,
+            last_command_result="accepted",
+            owner_pid=process.pid,
+            readback={
+                "automation_active": False,
+                "automation_phase": "emergency",
+                "emergency_reason": "operator emergency request",
+            },
+        )
+        window._poll_production_control_process()
+
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+        assert process.closed is True
+        assert "dedicated process emergency" in window.label_control_process_status.text()
+        assert "operator emergency request" in window.label_control_process_status.text()
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    [
+        mini_dma_mod.ControlState.STOPPED,
+        mini_dma_mod.ControlState.EMERGENCY,
+        mini_dma_mod.ControlState.FAULTED,
+    ],
+)
+def test_isolated_hardware_ownership_interlocks_manual_controls_until_finish(
+    tmp_path: Path,
+    qtbot,
+    terminal_state: object,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+
+    try:
+        window._update_recipe_buttons()
+
+        assert window.manual_actions_box.isEnabled() is False
+        assert window.hardware_tab.isEnabled() is False
+        assert window.button_emergency_stop.isEnabled() is True
+
+        window._finish_isolated_recipe(state=terminal_state)
+
+        assert window.manual_actions_box.isEnabled() is True
+        assert window.hardware_tab.isEnabled() is True
+        assert window.button_emergency_stop.isEnabled() is True
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     tmp_path: Path,
     qtbot,
@@ -1999,6 +2109,7 @@ def test_isolated_start_releases_ui_hardware_before_spawning_child(
     window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
     window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
     window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._stop_manual_jog = lambda: ordering.append("stop_manual_jog")  # type: ignore[method-assign]
     window._disconnect_scale = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
         "release_scale", "_scale_thread"
     )
@@ -2015,6 +2126,7 @@ def test_isolated_start_releases_ui_hardware_before_spawning_child(
 
         assert ordering == [
             "ui_preflight",
+            "stop_manual_jog",
             "release_scale",
             "release_supply",
             "release_tic",

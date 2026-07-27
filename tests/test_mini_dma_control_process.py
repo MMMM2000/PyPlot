@@ -106,6 +106,29 @@ def test_operator_command_channel_reports_backpressure() -> None:
         process._command_queue.join_thread()
 
 
+def test_out_of_band_emergency_bypasses_a_full_command_channel() -> None:
+    class _UnstartedAliveProcess:
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    process = MiniDmaControlProcess(command_capacity=1)
+    process._process = _UnstartedAliveProcess()  # type: ignore[assignment]
+    identity = _identity()
+    request = ControlStartRequest(identity=identity, policy=ControlPolicy.PRAGUE)
+    try:
+        process.start_session(request)
+        with pytest.raises(ControlBackpressureError, match="queue is full"):
+            process.start_session(request)
+
+        process.emergency_stop()
+
+        assert process._emergency_event.is_set()
+    finally:
+        process._command_queue.close()
+        process._command_queue.join_thread()
+
+
 @pytest.mark.parametrize("policy", [ControlPolicy.PRAGUE, ControlPolicy.KOSICE])
 def test_spawned_process_owns_backend_and_ticks_during_ui_thread_stall(
     policy: ControlPolicy,
