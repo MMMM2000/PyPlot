@@ -165,13 +165,12 @@ def test_current_sweep_defaults_to_adaptive_but_custom_dashboard_remains(
     combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
 
     assert window._adaptive_plot_stack.currentIndex() == 0
-    assert window._dashboard_view_tabs.isVisible()
+    assert not window._dashboard_view_tabs.isVisible()
     assert window._dashboard_view_tabs.currentIndex() == 0
     assert len(window._plot_tiles) == 4
 
-    window._dashboard_view_tabs.setCurrentIndex(1)
+    window._set_control_view("review")
     assert window._adaptive_plot_stack.currentIndex() == 1
-    assert window.button_plot_setup.isVisible()
     assert all(tile.x_combo.count() > 0 for tile in window._plot_tiles)
 
     combo.setCurrentIndex(combo.findData(mini_dma_mod.CALIBRATION))
@@ -195,7 +194,8 @@ def test_non_stress_current_sweeps_keep_custom_dashboard(
 
     assert window._adaptive_plot_stack.currentIndex() == 1
     assert not window._dashboard_view_tabs.isVisible()
-    assert not window._control_view_tabs.isTabEnabled(0)
+    assert not window._control_view_tabs.isTabEnabled(1)
+    assert window._control_view_tabs.isTabEnabled(0)
     assert window._control_view_stack.currentIndex() == 0
 
 
@@ -213,8 +213,8 @@ def test_active_stress_run_ignores_staged_recipe_selector_change(
     window._sync_dashboard_workspace_mode()
 
     assert window._adaptive_plot_stack.currentIndex() == 0
-    assert window._dashboard_view_tabs.isVisible()
-    assert window._control_view_tabs.isTabEnabled(0)
+    assert not window._dashboard_view_tabs.isVisible()
+    assert window._control_view_tabs.isTabEnabled(1)
 
     window._automation_active = False
     window._automation_name = ""
@@ -236,10 +236,11 @@ def test_target_navigation_scopes_results_and_progress(
     app.processEvents()
 
     navigator = window._adaptive_target_navigator
-    assert navigator.target_list.count() == 20
+    assert navigator.target_list.topLevelItemCount() == 21
+    assert navigator.target_list.topLevelItem(0).text(0) == "All targets"
     assert navigator.active_label.text() == "Active  100 MPa"
     assert navigator.inspected_label.text() == "Inspecting  100 MPa"
-    assert "Following active target | 100 MPa" in (
+    assert "Following active target | live target 100 MPa" in (
         window._adaptive_workspace_context_label.text()
     )
 
@@ -251,19 +252,24 @@ def test_target_navigation_scopes_results_and_progress(
     )
     assert len(progress_x) == 3
 
-    first_item = navigator.target_list.item(0)
-    navigator.target_list.itemClicked.emit(first_item)
+    first_item = navigator.target_list.topLevelItem(1)
+    navigator.target_list.itemClicked.emit(first_item, 0)
     app.processEvents()
     assert window._adaptive_target_selection == (
         adaptive_mod.StressTargetSelection.target(50.0)
     )
     assert navigator.active_label.text() == "Active  100 MPa"
     assert navigator.inspected_label.text() == "Inspecting  50 MPa"
-    assert "Inspecting 50 MPa | active 100 MPa" in (
+    assert "Inspecting 50 MPa | live target 100 MPa" in (
         window._adaptive_workspace_context_label.text()
     )
+    assert window._adaptive_return_to_active_button.isEnabled()
+    window._adaptive_return_to_active_button.click()
+    app.processEvents()
+    assert window._adaptive_target_selection.mode == "follow_active"
+    assert not window._adaptive_return_to_active_button.isEnabled()
 
-    navigator.all_button.click()
+    navigator.target_list.itemClicked.emit(navigator.target_list.topLevelItem(0), 0)
     app.processEvents()
     assert window._adaptive_target_selection.mode == "all"
     all_progress_x, _all_progress_y = (
@@ -276,8 +282,10 @@ def test_target_navigation_scopes_results_and_progress(
     ]
     assert len(visible_result_curves) == 2
 
-    future_item = navigator.target_list.item(navigator.target_list.count() - 1)
-    navigator.target_list.itemClicked.emit(future_item)
+    future_item = navigator.target_list.topLevelItem(
+        navigator.target_list.topLevelItemCount() - 1
+    )
+    navigator.target_list.itemClicked.emit(future_item, 0)
     app.processEvents()
     assert navigator.inspected_label.text() == "Inspecting  1000 MPa"
     assert all(
@@ -349,6 +357,17 @@ def test_adaptive_workspace_uses_full_width_header_and_action_dock(
     assert window.recipe_action_footer.width() >= central.width() - 2
     assert window._adaptive_summary_labels["target"].isVisible()
     assert window._adaptive_sweep_progress.isVisible()
+    assert [
+        window._control_view_tabs.tabText(index)
+        for index in range(window._control_view_tabs.count())
+    ] == ["Prepare", "Run", "Review"]
+    assert not window._dashboard_view_tabs.isVisible()
+    assert [
+        window._adaptive_inspector_tabs.tabText(index)
+        for index in range(window._adaptive_inspector_tabs.count())
+    ] == ["Active sweep", "Remaining recipe"]
+    assert window._adaptive_return_to_active_button.text() == "Following active"
+    assert not window.recipe_progress.isVisible()
 
 
 def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
@@ -368,8 +387,13 @@ def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
     assert window._adaptive_target_headline_label.text() == "100 MPa"
     assert window._adaptive_workspace_phase_label.text() == "STRESS RECOVERY HOLD"
     assert window._adaptive_summary_labels["target"].text() == "100 MPa"
+    assert window._adaptive_summary_labels["target_equivalent"].text().endswith(" g")
     assert window._adaptive_summary_labels["processed"].text() == "101.5 MPa"
     assert window._adaptive_summary_labels["current"].text() == "3.10 mA"
+    assert "A/mm" in window._adaptive_summary_labels["current_equivalent"].text()
+    assert "MPa" in window._adaptive_summary_labels["error"].text()
+    assert window._adaptive_remaining_recipe_labels["targets"].text()
+    assert window._adaptive_remaining_recipe_labels["current"].text().endswith("mA")
     assert (
         window._adaptive_plot_bundles["strain"]
         .widget.backgroundBrush()

@@ -133,14 +133,22 @@ class StressTargetNavigator(QtWidgets.QWidget):
         title.setFont(title_font)
         layout.addWidget(title)
 
+        self.count_label = QtWidgets.QLabel("0 of 0 active", self)
+        self.count_label.setObjectName("targetNavigatorCount")
+        layout.addWidget(self.count_label)
+
         self.follow_button = QtWidgets.QPushButton("Follow active target", self)
         self.follow_button.setObjectName("followActiveTargetButton")
         self.follow_button.setCheckable(True)
         self.follow_button.clicked.connect(self._select_follow_active)
         layout.addWidget(self.follow_button)
 
-        self.target_list = QtWidgets.QListWidget(self)
+        self.target_list = QtWidgets.QTreeWidget(self)
         self.target_list.setObjectName("stressTargetList")
+        self.target_list.setColumnCount(2)
+        self.target_list.setHeaderHidden(True)
+        self.target_list.setRootIsDecorated(False)
+        self.target_list.setIndentation(0)
         self.target_list.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
         )
@@ -154,33 +162,29 @@ class StressTargetNavigator(QtWidgets.QWidget):
         self.all_button.setObjectName("allStressTargetsButton")
         self.all_button.setCheckable(True)
         self.all_button.clicked.connect(self._select_all)
-        layout.addWidget(self.all_button)
-
-        divider = QtWidgets.QFrame(self)
-        divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        divider.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
-        layout.addWidget(divider)
+        self.all_button.setVisible(False)
 
         self.active_label = QtWidgets.QLabel("Active  -", self)
         self.active_label.setObjectName("activeTargetLabel")
         self.active_label.setWordWrap(True)
-        layout.addWidget(self.active_label)
+        self.active_label.setVisible(False)
 
         self.inspected_label = QtWidgets.QLabel("Inspecting  -", self)
         self.inspected_label.setObjectName("inspectedTargetLabel")
         self.inspected_label.setWordWrap(True)
-        layout.addWidget(self.inspected_label)
+        self.inspected_label.setVisible(False)
 
         self.configure_button = QtWidgets.QPushButton("Recipe, sample and hardware", self)
         self.configure_button.setObjectName("openTmaConfigurationButton")
         self.configure_button.clicked.connect(self.configure_requested)
-        layout.addWidget(self.configure_button)
+        self.configure_button.setVisible(False)
 
         self.setStyleSheet(
             """
             QWidget#tmaStressTargetNavigator {
                 background: #191c20;
-                border-right: 1px solid #343a42;
+                border: 1px solid #343a42;
+                border-radius: 4px;
             }
             QPushButton#followActiveTargetButton,
             QPushButton#allStressTargetsButton {
@@ -192,22 +196,25 @@ class StressTargetNavigator(QtWidgets.QWidget):
             }
             QPushButton#followActiveTargetButton:checked,
             QPushButton#allStressTargetsButton:checked {
-                background: #e8ad43;
-                border-color: #e8ad43;
-                color: #101214;
-                font-weight: 700;
+                background: #20242a;
+                border-color: #343a42;
+                color: #edf0f3;
             }
-            QListWidget#stressTargetList {
+            QLabel#targetNavigatorCount {
+                color: #9ca5af;
+                font-size: 9px;
+            }
+            QTreeWidget#stressTargetList {
                 border: 0;
                 outline: 0;
                 background: transparent;
             }
-            QListWidget#stressTargetList::item {
-                min-height: 29px;
-                padding: 2px 6px;
+            QTreeWidget#stressTargetList::item {
+                min-height: 28px;
+                padding: 1px 5px;
                 color: #9ca5af;
             }
-            QListWidget#stressTargetList::item:selected {
+            QTreeWidget#stressTargetList::item:selected {
                 border-left: 3px solid #e8ad43;
                 background: #20242a;
                 color: #edf0f3;
@@ -256,18 +263,26 @@ class StressTargetNavigator(QtWidgets.QWidget):
 
     def _rebuild_target_items(self) -> None:
         self.target_list.clear()
+        all_item = QtWidgets.QTreeWidgetItem(["All targets", ""])
+        all_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, "all")
+        all_item.setToolTip(0, "Compare all measured stress targets")
+        self.target_list.addTopLevelItem(all_item)
         for target_mpa in self._targets_mpa:
             equivalent = self._equivalent_by_target.get(round(target_mpa, 9), "")
-            text = format_target_mpa(target_mpa)
-            if equivalent and equivalent != "-":
-                text += f"\n{equivalent}"
-            item = QtWidgets.QListWidgetItem(text)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, float(target_mpa))
+            item = QtWidgets.QTreeWidgetItem(
+                [
+                    format_target_mpa(target_mpa),
+                    "" if equivalent == "-" else equivalent,
+                ]
+            )
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, float(target_mpa))
             item.setToolTip(
+                0,
                 f"Inspect plots for {format_target_mpa(target_mpa)}"
                 + ("" if not equivalent else f" ({equivalent})")
             )
-            self.target_list.addItem(item)
+            self.target_list.addTopLevelItem(item)
+        self.target_list.resizeColumnToContents(1)
 
     def _sync_controls(self) -> None:
         resolved = resolve_selected_target(
@@ -277,14 +292,24 @@ class StressTargetNavigator(QtWidgets.QWidget):
         )
         self.follow_button.setChecked(self._selection.mode == "follow_active")
         self.all_button.setChecked(self._selection.mode == "all")
+        active_count = 0
+        if self._active_target_mpa is not None:
+            active_count = sum(
+                1
+                for target in self._targets_mpa
+                if target <= self._active_target_mpa + TARGET_MATCH_ABS_TOLERANCE_MPA
+            )
+        self.count_label.setText(f"{active_count} of {len(self._targets_mpa)} active")
         self.target_list.blockSignals(True)
         try:
             self.target_list.clearSelection()
-            if self._selection.mode == "target" and resolved is not None:
-                for row in range(self.target_list.count()):
-                    item = self.target_list.item(row)
-                    value = item.data(QtCore.Qt.ItemDataRole.UserRole)
-                    if value is not None and math.isclose(
+            if self._selection.mode == "all":
+                self.target_list.setCurrentItem(self.target_list.topLevelItem(0))
+            elif self._selection.mode in {"target", "follow_active"} and resolved is not None:
+                for row in range(self.target_list.topLevelItemCount()):
+                    item = self.target_list.topLevelItem(row)
+                    value = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                    if isinstance(value, (int, float)) and math.isclose(
                         float(value),
                         float(resolved),
                         rel_tol=0.0,
@@ -293,12 +318,12 @@ class StressTargetNavigator(QtWidgets.QWidget):
                         item.setSelected(True)
                         self.target_list.setCurrentItem(item)
                         break
-            for row in range(self.target_list.count()):
-                item = self.target_list.item(row)
-                value = item.data(QtCore.Qt.ItemDataRole.UserRole)
-                font = QtGui.QFont(item.font())
+            for row in range(self.target_list.topLevelItemCount()):
+                item = self.target_list.topLevelItem(row)
+                value = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                font = QtGui.QFont(item.font(0))
                 is_active = (
-                    value is not None
+                    isinstance(value, (int, float))
                     and self._active_target_mpa is not None
                     and math.isclose(
                         float(value),
@@ -308,14 +333,18 @@ class StressTargetNavigator(QtWidgets.QWidget):
                     )
                 )
                 font.setBold(is_active)
-                item.setFont(font)
+                item.setFont(0, font)
+                if is_active:
+                    item.setText(0, f"{format_target_mpa(float(value))}  active")
+                elif isinstance(value, (int, float)):
+                    item.setText(0, format_target_mpa(float(value)))
                 item.setForeground(
-                    self.palette().brush(
-                        QtGui.QPalette.ColorRole.Highlight
-                        if is_active
-                        else QtGui.QPalette.ColorRole.Text
-                    )
+                    0,
+                    QtGui.QBrush(
+                        QtGui.QColor("#e8ad43" if is_active else "#9ca5af")
+                    ),
                 )
+                item.setForeground(1, QtGui.QBrush(QtGui.QColor("#9ca5af")))
         finally:
             self.target_list.blockSignals(False)
 
@@ -343,8 +372,15 @@ class StressTargetNavigator(QtWidgets.QWidget):
         self._sync_controls()
         self.selection_changed.emit(self._selection)
 
-    def _select_item(self, item: QtWidgets.QListWidgetItem) -> None:
-        target_mpa = item.data(QtCore.Qt.ItemDataRole.UserRole)
+    def _select_item(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        _column: int = 0,
+    ) -> None:
+        target_mpa = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if target_mpa == "all":
+            self._select_all()
+            return
         if target_mpa is None:
             return
         self._selection = StressTargetSelection.target(float(target_mpa))
