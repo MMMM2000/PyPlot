@@ -7936,6 +7936,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._controller_process_cadence_downgrade_accepted = False
         self._controller_process_prior_run_preflight_complete = False
         self._controller_process_hardware_preflight_complete = False
+        self._controller_process_output_collision_action = OUTPUT_COLLISION_CANCEL
         self._production_control_process: MiniDmaControlProcess | None = None
         self._production_control_identity: ControlSessionIdentity | None = None
         self._production_control_generation = 0
@@ -8373,6 +8374,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
+        self._manual_jog_velocity_sequence: int | None = None
         self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
@@ -24640,25 +24642,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
+        self._manual_jog_velocity_sequence = None
         self._start_tic_keepalive()
         self._manual_jog_timer.start()
 
     def _stop_manual_jog(self) -> None:
         self._manual_jog_timer.stop()
-        if self._manual_jog_timer_moves > 0:
+        velocity_was_queued = self._manual_jog_velocity_sequence is not None
+        if velocity_was_queued:
+            try:
+                self._build_tic_dispatcher().halt_and_hold()
+            except Exception as exc:
+                self._log(f"Tic manual-jog halt failed: {exc}")
+        if self._manual_jog_timer_moves > 0 or velocity_was_queued:
             self._manual_jog_click_suppressed = True
         self._manual_jog_last_tick_s = None
         self._manual_jog_direction = 0.0
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
+        self._manual_jog_velocity_sequence = None
         if not self._automation_active:
             self._stop_tic_keepalive()
 
     def _handle_manual_jog_timer(self) -> None:
         if self._manual_jog_direction == 0.0:
             return
-        if self._jog_relative(self._manual_jog_direction):
-            self._manual_jog_timer_moves += 1
+        if self._pending_motion_command is not None or self._tic_motor_power_ok is False:
+            return
+        dispatcher = self._build_tic_dispatcher()
+        if self._manual_jog_velocity_sequence is not None:
+            result = dispatcher.command_result(self._manual_jog_velocity_sequence)
+            if result is None or result.succeeded:
+                return
+            self._log(f"Tic manual-jog velocity command failed: {result.error}; retrying.")
+            self._manual_jog_velocity_sequence = None
+        velocity_units = int(
+            round(
+                self._manual_jog_direction
+                * abs(float(self.spin_motion_speed_mm_s.value()))
+                * max(1.0, float(self.spin_steps_per_mm.value()))
+                * 10_000.0
+            )
+        )
+        if velocity_units == 0:
+            return
+        self._manual_jog_velocity_sequence = dispatcher.set_target_velocity(
+            velocity_units
+        )
+        self._manual_jog_timer_moves += 1
 
     def _handle_manual_jog_button_clicked(self, direction: float) -> None:
         if self._manual_jog_click_suppressed:
@@ -25651,6 +25682,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _ask_existing_output_action(self, paths: Sequence[Path]) -> str:
+        if self._controller_process_mode:
+            action = self._controller_process_output_collision_action
+            if action in {OUTPUT_COLLISION_NEXT, OUTPUT_COLLISION_REPLACE}:
+                return action
+            return OUTPUT_COLLISION_CANCEL
         existing_names = ", ".join(path.name for path in paths if path.exists())
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
@@ -25676,6 +25712,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if clicked is cancel_button:
             return OUTPUT_COLLISION_CANCEL
         return OUTPUT_COLLISION_CANCEL
+
+    def _preflight_isolated_session_output(self) -> bool:
+        """Resolve an existing run visibly before collecting recipe-only input."""
+
+        self._controller_process_output_collision_action = OUTPUT_COLLISION_NEXT
+        paths = self._session_base_paths()
+        if not _session_paths_exist(paths):
+            return True
+        action = self._ask_existing_output_action(paths)
+        if action == OUTPUT_COLLISION_CANCEL:
+            self._log("Recipe start cancelled while reviewing existing output.")
+            self._controller_process_output_collision_action = OUTPUT_COLLISION_CANCEL
+            return False
+        self._controller_process_output_collision_action = action
+        if action == OUTPUT_COLLISION_NEXT:
+            directory = paths[0].parent.parent
+            basename = _clean_session_basename(self.edit_log_name.text())
+            next_basename, _next_paths = _next_run_session_paths(directory, basename)
+            self.edit_log_name.setText(next_basename)
+            self._log(
+                "Existing output preserved; the dedicated controller will use "
+                f"{next_basename}."
+            )
+        else:
+            self._log(
+                "Existing output replacement confirmed; evacuation is deferred until "
+                "the dedicated controller starts authoritative logging."
+            )
+        return True
 
     def _resolve_session_base_paths(self) -> tuple[Path, Path, Path, Path]:
         paths = self._session_base_paths()
@@ -31371,6 +31436,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._first_overheating_preflight_allows_start():
             return
         self._sync_stale_log_name_from_sample()
+        if not self._preflight_isolated_session_output():
+            self._first_overheating_preflight_decision = None
+            return
         if not self._preflight_recipe_hardware(steps, show_progress=True):
             self._first_overheating_preflight_decision = None
             return

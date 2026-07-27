@@ -443,12 +443,14 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
         policy=ControlPolicy.PRAGUE,
         config_json=(
             '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+            '"output_collision_action":"replace",'
             '"cadence_downgrade_accepted":true}'
         ),
     )
 
     backend.start(request)
     assert backend._window.lifecycle_calls == ["hardware_preflight", "recipe_start"]
+    assert backend._window._controller_process_output_collision_action == "replace"
     readback = dict(backend.readback())
     assert readback["backend_owner_pid"] == os.getpid()
     assert readback["automation_active"] is True
@@ -582,6 +584,7 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
             self.enabled.setChecked(True)
             self.name = QtWidgets.QLineEdit("sample")
             self._first_overheating_preflight_decision = {"action": "continue"}
+            self._controller_process_output_collision_action = "next"
 
     payload = capture_window_configuration(
         _Window(),
@@ -590,6 +593,7 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     )
     assert '"starting_length_mm":57.0' in payload
     assert '"prior_run_preflight_complete":true' in payload
+    assert '"output_collision_action":"next"' in payload
     assert '"kind":"integer_spin","value":7' in payload
     assert '"kind":"decimal_spin","value":12.5' in payload
     assert '"value":12.5' in payload

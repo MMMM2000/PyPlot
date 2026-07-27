@@ -1968,6 +1968,9 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     window._first_overheating_preflight_allows_start = (  # type: ignore[method-assign]
         lambda: ordering.append("prior_run_check") or True
     )
+    window._preflight_isolated_session_output = (  # type: ignore[method-assign]
+        lambda: ordering.append("existing_output_check") or True
+    )
     window._preflight_recipe_hardware = (  # type: ignore[method-assign]
         lambda _steps, *, show_progress: (
             ordering.append("hardware_preflight") or show_progress
@@ -1990,6 +1993,7 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
 
         assert ordering == [
             "prior_run_check",
+            "existing_output_check",
             "hardware_preflight",
             "continuity_current",
             "length_prompt",
@@ -2001,6 +2005,136 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_reviews_real_existing_output_before_length(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_log_name.setText("existing_sample")
+    run_dir = tmp_path / "existing_sample"
+    run_dir.mkdir()
+    (run_dir / mini_dma_mod.SESSION_METADATA_JSON).write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 10,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni47Fe24Ga23Co6",
+                    "microwire": "2/1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    ordering: list[str] = []
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda paths: (
+            ordering.append(f"existing_output:{paths[0].parent.name}")
+            or mini_dma_mod.OUTPUT_COLLISION_NEXT
+        )
+    )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: (
+            ordering.append("hardware_preflight") or show_progress
+        )
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: ordering.append("continuity_current") or True
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (
+            ordering.append("length_prompt") or 57.522,
+            True,
+        ),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == [
+            "existing_output:existing_sample",
+            "hardware_preflight",
+            "continuity_current",
+            "length_prompt",
+        ]
+        assert process.started is True
+        payload = json.loads(process.requests[0].config_json)
+        assert payload["output_collision_action"] == mini_dma_mod.OUTPUT_COLLISION_NEXT
+        assert (
+            payload["widgets"]["edit_log_name"]["text"]
+            == "existing_sample_run02"
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_existing_output_cancel_prevents_hardware_and_length(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_log_name.setText("existing_sample")
+    (tmp_path / "existing_sample").mkdir()
+    side_effects: list[str] = []
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_CANCEL
+    )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: side_effects.append("hardware") or True
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (
+            side_effects.append("length") or 57.522,
+            True,
+        ),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert side_effects == []
+        assert process.started is False
+        assert "cancelled while reviewing existing output" in window.log_output.toPlainText()
+    finally:
         _close_test_window(window)
 
 
@@ -7367,31 +7501,43 @@ def test_manual_jog_press_refreshes_stale_tic_status(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
-def test_held_manual_jog_repeats_bounded_position_steps(
+def test_held_manual_jog_uses_one_continuous_velocity_command(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    jog_directions: list[float] = []
-    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
-    window._jog_relative = (  # type: ignore[method-assign]
-        lambda direction, **_kwargs: jog_directions.append(direction) or True
-    )
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.velocities: list[int] = []
+            self.halts = 0
+
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
+
+        def halt_and_hold(self) -> None:
+            self.halts += 1
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
 
     try:
         window._start_manual_jog(-1.0)
         for _ in range(3):
             window._handle_manual_jog_timer()
+            _wait_for_tic_commands(window)
         window._stop_manual_jog()
+        _wait_for_tic_commands(window)
 
-        assert jog_directions == [-1.0, -1.0, -1.0]
-        assert window._manual_jog_timer.isActive() is False
-        assert window._manual_jog_click_suppressed is True
+        assert controller.velocities == [-1_000_000]
+        assert controller.halts == 1
     finally:
         _close_test_window(window)
 
 
-def test_held_manual_jog_delayed_timer_caps_each_position_step(
+def test_held_manual_jog_delayed_timer_starts_only_one_velocity_command(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -7399,13 +7545,17 @@ def test_held_manual_jog_delayed_timer_caps_each_position_step(
     window = _build_window(tmp_path, qtbot)
     clock = {"now": 10.0}
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
-    targets: list[tuple[float, bool]] = []
-    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
-    window._relative_motion_base_mm = lambda: 0.0  # type: ignore[method-assign]
-    window._move_to_position_mm = (  # type: ignore[method-assign]
-        lambda target_mm, *, manual_jog=False: targets.append((target_mm, manual_jog)) or True
-    )
-    window.spin_steps_per_mm.setValue(800.0)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.velocities: list[int] = []
+
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
     window.spin_jog_mm.setValue(0.01)
     window.spin_motion_speed_mm_s.setValue(1.0)
 
@@ -7413,33 +7563,56 @@ def test_held_manual_jog_delayed_timer_caps_each_position_step(
         window._start_manual_jog(-1.0)
         clock["now"] = 10.8
         window._handle_manual_jog_timer()
+        window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
 
-        assert targets == [(-mini_dma_mod.MANUAL_JOG_MAX_TIMER_ELAPSED_S, True)]
+        assert controller.velocities == [-1_000_000]
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
 
 
-def test_manual_jog_release_stops_without_queuing_an_extra_motor_command(
+def test_manual_jog_release_halts_velocity_without_batching_position_move(
     tmp_path: Path,
     qtbot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    jog_directions: list[float] = []
-    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
-    window._jog_relative = (  # type: ignore[method-assign]
-        lambda direction, **_kwargs: jog_directions.append(direction) or True
-    )
+    clock = {"now": 10.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+            self.velocities: list[int] = []
+            self.halts = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
+
+        def halt_and_hold(self) -> None:
+            self.halts += 1
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_jog_mm.setValue(0.00625)
+    window.spin_motion_speed_mm_s.setValue(0.1)
 
     try:
         window._start_manual_jog(1.0)
+        clock["now"] = 20.0
         window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
         window._stop_manual_jog()
-        window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
 
-        assert jog_directions == [1.0]
-        assert window._manual_jog_direction == 0.0
-        assert window._manual_jog_timer.isActive() is False
+        assert controller.targets == []
+        assert controller.velocities == [800_000]
+        assert controller.halts == 1
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
@@ -21073,6 +21246,38 @@ def test_tic_command_dispatcher_halt_cancels_queued_target_with_result() -> None
         dispatcher.stop()
 
 
+def test_tic_command_dispatcher_halt_cancels_queued_manual_velocity() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.actions.append(f"velocity:{velocity_steps_per_10k_s}")
+
+        def halt_and_hold(self) -> None:
+            self.actions.append("halt")
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(
+        lambda: controller,
+        autostart=False,
+    )
+    try:
+        velocity_sequence = dispatcher.set_target_velocity(800_000)
+        dispatcher.halt_and_hold()
+        velocity_result = dispatcher.command_result(velocity_sequence)
+
+        assert velocity_result is not None
+        assert velocity_result.succeeded is False
+        assert "cancelled by halt-and-hold" in str(velocity_result.error)
+
+        dispatcher.start()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert controller.actions == ["halt"]
+    finally:
+        dispatcher.stop()
+
+
 def test_tic_command_dispatcher_keepalive_runs_without_qt_event_processing() -> None:
     class _FakeController:
         def __init__(self) -> None:
@@ -32078,6 +32283,42 @@ def test_existing_output_message_names_sample_and_output_folder(tmp_path: Path, 
         assert "Sample: Ni50Fe27Ga23 10/4 calibration" in message
         assert "Base filename: Ni50Fe27Ga23 10_4 calibration" in message
         assert str(tmp_path / "Ni50Fe27Ga23 10_4 calibration") in message
+    finally:
+        _close_test_window(window)
+
+
+def test_controller_process_resolves_transferred_output_choice_without_dialog(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    paths = mini_dma_mod._session_paths_for_basename(tmp_path, "existing_sample")
+    window._controller_process_output_collision_action = mini_dma_mod.OUTPUT_COLLISION_NEXT
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "exec",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller process must not open an output-collision dialog"
+        ),
+    )
+
+    try:
+        assert (
+            window._ask_existing_output_action(paths)
+            == mini_dma_mod.OUTPUT_COLLISION_NEXT
+        )
+        window._controller_process_output_collision_action = "unexpected"
+        assert (
+            window._ask_existing_output_action(paths)
+            == mini_dma_mod.OUTPUT_COLLISION_CANCEL
+        )
     finally:
         _close_test_window(window)
 

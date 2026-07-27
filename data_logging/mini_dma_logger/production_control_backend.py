@@ -72,6 +72,9 @@ def capture_window_configuration(
             decision if isinstance(decision, Mapping) else None
         ),
         "prior_run_preflight_complete": True,
+        "output_collision_action": str(
+            getattr(window, "_controller_process_output_collision_action", "cancel")
+        ),
         "cadence_downgrade_accepted": bool(cadence_downgrade_accepted),
         "parent_pid": os.getpid(),
     }
@@ -247,6 +250,9 @@ class ProductionMiniDmaBackend:
         )
         self._window._controller_process_prior_run_preflight_complete = bool(
             payload.get("prior_run_preflight_complete", False)
+        )
+        self._window._controller_process_output_collision_action = str(
+            payload.get("output_collision_action", "cancel")
         )
         starting_length = payload.get("starting_length_mm")
         steps, _summary, _interval_ms = self._window._build_automation_recipe()

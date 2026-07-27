@@ -25,11 +25,16 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
    events, generation checks, bounded channels, heartbeat/crash handling, and
    an out-of-band emergency path. It imports no Qt, serial, Tic, or PSU code.
 2. The visible UI retains operator-facing preparation: stopped-run handling,
-   previous-run and first-overheating decisions, hardware preflight, continuity
-   preparation, the mounted-length prompt, and responsive manual setup controls.
-   Manual Tic jogging uses bounded target-position steps directly from the UI
-   while no isolated recipe owns the hardware; it is not routed through the
-   recipe child.
+   previous-run and first-overheating decisions, existing-output review,
+   hardware preflight, continuity preparation, the mounted-length prompt, and
+   responsive manual setup controls. Existing output is reviewed before mounted
+   length is requested; the resulting save-next or replace decision is
+   transferred as immutable startup configuration so the hidden child never
+   opens an operator dialog.
+   Manual Tic jogging uses the PR 298 continuous-velocity path directly from
+   the UI while no isolated recipe owns the hardware. Button release sends a
+   priority halt instead of leaving a position target for the motor to finish;
+   manual commands are not routed through the recipe child.
 3. Immediately before the run, the visible UI freezes immutable JSON
    configuration, stops its acquisition workers, closes its PSU and Tic
    objects, explicitly releases the Tic ownership lease, and starts the child.
@@ -58,6 +63,16 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
 Normal persisted app launches default to the isolated production path. The
 in-process path remains as an explicit constructor seam for deterministic tests
 and for the child-host adapter.
+
+## Manual-control provenance
+
+PR 298 combined exact Tic target/current-position/velocity readback
+(`6f9e7802`, `525dc4e7`) with continuous-velocity press-and-hold jogging
+(`7ff64206`). That combination is intentional. A held jog has no future
+position target: release inserts `halt_and_hold` ahead of ordinary dispatcher
+work and cancels an undispatched velocity command. Replacing it with repeated
+position targets makes release stop only future scheduling while the Tic still
+finishes its last accepted target, producing perceptible post-release travel.
 
 ## Software gates
 

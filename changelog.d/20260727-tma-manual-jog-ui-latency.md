@@ -1,9 +1,12 @@
 2026-07-27 UTC
 
-- Restored responsive UI-owned TMA manual motor jogging with bounded
-  target-position steps. Releasing a jog button now stops scheduling movement
-  immediately instead of waiting for a queued velocity halt, while active
-  recipes remain isolated in the dedicated control process.
+- Restored the PR 298 UI-owned continuous-velocity manual motor jog. Releasing
+  a jog button now sends a priority halt that cancels any undispatched velocity
+  command, leaving no position destination for the motor to finish after
+  release. Active recipes remain isolated in the dedicated control process.
+- Restored the visible existing-output review before the mounted-length prompt.
+  The UI records the operator's save-next or replace choice, while the dedicated
+  controller remains the only process that creates and writes the run files.
 - Routed the visible Emergency Stop through the control child's out-of-band
   safety event and retained a red pending state until the child confirms its
   emergency safe state. Manual and Hardware controls are now interlocked while
