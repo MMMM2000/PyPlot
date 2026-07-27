@@ -450,7 +450,7 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     backend.close()
 
 
-def test_production_backend_preflights_before_requesting_starting_length() -> None:
+def test_production_backend_rejects_missing_ui_collected_starting_length() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app
     backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
@@ -464,29 +464,14 @@ def test_production_backend_preflights_before_requesting_starting_length() -> No
         ),
     )
 
-    backend.start(request)
+    with pytest.raises(
+        ValueError,
+        match="must be collected by the visible UI",
+    ):
+        backend.start(request)
 
     assert backend._window.lifecycle_calls == ["hardware_preflight"]
-    readback = dict(backend.readback())
-    assert readback["hardware_preflight_complete"] is True
-    assert readback["scale_connected"] is True
-    assert readback["tic_connected"] is True
-    assert "scale connected" in readback["hardware_preflight_detail"]
-    assert readback["operator_input_required"] == "starting_length_mm"
-    assert readback["operator_input_default"] == pytest.approx(57.25)
-    assert readback["automation_active"] is False
-    assert backend.completion_detail() is None
-
-    accepted, detail = backend.update_config(
-        '{"schema_version":1,"operator_response":"starting_length_mm","value":57.602}'
-    )
-
-    assert accepted is True
-    assert "recipe started" in detail
-    assert backend._window.starting_length_mm == pytest.approx(57.602)
-    assert backend._window.lifecycle_calls == ["hardware_preflight", "recipe_start"]
-    assert dict(backend.readback())["operator_input_required"] is None
-    assert dict(backend.readback())["automation_active"] is True
+    assert dict(backend.readback())["automation_active"] is False
     backend.close()
 
 
@@ -534,7 +519,7 @@ def test_production_backend_rejects_start_when_child_hardware_preflight_fails() 
     backend.close()
 
 
-def test_production_backend_stop_while_waiting_for_length_disables_outputs() -> None:
+def test_production_backend_rejects_non_runtime_configuration_update() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app
     backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
@@ -542,18 +527,19 @@ def test_production_backend_stop_while_waiting_for_length_disables_outputs() -> 
         identity=_identity(),
         policy=ControlPolicy.PRAGUE,
         config_json=(
-            '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
+            '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
             '"prior_run_preflight_complete":true,'
             '"cadence_downgrade_accepted":true}'
         ),
     )
     backend.start(request)
 
-    backend.stop()
+    accepted, detail = backend.update_config(
+        '{"schema_version":1,"widgets":{}}'
+    )
 
-    assert backend._window.supply_disable_calls == 1
-    assert backend._window.motor_supply_disable_calls == 1
-    assert dict(backend.readback())["operator_input_required"] is None
+    assert accepted is False
+    assert "not marked as runtime-safe" in detail
     backend.close()
 
 

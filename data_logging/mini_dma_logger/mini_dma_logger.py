@@ -93,7 +93,6 @@ from data_logging.mini_dma_logger.control_process import (
 )
 from data_logging.mini_dma_logger.production_control_backend import (
     capture_runtime_configuration,
-    capture_starting_length_response,
     capture_window_configuration,
 )
 
@@ -11351,6 +11350,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_control_process_status.setWordWrap(True)
         self.label_control_process_status.setStyleSheet("color: #2563eb;")
+        self.label_control_process_status.setVisible(False)
 
         self.recipe_action_footer_layout.addWidget(self.label_control_process_status)
         self.recipe_action_footer_layout.addWidget(self.recipe_progress)
@@ -31332,16 +31332,68 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         try:
-            steps, _summary, interval_ms = self._build_automation_recipe()
+            steps, summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        if self._resume_recipe_state is not None:
+            if self._resume_recipe_state.summary == summary:
+                resume_choice = self._ask_resume_stopped_recipe()
+                if resume_choice == "cancel":
+                    return
+                if resume_choice == "resume":
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        APP_NAME,
+                        "A stopped recipe cannot yet be resumed across the dedicated-process "
+                        "ownership boundary. Choose Start over in the resume dialog to run it "
+                        "with process isolation.",
+                    )
+                    return
+            else:
+                self._log(
+                    "Discarded stopped-recipe resume state because the visible recipe "
+                    "controls changed."
+                )
+            self._resume_recipe_state = None
         if not self._first_overheating_preflight_allows_start():
             return
+        self._sync_stale_log_name_from_sample()
+        if not self._preflight_recipe_hardware(steps, show_progress=True):
+            self._first_overheating_preflight_decision = None
+            return
+        if not self._prepare_continuity_current_for_recipe(steps):
+            self._first_overheating_preflight_decision = None
+            return
+        starting_length_mm: float | None = None
+        if any(step.action == "starting_length_prompt" for step in steps):
+            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                APP_NAME,
+                "Measured mounted wire length now (mm):",
+                max(0.001, float(self.spin_initial_length.value())),
+                0.001,
+                100000.0,
+                4,
+            )
+            if not accepted:
+                self._log("Recipe start cancelled before transferring hardware ownership.")
+                self._first_overheating_preflight_decision = None
+                return
+            starting_length_mm = float(starting_length_mm)
+            self.spin_initial_length.setValue(starting_length_mm)
+        config_json = capture_window_configuration(
+            self,
+            starting_length_mm=starting_length_mm,
+            cadence_downgrade_accepted=True,
+        )
         if (
             self._scale_thread is not None
             or self._supply_controller is not None
             or self._tic_command_dispatcher is not None
+            or self._tic_controller is not None
+            or self._tic_device_lock is not None
+            or self._tic_device_lock_handle is not None
         ):
             self._log(
                 "Releasing UI-process hardware handles before starting the dedicated "
@@ -31349,16 +31401,18 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._disconnect_scale()
             self._disconnect_supply()
-            self._stop_tic_dispatcher()
+            if not self._stop_tic_dispatcher():
+                self._log(
+                    "Dedicated-process startup aborted because the UI Tic worker did "
+                    "not release hardware ownership cleanly."
+                )
+                self._first_overheating_preflight_decision = None
+                return
+            self._release_tic_device_lock()
         self._production_control_generation += 1
         identity = ControlSessionIdentity(
             session_id=f"mini-dma-{uuid4()}",
             generation=self._production_control_generation,
-        )
-        config_json = capture_window_configuration(
-            self,
-            starting_length_mm=None,
-            cadence_downgrade_accepted=True,
         )
         policy = (
             ControlPolicy.KOSICE
@@ -31396,9 +31450,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         self._automation_phase = "starting_process"
         self.label_control_process_status.setStyleSheet("color: #2563eb;")
-        self.label_control_process_status.setText(
-            f"Controller: starting dedicated process (PID {process.pid or '-'})"
-        )
+        self.label_control_process_status.setText("Starting recipe controller…")
+        self.label_control_process_status.setVisible(True)
         self._control_process_poll_timer.start()
         self._update_recipe_buttons()
 
@@ -31412,12 +31465,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
             self._consume_isolated_plot_snapshot(readback)
-            if (
-                readback.get("operator_input_required") == "starting_length_mm"
-                and not self._isolated_operator_prompt_open
-                and self._isolated_command_pending == "start"
-            ):
-                self._request_isolated_starting_length(readback)
             self._automation_paused = snapshot.state is ControlState.PAUSED
             self._isolated_recipe_paused = self._automation_paused
             pending_sequence = self._isolated_pending_sequence
@@ -31448,6 +31495,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_runtime_update_values = None
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None
+                if snapshot.state is ControlState.RUNNING:
+                    self.label_control_process_status.setVisible(False)
                 self._update_recipe_buttons()
             if (
                 (
@@ -31541,75 +31590,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 detail=f"control process exited with code {process.exitcode}",
             )
 
-    def _request_isolated_starting_length(
-        self,
-        readback: Mapping[str, object],
-    ) -> None:
-        process = self._production_control_process
-        identity = self._production_control_identity
-        if process is None or identity is None:
-            return
-        self._isolated_operator_prompt_open = True
-        try:
-            preflight_detail = str(
-                readback.get("hardware_preflight_detail")
-                or "required hardware is ready"
-            )
-            self._log(
-                "Dedicated controller hardware preflight completed: "
-                f"{preflight_detail}."
-            )
-            self.label_current_task.setText(
-                "Current task: Hardware ready; waiting for mounted length"
-            )
-            self.label_current_task.setVisible(True)
-            self.label_control_process_status.setText(
-                "Controller: child hardware preflight passed | "
-                f"{preflight_detail}"
-            )
-            self.label_live_summary.setText(
-                "Process-owned hardware ready | "
-                f"scale {'connected' if readback.get('scale_connected') else 'not required'} | "
-                f"PSU {'connected' if readback.get('supply_connected') else 'not required'} | "
-                f"Tic {'connected' if readback.get('tic_connected') else 'not required'}"
-            )
-            QtWidgets.QApplication.processEvents(
-                QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-            )
-            default_value = float(
-                readback.get("operator_input_default")
-                or self.spin_initial_length.value()
-            )
-            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
-                self,
-                APP_NAME,
-                "Measured mounted wire length now (mm):",
-                max(0.001, default_value),
-                0.001,
-                100000.0,
-                4,
-            )
-            if accepted:
-                sequence = process.update_config(
-                    identity,
-                    capture_starting_length_response(starting_length_mm),
-                )
-                self._isolated_command_pending = "starting_length"
-                self._isolated_pending_sequence = sequence
-                self.label_control_process_status.setText(
-                    "Controller: mounted length sent; awaiting child confirmation"
-                )
-            else:
-                sequence = process.stop(identity)
-                self._isolated_command_pending = "stop"
-                self._isolated_pending_sequence = sequence
-                self.label_control_process_status.setText(
-                    "Controller: startup cancelled; awaiting safe child stop"
-                )
-            self._update_recipe_buttons()
-        finally:
-            self._isolated_operator_prompt_open = False
-
     def _finish_isolated_recipe(
         self,
         *,
@@ -31638,6 +31618,9 @@ class MainWindow(QtWidgets.QMainWindow):
         suffix = f": {detail}" if detail else ""
         self.label_control_process_status.setText(
             f"Controller: dedicated process {state.value}{suffix}"
+        )
+        self.label_control_process_status.setVisible(
+            state in {ControlState.FAULTED, ControlState.EMERGENCY}
         )
         self._update_recipe_buttons()
 

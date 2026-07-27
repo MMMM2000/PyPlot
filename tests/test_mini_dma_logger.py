@@ -1716,6 +1716,12 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         lambda: mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE
     )
     window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: show_progress
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: True
+    )
 
     try:
         window._start_auto_ramp()
@@ -1829,7 +1835,7 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         _close_test_window(window)
 
 
-def test_isolated_start_waits_for_child_preflight_before_length_prompt(
+def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -1852,6 +1858,14 @@ def test_isolated_start_waits_for_child_preflight_before_length_prompt(
     window._first_overheating_preflight_allows_start = (  # type: ignore[method-assign]
         lambda: ordering.append("prior_run_check") or True
     )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: (
+            ordering.append("hardware_preflight") or show_progress
+        )
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: ordering.append("continuity_current") or True
+    )
     monkeypatch.setattr(
         mini_dma_mod.QtWidgets.QInputDialog,
         "getDouble",
@@ -1864,48 +1878,16 @@ def test_isolated_start_waits_for_child_preflight_before_length_prompt(
     try:
         window._start_auto_ramp()
 
-        assert ordering == ["prior_run_check"]
+        assert ordering == [
+            "prior_run_check",
+            "hardware_preflight",
+            "continuity_current",
+            "length_prompt",
+        ]
         assert len(process.requests) == 1
-        assert '"starting_length_mm":null' in process.requests[0].config_json
-        process.next_snapshot = SimpleNamespace(
-            identity=process.requests[0].identity,
-            state=mini_dma_mod.ControlState.RUNNING,
-            sequence=1,
-            monotonic_s=time.monotonic(),
-            tick_count=1,
-            last_command_sequence=1,
-            last_command_result="accepted",
-            last_command_detail="hardware preflight complete",
-            policy=process.requests[0].policy,
-            owner_pid=process.pid,
-            dropped_event_count=0,
-            readback={
-                "hardware_preflight_complete": True,
-                "hardware_preflight_detail": (
-                    "scale COM6 at 9600 baud; PSU COM5; Tic connected"
-                ),
-                "scale_connected": True,
-                "supply_connected": True,
-                "tic_connected": True,
-                "operator_input_required": "starting_length_mm",
-                "operator_input_default": 57.25,
-                "automation_active": False,
-                "automation_phase": "awaiting_operator_input",
-                "automation_index": 0,
-                "automation_total": 1,
-                "task": "Waiting for mounted starting length",
-            },
-        )
-
-        window._poll_production_control_process()
-
-        assert ordering == ["prior_run_check", "length_prompt"]
-        assert window._isolated_command_pending == "starting_length"
-        assert process.update_payloads
-        assert '"operator_response":"starting_length_mm"' in process.update_payloads[-1]
-        assert '"value":57.602' in process.update_payloads[-1]
-        assert "hardware preflight completed" in window.log_output.toPlainText()
-        assert "scale COM6 at 9600 baud" in window.log_output.toPlainText()
+        assert '"starting_length_mm":57.602' in process.requests[0].config_json
+        assert process.update_payloads == []
+        assert window.spin_initial_length.value() == pytest.approx(57.602)
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
@@ -1941,6 +1923,181 @@ def test_isolated_recipe_refuses_parallel_ui_owned_session(
         assert "sole authoritative run logger" in warnings[0]
     finally:
         window._session_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_does_not_spawn_when_visible_hardware_preflight_fails(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_releases_ui_hardware_before_spawning_child(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    ordering: list[str] = []
+    original_start_process = process.start_process
+
+    def _preflight(_steps: object, *, show_progress: bool) -> bool:
+        assert show_progress is True
+        ordering.append("ui_preflight")
+        window._scale_thread = object()
+        window._supply_controller = object()
+        window._tic_command_dispatcher = object()
+        return True
+
+    def _release(name: str, attribute: str) -> None:
+        ordering.append(name)
+        setattr(window, attribute, None)
+
+    def _start_process() -> None:
+        ordering.append("child_spawn")
+        assert window._scale_thread is None
+        assert window._supply_controller is None
+        assert window._tic_command_dispatcher is None
+        original_start_process()
+
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    process.start_process = _start_process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
+        "release_scale", "_scale_thread"
+    )
+    window._disconnect_supply = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
+        "release_supply", "_supply_controller"
+    )
+    window._stop_tic_dispatcher = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
+        "release_tic", "_tic_command_dispatcher"
+    ) or True
+    window._release_tic_device_lock = lambda: ordering.append("release_tic_lock")  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == [
+            "ui_preflight",
+            "release_scale",
+            "release_supply",
+            "release_tic",
+            "release_tic_lock",
+            "child_spawn",
+        ]
+        assert process.started is True
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_cancelled_length_keeps_control_process_unstarted(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (57.0, False),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert window._isolated_recipe_active is False
+        assert "before transferring hardware ownership" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_aborts_when_tic_dispatcher_cannot_quiesce(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    lock_releases: list[str] = []
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._tic_command_dispatcher = object()
+    window._stop_tic_dispatcher = lambda: False  # type: ignore[method-assign]
+    window._release_tic_device_lock = lambda: lock_releases.append("released")  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert lock_releases == []
+        assert "did not release hardware ownership cleanly" in window.log_output.toPlainText()
+    finally:
+        window._tic_command_dispatcher = None
         _close_test_window(window)
 
 
@@ -2153,6 +2310,12 @@ def test_isolated_start_waits_for_completed_history_scan_and_logs_match_source(
     root = window._current_tma_history_root()
     window._tma_history_root = None
     window._tma_history_scan_pending_root = root
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: show_progress
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: True
+    )
 
     try:
         window._start_auto_ramp()

@@ -1,10 +1,8 @@
 # Mini DMA/TMA control-process migration
 
-Status: production cutover on `codex/tma-control-process-production`, stacked on
-`codex/hmp-usb-cadence-arbitration` at `21c7c11c` (PR 300). PR 298 has merged.
-This branch must remain stacked on PR 300 until that branch merges; afterwards,
-rebase onto current `main` and retarget this pull request. Do not merge or
-rewrite PR 300 as part of this work.
+Status: production cutover on `codex/tma-control-process-production` (PR 301).
+PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
+2026-07-27; PR 301 must now target `main`.
 
 ## Evidence from the previous architecture
 
@@ -26,19 +24,27 @@ rewrite PR 300 as part of this work.
 1. The dependency-light process kernel owns immutable commands, snapshots and
    events, generation checks, bounded channels, heartbeat/crash handling, and
    an out-of-band emergency path. It imports no Qt, serial, Tic, or PSU code.
-2. A production child adapter constructs the existing Mini DMA controller only
-   inside the spawned process. Scale acquisition, Tic and PSU objects, recipe
-   clocks/state, immediate confirmation, and all run writers therefore remain
+2. The visible UI retains operator-facing preparation: stopped-run handling,
+   previous-run and first-overheating decisions, hardware preflight, continuity
+   preparation, and the mounted-length prompt.
+3. Immediately before the run, the visible UI freezes immutable JSON
+   configuration, stops its acquisition workers, closes its PSU and Tic
+   objects, explicitly releases the Tic ownership lease, and starts the child.
+   A failed or non-quiescent release aborts startup.
+4. A production child adapter reconstructs the existing Mini DMA runtime only
+   inside the spawned process, reacquires the required hardware, verifies the
+   handoff, and then starts the recipe. Scale acquisition, Tic and PSU objects,
+   recipe clocks/state, immediate confirmation, and all run writers remain
    together in the authoritative child.
-3. The visible window captures immutable JSON configuration, releases any local
-   device handles, starts the child, and thereafter sends session-scoped
-   lifecycle commands. It renders coalesced immutable snapshots.
-4. Parent-side scale, PSU, and Tic construction is fenced while the child owns
+5. During the run the visible UI sends only session-scoped lifecycle or
+   explicitly permitted runtime-edit commands and renders coalesced immutable
+   snapshots. UI repaint or event-loop stalls cannot clock the child recipe.
+6. Parent-side scale, PSU, and Tic construction is fenced while the child owns
    the recipe. The child retains the existing cross-process Tic device lease.
-5. The production child runs the existing recipe implementation unchanged, so
+7. The production child runs the existing recipe implementation unchanged, so
    Prague legacy-seek and Košice adaptive policies stay separate while sharing
    the isolated process and hardware infrastructure.
-6. Disposable test windows default to the legacy in-process path. Tests must
+8. Disposable test windows default to the legacy in-process path. Tests must
    explicitly opt into isolation with a fake supervisor, preventing accidental
    serial access during software verification.
 
@@ -54,7 +60,9 @@ and for the child-host adapter.
 - Lifecycle coverage must include start, pause, resume, stop, emergency,
   parent-heartbeat loss, child fault, command saturation, and shutdown.
 - UI adapter tests must prove immutable configuration hand-off, policy
-  selection, command confirmation, and refusal of parent-side hardware access.
+  selection, unchanged pre-run ordering, explicit hardware and lease release
+  before child spawn, command confirmation, and refusal of parent-side hardware
+  access.
 - Existing Prague and Košice controller suites must remain green; this migration
   does not change their physical assumptions or control laws.
 - Packaging analysis must include the dynamically imported process kernel and

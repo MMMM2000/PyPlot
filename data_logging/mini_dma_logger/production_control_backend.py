@@ -17,7 +17,6 @@ from .control_process import ControlStartRequest, ReadbackValue
 
 
 CONFIG_SCHEMA_VERSION = 1
-STARTING_LENGTH_INPUT = "starting_length_mm"
 
 
 def _json_scalar(value: object) -> str | int | float | bool | None:
@@ -95,17 +94,6 @@ def capture_runtime_configuration(window: object) -> str:
         "schema_version": CONFIG_SCHEMA_VERSION,
         "runtime_update": True,
         "widgets": widgets,
-    }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def capture_starting_length_response(starting_length_mm: float) -> str:
-    """Serialize the sole operator response accepted during child startup."""
-
-    payload = {
-        "schema_version": CONFIG_SCHEMA_VERSION,
-        "operator_response": STARTING_LENGTH_INPUT,
-        "value": float(starting_length_mm),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -232,7 +220,6 @@ class ProductionMiniDmaBackend:
         self._emergency_reason = ""
         self._last_error = ""
         self._window_factory = window_factory
-        self._awaiting_starting_length = False
         self._hardware_preflight: dict[str, ReadbackValue] = {}
 
     def start(self, request: ControlStartRequest) -> None:
@@ -284,11 +271,10 @@ class ProductionMiniDmaBackend:
             step.action == "starting_length_prompt" for step in steps
         )
         if starting_length is None and requires_starting_length:
-            self._awaiting_starting_length = True
-            self._started = True
-            self._stopped = False
-            self._drain_events()
-            return
+            raise ValueError(
+                "mounted starting length must be collected by the visible UI "
+                "before hardware ownership is transferred"
+            )
         self._window.set_length_setup_automation_values(
             starting_length_mm=(
                 None if starting_length is None else float(starting_length)
@@ -305,7 +291,6 @@ class ProductionMiniDmaBackend:
             raise RuntimeError(detail)
         self._started = True
         self._stopped = False
-        self._awaiting_starting_length = False
 
     def tick(self, now_s: float) -> None:
         del now_s
@@ -327,16 +312,11 @@ class ProductionMiniDmaBackend:
                 user_initiated=True,
                 offer_recovery=False,
             )
-        elif self._awaiting_starting_length:
-            window._disable_supply_output()
-            window._disable_motor_supply_output()
-        self._awaiting_starting_length = False
         self._stopped = True
         self._drain_events()
 
     def emergency_stop(self, reason: str) -> None:
         self._emergency_reason = str(reason)
-        self._awaiting_starting_length = False
         window = self._window
         if window is None:
             return
@@ -366,29 +346,6 @@ class ProductionMiniDmaBackend:
         payload = json.loads(config_json)
         if int(payload.get("schema_version", 0)) != CONFIG_SCHEMA_VERSION:
             return False, "unsupported runtime configuration schema"
-        if payload.get("operator_response") == STARTING_LENGTH_INPUT:
-            if not self._awaiting_starting_length:
-                return False, "starting length is not currently requested"
-            try:
-                starting_length_mm = float(payload["value"])
-            except (KeyError, TypeError, ValueError):
-                return False, "starting length response is invalid"
-            if not 0.001 <= starting_length_mm <= 100000.0:
-                return False, "starting length is outside the allowed range"
-            window.set_length_setup_automation_values(
-                starting_length_mm=starting_length_mm,
-                preload_length_mm=None,
-            )
-            window._start_auto_ramp()
-            self._drain_events()
-            if not window._automation_active:
-                detail = (
-                    str(getattr(window, "_controller_process_error", "")).strip()
-                    or "controller process did not start the recipe"
-                )
-                return False, detail
-            self._awaiting_starting_length = False
-            return True, "mounted starting length accepted; production recipe started"
         if payload.get("runtime_update") is not True:
             return False, "configuration update is not marked as runtime-safe"
         _apply_window_configuration(window, payload)
@@ -429,18 +386,6 @@ class ProductionMiniDmaBackend:
             ("backend_owner_pid", self._owner_pid),
             ("started", self._started),
             ("stopped", self._stopped),
-            (
-                "operator_input_required",
-                STARTING_LENGTH_INPUT if self._awaiting_starting_length else None,
-            ),
-            (
-                "operator_input_default",
-                (
-                    float(window.spin_initial_length.value())
-                    if self._awaiting_starting_length
-                    else None
-                ),
-            ),
             ("hardware_preflight_complete", bool(self._started)),
             ("automation_active", bool(window._automation_active)),
             ("automation_paused", bool(window._automation_paused)),
@@ -502,7 +447,6 @@ class ProductionMiniDmaBackend:
     def completion_detail(self) -> str | None:
         if (
             self._started
-            and not self._awaiting_starting_length
             and self._window is not None
             and not self._window._automation_active
         ):
@@ -539,7 +483,6 @@ def create_production_backend() -> ProductionMiniDmaBackend:
 __all__ = [
     "CONFIG_SCHEMA_VERSION",
     "ProductionMiniDmaBackend",
-    "capture_starting_length_response",
     "capture_runtime_configuration",
     "capture_window_configuration",
     "create_production_backend",
