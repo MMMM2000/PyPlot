@@ -127,7 +127,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-23.4"
+CONTROL_LOGIC_VERSION = "2026-07-28.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -162,6 +162,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_uses_geometry_base_cap_before_response",
     "current_hold_response_stiffness_requires_error_improvement",
     "current_hold_adaptive_cap_growth_is_response_earned",
+    "current_hold_one_outstanding_response_budget",
+    "current_hold_response_learning_is_once_per_correction",
     "current_hold_adaptive_large_error_floor_scales_with_band",
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
@@ -7912,6 +7914,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
+        self._current_sweep_hold_response_evaluated_by_key: set[tuple[str, int, float]] = set()
         self._current_sweep_cycle_center_motor_suppression_enabled = (
             os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "1").strip().lower()
             not in {"0", "false", "no", "off"}
@@ -20602,11 +20605,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         else:
             return
+        if seek_key in self._current_sweep_hold_response_evaluated_by_key:
+            return
         current_position = self._current_effective_tensile_position_mm()
         previous_value = self._seek_last_value_by_key.get(seek_key)
         previous_position = self._seek_last_effective_position_by_key.get(seek_key)
         if previous_value is None or previous_position is None:
             return
+        if not self._current_sweep_hold_response_observation_complete(seek_key):
+            return
+        # A completed observation is consumed exactly once, whether or not it
+        # proves a useful directional response. Re-reading the same post-move
+        # plateau must never earn repeated adaptive-cap growth.
+        self._current_sweep_hold_response_evaluated_by_key.add(seek_key)
         signed_delta_position = float(current_position) - float(previous_position)
         delta_position = abs(signed_delta_position)
         if delta_position < self._motor_step_mm() * 0.5:
@@ -21026,6 +21037,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_stiffness_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_count_by_key.pop(seek_key, None)
+        self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
 
     def _filtered_signal_changed_after_last_correction(
         self,
@@ -21052,6 +21064,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if latest_s is None or last_s is None:
             return False
         return latest_s - float(last_s) >= self._current_sweep_hold_filter_window_s()
+
+    def _current_sweep_hold_response_observation_complete(
+        self,
+        seek_key: tuple[str, int, float],
+    ) -> bool:
+        if (
+            self._automation_phase != "current_hold"
+            or seek_key not in self._seek_last_effective_position_by_key
+        ):
+            return True
+        ready_after_s = self._motion_feedback_ready_after_s()
+        latest_s = self._latest_scale_sample_time_s()
+        if ready_after_s is None:
+            return True
+        if latest_s is None:
+            return False
+        return (
+            float(latest_s)
+            >= float(ready_after_s) + SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S
+        )
 
     def _current_hold_error_is_persistent(
         self,
@@ -21842,7 +21874,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
         required_samples: int,
     ) -> bool:
-        if required_samples <= 1:
+        if required_samples <= 0:
             return False
         latest_s = self._latest_scale_sample_time_s()
         if latest_s is None:
@@ -22753,6 +22785,26 @@ class MainWindow(QtWidgets.QMainWindow):
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._last_motion_command_time_s is not None
         ):
+            if not self._current_sweep_hold_response_observation_complete(seek_key):
+                self._log_waiting_for_feedback(
+                    "Waiting for the full post-correction response window before issuing another "
+                    "current-hold move."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=acceptance_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(
+                        basis,
+                        seek_key=seek_key,
+                    ),
+                    result="waiting",
+                    reason="current_hold_response_observation",
+                )
+                return False
             if (
                 not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
                 and not self._filtered_signal_changed_after_last_correction(
@@ -23288,6 +23340,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
             self._seek_post_move_sample_count_by_key[seek_key] = 0
             self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+            self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
             self._seek_travel_by_key[seek_key] = (
                 self._seek_travel_by_key.get(seek_key, 0.0) + abs(backlash_takeup_mm)
             )
@@ -23397,6 +23450,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
         self._seek_post_move_sample_count_by_key[seek_key] = 0
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+        self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
         )
@@ -30988,6 +31042,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
+        self._current_sweep_hold_response_evaluated_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
@@ -31949,6 +32004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
+        self._current_sweep_hold_response_evaluated_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()

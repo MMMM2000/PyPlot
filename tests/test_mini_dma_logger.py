@@ -16106,6 +16106,8 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         assert seek_key not in window._current_sweep_hold_response_stiffness_by_key
         assert window._current_sweep_hold_response_count_by_key.get(seek_key, 0) == 0
 
+        # A new accepted correction opens one new response-learning budget.
+        window._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
         window._update_current_sweep_hold_response_stiffness(
             seek_key,
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
@@ -16113,6 +16115,76 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         )
 
         assert window._current_sweep_hold_response_count_by_key[seek_key] == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_response_observation_blocks_rapid_compounding(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = time.time()
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._last_motion_command_time_s = now_s - 0.5
+    window._last_motion_expected_complete_time_s = now_s - 0.4
+    window._latest_scale_timestamp = now_s
+
+    try:
+        assert window._current_sweep_hold_response_observation_complete(seek_key) is False
+
+        completed_s = now_s - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.1
+        window._last_motion_command_time_s = completed_s
+        window._last_motion_expected_complete_time_s = completed_s
+        assert window._current_sweep_hold_response_observation_complete(seek_key) is True
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_response_learning_is_consumed_once_per_correction(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_value_by_key[seek_key] = 40.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._current_position_mm = 0.1
+    window._effective_position_mm = 0.1
+
+    try:
+        window._update_current_sweep_hold_response_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            45.0,
+        )
+        first_stiffness = window._current_sweep_hold_response_stiffness_by_key[seek_key]
+        assert window._current_sweep_hold_response_count_by_key[seek_key] == 1
+
+        window._update_current_sweep_hold_response_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            49.0,
+        )
+
+        assert window._current_sweep_hold_response_count_by_key[seek_key] == 1
+        assert window._current_sweep_hold_response_stiffness_by_key[seek_key] == first_stiffness
     finally:
         _close_test_window(window)
 
@@ -24520,10 +24592,7 @@ def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
 
         assert reached is False
         assert not moves
-        assert trace_rows[-1]["reason"] == "volatile_post_move_response"
-        assert trace_rows[-1]["required_fresh_samples"] == (
-            mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
-        )
+        assert trace_rows[-1]["reason"] == "current_hold_response_observation"
     finally:
         _close_test_window(window)
 
