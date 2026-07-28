@@ -131,7 +131,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-28.2"
+CONTROL_LOGIC_VERSION = "2026-07-21.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -195,7 +195,6 @@ CONTROL_LOGIC_FEATURES = [
     "current_sweep_reverse_current_recipe_flag",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
-    "current_sweep_target_hold_mandatory",
     "length_setup_commits_run_zero_load_reference",
     "automation_controller_boundary",
     "current_sweep_accumulated_correction_travel_no_abort",
@@ -10874,14 +10873,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_rate_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         current_sweep_form.addRow("Ramp rate", current_rate_mA_row)
         self.check_current_sweep_hold_on_error = QtWidgets.QCheckBox(
-            "Hold current while target recovers (required)",
+            "Pause while target recovers",
             automation_box,
         )
-        self.check_current_sweep_hold_on_error.setChecked(True)
-        self.check_current_sweep_hold_on_error.setEnabled(False)
         self.check_current_sweep_hold_on_error.setToolTip(
-            "Iso-load, iso-stress, and iso-strain current sweeps always hold the current setpoint when the "
-            "controlled target drifts too far, while the displacement servo keeps correcting."
+            "Hold the current setpoint when absolute load/stress/strain error is too far from the requested target, "
+            "while the displacement servo keeps correcting."
         )
         current_sweep_form.addRow("", self.check_current_sweep_hold_on_error)
         self.spin_current_sweep_hold_pause_factor = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
@@ -23496,7 +23493,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
                     f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
                 )
-                summary += " Current ramp pauses while the stress target recovers."
+                if self.check_current_sweep_hold_on_error.isChecked():
+                    summary += " Current ramp can pause while the stress target recovers."
                 if self._pre_measurement_setup_enabled(mode):
                     setup_load_g = load_g_from_stress_mpa(
                         float(self.spin_setup_preload_stress_mpa.value()),
@@ -26136,7 +26134,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "correction_hold_max_stress_mpa": self._current_sweep_hold_correction_stress_mpa(),
                 "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
                 "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
-                "current_ramp_hold_on_error": True,
+                "current_ramp_hold_on_error": self.check_current_sweep_hold_on_error.isChecked(),
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
@@ -26617,7 +26615,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
-                "current_ramp_hold_on_error": True,
+                "current_ramp_hold_on_error": self.check_current_sweep_hold_on_error.isChecked(),
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
@@ -28621,7 +28619,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_start = self._recipe_number_token(self.spin_current_sweep_start_mA.value())
             current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
             current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
-            flags = ["hold"]
+            flags = ["hold"] if self.check_current_sweep_hold_on_error.isChecked() else []
             if self.check_current_sweep_first_overheating.isChecked():
                 preheat = self._recipe_number_token(self.spin_current_sweep_first_overheating_target_mpa.value())
                 flags.append(f"firstheat{preheat}MPa")
@@ -28694,7 +28692,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
         current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
         flags: list[str] = []
-        flags.append("hold")
+        if self.check_current_sweep_hold_on_error.isChecked():
+            flags.append("hold")
         if self.check_current_sweep_first_overheating.isChecked():
             preheat = self._recipe_number_token(self.spin_current_sweep_first_overheating_target_mpa.value())
             flags.append(f"firstheat{preheat}MPa")
@@ -28745,7 +28744,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
-                "hold_on_error": True,
+                "hold_on_error": bool(self.check_current_sweep_hold_on_error.isChecked()),
                 "hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
@@ -28906,7 +28905,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_start_mA.setValue(float(current_sweep.get("current_start_mA", self.spin_current_sweep_start_mA.value())))
             self.spin_current_sweep_end_mA.setValue(float(current_sweep.get("current_end_mA", self.spin_current_sweep_end_mA.value())))
             self.spin_current_sweep_step_mA.setValue(float(current_sweep.get("current_ramp_rate_mA_s", self.spin_current_sweep_step_mA.value())))
-            self.check_current_sweep_hold_on_error.setChecked(True)
+            self.check_current_sweep_hold_on_error.setChecked(bool(current_sweep.get("hold_on_error", self.check_current_sweep_hold_on_error.isChecked())))
             self.spin_current_sweep_hold_pause_factor.setValue(float(current_sweep.get("hold_pause_factor", self.spin_current_sweep_hold_pause_factor.value())))
             self.spin_current_sweep_hold_resume_factor.setValue(float(current_sweep.get("hold_resume_factor", self.spin_current_sweep_hold_resume_factor.value())))
             self.spin_current_sweep_hold_resume_stable_s.setValue(float(current_sweep.get("hold_resume_stable_s", self.spin_current_sweep_hold_resume_stable_s.value())))
@@ -29577,7 +29576,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
             "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
             "return_target": bool(self.check_current_sweep_return_target.isChecked()),
-            "current_hold_enabled": True,
+            "current_hold_enabled": bool(self.check_current_sweep_hold_on_error.isChecked()),
             "current_hold_pause_tolerance_factor": pause_factor,
             "current_hold_resume_tolerance_factor": min(
                 pause_factor,
@@ -30584,6 +30583,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_end_mA,
             self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_step_mA,
+            self.check_current_sweep_hold_on_error,
             self.spin_current_sweep_hold_pause_factor,
             self.spin_current_sweep_hold_resume_factor,
             self.spin_current_sweep_hold_resume_stable_s,
@@ -30600,6 +30600,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_end_mA: ("current_end_mA",),
             self.spin_current_sweep_first_overheating_end_mA: ("first_overheating_current_end_mA",),
             self.spin_current_sweep_step_mA: ("current_ramp_rate_mA_s",),
+            self.check_current_sweep_hold_on_error: ("current_hold_enabled",),
             self.spin_current_sweep_hold_pause_factor: ("current_hold_pause_tolerance_factor",),
             self.spin_current_sweep_hold_resume_factor: ("current_hold_resume_tolerance_factor",),
             self.spin_current_sweep_hold_resume_stable_s: ("current_hold_resume_stable_s",),
@@ -32981,10 +32982,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_start = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value()))
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
-            # These recipes promise an iso-load/iso-stress/iso-strain target.
-            # An unchecked legacy setting must never silently turn them into an
-            # open-loop current ramp, especially during first overheating.
-            current_hold_enabled = True
+            current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
             reverse_current = True if is_fatigue_recipe else self.check_current_sweep_reverse_current.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
@@ -35898,7 +35896,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
         self.settings.setValue("current_sweep_step_mA", self.spin_current_sweep_step_mA.value())
         self.settings.setValue("current_sweep_ramp_rate_mA_s", self.spin_current_sweep_step_mA.value())
-        self.settings.setValue("current_sweep_hold_on_error", True)
+        self.settings.setValue("current_sweep_hold_on_error", self.check_current_sweep_hold_on_error.isChecked())
         self.settings.setValue("current_sweep_hold_pause_factor", self.spin_current_sweep_hold_pause_factor.value())
         self.settings.setValue("current_sweep_hold_resume_factor", self.spin_current_sweep_hold_resume_factor.value())
         self.settings.setValue(
@@ -36580,9 +36578,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
         )
-        # Migrate legacy profiles that allowed an open-loop current ramp under
-        # an iso-* recipe name. Target hold is now part of the recipe contract.
-        self.check_current_sweep_hold_on_error.setChecked(True)
+        self.check_current_sweep_hold_on_error.setChecked(
+            bool(self.settings.value("current_sweep_hold_on_error", False, type=bool))
+        )
         self.spin_current_sweep_hold_pause_factor.setValue(
             max(
                 1.0,

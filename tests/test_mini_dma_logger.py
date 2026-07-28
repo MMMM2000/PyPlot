@@ -7511,11 +7511,11 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 9.7 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "Estimated:" in window.recipe_progress.format()
-        assert "9.7 min" in window.recipe_progress.format()
+        assert "8.1 min" in window.recipe_progress.format()
     finally:
         _close_test_window(window)
 
@@ -15447,38 +15447,6 @@ def test_current_sweep_first_overheating_uses_independent_preheat_target(tmp_pat
         _close_test_window(window)
 
 
-def test_iso_stress_recipe_migrates_disabled_hold_before_first_overheating(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
-        assert index >= 0
-        window.combo_recipe_mode.setCurrentIndex(index)
-        _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_first_overheating.setChecked(True)
-        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
-
-        # Reproduce a legacy saved/app-data value like the two failed runs.
-        window.check_current_sweep_hold_on_error.setChecked(False)
-
-        steps, summary, _interval_ms = window._build_automation_recipe()
-        sweep_steps = [step for step in steps if step.action == "sweep_current"]
-
-        assert sweep_steps
-        assert all(step.current_hold_enabled is True for step in sweep_steps)
-        assert [step.current_hold_enabled for step in sweep_steps if step.note == "first_overheating"] == [
-            True,
-            True,
-        ]
-        assert window._current_sweep_override_values_from_controls()["current_hold_enabled"] is True
-        assert "Current ramp hold enabled" in summary
-    finally:
-        _close_test_window(window)
-
-
 def test_current_sweep_first_overheating_can_use_independent_max_current(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -21655,18 +21623,18 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
         assert window._automation_steps[0].current_end_mA == pytest.approx(80.0)
         assert window._automation_steps[0].current_ramp_rate_mA_s == pytest.approx(0.6)
-        assert window._automation_steps[0].current_hold_enabled is True
+        assert window._automation_steps[0].current_hold_enabled is False
         assert window._automation_phase == "current_hold"
         assert window._active_current_sweep_last_setpoint_mA == pytest.approx(44.0)
-        assert window._current_sweep_ramp_hold_step_index == 0
-        assert window._current_sweep_ramp_hold_started_s == pytest.approx(123.0)
+        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_ramp_hold_started_s == pytest.approx(0.0)
         assert window._active_current_sweep_started_s > 123.0
         assert window._automation_steps[1].current_mA == pytest.approx(2.0)
         assert window._automation_steps[2].target_ramp_rate_value_s == pytest.approx(3.0)
         assert window._automation_steps[3].current_start_mA == pytest.approx(2.0)
         assert window._automation_steps[3].current_end_mA == pytest.approx(80.0)
         assert window._automation_steps[3].current_ramp_rate_mA_s == pytest.approx(0.6)
-        assert window._automation_steps[3].current_hold_enabled is True
+        assert window._automation_steps[3].current_hold_enabled is False
         assert window._automation_steps[4].current_start_mA == pytest.approx(80.0)
         assert window._automation_steps[4].current_end_mA == pytest.approx(2.0)
         assert window._current_sweep_recipe_overrides
@@ -21696,7 +21664,7 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         assert overrides[0]["changed_step_count"] == 5
         assert metadata["controlled_current_sweep"]["current_end_mA"] == pytest.approx(80.0)
         assert metadata["controlled_current_sweep"]["current_ramp_rate_mA_s"] == pytest.approx(0.6)
-        assert metadata["controlled_current_sweep"]["current_ramp_hold_on_error"] is True
+        assert metadata["controlled_current_sweep"]["current_ramp_hold_on_error"] is False
         assert window._run_metadata_snapshot is None
     finally:
         window._automation_active = False
@@ -21806,7 +21774,7 @@ def test_current_sweep_runtime_update_keeps_active_plateau_reverse_before_next_t
         _close_test_window(window)
 
 
-def test_current_sweep_runtime_update_cannot_disable_active_hold(
+def test_current_sweep_runtime_update_disables_active_hold_without_current_target_change(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -21858,14 +21826,14 @@ def test_current_sweep_runtime_update_cannot_disable_active_hold(
 
         assert window._automation_steps[0] is not active_sweep
         assert window._automation_steps[0].current_end_mA == pytest.approx(85.0)
-        assert window._automation_steps[0].current_hold_enabled is True
-        assert window._automation_steps[1].current_hold_enabled is True
-        assert window._current_sweep_ramp_hold_step_index == 0
-        assert window._current_sweep_ramp_hold_started_s == pytest.approx(123.0)
-        assert window._current_sweep_ramp_hold_in_band_since_s == pytest.approx(124.0)
-        assert window._current_sweep_ramp_hold_seek_accepted_since_s == pytest.approx(125.0)
+        assert window._automation_steps[0].current_hold_enabled is False
+        assert window._automation_steps[1].current_hold_enabled is False
+        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_ramp_hold_started_s == pytest.approx(0.0)
+        assert window._current_sweep_ramp_hold_in_band_since_s is None
+        assert window._current_sweep_ramp_hold_seek_accepted_since_s is None
         assert window._active_current_sweep_last_setpoint_mA == pytest.approx(64.0)
-        assert window._active_current_sweep_started_s == pytest.approx(100.0)
+        assert window._active_current_sweep_started_s > 123.0
 
         window._stop_session()
         metadata = json.loads((tmp_path / "runtime_disable_active_hold" / "metadata.json").read_text(encoding="utf-8"))
