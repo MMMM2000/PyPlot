@@ -1,8 +1,8 @@
 # Post-run transition review in measurement loggers
 
-## Recommendation
+## Implemented workflow
 
-Current annealing and TMA loggers should eventually offer transition review immediately after a run reaches its finished state. The review result should be stored as a small, safe JSON sidecar beside the measurement data. Builder should import that sidecar as the portable review record instead of requiring the `.pydpj` project to be the only authority.
+Current annealing and TMA loggers offer transition review immediately after a run reaches its finished state. The review result should be stored as a small, safe JSON sidecar beside the measurement data. Builder should import that sidecar as the portable review record instead of requiring the `.pydpj` project to be the only authority.
 
 This keeps the fast experimental workflow Martin wants while preserving Builder as the place for cross-sample overview, conflict review, column selection, and public database export.
 
@@ -13,9 +13,9 @@ This keeps the fast experimental workflow Martin wants while preserving Builder 
 - Ordinary loading executes JSON only. No pickle or arbitrary object deserialization is introduced.
 - Saving uses an atomic temporary-file replacement and never rewrites the raw measurement file.
 
-## Proposed sidecar
+## Portable sidecar
 
-Use one `transition_review.json` in a TMA run folder, or a uniquely named `*.transition-review.json` beside a current-annealing file. A shared schema should contain:
+New current-annealing runs and TMA runs use one `transition_review.json` in the run folder. Legacy flat current-annealing files remain supported through a uniquely named `<measurement>.transition-review.json` beside the data file. A shared schema should contain:
 
 - schema version and experiment family (`current_annealing` or `tma`);
 - normalized sample identity plus the original source label;
@@ -36,13 +36,14 @@ The content fingerprint is the durable identity. Paths are useful provenance but
 4. If both locations contain different explicit decisions, Builder retains both, shows a conflict, and asks which version to adopt; it does not silently overwrite reviewed work.
 5. Assemble consumes only the resolved review. Explicit no-transition decisions remain visible and excluded records remain auditable.
 
-## Suggested delivery sequence
+## Retrospective review
 
-1. Extract the existing CA/TMA review record format and identity/fingerprint logic into a shared, UI-independent module.
-2. Add sidecar read/write/validation tests, including atomic-save failure and moved-folder matching.
-3. Teach Builder to import sidecars while preserving all existing `.pydpj` reviews.
-4. Add a post-run review action to the current-annealing logger using recorded test data only.
-5. Add the equivalent per-target TMA review after safe run completion.
-6. Only after conflict and round-trip tests pass, make immediate post-run review the recommended workflow.
+Portable reviews can be created from existing Builder project decisions without modifying the project or raw measurements:
 
-VSM can use the same schema later, but it should not delay the CA/TMA path.
+```powershell
+uv run python scripts/backfill_transition_reviews.py --project <copy.pydpj> --root <data-root> --out artifacts/transition-review-backfill
+```
+
+The command is a dry run by default. Add `--write` only after reviewing the audit summary. It writes a sidecar only for an exact or unique measurement match, never overwrites a conflicting sidecar, and records every written, skipped, ambiguous, stale, or conflicting item in a JSON audit manifest.
+
+VSM can use the same schema later, but it does not block the CA/TMA path.

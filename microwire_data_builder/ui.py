@@ -6478,6 +6478,7 @@ MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY = "mini_dma_transition_reviews"
 MINI_DMA_REVIEW_STATUS_ACCEPTED = "accepted"
 MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
 MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
+MINI_DMA_REVIEW_STATUS_NEEDS_ATTENTION = "needs_attention"
 MINI_DMA_TRANSITION_LABELS = ("As", "Af", "Ms", "Mf")
 
 VSM_TRANSITION_REVIEW_SCHEMA_VERSION = 2
@@ -6734,6 +6735,85 @@ def _transition_record_id_for_annealing_record(record: MeasurementRecord) -> str
     digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
     return f"ca:{digest}"
 
+
+def _portable_annealing_review(record: MeasurementRecord) -> Dict[str, Any]:
+    from plotting.shared.transition_review import load_review, sidecar_path_for_measurement
+    from plotting.shared.transition_review_adapters import current_annealing_review_draft
+
+    path = getattr(record, "path", None)
+    frame = getattr(record, "dataframe", None)
+    if not isinstance(path, Path) or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {}
+    sidecar = sidecar_path_for_measurement(path, family="current_annealing")
+    if not sidecar.exists():
+        return {}
+    try:
+        payload = load_review(sidecar)
+        fingerprint = current_annealing_review_draft(path)["measurement_fingerprint"]
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to read portable Current Annealing review %s", sidecar
+        )
+        return {}
+    if payload.get("experiment_family") != "current_annealing":
+        return {}
+    if payload.get("measurement_fingerprint") != fingerprint:
+        return {
+            "status": TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
+            "included": False,
+            "portable_conflict": "measurement_fingerprint_mismatch",
+            "portable_sidecar_path": str(sidecar),
+            "portable_review": payload,
+        }
+    target = next(
+        (item for item in payload.get("targets", []) if item.get("target_key") == "graph"),
+        None,
+    )
+    if not isinstance(target, Mapping):
+        return {}
+    return {
+        "source_kind": "current_annealing",
+        "status": str(target.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED),
+        "included": bool(target.get("included", False)),
+        "auto_values_mA": dict(target.get("auto_values") or {}),
+        "manual_values_mA": dict(target.get("manual_values") or {}),
+        "final_values_mA": dict(target.get("final_values") or {}),
+        "cleared_labels": list(target.get("cleared_labels") or ()),
+        "updated_at": payload.get("updated_utc"),
+        "content_identity": fingerprint,
+        "portable_sidecar_path": str(sidecar),
+        "portable_review_revision": int(payload.get("review_revision", 1) or 1),
+    }
+
+
+def _review_semantics(payload: Mapping[str, Any]) -> Tuple[str, Tuple[Tuple[str, float], ...], Tuple[str, ...]]:
+    status = str(payload.get("status") or "").strip()
+    values = _clean_transition_values(
+        payload.get("final_values_mA") if isinstance(payload.get("final_values_mA"), Mapping) else {}
+    )
+    cleared = tuple(sorted(str(label) for label in payload.get("cleared_labels", ()) if str(label)))
+    return status, tuple(sorted(values.items())), cleared
+
+
+def _merge_portable_annealing_review(
+    existing: Mapping[str, Any] | None,
+    portable: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not existing or str(existing.get("status") or "") in {"", TRANSITION_REVIEW_STATUS_UNREVIEWED}:
+        return dict(portable)
+    if _review_semantics(existing) == _review_semantics(portable):
+        merged = dict(existing)
+        for key in ("content_identity", "portable_sidecar_path", "portable_review_revision"):
+            if portable.get(key) not in (None, ""):
+                merged[key] = portable[key]
+        return merged
+    conflict = dict(portable)
+    conflict["status"] = TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION
+    conflict["included"] = False
+    conflict["portable_conflict"] = "project_and_sidecar_differ"
+    conflict["project_review"] = dict(existing)
+    conflict["portable_review"] = dict(portable)
+    return conflict
 
 def _auto_transition_values_for_annealing_record(record: MeasurementRecord) -> Dict[str, float]:
     dataframe = getattr(record, "dataframe", None)
@@ -8256,6 +8336,8 @@ def _mini_dma_review_status_label(status: str) -> str:
         return "No transition"
     if status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
         return "Excluded"
+    if status == MINI_DMA_REVIEW_STATUS_NEEDS_ATTENTION:
+        return "Needs attention"
     return "Unreviewed"
 
 
@@ -8365,6 +8447,150 @@ def _mini_dma_transition_review_entries(
                 )
             )
     return entries
+
+
+def _import_portable_tma_reviews(
+    records: Sequence[MiniDmaRecord],
+    reviews: Dict[str, Dict[str, Any]],
+    logger: logging.Logger,
+) -> bool:
+    from plotting.shared.transition_review import load_review, sidecar_path_for_measurement
+    from plotting.shared.transition_review_adapters import tma_review_draft
+
+    changed = False
+    for record in records:
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path):
+            continue
+        review_path = sidecar_path_for_measurement(path, family="tma")
+        if not review_path.exists():
+            continue
+        try:
+            portable_payload = load_review(review_path)
+            draft = tma_review_draft(path)
+            entries = _mini_dma_transition_review_entries([record], logger)
+        except Exception:
+            logger.exception("Failed to import portable TMA review from %s", review_path)
+            continue
+        if (
+            portable_payload.get("experiment_family") != "tma"
+            or portable_payload.get("measurement_fingerprint")
+            != draft.get("measurement_fingerprint")
+        ):
+            logger.warning(
+                "Ignoring stale portable TMA review with a measurement mismatch: %s",
+                review_path,
+            )
+            continue
+        for target in portable_payload.get("targets", []):
+            if not isinstance(target, Mapping):
+                continue
+            target_metadata = target.get("target")
+            stress_mpa = (
+                _coerce_finite_float(target_metadata.get("stress_mpa"))
+                if isinstance(target_metadata, Mapping)
+                else None
+            )
+            if stress_mpa is None:
+                continue
+            matching_entries = [
+                entry
+                for entry in entries
+                if math.isclose(
+                    float(getattr(entry.target_summary, "stress_mpa", math.nan)),
+                    stress_mpa,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ]
+            if len(matching_entries) != 1:
+                logger.warning(
+                    "Could not uniquely match portable TMA target %.9g in %s",
+                    stress_mpa,
+                    review_path,
+                )
+                continue
+            entry = matching_entries[0]
+            portable_status = str(target.get("status") or "").strip()
+            if portable_status == "unreviewed":
+                continue
+            status = (
+                MINI_DMA_REVIEW_STATUS_ACCEPTED
+                if portable_status in {"accepted_auto", "manual_adjusted"}
+                else portable_status
+            )
+            portable_review: Dict[str, Any] = {
+                "status": status,
+                "sample": entry.sample,
+                "run_label": entry.run_label,
+                "target_label": entry.target_label,
+                "auto_status": entry.status,
+                "values": _clean_mini_dma_transition_values(target.get("final_values")),
+                "auto_values_mA": _clean_mini_dma_transition_values(
+                    target.get("auto_values")
+                ),
+                "manual_values_mA": _clean_mini_dma_transition_values(
+                    target.get("manual_values")
+                ),
+                "cleared_labels": sorted(_mini_dma_cleared_transition_labels(target)),
+                "portable_sidecar_path": str(review_path),
+                "portable_review_revision": portable_payload.get("review_revision", 1),
+                "measurement_fingerprint": portable_payload.get(
+                    "measurement_fingerprint", ""
+                ),
+            }
+            portable_review = {
+                key: value
+                for key, value in portable_review.items()
+                if value not in (None, "", [], {})
+            }
+            record_id = _mini_dma_review_record_id(record, entry.target_label)
+            existing = reviews.get(record_id)
+            if not isinstance(existing, Mapping):
+                reviews[record_id] = portable_review
+                changed = True
+                continue
+            existing_semantics = (
+                str(existing.get("status") or ""),
+                _clean_mini_dma_transition_values(existing.get("values")),
+                _mini_dma_cleared_transition_labels(existing),
+            )
+            portable_semantics = (
+                str(portable_review.get("status") or ""),
+                _clean_mini_dma_transition_values(portable_review.get("values")),
+                _mini_dma_cleared_transition_labels(portable_review),
+            )
+            if existing_semantics == portable_semantics:
+                merged = dict(existing)
+                merged.update(
+                    {
+                        key: value
+                        for key, value in portable_review.items()
+                        if key.startswith("portable_")
+                        or key == "measurement_fingerprint"
+                    }
+                )
+            else:
+                merged = dict(existing)
+                merged.update(
+                    {
+                        "status": MINI_DMA_REVIEW_STATUS_NEEDS_ATTENTION,
+                        "portable_conflict": "project_and_sidecar_differ",
+                        "project_review": dict(existing),
+                        "portable_review": portable_review,
+                        "portable_sidecar_path": str(review_path),
+                        "portable_review_revision": portable_payload.get(
+                            "review_revision", 1
+                        ),
+                        "measurement_fingerprint": portable_payload.get(
+                            "measurement_fingerprint", ""
+                        ),
+                    }
+                )
+            if merged != existing:
+                reviews[record_id] = merged
+                changed = True
+    return changed
 
 
 class _MiniDmaTransitionReviewLoadWorker(QtCore.QObject):
@@ -15020,10 +15246,23 @@ class AnnealingSection(MiniDatabaseSection):
             "setpoint_mA",
             "notes",
             "updated_at",
+            "content_identity",
+            "portable_sidecar_path",
+            "portable_review_revision",
+            "portable_conflict",
         ):
             value = payload.get(key)
             if value not in (None, ""):
                 entry[key] = value
+        for key in ("project_review", "portable_review"):
+            value = payload.get(key)
+            if isinstance(value, Mapping):
+                entry[key] = dict(value)
+        cleared = payload.get("cleared_labels")
+        if isinstance(cleared, Iterable) and not isinstance(cleared, (str, bytes)):
+            entry["cleared_labels"] = sorted(
+                {str(label).strip() for label in cleared if str(label).strip()}
+            )
         return entry
 
     def _store_transition_reviews(self) -> None:
@@ -15137,6 +15376,19 @@ class AnnealingSection(MiniDatabaseSection):
                 f"{metadata.get('sample_key', '')}|{metadata.get('graph_label', '')}",
                 record_id,
             )
+        portable_changed = False
+        for record_id, record in records_by_id.items():
+            portable = _portable_annealing_review(record)
+            if not portable:
+                continue
+            portable.update(self._transition_review_metadata(record_id, record))
+            merged = _merge_portable_annealing_review(
+                self._transition_reviews.get(record_id), portable
+            )
+            cleaned = self._clean_transition_review_payload(record_id, merged)
+            if cleaned and cleaned != self._transition_reviews.get(record_id):
+                self._transition_reviews[record_id] = cleaned
+                portable_changed = True
         valid_ids = set(records_by_id)
         if not valid_ids:
             if self._transition_reviews:
@@ -15169,7 +15421,7 @@ class AnnealingSection(MiniDatabaseSection):
                     if preserved_updated_at:
                         remapped["updated_at"] = preserved_updated_at
                     self._transition_reviews[new_id] = remapped
-        if removed and store:
+        if (removed or portable_changed) and store:
             self._store_transition_reviews()
 
     def _transition_review_metadata(
@@ -26010,6 +26262,7 @@ class MiniDmaSection(MiniDatabaseSection):
             MINI_DMA_REVIEW_STATUS_ACCEPTED,
             MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
             MINI_DMA_REVIEW_STATUS_EXCLUDED,
+            MINI_DMA_REVIEW_STATUS_NEEDS_ATTENTION,
         }:
             return {}
         entry: Dict[str, Any] = {"status": status}
@@ -26021,6 +26274,9 @@ class MiniDmaSection(MiniDatabaseSection):
             "content_identity",
             "source_name",
             "record_path",
+            "portable_sidecar_path",
+            "measurement_fingerprint",
+            "portable_conflict",
         ):
             value = payload.get(field)
             if isinstance(value, str) and value.strip():
@@ -26038,6 +26294,13 @@ class MiniDmaSection(MiniDatabaseSection):
         cleared_labels = _mini_dma_cleared_transition_labels(payload)
         if cleared_labels and status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
             entry["cleared_labels"] = sorted(cleared_labels)
+        revision = payload.get("portable_review_revision")
+        if isinstance(revision, int) and revision > 0:
+            entry["portable_review_revision"] = revision
+        for field in ("project_review", "portable_review"):
+            value = payload.get(field)
+            if isinstance(value, Mapping):
+                entry[field] = dict(value)
         return entry
 
     def _store_transition_reviews(self) -> None:
@@ -26117,6 +26380,9 @@ class MiniDmaSection(MiniDatabaseSection):
         return metadata
 
     def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
+        changed = _import_portable_tma_reviews(
+            records, self._transition_reviews, self.logger
+        )
         proposals: Dict[str, List[Tuple[str, MiniDmaRecord]]] = {}
         direct: List[Tuple[str, MiniDmaRecord]] = []
         direct_mismatches: List[str] = []
@@ -26166,7 +26432,6 @@ class MiniDmaSection(MiniDatabaseSection):
             record = candidates[0]
             current_id = _mini_dma_review_record_id(record, target_label)
             proposals.setdefault(current_id, []).append((stored_id, record))
-        changed = False
         for stored_id, record in direct:
             enriched = dict(self._transition_reviews[stored_id])
             enriched.update(self._mini_dma_review_metadata(record))

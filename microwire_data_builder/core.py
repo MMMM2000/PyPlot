@@ -4034,6 +4034,29 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
+    logger_metadata: Dict[str, Any] = {}
+    if path.name.casefold() == "measurement.txt":
+        metadata_path = path.parent / "metadata.json"
+        try:
+            candidate = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("schema") == "current_annealing_logger_metadata_v1"
+            ):
+                logger_metadata = candidate
+                base = " ".join(
+                    str(value).strip()
+                    for value in (
+                        candidate.get("composition"),
+                        candidate.get("microwire"),
+                        f"{candidate.get('max_current_mA')}mA"
+                        if candidate.get("max_current_mA") not in (None, "")
+                        else "",
+                    )
+                    if str(value).strip()
+                )
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger_metadata = {}
     parts = base.split()
     composition_match = COMPOSITION_TOKEN_PATTERN.search(base)
     composition = (
@@ -4054,13 +4077,13 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     alt_variant = bool(ALT_VARIANT_PATTERN.search(base))
     relpath = os.fspath(path.relative_to(root)) if root and path.is_relative_to(root) else path.as_posix()
     return MeasurementMetadata(
-        composition_token=composition,
+        composition_token=str(logger_metadata.get("composition") or composition),
         draw_x=draw_x,
         piece_y=piece_y,
         setpoint_mA=setpoint,
         alt_variant=alt_variant,
         measurement_id=_hash_file(path),
-        file_name=path.name,
+        file_name=path.parent.name if logger_metadata else path.name,
         relpath=relpath,
         timestamp_mtime_utc=timestamp,
     )

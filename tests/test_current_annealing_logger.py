@@ -2041,13 +2041,23 @@ def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path
 
     data_path = logger_mod.Path(window.f_name)
     assert data_path.exists()
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     assert metadata_path.exists()
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["data_file"] == data_path.name
     assert payload["supply"]["profile_id"] == "shared_hmp_broker"
     assert payload["supply"]["channel"] == 1
     assert "hold_duration_s" not in payload
+    assert payload["session_state"] == "running"
+    assert payload["run_folder"] == "sample_run01"
+
+    window._finalize_metadata_file(
+        str(data_path), final_state="completed", detail="Run complete"
+    )
+    finalized = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert finalized["session_state"] == "finished"
+    assert finalized["stop"] == {"state": "completed", "detail": "Run complete"}
+    assert finalized["finished_utc"].endswith("Z")
 
 
 def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
@@ -2060,9 +2070,9 @@ def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("replace_me")
     data_path = logger_mod.Path(window.build_log_path())
+    data_path.parent.mkdir(parents=True)
     data_path.write_text("old data\n", encoding="utf-8")
-    metadata_dir = data_path.parent / "metadata" / data_path.stem
-    metadata_dir.mkdir(parents=True)
+    metadata_dir = data_path.parent
     (metadata_dir / "metadata.json").write_text('{"old": true}\n', encoding="utf-8")
     moved: list[logger_mod.Path] = []
 
@@ -2118,10 +2128,12 @@ def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
 
     assert window.prepare_output_file() is True
 
-    assert moved == [data_path, metadata_dir]
+    assert moved == [metadata_dir]
     assert data_path.read_text(encoding="utf-8").startswith("# Current (mA)")
     assert (metadata_dir / "metadata.json").exists()
-    assert (tmp_path / "trash" / data_path.name).read_text(encoding="utf-8") == "old data\n"
+    assert (
+        tmp_path / "trash" / data_path.parent.name / data_path.name
+    ).read_text(encoding="utf-8") == "old data\n"
 
 
 def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:
@@ -2143,7 +2155,7 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     supply = payload["supply"]
     assert supply["detected_model"] == "hmp4040"
@@ -2170,7 +2182,7 @@ def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot)
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["step_mA"] == pytest.approx(0.2)
     assert payload["recipe"]["current_ramp_rate_mA_s"] == pytest.approx(0.2)
@@ -2190,7 +2202,7 @@ def test_current_annealing_metadata_records_source_control_snapshot(
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     pending = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     token = window._source_provenance_token
     assert pending["source_control"]["capture_state"] == "pending"
@@ -3603,7 +3615,7 @@ def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None
     assert window.prepare_output_file() is True
 
     output = logger_mod.Path(window.f_name)
-    metadata_path = tmp_path / "metadata" / output.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(output))
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["output_file"] == str(output)
     assert payload["composition"] == "Ni50Fe27Ga23"

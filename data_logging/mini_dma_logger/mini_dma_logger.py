@@ -14427,6 +14427,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if box.clickedButton() == return_position_button:
             self._start_recovery_displacement_zero()
 
+    def _offer_tma_transition_review(self, run_dir: Path) -> None:
+        if self._window_closing or not self.isVisible():
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Review transitions",
+            "The TMA run finished and all outputs are safely off. Review transition currents now?",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from plotting.shared.transition_review_dialog import review_tma_run
+
+            review_tma_run(self, Path(run_dir))
+        except Exception as exc:
+            self._log(f"Post-run TMA transition review failed for {run_dir}: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
     def _maybe_offer_run_cleanup(self, current_run: Path | None = None) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(
@@ -27341,6 +27358,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{summary['image_path']} and {summary['detail_image_path']}"
             )
             if offer_cleanup:
+                self._offer_tma_transition_review(run_dir)
                 self._maybe_offer_run_cleanup(run_dir)
         pending = self._run_summary_pending.popleft() if self._run_summary_pending else None
         if pending is not None and not self._window_closing:
