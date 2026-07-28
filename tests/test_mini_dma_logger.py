@@ -1887,20 +1887,27 @@ def test_isolated_setup_snapshot_updates_visible_setup_graph_until_logging_start
 
     try:
         window._show_length_setup_dialog()
+        window._length_setup_points.append(
+            dataclasses.replace(point, elapsed_s=8.0, stress_mpa=48.0)
+        )
         window._consume_isolated_plot_snapshot(readback)
 
         assert window._length_setup_dialog is not None
         assert window._length_setup_dialog.isVisible()
-        assert len(window._length_setup_points) == 1
-        assert window._length_setup_points[0].stress_mpa == pytest.approx(49.8)
+        assert len(window._length_setup_points) == 2
+        assert window._length_setup_points[-1].stress_mpa == pytest.approx(49.8)
+        assert window._length_setup_points[-1].elapsed_s > 8.0
         assert window._live_plot_points == []
 
         readback["session_logging_enabled"] = True
-        readback["plot_elapsed_s"] = 2.0
+        # Recipe logging has its own elapsed clock. Its first point must not be
+        # rejected merely because setup elapsed time had already advanced.
+        readback["plot_elapsed_s"] = 0.1
         window._consume_isolated_plot_snapshot(readback)
 
-        assert len(window._length_setup_points) == 1
+        assert len(window._length_setup_points) == 2
         assert len(window._live_plot_points) == 1
+        assert window._live_plot_points[0].elapsed_s == pytest.approx(0.1)
     finally:
         _close_test_window(window)
 
@@ -2434,7 +2441,7 @@ def test_isolated_start_does_not_spawn_when_visible_hardware_preflight_fails(
         _close_test_window(window)
 
 
-def test_isolated_start_releases_ui_hardware_before_spawning_child(
+def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_session(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -2461,14 +2468,24 @@ def test_isolated_start_releases_ui_hardware_before_spawning_child(
         setattr(window, attribute, None)
 
     def _start_process() -> None:
-        ordering.append("child_spawn")
+        ordering.append("child_prewarmer")
+        assert window._scale_thread is not None
+        assert window._supply_controller is not None
+        assert window._tic_command_dispatcher is not None
+        original_start_process()
+
+    original_start_session = process.start_session
+
+    def _start_session(request: object) -> int:
+        ordering.append("child_session")
         assert window._scale_thread is None
         assert window._supply_controller is None
         assert window._tic_command_dispatcher is None
-        original_start_process()
+        return original_start_session(request)
 
     window._create_production_control_process = lambda: process  # type: ignore[method-assign]
     process.start_process = _start_process  # type: ignore[method-assign]
+    process.start_session = _start_session  # type: ignore[method-assign]
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
         [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
         "Synthetic isolated recipe",
@@ -2494,12 +2511,13 @@ def test_isolated_start_releases_ui_hardware_before_spawning_child(
 
         assert ordering == [
             "ui_preflight",
+            "child_prewarmer",
             "stop_manual_jog",
             "release_scale",
-            "release_supply",
             "release_tic",
             "release_tic_lock",
-            "child_spawn",
+            "release_supply",
+            "child_session",
         ]
         assert process.started is True
     finally:
@@ -2508,7 +2526,7 @@ def test_isolated_start_releases_ui_hardware_before_spawning_child(
         _close_test_window(window)
 
 
-def test_isolated_start_cancelled_length_keeps_control_process_unstarted(
+def test_isolated_start_cancelled_length_closes_prewarmed_control_process(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -2538,7 +2556,9 @@ def test_isolated_start_cancelled_length_keeps_control_process_unstarted(
     try:
         window._start_auto_ramp()
 
-        assert process.started is False
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
         assert window._isolated_recipe_active is False
         assert "before transferring hardware ownership" in window.log_output.toPlainText()
     finally:
@@ -2573,11 +2593,55 @@ def test_isolated_start_aborts_when_tic_dispatcher_cannot_quiesce(
     try:
         window._start_auto_ramp()
 
-        assert process.started is False
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
         assert lock_releases == []
         assert "did not release hardware ownership cleanly" in window.log_output.toPlainText()
     finally:
         window._tic_command_dispatcher = None
+        _close_test_window(window)
+
+
+def test_isolated_start_failure_forces_shared_supply_off_even_if_child_emergency_fails(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    forced_shutdowns: list[bool] = []
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    process.start_session = (  # type: ignore[method-assign]
+        lambda _request: (_ for _ in ()).throw(RuntimeError("start failed"))
+    )
+    process.emergency_stop = (  # type: ignore[method-assign]
+        lambda: (_ for _ in ()).throw(RuntimeError("child unavailable"))
+    )
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: forced_shutdowns.append(True)
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="start failed"):
+            window._start_auto_ramp()
+
+        assert process.closed is True
+        assert forced_shutdowns == [True]
+        assert "control-process emergency command failed" in window.log_output.toPlainText()
+    finally:
         _close_test_window(window)
 
 
@@ -19400,6 +19464,84 @@ def test_shared_broker_normal_stop_releases_motor_lease_without_disabling_output
     ) in calls
     assert controller._client is None
     assert controller._leases == {}
+
+
+def test_shared_broker_handoff_releases_both_leases_without_toggling_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            del host, port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            self.calls.append(
+                ("release", {"channel": channel, "lease_id": lease_id})
+            )
+
+        def set_output(self, **payload: object) -> None:
+            self.calls.append(("set_output", dict(payload)))
+
+        def configure_channel(self, **payload: object) -> None:
+            self.calls.append(("configure_channel", dict(payload)))
+
+    client = _FakeBrokerClient(host="127.0.0.1", port=8765)
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "BrokerJsonClient",
+        lambda *, host, port: client,
+    )
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+        current_limit_a=0.08,
+        motor_voltage_limit_v=12.0,
+        motor_current_limit_a=0.5,
+    )
+    controller._client = client
+    controller._connected = True
+    controller._leases = {4: "lease-4", 3: "lease-3"}
+
+    controller.disconnect(
+        preserve_motor_output=True,
+        preserve_current_output=True,
+    )
+
+    assert not any(
+        action in {"set_output", "configure_channel"}
+        for action, _payload in client.calls
+    )
+    assert client.calls == [
+        ("release", {"channel": 4, "lease_id": "lease-4"}),
+        ("release", {"channel": 3, "lease_id": "lease-3"}),
+    ]
+
+
+def test_dialog_plot_refresh_uses_faster_ui_cadence(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    window.spin_ui_interval.setValue(250)
+    window.spin_graph_interval.setValue(500)
+
+    try:
+        assert window._dialog_plot_refresh_due(10.0, now_s=10.24) is False
+        assert window._dialog_plot_refresh_due(10.0, now_s=10.25) is True
+    finally:
+        _close_test_window(window)
 
 
 def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limits(

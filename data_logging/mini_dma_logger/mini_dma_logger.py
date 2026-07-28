@@ -7131,7 +7131,12 @@ class SharedBrokerSupplyController:
         self._apply_cadence_status(status)
         return status
 
-    def disconnect(self, *, preserve_motor_output: bool = False) -> None:
+    def disconnect(
+        self,
+        *,
+        preserve_motor_output: bool = False,
+        preserve_current_output: bool = False,
+    ) -> None:
         with self._io_lock:
             client = self._client
             channels = list(self._leases)
@@ -7144,13 +7149,21 @@ class SharedBrokerSupplyController:
                     preserve_motor_output
                     and self.motor_channel is not None
                     and int(channel) == int(self.motor_channel)
+                ) or (
+                    preserve_current_output
+                    and self.current_channel is not None
+                    and int(channel) == int(self.current_channel)
                 )
                 if not preserve_channel:
                     try:
                         client.set_output(channel=channel, lease_id=lease_id, output_on=False)
                     except Exception:
                         pass
-                if self.current_channel is not None and int(channel) == int(self.current_channel):
+                if (
+                    not preserve_channel
+                    and self.current_channel is not None
+                    and int(channel) == int(self.current_channel)
+                ):
                     try:
                         client.configure_channel(
                             channel=channel,
@@ -7997,6 +8010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_runtime_update_values: dict[str, float | bool] | None = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s: float | None = None
+        self._isolated_setup_elapsed_offset_s: float | None = None
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
@@ -13781,11 +13795,17 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    def _disconnect_supply(self, *, preserve_motor_output: bool = False) -> None:
+    def _disconnect_supply(
+        self,
+        *,
+        preserve_motor_output: bool = False,
+        preserve_current_output: bool = False,
+    ) -> None:
         if self._supply_controller is not None:
             if isinstance(self._supply_controller, SharedBrokerSupplyController):
                 self._supply_controller.disconnect(
-                    preserve_motor_output=preserve_motor_output
+                    preserve_motor_output=preserve_motor_output,
+                    preserve_current_output=preserve_current_output,
                 )
             else:
                 self._supply_controller.disconnect()
@@ -13797,6 +13817,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_cadence_generation = 0
         self._refresh_supply_cadence_status()
         self._refresh_supply_live_label()
+
+    def _emergency_shared_supply_outputs_off(self) -> None:
+        BrokerJsonClient(
+            host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+            port=int(self.spin_shared_broker_port.value()),
+        ).emergency_all_outputs_off()
 
     def _refresh_supply_live_label(self) -> None:
         if not self._is_ui_thread():
@@ -31813,6 +31839,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._prepare_continuity_current_for_recipe(steps):
             self._first_overheating_preflight_decision = None
             return
+        process = self._create_production_control_process()
+        try:
+            # Starting the empty worker process does not acquire hardware. Do
+            # it before the operator prompt so Windows spawn/import latency is
+            # paid while the operator measures and enters the wire length.
+            process.start_process()
+        except Exception:
+            process.close()
+            raise
         starting_length_mm: float | None = None
         has_length_setup = any(
             step.action == "starting_length_prompt" for step in steps
@@ -31835,6 +31870,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not accepted:
                 self._log("Recipe start cancelled before transferring hardware ownership.")
                 self._close_length_setup_dialog()
+                process.close()
                 self._first_overheating_preflight_decision = None
                 return
             starting_length_mm = float(starting_length_mm)
@@ -31858,15 +31894,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 "control process."
             )
             self._disconnect_scale()
-            self._disconnect_supply()
             if not self._stop_tic_dispatcher():
                 self._log(
                     "Dedicated-process startup aborted because the UI Tic worker did "
                     "not release hardware ownership cleanly."
                 )
+                process.close()
                 self._first_overheating_preflight_decision = None
                 return
             self._release_tic_device_lock()
+            # This is an ownership handoff, not a stop. Release both broker
+            # leases without toggling the physical outputs; the child will
+            # immediately reacquire and confirm them.
+            self._disconnect_supply(
+                preserve_motor_output=True,
+                preserve_current_output=True,
+            )
         # The visible window no longer owns Tic status while the child owns
         # recipe hardware.  A preflight refresh may have armed this timer.
         self._status_timer.stop()
@@ -31880,9 +31923,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
             else ControlPolicy.PRAGUE
         )
-        process = self._create_production_control_process()
         try:
-            process.start_process()
             start_sequence = process.start_session(
                 ControlStartRequest(
                     identity=identity,
@@ -31894,8 +31935,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
         except Exception:
-            process.emergency_stop()
-            process.close()
+            try:
+                process.emergency_stop()
+            except Exception as emergency_exc:
+                self._log(
+                    "WARNING: control-process emergency command failed during "
+                    f"ownership handoff: {emergency_exc}"
+                )
+            finally:
+                process.close()
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as shutdown_exc:
+                self._log(
+                    "WARNING: failed to confirm shared HMP outputs off after "
+                    f"control-process handoff failure: {shutdown_exc}"
+                )
             raise
         self._production_control_process = process
         self._production_control_identity = identity
@@ -31904,6 +31959,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending = "start"
         self._isolated_pending_sequence = start_sequence
         self._isolated_last_plot_elapsed_s = None
+        self._isolated_setup_elapsed_offset_s = None
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
@@ -32186,6 +32242,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed_value is None:
             return
         elapsed_s = float(elapsed_value)
+        session_logging_enabled = bool(
+            readback.get("session_logging_enabled")
+        )
+        logging_started = (
+            session_logging_enabled
+            and not self._isolated_session_logging_enabled
+        )
+        if logging_started:
+            # Setup and recipe logging deliberately use separate elapsed
+            # clocks. Reset duplicate suppression at that boundary so the
+            # recipe's first points near t=0 are visible immediately.
+            self._isolated_last_plot_elapsed_s = None
+            self._isolated_setup_elapsed_offset_s = None
+            self._live_plot_points = []
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
         last_elapsed_s = self._isolated_last_plot_elapsed_s
         if last_elapsed_s is not None and elapsed_s <= last_elapsed_s:
             return
@@ -32194,13 +32266,25 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return
         self._isolated_last_plot_elapsed_s = elapsed_s
-        session_logging_enabled = bool(
-            readback.get("session_logging_enabled")
-        )
         if (
             self._length_setup_dialog is not None
             and not session_logging_enabled
         ):
+            if self._isolated_setup_elapsed_offset_s is None:
+                previous_elapsed_s = (
+                    float(self._length_setup_points[-1].elapsed_s)
+                    if self._length_setup_points
+                    else None
+                )
+                self._isolated_setup_elapsed_offset_s = (
+                    0.0
+                    if previous_elapsed_s is None
+                    else previous_elapsed_s
+                    + max(0.001, self._ui_refresh_interval_ms() / 1000.0)
+                    - elapsed_s
+                )
+            display_elapsed_s = elapsed_s + self._isolated_setup_elapsed_offset_s
+            point = replace(point, elapsed_s=display_elapsed_s)
             self._length_setup_points.append(point)
             if len(self._length_setup_points) > 1000:
                 self._length_setup_points = self._length_setup_points[-1000:]
@@ -32213,13 +32297,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._refresh_length_setup_plot()
             self._isolated_session_logging_enabled = False
             return
-        if (
-            session_logging_enabled
-            and not self._isolated_session_logging_enabled
-        ):
-            self._live_plot_points = []
-            self._display_plot_old_cache_key = None
-            self._display_plot_old_cache = []
         self._isolated_session_logging_enabled = session_logging_enabled
         self._live_plot_points.append(point)
         self._compact_live_plot_points()
@@ -32840,7 +32917,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _dialog_plot_refresh_due(self, last_refresh_s: float | None, *, now_s: float) -> bool:
         if last_refresh_s is None:
             return True
-        interval_s = max(0.1, float(self._graph_refresh_interval_ms()) / 1000.0)
+        interval_s = max(
+            0.1,
+            min(
+                float(self._graph_refresh_interval_ms()),
+                float(self._ui_refresh_interval_ms()),
+            )
+            / 1000.0,
+        )
         return now_s - float(last_refresh_s) >= interval_s
 
     def _qcolor_from_rgb(self, rgb: Sequence[float]) -> QtGui.QColor:

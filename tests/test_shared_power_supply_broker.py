@@ -511,3 +511,20 @@ def test_broker_protocol_exposes_cadence_preview_and_status() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+
+def test_broker_protocol_emergency_all_outputs_off_requires_explicit_client_call() -> None:
+    broker, _annealing, _mini_dma = _leased_broker()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+
+        client.emergency_all_outputs_off()
+
+        assert broker.output_state(channel=1) is False
+        assert broker.output_state(channel=3) is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
