@@ -1646,6 +1646,7 @@ class _FakeIsolatedControlProcess:
         self.update_payloads: list[str] = []
         self.next_snapshot: object | None = None
         self.next_events: tuple[object, ...] = ()
+        self.next_fault_detail: tuple[str, str] = ("", "")
 
     def start_process(self) -> None:
         self.started = True
@@ -1683,6 +1684,11 @@ class _FakeIsolatedControlProcess:
         events = self.next_events
         self.next_events = ()
         return events
+
+    def poll_fault_detail(self) -> tuple[str, str]:
+        detail = self.next_fault_detail
+        self.next_fault_detail = ("", "")
+        return detail
 
     def is_alive(self) -> bool:
         return self.started and not self.closed
@@ -1832,6 +1838,97 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         assert process.closed is True
         assert window._isolated_recipe_active is False
     finally:
+        _close_test_window(window)
+
+
+def test_isolated_setup_snapshot_updates_visible_setup_graph_until_logging_starts(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    point = mini_dma_mod.MeasurementPoint(
+        elapsed_s=1.5,
+        timestamp_utc="2026-07-28T07:00:00Z",
+        raw_position_mm=0.12,
+        position_mm=0.12,
+        raw_load_g=0.91,
+        load_g=0.91,
+        preload_state="setup",
+        strain_pct=0.0,
+        stress_mpa=49.8,
+        current_set_mA=1.0,
+        current_measured_mA=1.0,
+        voltage_V=0.15,
+        resistance_ohm=150.0,
+        power_W=0.00015,
+        automation_phase="starting_length_prompt",
+        automation_basis="stress_mpa",
+        automation_target_value=50.0,
+        plateau_index=0,
+        plateau_label="length setup",
+    )
+    readback = {
+        f"plot_{field.name}": getattr(point, field.name)
+        for field in dataclasses.fields(point)
+    }
+    readback["session_logging_enabled"] = False
+
+    try:
+        window._show_length_setup_dialog()
+        window._consume_isolated_plot_snapshot(readback)
+
+        assert window._length_setup_dialog is not None
+        assert window._length_setup_dialog.isVisible()
+        assert len(window._length_setup_points) == 1
+        assert window._length_setup_points[0].stress_mpa == pytest.approx(49.8)
+
+        readback["session_logging_enabled"] = True
+        readback["plot_elapsed_s"] = 2.0
+        window._consume_isolated_plot_snapshot(readback)
+
+        assert len(window._length_setup_points) == 1
+        assert len(window._live_plot_points) == 2
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_fast_child_exit_reports_durable_fault_detail(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = False
+    process.exitcode = 1
+    process.next_fault_detail = (
+        "hardware preflight failed: scale COM6 unavailable",
+        "Traceback (most recent call last): synthetic",
+    )
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+
+    try:
+        window._poll_production_control_process()
+
+        status = window.label_control_process_status.text()
+        assert "hardware preflight failed: scale COM6 unavailable" in status
+        assert "exited with code 1" not in status
+        assert window._production_control_process is None
+        assert window._isolated_recipe_active is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
         _close_test_window(window)
 
 
@@ -2006,13 +2103,24 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
         lambda _steps: ordering.append("continuity_current") or True
     )
+    show_length_setup_dialog = window._show_length_setup_dialog
+
+    def _show_setup_graph() -> None:
+        ordering.append("setup_graph")
+        show_length_setup_dialog()
+
+    window._show_length_setup_dialog = _show_setup_graph  # type: ignore[method-assign]
+
+    def _enter_length(*_args: object, **_kwargs: object) -> tuple[float, bool]:
+        assert window._length_setup_dialog is not None
+        assert window._length_setup_dialog.isVisible()
+        ordering.append("length_prompt")
+        return 57.602, True
+
     monkeypatch.setattr(
         mini_dma_mod.QtWidgets.QInputDialog,
         "getDouble",
-        lambda *_args, **_kwargs: (
-            ordering.append("length_prompt") or 57.602,
-            True,
-        ),
+        _enter_length,
     )
 
     try:
@@ -2023,6 +2131,7 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
             "existing_output_check",
             "hardware_preflight",
             "continuity_current",
+            "setup_graph",
             "length_prompt",
         ]
         assert len(process.requests) == 1

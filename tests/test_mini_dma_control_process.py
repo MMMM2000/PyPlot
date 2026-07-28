@@ -290,6 +290,9 @@ def test_backend_fault_attempts_emergency_stop_and_reports_fault() -> None:
         while process.is_alive() and time.monotonic() < deadline_s:
             time.sleep(0.01)
         assert process.exitcode not in {None, 0}
+        fault_detail, fault_traceback = process.poll_fault_detail()
+        assert "simulated backend failure at tick 3" in fault_detail
+        assert "RuntimeError: simulated backend failure at tick 3" in fault_traceback
     finally:
         assert process.close()
 

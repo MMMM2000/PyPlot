@@ -31446,7 +31446,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._first_overheating_preflight_decision = None
             return
         starting_length_mm: float | None = None
-        if any(step.action == "starting_length_prompt" for step in steps):
+        has_length_setup = any(
+            step.action == "starting_length_prompt" for step in steps
+        )
+        if has_length_setup:
+            # Preserve the established pre-run experience: the setup graphs
+            # exist behind the modal length prompt. The visible process owns
+            # only these immutable views; the child still owns every setup
+            # hardware command and authoritative setup/run file.
+            self._show_length_setup_dialog()
             starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
                 self,
                 APP_NAME,
@@ -31458,6 +31466,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if not accepted:
                 self._log("Recipe start cancelled before transferring hardware ownership.")
+                self._close_length_setup_dialog()
                 self._first_overheating_preflight_decision = None
                 return
             starting_length_mm = float(starting_length_mm)
@@ -31544,11 +31553,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if process is None:
             self._control_process_poll_timer.stop()
             return
+        poll_fault_detail = getattr(process, "poll_fault_detail", None)
+        fault_detail, _fault_traceback = (
+            poll_fault_detail()
+            if callable(poll_fault_detail)
+            else ("", "")
+        )
         snapshot = process.poll_latest_snapshot()
         if snapshot is not None:
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
             self._consume_isolated_plot_snapshot(readback)
+            if (
+                self._length_setup_dialog is not None
+                and bool(readback.get("session_logging_enabled"))
+            ):
+                self._update_length_setup_progress(complete=True)
+                self._close_length_setup_dialog()
             self._automation_paused = snapshot.state is ControlState.PAUSED
             self._isolated_recipe_paused = self._automation_paused
             pending_sequence = self._isolated_pending_sequence
@@ -31665,13 +31686,16 @@ class MainWindow(QtWidgets.QMainWindow):
             elif event.kind is ControlEventKind.FAULT:
                 self._finish_isolated_recipe(
                     state=ControlState.FAULTED,
-                    detail=event.detail,
+                    detail=event.detail or fault_detail,
                 )
                 return
         if not process.is_alive() and process.exitcode is not None:
             self._finish_isolated_recipe(
                 state=ControlState.FAULTED,
-                detail=f"control process exited with code {process.exitcode}",
+                detail=(
+                    fault_detail
+                    or f"control process exited with code {process.exitcode}"
+                ),
             )
 
     def _finish_isolated_recipe(
@@ -31689,6 +31713,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_runtime_update_values = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s = None
+        self._close_length_setup_dialog()
         self._automation_active = False
         self._automation_paused = False
         self._automation_steps = []
@@ -31728,6 +31753,20 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return
         self._isolated_last_plot_elapsed_s = elapsed_s
+        if (
+            self._length_setup_dialog is not None
+            and not bool(readback.get("session_logging_enabled"))
+        ):
+            self._length_setup_points.append(point)
+            if len(self._length_setup_points) > 1000:
+                self._length_setup_points = self._length_setup_points[-1000:]
+            now_s = time.monotonic()
+            if self._dialog_plot_refresh_due(
+                self._last_length_setup_plot_refresh_s,
+                now_s=now_s,
+            ):
+                self._last_length_setup_plot_refresh_s = now_s
+                self._refresh_length_setup_plot()
         self._live_plot_points.append(point)
         if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
             self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]

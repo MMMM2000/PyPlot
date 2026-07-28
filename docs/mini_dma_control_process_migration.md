@@ -57,7 +57,12 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
 7. The production child runs the existing recipe implementation unchanged, so
    Prague legacy-seek and Košice adaptive policies stay separate while sharing
    the isolated process and hardware infrastructure.
-8. Disposable test windows default to the legacy in-process path. Tests must
+8. Operator-owned pre-run UI remains visible: the length-setup graph is created
+   before the mounted-length prompt and is updated from immutable child
+   snapshots. Setup motor/scale/PSU calls and setup/run files remain exclusively
+   child-owned. A feeder-independent fault pipe and direct process-log traceback
+   preserve startup diagnostics across fast Windows child exits.
+9. Disposable test windows default to the legacy in-process path. Tests must
    explicitly opt into isolation with a fake supervisor, preventing accidental
    serial access during software verification.
 

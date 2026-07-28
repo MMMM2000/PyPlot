@@ -399,6 +399,10 @@ class ProductionMiniDmaBackend:
             ("automation_name", str(window._automation_name)),
             ("automation_index", int(window._automation_index)),
             (
+                "session_logging_enabled",
+                bool(getattr(window, "_session_logging_enabled", False)),
+            ),
+            (
                 "automation_completed",
                 int(getattr(window, "_automation_completed_ticks", window._automation_index)),
             ),

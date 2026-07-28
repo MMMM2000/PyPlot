@@ -16,6 +16,7 @@ import os
 from queue import Empty, Full
 from threading import Event as ThreadEvent, Lock, Thread
 import time
+import traceback
 from typing import Any, Protocol
 
 
@@ -304,6 +305,7 @@ class _ControlProcessRuntime:
         heartbeat_queue: Any,
         snapshot_queue: Any,
         event_queue: Any,
+        fault_connection: Any,
         emergency_event: Any,
         shutdown_event: Any,
         backend_config: SimulatedBackendConfig,
@@ -313,6 +315,7 @@ class _ControlProcessRuntime:
         self._heartbeat_queue = heartbeat_queue
         self._snapshot_queue = snapshot_queue
         self._event_queue = event_queue
+        self._fault_connection = fault_connection
         self._emergency_event = emergency_event
         self._shutdown_event = shutdown_event
         self._backend: ControlBackend = _build_backend(
@@ -384,10 +387,34 @@ class _ControlProcessRuntime:
                     self._publish_snapshot()
         except BaseException as exc:
             self._state = ControlState.FAULTED
+            fault_traceback = traceback.format_exc()
+            fault_detail = str(exc) or exc.__class__.__name__
+            try:
+                self._fault_connection.send(
+                    {
+                        "detail": fault_detail,
+                        "traceback": fault_traceback,
+                    }
+                )
+            except Exception:
+                pass
+            diagnostic_path = str(
+                os.environ.get("PYPLOT_EXPERIMENT_LOG_PATH", "")
+            ).strip()
+            if diagnostic_path:
+                try:
+                    with open(diagnostic_path, "a", encoding="utf-8") as handle:
+                        handle.write(
+                            "\n=== dedicated Mini DMA control process fault ===\n"
+                        )
+                        handle.write(fault_traceback)
+                        handle.flush()
+                except OSError:
+                    pass
             try:
                 self._backend.emergency_stop(f"control process fault: {exc}")
             finally:
-                self._emit_event(ControlEventKind.FAULT, detail=str(exc) or exc.__class__.__name__)
+                self._emit_event(ControlEventKind.FAULT, detail=fault_detail)
                 self._publish_snapshot()
             # Preserve the original traceback on the inherited diagnostic
             # stream.  The supervisor still observes exit code 1, while a
@@ -584,6 +611,7 @@ def _run_control_process(
     heartbeat_queue: Any,
     snapshot_queue: Any,
     event_queue: Any,
+    fault_connection: Any,
     emergency_event: Any,
     shutdown_event: Any,
     backend_config: SimulatedBackendConfig,
@@ -594,6 +622,7 @@ def _run_control_process(
         heartbeat_queue=heartbeat_queue,
         snapshot_queue=snapshot_queue,
         event_queue=event_queue,
+        fault_connection=fault_connection,
         emergency_event=emergency_event,
         shutdown_event=shutdown_event,
         backend_config=backend_config,
@@ -624,6 +653,9 @@ class MiniDmaControlProcess:
         self._heartbeat_queue = self._context.Queue(maxsize=1)
         self._snapshot_queue = self._context.Queue(maxsize=1)
         self._event_queue = self._context.Queue(maxsize=event_capacity)
+        self._fault_connection, self._child_fault_connection = self._context.Pipe(
+            duplex=False
+        )
         self._emergency_event = self._context.Event()
         self._shutdown_event = self._context.Event()
         self._backend_config = backend_config or SimulatedBackendConfig()
@@ -634,6 +666,8 @@ class MiniDmaControlProcess:
         self._process: multiprocessing.Process | None = None
         self._command_sequence = 0
         self._sequence_lock = Lock()
+        self._last_fault_detail = ""
+        self._last_fault_traceback = ""
 
     @property
     def pid(self) -> int | None:
@@ -657,6 +691,7 @@ class MiniDmaControlProcess:
                 self._heartbeat_queue,
                 self._snapshot_queue,
                 self._event_queue,
+                self._child_fault_connection,
                 self._emergency_event,
                 self._shutdown_event,
                 self._backend_config,
@@ -720,6 +755,27 @@ class MiniDmaControlProcess:
             if isinstance(candidate, ControlEvent):
                 events.append(candidate)
 
+    def poll_fault_detail(self) -> tuple[str, str]:
+        """Return the latest fault over a feeder-free pipe.
+
+        Queue feeder shutdown can race a fast child exit on Windows.  This
+        dedicated pipe keeps the original exception available to the visible
+        supervisor even when the final snapshot/event is lost.
+        """
+
+        while True:
+            try:
+                if not self._fault_connection.poll():
+                    break
+                payload = self._fault_connection.recv()
+            except (EOFError, OSError):
+                break
+            if not isinstance(payload, dict):
+                continue
+            self._last_fault_detail = str(payload.get("detail") or "")
+            self._last_fault_traceback = str(payload.get("traceback") or "")
+        return self._last_fault_detail, self._last_fault_traceback
+
     def close(self, *, timeout_s: float = 2.0) -> bool:
         self._heartbeat_stop.set()
         self._shutdown_event.set()
@@ -730,6 +786,15 @@ class MiniDmaControlProcess:
         if process is None:
             return True
         process.join(timeout=max(0.0, timeout_s))
+        if not process.is_alive():
+            try:
+                self._fault_connection.close()
+            except OSError:
+                pass
+            try:
+                self._child_fault_connection.close()
+            except OSError:
+                pass
         return not process.is_alive()
 
     def _send(
