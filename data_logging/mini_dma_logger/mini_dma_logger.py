@@ -7182,6 +7182,21 @@ class SharedBrokerSupplyController:
             self._client = None
             self._connected = False
 
+    def detach_for_handoff(self) -> dict[int, str]:
+        """Drop parent-side access without sending any broker or PSU command.
+
+        The hidden controller uses the same stable broker owner identity, so
+        its lease requests adopt these existing leases.  Returning the lease
+        ids lets the supervisor release them if child startup fails.
+        """
+
+        with self._io_lock:
+            leases = dict(self._leases)
+            self._leases.clear()
+            self._client = None
+            self._connected = False
+            return leases
+
     def is_connected(self) -> bool:
         return self._connected and self._client is not None
 
@@ -8014,6 +8029,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
+        self._isolated_supply_handoff_leases: dict[int, str] = {}
         self._preserve_motor_supply_on_close = False
         self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
@@ -13823,6 +13839,44 @@ class MainWindow(QtWidgets.QMainWindow):
             host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
             port=int(self.spin_shared_broker_port.value()),
         ).emergency_all_outputs_off()
+
+    def _detach_supply_for_handoff(self) -> dict[int, str]:
+        controller = self._supply_controller
+        handoff_leases: dict[int, str] = {}
+        if isinstance(controller, SharedBrokerSupplyController):
+            handoff_leases = controller.detach_for_handoff()
+        elif controller is not None:
+            # Direct serial disconnect only closes the port; it does not
+            # change channel or master output state.
+            controller.disconnect()
+        self._supply_controller = None
+        self._current_sweep_channel_limit_checked = None
+        self._supply_output_enabled = False
+        self.label_supply_status.setText("Supply ownership transferring.")
+        self._supply_effective_readback_hz = self._requested_supply_readback_hz()
+        self._supply_cadence_generation = 0
+        self._refresh_supply_cadence_status()
+        self._refresh_supply_live_label()
+        return handoff_leases
+
+    def _release_shared_supply_handoff_leases(
+        self,
+        leases: Mapping[int, str],
+    ) -> None:
+        if not leases:
+            return
+        client = BrokerJsonClient(
+            host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+            port=int(self.spin_shared_broker_port.value()),
+        )
+        for channel, lease_id in leases.items():
+            try:
+                client.release(channel=int(channel), lease_id=str(lease_id))
+            except Exception as exc:
+                self._log(
+                    f"WARNING: failed to release transferred CH{channel} lease "
+                    f"after child startup failure: {exc}"
+                )
 
     def _refresh_supply_live_label(self) -> None:
         if not self._is_ui_thread():
@@ -31894,6 +31948,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "control process."
             )
             self._disconnect_scale()
+            self._log("UI scale ownership released.")
             if not self._stop_tic_dispatcher():
                 self._log(
                     "Dedicated-process startup aborted because the UI Tic worker did "
@@ -31903,12 +31958,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._first_overheating_preflight_decision = None
                 return
             self._release_tic_device_lock()
-            # This is an ownership handoff, not a stop. Release both broker
-            # leases without toggling the physical outputs; the child will
-            # immediately reacquire and confirm them.
-            self._disconnect_supply(
-                preserve_motor_output=True,
-                preserve_current_output=True,
+            self._log("UI Tic ownership released.")
+            # Do not send broker release/configure/output commands here. The
+            # child uses the same stable broker owner identity and adopts the
+            # existing leases when it connects.
+            self._isolated_supply_handoff_leases = (
+                self._detach_supply_for_handoff()
+            )
+            self._log(
+                "Shared HMP ownership transferred without changing PSU outputs."
             )
         # The visible window no longer owns Tic status while the child owns
         # recipe hardware.  A preflight refresh may have armed this timer.
@@ -31951,6 +32009,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     "WARNING: failed to confirm shared HMP outputs off after "
                     f"control-process handoff failure: {shutdown_exc}"
                 )
+            self._release_shared_supply_handoff_leases(
+                self._isolated_supply_handoff_leases
+            )
+            self._isolated_supply_handoff_leases = {}
             raise
         self._production_control_process = process
         self._production_control_identity = identity
@@ -31992,6 +32054,15 @@ class MainWindow(QtWidgets.QMainWindow):
             readback = dict(snapshot.readback)
             self._consume_isolated_log_snapshot(readback)
             self._consume_isolated_plot_snapshot(readback)
+            if (
+                self._isolated_command_pending == "start"
+                and self._isolated_pending_sequence is not None
+                and snapshot.last_command_sequence >= self._isolated_pending_sequence
+                and getattr(snapshot, "last_command_result", "") == "accepted"
+            ):
+                # The child has adopted the stable-owner broker leases. It now
+                # owns their normal release/cleanup lifecycle.
+                self._isolated_supply_handoff_leases = {}
             if (
                 self._length_setup_dialog is not None
                 and bool(readback.get("session_logging_enabled"))
@@ -32166,6 +32237,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._production_control_identity = None
         if process is not None:
             process.close(timeout_s=2.0)
+        if self._isolated_supply_handoff_leases:
+            if state in {ControlState.FAULTED, ControlState.EMERGENCY}:
+                try:
+                    self._emergency_shared_supply_outputs_off()
+                except Exception as exc:
+                    self._log(
+                        "WARNING: failed to confirm shared HMP outputs off "
+                        f"after pre-adoption controller fault: {exc}"
+                    )
+            self._release_shared_supply_handoff_leases(
+                self._isolated_supply_handoff_leases
+            )
+            self._isolated_supply_handoff_leases = {}
         color = "#b91c1c" if state in {ControlState.FAULTED, ControlState.EMERGENCY} else "#15803d"
         self.label_control_process_status.setStyleSheet(f"color: {color};")
         suffix = f": {detail}" if detail else ""

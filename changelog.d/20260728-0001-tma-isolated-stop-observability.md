@@ -8,9 +8,9 @@ also wait for a complete filtered response to the previous motor command
 before another correction can be issued. The child now also preserves the
 visible UI's completed prior-run/next-run filename decision instead of
 reapplying stale automatic naming after ownership transfer.
-The UI-to-controller handoff now releases shared-HMP leases without switching
-the current or motor outputs off and back on, with an explicit all-output
-emergency fallback if the child cannot take ownership. Setup snapshots continue
+The UI-to-controller handoff now transfers shared-HMP leases without sending
+release, configure, or output commands, with an explicit all-output emergency
+fallback if the child cannot take ownership. Setup snapshots continue
 after the visible pre-prompt samples on one display timeline, recipe plots
 accept their new elapsed clock immediately, and transient setup graphs refresh
 at the faster UI cadence.

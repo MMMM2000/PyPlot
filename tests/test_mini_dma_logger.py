@@ -2498,8 +2498,8 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
     window._disconnect_scale = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
         "release_scale", "_scale_thread"
     )
-    window._disconnect_supply = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
-        "release_supply", "_supply_controller"
+    window._detach_supply_for_handoff = lambda: (  # type: ignore[method-assign]
+        _release("transfer_supply", "_supply_controller") or {}
     )
     window._stop_tic_dispatcher = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
         "release_tic", "_tic_command_dispatcher"
@@ -2516,7 +2516,7 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
             "release_scale",
             "release_tic",
             "release_tic_lock",
-            "release_supply",
+            "transfer_supply",
             "child_session",
         ]
         assert process.started is True
@@ -19466,7 +19466,7 @@ def test_shared_broker_normal_stop_releases_motor_lease_without_disabling_output
     assert controller._leases == {}
 
 
-def test_shared_broker_handoff_releases_both_leases_without_toggling_outputs(
+def test_shared_broker_handoff_detaches_both_leases_without_broker_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeBrokerClient:
@@ -19509,19 +19509,12 @@ def test_shared_broker_handoff_releases_both_leases_without_toggling_outputs(
     controller._connected = True
     controller._leases = {4: "lease-4", 3: "lease-3"}
 
-    controller.disconnect(
-        preserve_motor_output=True,
-        preserve_current_output=True,
-    )
+    leases = controller.detach_for_handoff()
 
-    assert not any(
-        action in {"set_output", "configure_channel"}
-        for action, _payload in client.calls
-    )
-    assert client.calls == [
-        ("release", {"channel": 4, "lease_id": "lease-4"}),
-        ("release", {"channel": 3, "lease_id": "lease-3"}),
-    ]
+    assert client.calls == []
+    assert leases == {4: "lease-4", 3: "lease-3"}
+    assert controller._client is None
+    assert controller._leases == {}
 
 
 def test_dialog_plot_refresh_uses_faster_ui_cadence(
