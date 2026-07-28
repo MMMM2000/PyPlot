@@ -131,7 +131,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-28.1"
+CONTROL_LOGIC_VERSION = "2026-07-28.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -143,6 +143,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_scale_signal",
     "current_hold_cycle_center_motor_suppression",
     "current_hold_cycle_center_resume_confirmation",
+    "current_hold_cycle_center_resume_uses_active_hold_state",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
     "current_hold_automatic_entry_gate",
@@ -21499,9 +21500,12 @@ class MainWindow(QtWidgets.QMainWindow):
             fast_veto=False,
             suppression_allowed=False,
         )
+        hold_active = self._current_sweep_ramp_hold_step_index is not None
         if (
             self._automation_phase != "current_hold"
-            or not self._is_current_sweep_mode(self._automation_name)
+            and not hold_active
+        ) or (
+            not self._is_current_sweep_mode(self._automation_name)
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or self._current_sweep_ramp_hold_scale_started_s is None
         ):

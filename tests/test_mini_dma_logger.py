@@ -24949,6 +24949,95 @@ def test_current_sweep_cycle_center_requires_fixed_current_history_and_fast_veto
         _close_test_window(window)
 
 
+def test_current_sweep_cycle_center_is_available_before_held_context_is_published(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumes: list[str] = []
+    now_s = time.time()
+    start_s = now_s - 20.0
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_scale_started_s = start_s
+    for index in range(81):
+        elapsed_s = index * 0.25
+        stress_mpa = 50.0 + 10.0 * math.cos(
+            2.0 * math.pi * elapsed_s / 10.0
+        )
+        load_g = mini_dma_mod.load_g_from_stress_mpa(
+            stress_mpa,
+            window.spin_diameter.value(),
+        )
+        assert load_g is not None
+        timestamp_s = start_s + elapsed_s
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+        )
+
+        assert state.ready is True
+        assert state.stationary is True
+        assert state.suppression_allowed is True
+        assert state.signal is not None
+        assert state.signal.noise <= 12.0
+
+        window._has_fresh_scale_reading = lambda **_kwargs: True  # type: ignore[method-assign]
+        window._current_sweep_cycle_center_resume_enabled = True
+        window._pending_motion_command = None
+        window._kosice_active_motion_target_steps = None
+        window._motion_feedback_ready_after_monotonic_s = lambda: None  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumes.append(str(kwargs["reason"]))
+        )
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_hold_enabled=True,
+        )
+        fast_signal = window._scale_control_signal_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            trend_aware=True,
+        )
+        assert fast_signal is not None
+        assert abs(50.0 - fast_signal.value) <= 20.0
+        assert abs(50.0 - fast_signal.latest_value) <= 20.0
+        window._latest_scale_arrival_monotonic_s = 10.0
+        assert not window._maybe_resume_current_sweep_ramp_from_cycle_center(
+            step,
+            now_s=100.0,
+        )
+        assert window._current_sweep_ramp_hold_cycle_center_since_s == 10.0
+        window._latest_scale_arrival_monotonic_s = 12.1
+        assert window._maybe_resume_current_sweep_ramp_from_cycle_center(
+            step,
+            now_s=102.1,
+        )
+        assert len(resumes) == 1
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence(
     tmp_path: Path,
     qtbot,
