@@ -26618,7 +26618,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_cycle_center_motor_suppression_enabled": (
                     self._current_sweep_cycle_center_motor_suppression_enabled
                 ),
-                "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
             },
         }
 
