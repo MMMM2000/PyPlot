@@ -8,6 +8,7 @@ readback snapshots to the visible UI process.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import fields
 import json
 import os
@@ -224,6 +225,14 @@ class ProductionMiniDmaBackend:
         self._last_error = ""
         self._window_factory = window_factory
         self._hardware_preflight: dict[str, ReadbackValue] = {}
+        self._ui_log_sequence = 0
+        self._ui_log_lines: deque[tuple[int, str]] = deque(maxlen=256)
+
+    def _capture_ui_log_line(self, line: str) -> None:
+        self._ui_log_sequence += 1
+        self._ui_log_lines.append(
+            (self._ui_log_sequence, str(line)[:2000])
+        )
 
     def start(self, request: ControlStartRequest) -> None:
         payload = json.loads(request.config_json)
@@ -240,6 +249,7 @@ class ProductionMiniDmaBackend:
             control_process_enabled=False,
             controller_process_mode=True,
         )
+        self._window._control_process_log_sink = self._capture_ui_log_line
         _apply_window_configuration(self._window, payload)
         self._window._controller_process_cadence_downgrade_accepted = bool(
             payload.get("cadence_downgrade_accepted", False)
@@ -312,6 +322,10 @@ class ProductionMiniDmaBackend:
 
     def stop(self) -> None:
         window = self._require_window()
+        # A confirmed normal recipe stop preserves the separately configured
+        # motor-supply channel. Emergency/crash/close paths retain the default
+        # fail-safe behavior and turn it off.
+        window._preserve_motor_supply_on_close = True
         if window._automation_active:
             window._stop_auto_ramp(
                 log_completion=True,
@@ -326,6 +340,7 @@ class ProductionMiniDmaBackend:
         window = self._window
         if window is None:
             return
+        window._preserve_motor_supply_on_close = False
         try:
             if window._automation_active:
                 window._stop_auto_ramp(
@@ -440,6 +455,14 @@ class ProductionMiniDmaBackend:
             ("tic_vin_v", window._last_tic_vin_v),
             ("emergency_reason", self._emergency_reason),
             ("error", self._last_error),
+            (
+                "ui_log_tail_json",
+                json.dumps(
+                    list(self._ui_log_lines)[-32:],
+                    separators=(",", ":"),
+                ),
+            ),
+            ("ui_log_sequence", self._ui_log_sequence),
         ) + tuple(self._hardware_preflight.items())
         capture_plot_point = getattr(window, "_capture_live_plot_point", None)
         plot_point = capture_plot_point() if callable(capture_plot_point) else None

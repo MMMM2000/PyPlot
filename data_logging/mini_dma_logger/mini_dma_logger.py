@@ -174,6 +174,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
     "current_hold_volatile_response_contains_adaptive_recovery",
+    "current_hold_outstanding_response_observation_gate",
     "current_hold_large_error_uses_geometry_base_cap_before_response",
     "current_hold_response_stiffness_requires_error_improvement",
     "current_hold_adaptive_cap_growth_is_response_earned",
@@ -7088,7 +7089,7 @@ class SharedBrokerSupplyController:
         self._apply_cadence_status(status)
         return status
 
-    def disconnect(self) -> None:
+    def disconnect(self, *, preserve_motor_output: bool = False) -> None:
         with self._io_lock:
             client = self._client
             channels = list(self._leases)
@@ -7097,10 +7098,16 @@ class SharedBrokerSupplyController:
                 channels.insert(0, self.current_channel)
             for channel in channels:
                 lease_id = self._leases[channel]
-                try:
-                    client.set_output(channel=channel, lease_id=lease_id, output_on=False)
-                except Exception:
-                    pass
+                preserve_channel = (
+                    preserve_motor_output
+                    and self.motor_channel is not None
+                    and int(channel) == int(self.motor_channel)
+                )
+                if not preserve_channel:
+                    try:
+                        client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                    except Exception:
+                        pass
                 if self.current_channel is not None and int(channel) == int(self.current_channel):
                     try:
                         client.configure_channel(
@@ -7948,6 +7955,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_runtime_update_values: dict[str, float | bool] | None = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s: float | None = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
+        self._preserve_motor_supply_on_close = False
+        self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
         self._control_ui_event.connect(self._apply_control_ui_event, QtCore.Qt.ConnectionType.QueuedConnection)
@@ -12651,6 +12663,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
+        log_sink = self._control_process_log_sink
+        if callable(log_sink):
+            log_sink(line)
         self._queue_run_log_display_line(line)
         batch_live_run_log = (
             self._automation_control_loop is not None
@@ -13713,9 +13728,14 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    def _disconnect_supply(self) -> None:
+    def _disconnect_supply(self, *, preserve_motor_output: bool = False) -> None:
         if self._supply_controller is not None:
-            self._supply_controller.disconnect()
+            if isinstance(self._supply_controller, SharedBrokerSupplyController):
+                self._supply_controller.disconnect(
+                    preserve_motor_output=preserve_motor_output
+                )
+            else:
+                self._supply_controller.disconnect()
         self._supply_controller = None
         self._current_sweep_channel_limit_checked = None
         self._supply_output_enabled = False
@@ -21951,6 +21971,28 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return required_samples
 
+    def _current_hold_response_observation_pending(
+        self,
+        seek_key: tuple[str, int, float],
+        *,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> bool:
+        if (
+            self._automation_phase != "current_hold"
+            or seek_key not in self._seek_last_time_by_key
+        ):
+            return False
+        ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        if ready_after_s is None:
+            return False
+        response_age_s = max(0.0, time.monotonic() - float(ready_after_s))
+        return (
+            response_age_s < self._current_sweep_hold_filter_window_s()
+            or filtered_signal is None
+            or filtered_signal.sample_count
+            < SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+        )
+
     def _seek_wait_for_required_post_move_samples(
         self,
         seek_key: tuple[str, int, float],
@@ -22914,13 +22956,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 seek_key,
                 required_samples,
             )
-            if waiting_for_required_samples or volatile_unsettled_response:
+            waiting_for_complete_response = self._current_hold_response_observation_pending(
+                seek_key,
+                filtered_signal=filtered_signal,
+            )
+            if (
+                waiting_for_required_samples
+                or waiting_for_complete_response
+                or volatile_unsettled_response
+            ):
                 self._log_waiting_for_feedback(
                     (
                         "Current-hold response is fluctuating after the last move; waiting for delayed "
                         "scale feedback to settle before compounding another correction."
                     )
-                    if volatile_post_move_response
+                    if volatile_post_move_response or waiting_for_complete_response
                     else f"Waiting for {required_samples} fresh scale samples before the next fine correction."
                 )
                 self._write_control_trace(
@@ -22937,6 +22987,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     reason=(
                         "volatile_response_unsettled"
                         if volatile_unsettled_response
+                        else "outstanding_response_observation"
+                        if waiting_for_complete_response
                         else "volatile_post_move_response"
                         if volatile_post_move_response
                         else f"{required_samples}_fresh_scale_samples"
@@ -31536,6 +31588,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending = "start"
         self._isolated_pending_sequence = start_sequence
         self._isolated_last_plot_elapsed_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
         self._session_points = []
         self._live_plot_points = []
         self._automation_active = True
@@ -31563,6 +31618,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if snapshot is not None:
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
+            self._consume_isolated_log_snapshot(readback)
             self._consume_isolated_plot_snapshot(readback)
             if (
                 self._length_setup_dialog is not None
@@ -31664,6 +31720,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._finish_isolated_recipe(
                     state=snapshot.state,
                     detail=str(readback.get("error") or readback.get("emergency_reason") or ""),
+                    readback=readback,
                 )
                 return
         for event in process.poll_events():
@@ -31703,8 +31760,21 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         state: ControlState,
         detail: str = "",
+        readback: Mapping[str, object] | None = None,
     ) -> None:
         process = self._production_control_process
+        offer_recovery = (
+            state is ControlState.STOPPED
+            and self._isolated_user_stop_requested
+        )
+        if readback is not None:
+            position_mm = readback.get("position_mm")
+            if position_mm is not None:
+                self._current_position_mm = float(position_mm)
+                self._effective_position_mm = float(position_mm)
+                self._last_move_target_mm = float(position_mm)
+                self._last_effective_move_target_mm = float(position_mm)
+            self._tic_motor_power_ok = None
         self._control_process_poll_timer.stop()
         self._isolated_recipe_active = False
         self._isolated_recipe_paused = False
@@ -31713,6 +31783,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_runtime_update_values = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_user_stop_requested = False
         self._close_length_setup_dialog()
         self._automation_active = False
         self._automation_paused = False
@@ -31732,6 +31804,59 @@ class MainWindow(QtWidgets.QMainWindow):
             state in {ControlState.FAULTED, ControlState.EMERGENCY}
         )
         self._update_recipe_buttons()
+        if offer_recovery:
+            QtCore.QTimer.singleShot(0, self._ask_recovery_after_stop)
+
+    def _consume_isolated_log_snapshot(
+        self,
+        readback: Mapping[str, object],
+    ) -> None:
+        raw_tail = readback.get("ui_log_tail_json")
+        if not isinstance(raw_tail, str) or not raw_tail:
+            return
+        try:
+            tail = json.loads(raw_tail)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(tail, list):
+            return
+        appended = False
+        for item in tail:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+            ):
+                continue
+            try:
+                sequence = int(item[0])
+            except (TypeError, ValueError):
+                continue
+            line = str(item[1])
+            if sequence <= self._isolated_last_log_sequence:
+                continue
+            if (
+                self._isolated_last_log_sequence
+                and sequence > self._isolated_last_log_sequence + 1
+            ):
+                missed = sequence - self._isolated_last_log_sequence - 1
+                self._queue_run_log_display_line(
+                    f"[control process] {missed} UI log line(s) were omitted; "
+                    "the authoritative run_log.txt remains complete."
+                )
+            self._queue_run_log_display_line(line)
+            self._isolated_last_log_sequence = sequence
+            appended = True
+        if appended:
+            self._flush_pending_run_log_lines()
+
+    def _compact_live_plot_points(self) -> None:
+        if len(self._live_plot_points) <= LIVE_PLOT_MAX_POINTS:
+            return
+        self._display_plot_old_cache_key = None
+        self._display_plot_old_cache = []
+        self._live_plot_points = self._downsample_display_plot_points(
+            list(self._live_plot_points)
+        )
 
     def _consume_isolated_plot_snapshot(
         self,
@@ -31753,9 +31878,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return
         self._isolated_last_plot_elapsed_s = elapsed_s
+        session_logging_enabled = bool(
+            readback.get("session_logging_enabled")
+        )
         if (
             self._length_setup_dialog is not None
-            and not bool(readback.get("session_logging_enabled"))
+            and not session_logging_enabled
         ):
             self._length_setup_points.append(point)
             if len(self._length_setup_points) > 1000:
@@ -31767,9 +31895,18 @@ class MainWindow(QtWidgets.QMainWindow):
             ):
                 self._last_length_setup_plot_refresh_s = now_s
                 self._refresh_length_setup_plot()
+            self._isolated_session_logging_enabled = False
+            return
+        if (
+            session_logging_enabled
+            and not self._isolated_session_logging_enabled
+        ):
+            self._live_plot_points = []
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
+        self._isolated_session_logging_enabled = session_logging_enabled
         self._live_plot_points.append(point)
-        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
-            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        self._compact_live_plot_points()
         now_s = time.monotonic()
         if self._dashboard_graph_refresh_due(now_s=now_s):
             self._refresh_plots()
@@ -32083,6 +32220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ):
                 self._isolated_pending_sequence = process.stop(identity)
                 self._isolated_command_pending = "stop"
+                self._isolated_user_stop_requested = True
                 self.label_control_process_status.setText(
                     "Controller: stop requested; awaiting safe child shutdown"
                 )
@@ -32276,6 +32414,8 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
 
     def _update_length_setup_dialog(self, message: str) -> None:
         if self._controller_process_mode:
@@ -35873,7 +36013,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._handle_applied_load_limit_status()
 
     def _handle_ui_refresh_timer(self) -> None:
-        if not self._automation_active and not self._session_active:
+        if (
+            not self._automation_active
+            and not self._session_active
+            and not self._setup_dialog_visible()
+            and not self._recovery_dialog_visible()
+        ):
             self._ui_refresh_timer.stop()
             return
         started_s = time.monotonic()
@@ -36064,8 +36209,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if point is None:
             return False, False
         self._live_plot_points.append(point)
-        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
-            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        self._compact_live_plot_points()
         self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
         if self._controller_process_mode:
             return True, False
@@ -36082,7 +36226,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if (
             self._setup_dialog_visible()
-            and self._automation_active
             and self._length_setup_last_record_scale_timestamp != self._latest_scale_timestamp
         ):
             self._record_length_setup_point()
@@ -37634,7 +37777,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_session_source_provenance()
         self._release_experiment_sleep_guard()
-        self._disconnect_supply()
+        self._disconnect_supply(
+            preserve_motor_output=self._preserve_motor_supply_on_close
+        )
+        self._preserve_motor_supply_on_close = False
         self._stop_owned_shared_broker()
         self._async_run_log_writer.stop(timeout_s=0.5)
         self._stop_periodic_callbacks_for_close()

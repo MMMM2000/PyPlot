@@ -1728,6 +1728,10 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
     window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
         lambda _steps: True
     )
+    recovery_prompts: list[bool] = []
+    window._ask_recovery_after_stop = (  # type: ignore[method-assign]
+        lambda: recovery_prompts.append(True)
+    )
 
     try:
         window._start_auto_ramp()
@@ -1781,6 +1785,7 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
                 "automation_index": 0,
                 "automation_total": 1,
                 "task": "synthetic",
+                "position_mm": 1.25,
             }
             readback.update(
                 {
@@ -1835,8 +1840,10 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         with pytest.raises(RuntimeError, match="dedicated Mini DMA control process"):
             window._build_tic_dispatcher()
         _confirm(mini_dma_mod.ControlState.STOPPED)
+        qtbot.waitUntil(lambda: recovery_prompts == [True], timeout=1000)
         assert process.closed is True
         assert window._isolated_recipe_active is False
+        assert window._current_position_mm == pytest.approx(1.25)
     finally:
         _close_test_window(window)
 
@@ -1886,13 +1893,103 @@ def test_isolated_setup_snapshot_updates_visible_setup_graph_until_logging_start
         assert window._length_setup_dialog.isVisible()
         assert len(window._length_setup_points) == 1
         assert window._length_setup_points[0].stress_mpa == pytest.approx(49.8)
+        assert window._live_plot_points == []
 
         readback["session_logging_enabled"] = True
         readback["plot_elapsed_s"] = 2.0
         window._consume_isolated_plot_snapshot(readback)
 
         assert len(window._length_setup_points) == 1
-        assert len(window._live_plot_points) == 2
+        assert len(window._live_plot_points) == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_log_snapshot_appends_only_new_child_lines(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+
+    try:
+        window._consume_isolated_log_snapshot(
+            {
+                "ui_log_tail_json": json.dumps(
+                    [
+                        [1, "[00:00:01] child first"],
+                        [2, "[00:00:02] child second"],
+                    ]
+                )
+            }
+        )
+        window._consume_isolated_log_snapshot(
+            {
+                "ui_log_tail_json": json.dumps(
+                    [
+                        [2, "[00:00:02] child second"],
+                        [3, "[00:00:03] child third"],
+                    ]
+                )
+            }
+        )
+
+        text = window.log_output.toPlainText()
+        assert text.count("child first") == 1
+        assert text.count("child second") == 1
+        assert text.count("child third") == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_plot_compaction_preserves_full_time_range(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    base = mini_dma_mod.MeasurementPoint(
+        elapsed_s=0.0,
+        timestamp_utc="2026-07-28T07:00:00Z",
+        raw_position_mm=0.0,
+        position_mm=0.0,
+        raw_load_g=0.0,
+        load_g=0.0,
+        preload_state="recipe",
+        strain_pct=0.0,
+        stress_mpa=0.0,
+        current_set_mA=1.0,
+        current_measured_mA=1.0,
+        voltage_V=0.1,
+        resistance_ohm=100.0,
+        power_W=0.0001,
+        automation_phase="current",
+        automation_basis="stress_mpa",
+        automation_target_value=50.0,
+        plateau_index=1,
+        plateau_label="1",
+    )
+
+    try:
+        window._live_plot_points = [
+            dataclasses.replace(base, elapsed_s=float(index))
+            for index in range(mini_dma_mod.LIVE_PLOT_MAX_POINTS + 1)
+        ]
+        window._compact_live_plot_points()
+
+        assert len(window._live_plot_points) <= mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
+        assert window._live_plot_points[0].elapsed_s == pytest.approx(0.0)
+        assert window._live_plot_points[-1].elapsed_s == pytest.approx(
+            float(mini_dma_mod.LIVE_PLOT_MAX_POINTS)
+        )
     finally:
         _close_test_window(window)
 
@@ -14957,7 +15054,7 @@ def test_length_setup_timer_records_prompt_samples(tmp_path: Path, qtbot) -> Non
 
     try:
         window._show_length_setup_dialog()
-        window._automation_active = True
+        window._automation_active = False
         window._set_automation_context(phase="starting_length", note="starting_length")
         window._latest_scale_value_g = 21.5
         window._latest_scale_timestamp = time.time()
@@ -19220,6 +19317,94 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
         ("set_output", {"channel": 3, "lease_id": "lease-3", "output_on": False}),
         ("release", {"channel": 3, "lease_id": "lease-3"}),
     ]
+
+
+def test_shared_broker_normal_stop_releases_motor_lease_without_disabling_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            del host, port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(
+                ("lease", {"channel": channel, "owner": owner, "role": role})
+            )
+            return {"lease_id": f"lease-{channel}"}
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            self.calls.append(
+                ("release", {"channel": channel, "lease_id": lease_id})
+            )
+
+        def set_output(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "set_output",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_channel(self, **payload: object) -> None:
+            self.calls.append(("configure_channel", dict(payload)))
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+        current_limit_a=0.08,
+        motor_voltage_limit_v=12.0,
+        motor_current_limit_a=0.5,
+    )
+    controller.connect()
+    controller._leases = {4: "lease-4", 3: "lease-3"}
+
+    controller.disconnect(preserve_motor_output=True)
+
+    calls = clients[0].calls
+    assert (
+        "set_output",
+        {"channel": 4, "lease_id": "lease-4", "output_on": False},
+    ) in calls
+    assert not any(
+        action == "set_output" and payload.get("channel") == 3
+        for action, payload in calls
+    )
+    assert (
+        "release",
+        {"channel": 4, "lease_id": "lease-4"},
+    ) in calls
+    assert (
+        "release",
+        {"channel": 3, "lease_id": "lease-3"},
+    ) in calls
+    assert controller._client is None
+    assert controller._leases == {}
 
 
 def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limits(
@@ -25730,6 +25915,66 @@ def test_current_sweep_hold_quiet_response_keeps_normal_post_move_sample_gate(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_outstanding_response_waits_for_time_and_samples(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        50.0,
+    )
+    window._seek_last_time_by_key[seek_key] = 99.0
+    window._last_motion_command_monotonic_s = 99.0
+    window._last_motion_expected_complete_monotonic_s = 99.2
+    complete_signal = mini_dma_mod.ScaleControlSignal(
+        value=50.0,
+        latest_value=50.0,
+        noise=0.1,
+        slope_per_s=0.0,
+        sample_count=mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES,
+        timestamp_s=100.0,
+    )
+
+    try:
+        assert window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=complete_signal,
+        )
+
+        clock["now"] = (
+            99.2 + window._current_sweep_hold_filter_window_s() + 0.01
+        )
+        assert not window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=complete_signal,
+        )
+
+        incomplete_signal = dataclasses.replace(
+            complete_signal,
+            sample_count=(
+                mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES - 1
+            ),
+        )
+        assert window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=incomplete_signal,
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
     tmp_path: Path,
     qtbot,
@@ -25783,6 +26028,8 @@ def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
     window._last_effective_move_target_mm = 0.01
     window._last_motion_command_time_s = now_s - 0.8
     window._last_motion_expected_complete_time_s = now_s - 0.7
+    window._last_motion_command_monotonic_s = time.monotonic() - 0.8
+    window._last_motion_expected_complete_monotonic_s = time.monotonic() - 0.7
     load_g = mini_dma_mod.load_g_from_stress_mpa(110.0, window.spin_diameter.value())
     assert load_g is not None
     for index in range(5):
@@ -25805,7 +26052,7 @@ def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
 
         assert reached is False
         assert not moves
-        assert trace_rows[-1]["reason"] == "volatile_post_move_response"
+        assert trace_rows[-1]["reason"] == "outstanding_response_observation"
         assert trace_rows[-1]["required_fresh_samples"] == (
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
         )

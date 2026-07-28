@@ -351,6 +351,8 @@ class _FakeProductionWindow:
         self.supply_disable_calls = 0
         self.motor_supply_disable_calls = 0
         self.lifecycle_calls: list[str] = []
+        self._preserve_motor_supply_on_close = False
+        self._control_process_log_sink = None
         self.spin_initial_length = QtWidgets.QDoubleSpinBox()
         self.spin_initial_length.setValue(57.25)
 
@@ -475,6 +477,60 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     backend.stop()
     assert backend.completion_detail() == "production recipe completed"
     assert dict(backend.readback())["supply_output_enabled"] is False
+    assert backend._window._preserve_motor_supply_on_close is True
+    assert backend._window.motor_supply_disable_calls == 0
+    backend.close()
+
+
+def test_production_backend_emergency_does_not_preserve_motor_supply() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    backend.emergency_stop("synthetic emergency")
+
+    assert backend._window._preserve_motor_supply_on_close is False
+    assert backend._window.motor_supply_disable_calls == 1
+    assert backend._window.supply_disable_calls == 1
+    backend.close()
+
+
+def test_production_backend_readback_exposes_bounded_ui_log_tail() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    for index in range(40):
+        backend._window._control_process_log_sink(f"[00:00:00] child line {index}")
+
+    readback = dict(backend.readback())
+    tail = json.loads(str(readback["ui_log_tail_json"]))
+    assert readback["ui_log_sequence"] == 40
+    assert len(tail) == 32
+    assert tail[0] == [9, "[00:00:00] child line 8"]
+    assert tail[-1] == [40, "[00:00:00] child line 39"]
     backend.close()
 
 
