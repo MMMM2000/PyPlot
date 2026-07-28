@@ -2349,6 +2349,16 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         assert dialog._tree_items[first_ref].text(1) == "No transition"  # noqa: SLF001
         expected = builder_ui._transition_review_status_color("No transition")  # noqa: SLF001
         assert dialog._tree_items[first_ref].foreground(1).color().name() == expected  # noqa: SLF001
+
+        dialog._handle_transition_values_edited({"As": 42.0})  # noqa: SLF001
+        dialog._set_current_review(  # noqa: SLF001
+            builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED,
+            move_next=False,
+        )
+        excluded = next(iter(stored.values()))
+        assert excluded["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED
+        assert excluded["values"]["As"] == pytest.approx(42.0)
+        assert dialog._tree_items[first_ref].text(1) == "Excluded"  # noqa: SLF001
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -9644,8 +9654,13 @@ def test_annealing_transition_review_actions_update_visible_statuses() -> None:
         dialog._mark_current_no_transition()  # noqa: SLF001
         assert dialog._tree.topLevelItem(1).text(1) == "No transition"  # noqa: SLF001
 
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(22.5)  # noqa: SLF001
         dialog._exclude_current_graph()  # noqa: SLF001
         assert dialog._tree.topLevelItem(2).text(1) == "Excluded"  # noqa: SLF001
+        third_id = builder_ui._transition_record_id_for_annealing_record(records[2])  # noqa: SLF001
+        assert stored[third_id]["included"] is False
+        assert stored[third_id]["final_values_mA"]["As1"] == pytest.approx(22.5)
         detail = dialog._summary_label.text()  # noqa: SLF001
         assert "Review state: Excluded" in detail
         assert "Review state: Unreviewed" not in detail

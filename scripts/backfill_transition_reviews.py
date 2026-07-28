@@ -100,9 +100,18 @@ def _apply_ca_review(draft: dict[str, Any], review: Mapping[str, Any]) -> None:
     status = str(review.get("status") or "unreviewed")
     target["status"] = status
     target["included"] = status in {"accepted_auto", "manual_adjusted"}
+    target["analysis_included"] = status in {
+        "accepted_auto",
+        "manual_adjusted",
+        "no_transition",
+    }
     target["auto_values"] = dict(review.get("auto_values_mA") or target.get("auto_values") or {})
     target["manual_values"] = dict(review.get("manual_values_mA") or {})
-    target["final_values"] = dict(review.get("final_values_mA") or review.get("values") or {})
+    target["final_values"] = (
+        {}
+        if status == "no_transition"
+        else dict(review.get("final_values_mA") or review.get("values") or {})
+    )
     target["cleared_labels"] = list(review.get("cleared_labels") or ())
     draft["updated_utc"] = str(review.get("updated_at") or utc_now_text())
 
@@ -136,9 +145,16 @@ def _apply_tma_reviews(draft: dict[str, Any], reviews: list[Mapping[str, Any]]) 
         )
         target["status"] = status or "unreviewed"
         target["included"] = status in {"accepted_auto", "manual_adjusted"}
+        target["analysis_included"] = target["status"] in {
+            "accepted_auto",
+            "manual_adjusted",
+            "no_transition",
+        }
         target["auto_values"] = dict(review.get("auto_values_mA") or target.get("auto_values") or {})
         target["manual_values"] = manual
-        target["final_values"] = dict(review.get("values") or {})
+        target["final_values"] = (
+            {} if target["status"] == "no_transition" else dict(review.get("values") or {})
+        )
         target["cleared_labels"] = list(review.get("cleared_labels") or ())
 
 

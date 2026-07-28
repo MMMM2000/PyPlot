@@ -161,10 +161,15 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         final.update({key: value for key, value in manual.items() if key not in cleared})
         if status == "accepted_auto" and manual:
             status = "manual_adjusted"
-        if status in {"no_transition", "excluded", "needs_attention", "unreviewed"}:
+        if status in {"no_transition", "needs_attention", "unreviewed"}:
             final = {}
         target["status"] = status
         target["included"] = status in {"accepted_auto", "manual_adjusted"}
+        target["analysis_included"] = status in {
+            "accepted_auto",
+            "manual_adjusted",
+            "no_transition",
+        }
         target["manual_values"] = manual
         target["final_values"] = final
         target["cleared_labels"] = cleared

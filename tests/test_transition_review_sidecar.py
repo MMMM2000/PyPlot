@@ -58,6 +58,7 @@ def test_atomic_review_round_trip_and_cleanup(tmp_path) -> None:
 
     restored = load_review(path)
     assert restored["targets"][0]["status"] == "manual_adjusted"
+    assert restored["targets"][0]["analysis_included"] is True
     assert restored["targets"][0]["final_values"] == {"As1": 82.0, "Af1": 101.0}
     assert restored["targets"][0]["cleared_labels"] == ["Mf1", "Ms1"]
     assert not list(tmp_path.glob("*.tmp"))
@@ -209,6 +210,21 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert target["manual_values"] == {"As1": 82.0, "Af1": 101.0}
     assert target["final_values"] == {"As1": 82.0, "Af1": 101.0}
 
+    dialog.status_combo.setCurrentIndex(dialog.status_combo.findData("excluded"))
+    dialog._store_target_controls()  # noqa: SLF001
+    assert target["status"] == "excluded"
+    assert target["included"] is False
+    assert target["analysis_included"] is False
+    assert target["final_values"] == {"As1": 82.0, "Af1": 101.0}
+
+    dialog.status_combo.setCurrentIndex(dialog.status_combo.findData("no_transition"))
+    dialog._store_target_controls()  # noqa: SLF001
+    assert target["status"] == "no_transition"
+    assert target["included"] is False
+    assert target["analysis_included"] is True
+    assert target["final_values"] == {}
+
+
 def test_builder_imports_matching_tma_sidecar_by_stress_target(
     tmp_path, monkeypatch
 ) -> None:
@@ -264,6 +280,86 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
     ) is True
     imported = next(iter(reviews.values()))
     assert imported["status"] == "accepted"
+    assert imported["analysis_included"] is True
     assert imported["values"] == {"As": 21.0}
     assert imported["manual_values_mA"] == {"As": 21.0}
     assert imported["portable_review_revision"] == 2
+
+
+def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
+    from scripts.backfill_transition_reviews import _apply_ca_review, _apply_tma_reviews
+
+    fingerprint = "sha256:" + "b" * 64
+    ca_draft = make_review(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        targets=[
+            make_target(
+                family="current_annealing",
+                measurement_fingerprint=fingerprint,
+                target_key="graph",
+                auto_values={"As1": 20.0},
+            )
+        ],
+    )
+    _apply_ca_review(
+        ca_draft,
+        {
+            "status": "excluded",
+            "final_values_mA": {"As1": 21.0},
+        },
+    )
+    assert ca_draft["targets"][0]["included"] is False
+    assert ca_draft["targets"][0]["analysis_included"] is False
+    assert ca_draft["targets"][0]["final_values"] == {"As1": 21.0}
+
+    _apply_ca_review(
+        ca_draft,
+        {
+            "status": "no_transition",
+            "final_values_mA": {"As1": 99.0},
+        },
+    )
+    assert ca_draft["targets"][0]["included"] is False
+    assert ca_draft["targets"][0]["analysis_included"] is True
+    assert ca_draft["targets"][0]["final_values"] == {}
+
+    tma_target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="stress_mpa:30",
+        auto_values={"As": 20.0},
+    )
+    tma_target["target"] = {"stress_mpa": 30.0, "load_g": 1.0}
+    tma_draft = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=[tma_target],
+    )
+    _apply_tma_reviews(
+        tma_draft,
+        [
+            {
+                "status": "excluded",
+                "target_label": "30 MPa",
+                "values": {"As": 22.0},
+            }
+        ],
+    )
+    assert tma_draft["targets"][0]["included"] is False
+    assert tma_draft["targets"][0]["analysis_included"] is False
+    assert tma_draft["targets"][0]["final_values"] == {"As": 22.0}
+
+    _apply_tma_reviews(
+        tma_draft,
+        [
+            {
+                "status": "no_transition",
+                "target_label": "30 MPa",
+                "values": {"As": 99.0},
+            }
+        ],
+    )
+    assert tma_draft["targets"][0]["included"] is False
+    assert tma_draft["targets"][0]["analysis_included"] is True
+    assert tma_draft["targets"][0]["final_values"] == {}

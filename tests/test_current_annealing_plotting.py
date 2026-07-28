@@ -753,3 +753,68 @@ def test_current_annealing_open_origin_delegates_to_shared_host_export() -> None
     plugin._plot_tabs = [object()]  # noqa: SLF001 - bypass generate() for delegation check
     plugin.open_origin()
     assert host.called is True
+
+
+def test_current_annealing_core_loads_logger_run_folder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text(
+        "0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n",
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(run_dir)
+
+    assert frame["I_mA"].tolist() == pytest.approx([20.0, 50.0, 100.0])
+    assert anneal_core.resolve_measurement_path(run_dir) == measurement
+    assert anneal_core.measurement_display_name(measurement) == run_dir.name
+
+
+def test_current_annealing_plugin_treats_run_folder_as_one_measurement(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text(
+        "0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n",
+        encoding="utf-8",
+    )
+    notes = run_dir / "operator_notes.txt"
+    notes.write_text("not measurement data\n", encoding="utf-8")
+    plugin = _current_annealing_load_plugin()
+
+    assert plugin._is_data_source_path(measurement) is True  # noqa: SLF001
+    assert plugin._is_data_source_path(notes) is False  # noqa: SLF001
+    assert plugin._candidate_data_paths([run_dir]) == [  # noqa: SLF001
+        measurement.resolve()
+    ]
+    assert plugin._load_data_from_paths([run_dir], show_errors=False) is True  # noqa: SLF001
+    assert list(plugin._data_by_file) == [str(measurement.resolve())]  # noqa: SLF001
+
+def test_current_annealing_plugin_reviews_loaded_run_into_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text("0.02 0.10 5\n", encoding="utf-8")
+    plugin = _current_annealing_load_plugin()
+    plugin._loaded_files = [str(measurement)]  # noqa: SLF001
+    logged: list[str] = []
+    reviewed: list[Path] = []
+    plugin._log = lambda message, **_kwargs: logged.append(message)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        transition_review_dialog,
+        "review_current_annealing_file",
+        lambda _parent, path: reviewed.append(Path(path)) or True,
+    )
+
+    plugin._review_loaded_transitions()  # noqa: SLF001
+
+    assert reviewed == [measurement]
+    assert logged == [f"Saved transition review: {run_dir / 'transition_review.json'}"]

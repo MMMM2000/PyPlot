@@ -31,6 +31,11 @@ REVIEW_STATUSES = {
     "needs_attention",
 }
 INCLUDED_STATUSES = {"accepted_auto", "manual_adjusted"}
+ANALYSIS_INCLUDED_STATUSES = {
+    "accepted_auto",
+    "manual_adjusted",
+    "no_transition",
+}
 TRANSITION_LABELS = {
     "As",
     "Af",
@@ -139,6 +144,7 @@ def make_target(
         "target_key": str(target_key).strip(),
         "status": status,
         "included": status in INCLUDED_STATUSES,
+        "analysis_included": status in ANALYSIS_INCLUDED_STATUSES,
         "quantity": "current",
         "unit": "mA",
         "auto_values": _finite_values(auto_values),
@@ -219,10 +225,13 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
         cleaned["target_key"] = target_key
         cleaned["status"] = status
         cleaned["included"] = status in INCLUDED_STATUSES
+        cleaned["analysis_included"] = status in ANALYSIS_INCLUDED_STATUSES
         cleaned["quantity"] = "current"
         cleaned["unit"] = "mA"
         for key in ("auto_values", "manual_values", "final_values"):
             cleaned[key] = _finite_values(raw.get(key))
+        if status == "no_transition":
+            cleaned["final_values"] = {}
         cleaned["cleared_labels"] = sorted(
             {str(label).strip() for label in raw.get("cleared_labels", ())} & TRANSITION_LABELS
         )
@@ -299,6 +308,7 @@ def source_file_entry(path: Path, *, relative_to: Path | None = None) -> dict[st
 
 
 __all__ = [
+    "ANALYSIS_INCLUDED_STATUSES",
     "EXPERIMENT_FAMILIES",
     "INCLUDED_STATUSES",
     "REVIEW_STATUSES",

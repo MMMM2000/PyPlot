@@ -6775,6 +6775,16 @@ def _portable_annealing_review(record: MeasurementRecord) -> Dict[str, Any]:
         "source_kind": "current_annealing",
         "status": str(target.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED),
         "included": bool(target.get("included", False)),
+        "analysis_included": bool(
+            target.get(
+                "analysis_included",
+                str(target.get("status") or "") in {
+                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                    TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                },
+            )
+        ),
         "auto_values_mA": dict(target.get("auto_values") or {}),
         "manual_values_mA": dict(target.get("manual_values") or {}),
         "final_values_mA": dict(target.get("final_values") or {}),
@@ -7379,10 +7389,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         payload: Mapping[str, Any],
     ) -> Dict[str, float]:
         status = str(payload.get("status") or "").strip()
-        if status in {
-            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
-            TRANSITION_REVIEW_STATUS_EXCLUDED,
-        }:
+        if status == TRANSITION_REVIEW_STATUS_NO_TRANSITION:
             return {}
         manual = _clean_transition_values(payload.get("manual_values_mA"))
         if manual:
@@ -7704,9 +7711,15 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
     def _exclude_current_graph(self) -> None:
         started_s = time.perf_counter()
         try:
+            entry = self._current_entry()
+            if entry is None:
+                return
+            existing = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, existing) or dict(entry.auto_values)
             self._store_current_review(
                 TRANSITION_REVIEW_STATUS_EXCLUDED,
                 included=False,
+                values=values,
                 refresh_display=False,
             )
             self._select_next_unreviewed(fallback_next=True)
@@ -8521,6 +8534,16 @@ def _import_portable_tma_reviews(
             )
             portable_review: Dict[str, Any] = {
                 "status": status,
+                "analysis_included": bool(
+                    target.get(
+                        "analysis_included",
+                        portable_status in {
+                            "accepted_auto",
+                            "manual_adjusted",
+                            "no_transition",
+                        },
+                    )
+                ),
                 "sample": entry.sample,
                 "run_label": entry.run_label,
                 "target_label": entry.target_label,
@@ -9247,12 +9270,14 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             payload["auto_values_mA"] = auto_values
         if manual_values:
             payload["manual_values_mA"] = manual_values
-        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and cleared_labels:
+        value_preserving_status = status in {
+            MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            MINI_DMA_REVIEW_STATUS_EXCLUDED,
+        }
+        if value_preserving_status and cleared_labels:
             payload["cleared_labels"] = sorted(cleared_labels)
-        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and values:
+        if value_preserving_status:
             payload["values"] = values
-        elif status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
-            payload["values"] = {}
         try:
             self._review_setter(record_id, payload)
         except Exception:
@@ -15228,11 +15253,17 @@ class AnnealingSection(MiniDatabaseSection):
         included = bool(payload.get("included", status in TRANSITION_REVIEW_INCLUDED_STATUSES))
         if status in {TRANSITION_REVIEW_STATUS_NO_TRANSITION, TRANSITION_REVIEW_STATUS_EXCLUDED}:
             included = False
+        analysis_included = status in {
+            TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        }
         entry: Dict[str, Any] = {
             "transition_record_id": record_id,
             "source_kind": str(payload.get("source_kind") or "current_annealing"),
             "status": status,
             "included": included,
+            "analysis_included": analysis_included,
             "auto_values_mA": _clean_transition_values(payload.get("auto_values_mA")),
             "manual_values_mA": _clean_transition_values(payload.get("manual_values_mA")),
             "final_values_mA": _clean_transition_values(payload.get("final_values_mA")),
@@ -26265,7 +26296,13 @@ class MiniDmaSection(MiniDatabaseSection):
             MINI_DMA_REVIEW_STATUS_NEEDS_ATTENTION,
         }:
             return {}
-        entry: Dict[str, Any] = {"status": status}
+        entry: Dict[str, Any] = {
+            "status": status,
+            "analysis_included": status in {
+                MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            },
+        }
         for field in (
             "sample",
             "run_label",
@@ -26292,7 +26329,10 @@ class MiniDmaSection(MiniDatabaseSection):
         if manual_values:
             entry["manual_values_mA"] = manual_values
         cleared_labels = _mini_dma_cleared_transition_labels(payload)
-        if cleared_labels and status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+        if cleared_labels and status in {
+            MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            MINI_DMA_REVIEW_STATUS_EXCLUDED,
+        }:
             entry["cleared_labels"] = sorted(cleared_labels)
         revision = payload.get("portable_review_revision")
         if isinstance(revision, int) and revision > 0:

@@ -134,14 +134,37 @@ def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
     return 1000.0 if raw_max <= 1.2 else 1.0
 
 
-def load_file(path: str) -> pd.DataFrame:
+def resolve_measurement_path(path: str | Path) -> Path:
+    """Resolve either a legacy data file or a logger run folder."""
+
+    source = Path(path)
+    if source.is_dir():
+        measurement = source / "measurement.txt"
+        if not measurement.is_file():
+            raise ValueError(f"{source}: run folder has no measurement.txt")
+        return measurement
+    return source
+
+
+def measurement_display_name(path: str | Path) -> str:
+    """Return the human run name for files from either storage layout."""
+
+    source = resolve_measurement_path(path)
+    if source.name.casefold() == "measurement.txt":
+        return source.parent.name
+    return source.stem
+
+
+def load_file(path: str | Path) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
+    source = resolve_measurement_path(path)
+
     def _read(sep: str | None) -> pd.DataFrame:
         return pd.read_csv(
-            path,
+            source,
             sep=sep,
             engine="python",
             header=None,
@@ -157,7 +180,7 @@ def load_file(path: str) -> pd.DataFrame:
         if df.shape[1] > 3:
             df = _read(r"\s+")
     if df.shape[1] < 3:
-        raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
+        raise ValueError(f"{source}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3].copy()
     df.columns = ["I_A", "V_V", "R_Ohm"]
 
@@ -177,8 +200,13 @@ def load_file(path: str) -> pd.DataFrame:
     while len(df) > 1 and float(df.loc[0, "R_Ohm"]) <= 0.0:
         df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
-        raise ValueError(f"{path}: no valid samples after parsing")
-    scale_to_mA = _infer_current_scale_to_mA(path, df["I_A"])
+        raise ValueError(f"{source}: no valid samples after parsing")
+    scale_hint = (
+        str(source.parent)
+        if source.name.casefold() == "measurement.txt"
+        else str(source)
+    )
+    scale_to_mA = _infer_current_scale_to_mA(scale_hint, df["I_A"])
     if scale_to_mA == 1000.0:
         df["I_mA"] = df["I_A"] * 1e3
     else:
@@ -187,7 +215,7 @@ def load_file(path: str) -> pd.DataFrame:
     max_current_mA = float(df["I_mA"].abs().max()) if not df["I_mA"].empty else 0.0
     if math.isfinite(max_current_mA) and max_current_mA > (_expected_current_limit_mA() + 1e-6):
         raise ValueError(
-            f"{path}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
+            f"{source}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
         )
     mask = (
         np.isfinite(df["I_mA"]) &
@@ -196,7 +224,7 @@ def load_file(path: str) -> pd.DataFrame:
     )
     df = df.loc[mask].reset_index(drop=True)
     if df.empty:
-        raise ValueError(f"{path}: no usable samples after filtering zeros")
+        raise ValueError(f"{source}: no usable samples after filtering zeros")
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents, resistances)
@@ -1832,13 +1860,14 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     try:
         for path in files:
             try:
-                df = load_file(path)
+                source = resolve_measurement_path(path)
+                df = load_file(source)
             except Exception as exc:
                 failures.append((path, f"load: {exc}"))
                 print(f"ERROR: Failed to read {Path(path).name}: {exc}")
                 continue
 
-            title = format_annealing_title(Path(path).stem)
+            title = format_annealing_title(measurement_display_name(source))
             success = True
             fig: Figure | None = None
             fname: str = ""
