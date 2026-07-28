@@ -5,4 +5,6 @@ visible UI, keep setup samples out of recipe plots, and retain the full plot
 time range through bounded thinning. Emergency, crash, and application-close
 paths continue to disable the motor supply. Prague current-hold corrections
 also wait for a complete filtered response to the previous motor command
-before another correction can be issued.
+before another correction can be issued. The child now also preserves the
+visible UI's completed prior-run/next-run filename decision instead of
+reapplying stale automatic naming after ownership transfer.

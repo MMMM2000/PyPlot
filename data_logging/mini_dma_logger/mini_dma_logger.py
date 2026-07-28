@@ -32258,14 +32258,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Discarded stopped-recipe resume state because the visible recipe controls changed."
                 )
             self._resume_recipe_state = None
-        if (
+        parent_preflight_complete = (
             self._controller_process_mode
             and self._controller_process_prior_run_preflight_complete
-        ):
+        )
+        if parent_preflight_complete:
             self._controller_process_prior_run_preflight_complete = False
         elif not self._first_overheating_preflight_allows_start():
             return
-        self._sync_stale_log_name_from_sample()
+        if not parent_preflight_complete:
+            self._sync_stale_log_name_from_sample()
         if (
             self._controller_process_mode
             and self._controller_process_hardware_preflight_complete
