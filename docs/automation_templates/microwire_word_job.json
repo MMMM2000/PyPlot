@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "job_type": "microwire_word_export",
+  "job_id": "praha_microwire_word_export",
+  "source": "G:/My Drive/1 Projects/Praha/microwire_database/microwire_database_latest.pydpj",
+  "output_dir": "G:/My Drive/1 Projects/Praha/microwire_database/docx_exports",
+  "sample": null,
+  "include_origin": true,
+  "force_project_rebuild": true,
+  "graphs_only": false,
+  "dry_run": true,
+  "paths": {
+    "status": "artifacts/mw_jobs/praha_microwire_word_export/status.json",
+    "progress": "artifacts/mw_jobs/praha_microwire_word_export/progress.json",
+    "manifest": "artifacts/mw_jobs/praha_microwire_word_export/manifest.json",
+    "log": "artifacts/mw_jobs/praha_microwire_word_export/job.log",
+    "cancel": "artifacts/mw_jobs/praha_microwire_word_export/cancel.requested"
+  }
+}

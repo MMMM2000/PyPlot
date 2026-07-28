@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 @register_plugin("TMA")
-class MiniDmaPlugin(PyPlotPlugin):
-    """Plot TMA current-sweep logger output inside PyPlot."""
+class TmaPlugin(PyPlotPlugin):
+    """Plot TMA logger output inside PyPlot."""
 
     requires_imported_data = True
     supports_import_folders = True
@@ -39,7 +39,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         summary = QtWidgets.QLabel(
-            "Import TMA run folders or measurement.csv files, then plot current sweeps by target MPa."
+            "Import TMA run folders or measurement.csv files, then plot current-sweep and iso-current graphs."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -62,7 +62,7 @@ class MiniDmaPlugin(PyPlotPlugin):
             parent=container,
         )
         note = QtWidgets.QLabel(
-            "Creates strain-current and resistance-current graphs. Each curve is one target MPa plateau."
+            "Creates current-sweep graphs by target MPa, plus iso-current stress-strain graphs by current."
         )
         note.setWordWrap(True)
         section_layout.addWidget(note)
@@ -71,7 +71,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         baseline_combo = QtWidgets.QComboBox()
         baseline_combo.setToolTip(
             "Choose how TMA recalculates the strain-current Y axis. "
-            "Global minimum uses one shared l0 from all target-stress curves; "
+            "Global minimum uses one shared l₀ from all target-stress curves; "
             "each target minimum gives every stress plateau its own zero."
         )
         baseline_combo.addItem(
@@ -140,7 +140,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         if self._summary_label is not None:
             if runs:
                 self._summary_label.setText(
-                    f"Loaded {len(runs)} TMA run(s). Click Plot to build current-sweep graphs."
+                    f"Loaded {len(runs)} TMA run(s). Click Plot to build TMA graphs."
                 )
             else:
                 self._summary_label.setText(
@@ -168,25 +168,28 @@ class MiniDmaPlugin(PyPlotPlugin):
         plots_created = 0
         strain_baseline_mode = self._strain_baseline_mode()
         for run in self._runs:
-            plot_specs = (
-                (
-                    "strain_current",
-                    lambda current_run: core.make_strain_current_figure(
-                        current_run,
-                        strain_baseline_mode=strain_baseline_mode,
-                        show_power_top_axis=self._show_power_top_axis_enabled(),
-                        power_axis_mode=self._power_axis_mode(),
+            if core.is_iso_current_run(run):
+                plot_specs = (("iso_current", core.make_iso_current_figure),)
+            else:
+                plot_specs = (
+                    (
+                        "strain_current",
+                        lambda current_run: core.make_strain_current_figure(
+                            current_run,
+                            strain_baseline_mode=strain_baseline_mode,
+                            show_power_top_axis=self._show_power_top_axis_enabled(),
+                            power_axis_mode=self._power_axis_mode(),
+                        ),
                     ),
-                ),
-                (
-                    "resistance_current",
-                    lambda current_run: core.make_resistance_current_figure(
-                        current_run,
-                        show_power_top_axis=self._show_power_top_axis_enabled(),
-                        power_axis_mode=self._power_axis_mode(),
+                    (
+                        "resistance_current",
+                        lambda current_run: core.make_resistance_current_figure(
+                            current_run,
+                            show_power_top_axis=self._show_power_top_axis_enabled(),
+                            power_axis_mode=self._power_axis_mode(),
+                        ),
                     ),
-                ),
-            )
+                )
             for plot_kind, figure_factory in plot_specs:
                 try:
                     figure = figure_factory(run)
@@ -325,7 +328,11 @@ class MiniDmaPlugin(PyPlotPlugin):
                 "origin_layer_width": 54.0,
             },
         )
-        suffix = "Strain" if plot_kind == "strain_current" else "Resistance"
+        suffix = {
+            "strain_current": "Strain",
+            "resistance_current": "Resistance",
+            "iso_current": "Iso-current",
+        }.get(plot_kind, "Graph")
         tab_label = f"{run.sample_name} - {suffix}"
         self.host.tab_widget.addTab(tab, tab_label)
         self.host._register_plot_tab(tab, canvas, axes, descriptor)
@@ -389,3 +396,6 @@ class MiniDmaPlugin(PyPlotPlugin):
         index = combo.findData(mode)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+
+MiniDmaPlugin = TmaPlugin

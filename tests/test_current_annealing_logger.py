@@ -179,8 +179,23 @@ class _FakeBrokerClient:
 
 
 class _FakeScheduledBrokerClient(_FakeBrokerClient):
-    def configure_polling(self, *, channel: int, interval_s: float) -> None:
-        self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+    def configure_polling(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        requested_hz: float,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "configure_polling",
+                {"channel": channel, "lease_id": lease_id, "requested_hz": requested_hz},
+            )
+        )
+        return {
+            "generation": 1,
+            "polling": {"requested_hz": requested_hz, "effective_hz": requested_hz},
+        }
 
     def start_scheduler(self, *, tick_s: float = 0.05) -> None:
         self.calls.append(("start_scheduler", {"tick_s": tick_s}))
@@ -3131,8 +3146,81 @@ def test_shared_broker_init_enables_cached_polling_when_available(qtbot) -> None
 
     window.send_init_commands()
 
-    assert ("configure_polling", {"channel": 1, "interval_s": 1.0}) in fake.calls
+    assert (
+        "configure_polling",
+        {"channel": 1, "lease_id": "lease-1", "requested_hz": 1.0},
+    ) in fake.calls
     assert ("start_scheduler", {"tick_s": 0.05}) in fake.calls
+
+
+def test_current_annealing_two_hz_preserves_average_ramp_rate(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_hmp_readback_rate.setCurrentIndex(
+        window.ui.comboBox_hmp_readback_rate.findData(2.0)
+    )
+    window._shared_broker_effective_hz = 2.0
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_current_set = 0.001
+    window._ramp_ideal_current_A = 0.001
+    window._set_current_ramp_direction(1.0)
+
+    for _ in range(4):
+        window._advance_current_setpoint()
+
+    assert window.current_increment == pytest.approx(0.0005)
+    assert window.current_current_set == pytest.approx(0.003)
+
+
+def test_current_annealing_applies_broker_cadence_transition_to_timer_and_step(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_hmp_readback_rate.setCurrentIndex(
+        window.ui.comboBox_hmp_readback_rate.findData(2.0)
+    )
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.timer_command.start(1000)
+
+    window._apply_shared_broker_cadence_status(
+        {
+            "generation": 3,
+            "polling": {"requested_hz": 2.0, "effective_hz": 2.0},
+        },
+        announce=False,
+    )
+
+    assert window.timer_command.interval() == 500
+    assert window.current_increment == pytest.approx(0.0005)
+    assert window.ui.label_hmp_cadence_status.text() == "Effective PSU rate: 2 Hz"
+
+    window._apply_shared_broker_cadence_status(
+        {
+            "generation": 4,
+            "polling": {"requested_hz": 2.0, "effective_hz": 1.0},
+        },
+        announce=False,
+    )
+
+    assert window.timer_command.interval() == 1000
+    assert window.current_increment == pytest.approx(0.001)
+    assert "shared broker capacity" in window.ui.label_hmp_cadence_status.text()
+    window.timer_command.stop()
+
+
+def test_current_annealing_hmp_candidates_prefer_native_usb_d(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    combo = window.ui.comboBox_port
+    combo.clear()
+    combo.addItem("COM3 - USB-SERIAL CH340", "COM3")
+    combo.addItem("COM5 - HAMEG HO720 VCP", "COM5")
+    combo.setCurrentIndex(0)
+
+    assert window._candidate_hmp_ports_for_broker(include_all=True)[:2] == ["COM5", "COM3"]
 
 
 def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot) -> None:
