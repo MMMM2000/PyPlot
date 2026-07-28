@@ -441,3 +441,10 @@ def test_adaptive_progress_uses_stable_overlay_text(window: object) -> None:
     assert not window._adaptive_sweep_progress.isTextVisible()
     assert window._adaptive_sweep_progress_label.text() == "48%  |  ETA 54 min"
     window._automation_active = False
+
+
+def test_adaptive_tab_bars_do_not_draw_overlapping_base_lines(
+    window: object,
+) -> None:
+    assert not window._adaptive_result_tabs.tabBar().drawBase()
+    assert not window._adaptive_inspector_tabs.tabBar().drawBase()

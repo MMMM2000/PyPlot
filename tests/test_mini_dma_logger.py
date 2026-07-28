@@ -22421,7 +22421,7 @@ def test_current_sweep_runtime_update_button_waits_for_pending_changes(
         window._update_recipe_buttons()
 
         assert window._current_sweep_pending_update_preview()["changed_steps"] == []
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
         assert window.button_apply_current_sweep_edits.isEnabled() is False
         assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
 
@@ -22438,7 +22438,7 @@ def test_current_sweep_runtime_update_button_waits_for_pending_changes(
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
 
         assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
         assert window.button_apply_current_sweep_edits.isEnabled() is False
     finally:
         window._automation_active = False

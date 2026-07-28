@@ -9077,7 +9077,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: transparent;
                 color: #9ca5af;
                 border: 0;
-                border-bottom: 1px solid #343a42;
                 padding: 9px 13px 8px 13px;
                 font-size: 9pt;
             }
@@ -9085,7 +9084,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: transparent;
                 color: #9ca5af;
                 border: 0;
-                border-bottom: 1px solid #343a42;
                 padding: 8px 12px 7px 12px;
                 font-size: 8.5pt;
             }
@@ -12129,6 +12127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_result_tabs = result_tabs
         result_tabs.setObjectName("adaptiveResultTabs")
         result_tabs.setDocumentMode(True)
+        result_tabs.tabBar().setDrawBase(False)
 
         strain_page = QtWidgets.QWidget(result_tabs)
         strain_layout = QtWidgets.QVBoxLayout(strain_page)
@@ -12242,6 +12241,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_inspector_tabs = inspector_tabs
         inspector_tabs.setObjectName("adaptiveInspectorTabs")
         inspector_tabs.setDocumentMode(True)
+        inspector_tabs.tabBar().setDrawBase(False)
 
         active_page = QtWidgets.QWidget(inspector_tabs)
         active_page_layout = QtWidgets.QVBoxLayout(active_page)
