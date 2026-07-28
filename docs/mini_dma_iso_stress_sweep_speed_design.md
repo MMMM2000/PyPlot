@@ -319,3 +319,132 @@ The first live-controller slice is implemented on the isolated design branch and
 - neither the latest raw-equivalent stress nor the 1.8 s processed value is more than 35 MPa from target.
 
 If any condition fails, the existing correction path runs unchanged. The feature state and all cycle-center evidence are included in the control-logic fingerprint and `control_trace.csv`. This is an experimental branch implementation, not a `main` default.
+
+## Run 15 hardware result and revised controller direction (2026-07-28)
+
+The guarded 50 MPa run on `Ni47Fe24Ga23Co6 2/1` tested control logic
+`2026-07-28.2`. That revision fixed a concrete lifecycle bug: cycle-center
+resume eligibility was evaluated while the published phase was still
+`current`, immediately before the controller published `current_hold`.
+Eligibility now also recognizes the active held-current step. The fix produced
+17 genuine cycle-center resumes in run 15, versus none in run 14.
+
+The narrow fix did not solve the physical-control problem. Run 15 was stopped
+deliberately at 39 mA after the hold had become unproductive. Independent
+supervisor cleanup confirmed HMP channels 3 and 4 off at 0 V / 0 mA; the Tic
+was Reset and de-energized.
+
+| Quantity | Run 15 | Run 14 | Completed run 06 |
+|---|---:|---:|---:|
+| Control logic | 2026-07-28.2 | 2026-07-28.1 | 2026-07-23.3 |
+| Elapsed | 1,892.8 s | 1,605.4 s | 2,194.4 s |
+| Maximum set current | 39.0 mA | 36.0 mA | 40.0 mA |
+| Completed current loops | 0 | 0 | 1 |
+| Current-hold fraction | 92.13% | 91.28% | 89.45% |
+| Stress-error RMS | 17.61 MPa | 8.73 MPa | 9.71 MPa |
+| Hold-only RMS | 18.31 MPa | 9.10 MPa | 10.23 MPa |
+| p95 absolute stress error | 40.63 MPa | 19.20 MPa | 18.73 MPa |
+| Maximum stress | 148.31 MPa | 139.95 MPa | 122.30 MPa |
+| Motor commands | 795 | 607 | 1,340 |
+| Mean / maximum command | 3.87 / 33.75 um | 2.93 / 58.75 um | 3.25 / 28.75 um |
+| Longest released hold | 110.32 s | 192.50 s | 145.26 s |
+
+Run 15 therefore proves that cycle-center resume can release a centered,
+oscillatory hold, but also shows why it is insufficient. The fast recovery
+controller continued issuing corrections while the statistical center was
+being established. Each move changed the plant state and restarted response
+qualification. At 39 mA the processed stress traversed a wide range while the
+motor repeatedly reversed; a final 23.75 um tension correction after a
+near-zero stress observation made further running scientifically unhelpful.
+
+### Rejected no-move observation trigger
+
+An offline `processed_observation` policy was added to the dependency-light
+simulator. It enters a no-move observation period only after a fixed-current
+signal spans the target, has a centered low-trend robust distribution, adequate
+cadence, non-trivial noise, and repeated motor reversals. Across 20 paired
+seeds, it reduced stationary-hunting median elapsed time from 3,882.25 s to
+1,684.75 s (-56.6%), hold time from 3,608.25 s to 1,408.25 s (-61.0%), and
+motor travel from 6.01 mm to 2.32 mm while improving p95 true stress error by
+2.4%. It was exactly neutral in the simulator's calm, coherent-transformation,
+sparse-feedback, volatile, and heavy-tail scenarios.
+
+That synthetic non-regression is not sufficient. A same-timeline trigger
+classifier found 41 candidate observation windows in run 15 but 1,160 in the
+finalized transforming Prague trace. The real transforming trace therefore
+contains the same centered, noisy, motor-reversing signature. Because
+same-timeline classification cannot show what the counterfactual trajectory
+would become, and because the trigger does not distinguish real transformation
+well enough, this candidate is rejected for another hardware run.
+
+### Underlying control problem
+
+The controller currently combines three jobs in one fast heuristic loop:
+
+1. estimate the stress state from correlated and sometimes oscillatory scale
+   measurements;
+2. decide whether an observed change is noise, delayed motor response,
+   thermal drift, or transformation;
+3. choose a motor correction.
+
+The fast processed error is suitable for safety and hold entry, but not for
+repeated actuation when the response delay is comparable to the oscillation
+period. In that regime the controller reacts to phase rather than to the
+underlying center. Resume exceptions can shorten individual holds, but they
+cannot make the motor loop well damped.
+
+### Recommended estimator-based controller
+
+The next controller should be designed as a small state estimator plus a
+rate-limited actuator, not as another resume condition:
+
+- **Safety channel:** latest/raw-equivalent and fast 1.8 s processed values
+  retain authority for hard stress, wire-break, stale-feedback, voltage, and
+  pause decisions.
+- **Control channel:** estimate robust mean stress, mean-stress drift, and
+  uncertainty on a slower clock using fresh samples and their actual cadence.
+  Correlated samples must reduce effective sample count; a large raw spread
+  must not itself create a control error.
+- **Response model:** after one motor command, wait for the identified
+  move/settle/dead-time interval and estimate the signed change in mean stress.
+  Only one unassessed response may exist at a time.
+- **Disturbance state:** represent thermal/transformation drift separately from
+  motor response. Persistent one-sided drift earns bounded following motion;
+  zero-mean oscillation increases uncertainty but does not request alternating
+  motor moves.
+- **Actuator:** use a conservative PI or one-step predictive correction on the
+  estimated mean, with deadband, anti-windup, command/travel limits, and an
+  explicit reversal penalty. The integral term is frozen while response is
+  unobserved or uncertainty is too high.
+- **Current supervisor:** continue or resume current when the estimated mean
+  and projected short-horizon stress are acceptable. Preserve the existing
+  reduced-rate probation and never exceed the recipe rate.
+
+This architecture naturally protects a good transforming sample: coherent
+disturbance drift remains visible and is followed, while high-frequency
+oscillation around an acceptable mean is not chased.
+
+### Offline validation required before another hardware campaign
+
+1. Fit response delay, signed mean-stress gain, disturbance drift, and
+   correlated residual blocks separately from run 15 and from multiple loops of
+   the finalized Prague run.
+2. Reconstruct the current controller event-by-event before comparing the new
+   controller.
+3. Run leave-one-loop-out closed-loop tests on the finalized Prague run and use
+   run 15 only as the hunting/failure calibration.
+4. Add a genuinely calm real run and a large-strain transforming run as
+   external hold-outs; synthetic coherent transformation is not enough.
+5. Compare baseline, estimator only, one-response budget, PI/predictive action,
+   and the full controller.
+6. Require no new safety stops, no recipe-rate overshoot, p95 stress error no
+   worse than +5%, no increase in time outside the pause band, motor travel and
+   reversals no worse than +5%, and no material shift in transformation onset,
+   peak strain, or loop area.
+7. Require at least 25% lower hold time on hunting cases and no material
+   wall-time or scientific-fidelity regression on the real transforming
+   hold-out before preparing a new approved `campaign.yaml`.
+
+**Current decision:** retain the narrow lifecycle fix, keep the observation
+policy offline, and do not run another hardware campaign until an
+estimator-based candidate passes the real-run hold-outs.

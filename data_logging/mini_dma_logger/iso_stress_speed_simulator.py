@@ -25,6 +25,7 @@ POLICY_PROPOSED = "proposed"
 POLICY_CYCLE_CENTER_MOTOR = "cycle_center_motor"
 POLICY_CYCLE_CENTER_RESUME = "cycle_center_resume"
 POLICY_CYCLE_CENTER_COMBINED = "cycle_center_combined"
+POLICY_PROCESSED_OBSERVATION = "processed_observation"
 POLICIES = (
     POLICY_BASELINE,
     POLICY_EVIDENCE,
@@ -33,6 +34,7 @@ POLICIES = (
     POLICY_CYCLE_CENTER_MOTOR,
     POLICY_CYCLE_CENTER_RESUME,
     POLICY_CYCLE_CENTER_COMBINED,
+    POLICY_PROCESSED_OBSERVATION,
 )
 CYCLE_MOTOR_POLICIES = {
     POLICY_CYCLE_CENTER_MOTOR,
@@ -173,6 +175,20 @@ class IsoStressPolicyConfig:
     cycle_probe_factor: float = 0.25
     cycle_probe_s: float = 2.0
     cycle_probe_min_samples: int = 8
+    observation_min_s: float = 6.0
+    observation_max_s: float = 12.0
+    observation_min_samples: int = 16
+    observation_trigger_window_s: float = 6.0
+    observation_trigger_min_span_s: float = 5.5
+    observation_trigger_min_samples: int = 20
+    observation_trigger_min_motor_reversals: int = 2
+    observation_trigger_center_band_mpa: float = 10.0
+    observation_trigger_slope_max_mpa_s: float = 2.0
+    observation_trigger_noise_min_mpa: float = 2.0
+    observation_trigger_max_sample_interval_s: float = 0.45
+    observation_center_band_mpa: float = 5.0
+    observation_slope_max_mpa_s: float = 0.5
+    observation_fast_veto_mpa: float = 35.0
 
     def validated(self) -> "IsoStressPolicyConfig":
         if self.name not in POLICIES:
@@ -195,6 +211,22 @@ class IsoStressPolicyConfig:
             raise ValueError("cycle_center_band_mpa must be positive")
         if not 0.0 < self.cycle_probe_factor <= 1.0:
             raise ValueError("cycle_probe_factor must be in (0, 1]")
+        if self.observation_max_s < self.observation_min_s:
+            raise ValueError("observation window maximum must cover its minimum")
+        if self.observation_min_samples < 3:
+            raise ValueError("observation_min_samples must be at least 3")
+        if self.observation_trigger_min_samples < 3:
+            raise ValueError("observation_trigger_min_samples must be at least 3")
+        if self.observation_trigger_min_motor_reversals < 0:
+            raise ValueError("observation trigger motor reversals must be non-negative")
+        if self.observation_trigger_window_s < self.observation_trigger_min_span_s:
+            raise ValueError("observation trigger window must cover its minimum span")
+        if self.observation_center_band_mpa <= 0.0:
+            raise ValueError("observation_center_band_mpa must be positive")
+        if self.observation_trigger_noise_min_mpa < 0.0:
+            raise ValueError("observation trigger noise minimum must be non-negative")
+        if self.observation_trigger_max_sample_interval_s <= 0.0:
+            raise ValueError("observation trigger sample interval must be positive")
         return self
 
 
@@ -214,6 +246,7 @@ class SignalSummary:
     raw_max_mpa: float
     sample_count: int
     span_s: float
+    max_interval_s: float
 
 
 @dataclass(frozen=True)
@@ -389,7 +422,7 @@ def _transformation_fraction(current_ma: float, plant: IsoStressPlantConfig, dir
 
 def _signal(samples: list[tuple[float, float]], *, window_s: float) -> SignalSummary:
     if not samples:
-        return SignalSummary(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0)
+        return SignalSummary(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0)
     end_s = samples[-1][0]
     window = [item for item in samples if item[0] >= end_s - max(1e-9, window_s)] or [samples[-1]]
     values = [item[1] for item in window]
@@ -414,6 +447,13 @@ def _signal(samples: list[tuple[float, float]], *, window_s: float) -> SignalSum
         raw_max_mpa=max(values),
         sample_count=len(window),
         span_s=max(0.0, window[-1][0] - window[0][0]),
+        max_interval_s=max(
+            (
+                window[index][0] - window[index - 1][0]
+                for index in range(1, len(window))
+            ),
+            default=0.0,
+        ),
     )
 
 
@@ -528,6 +568,7 @@ def run_iso_stress_simulation(
     rows: list[IsoStressSimulationRow] = []
     measured_samples: list[tuple[float, float]] = []
     fixed_current_samples: list[tuple[float, float]] = []
+    observation_samples: list[tuple[float, float]] = []
     fixed_current_anchor_ma = scenario.plant.current_start_ma
     elapsed_s = 0.0
     current_ma = plant.current_start_ma
@@ -536,6 +577,7 @@ def run_iso_stress_simulation(
     effective_motor_mm = 0.0
     previous_motor_sign = 0
     motor_reversals = 0
+    hold_motor_reversals = 0
     motor_travel = 0.0
     last_motor_move_s = -math.inf
     noise_state = 0.0
@@ -550,6 +592,8 @@ def run_iso_stress_simulation(
     probe_samples = 0
     hold_s = 0.0
     hold_elapsed_s = 0.0
+    observation_elapsed_s = 0.0
+    observation_active = False
     max_continuous_hold_s = 0.0
     probation_s = 0.0
     hold_entries = 0
@@ -633,6 +677,10 @@ def run_iso_stress_simulation(
                 phase = "hold"
                 hold_entries += 1
                 hold_elapsed_s = 0.0
+                hold_motor_reversals = 0
+                observation_elapsed_s = 0.0
+                observation_active = False
+                observation_samples.clear()
                 resume_stable_s = 0.0
                 evidence_s = 0.0
                 probe_elapsed_s = 0.0
@@ -644,6 +692,42 @@ def run_iso_stress_simulation(
         if phase == "hold":
             hold_s += step_dt
             hold_elapsed_s += step_dt
+            observation_trigger = _signal(
+                fixed_current_samples,
+                window_s=policy.observation_trigger_window_s,
+            )
+            if (
+                policy.name == POLICY_PROCESSED_OBSERVATION
+                and not observation_active
+                and observation_trigger.sample_count
+                >= policy.observation_trigger_min_samples
+                and observation_trigger.span_s
+                >= policy.observation_trigger_min_span_s
+                and observation_trigger.raw_min_mpa <= 0.0
+                <= observation_trigger.raw_max_mpa
+                and abs(observation_trigger.center_mpa)
+                <= policy.observation_trigger_center_band_mpa
+                and abs(observation_trigger.slope_mpa_s)
+                <= policy.observation_trigger_slope_max_mpa_s
+                and observation_trigger.noise_mpa
+                >= policy.observation_trigger_noise_min_mpa
+                and observation_trigger.max_interval_s
+                <= policy.observation_trigger_max_sample_interval_s
+                and hold_motor_reversals
+                >= policy.observation_trigger_min_motor_reversals
+            ):
+                observation_active = True
+                observation_elapsed_s = 0.0
+                observation_samples.clear()
+            if observation_active:
+                observation_elapsed_s += step_dt
+                observation_samples.append(
+                    (elapsed_s, measured_stress - plant.target_stress_mpa)
+                )
+            observation = _signal(
+                observation_samples,
+                window_s=policy.observation_max_s,
+            )
             max_continuous_hold_s = max(max_continuous_hold_s, hold_elapsed_s)
             cycle_resume_triggered = False
             slow_away = (
@@ -691,6 +775,53 @@ def run_iso_stress_simulation(
                 should_resume = (
                     resume_stable_s >= policy.baseline_resume_stable_s
                     or cycle_resume_triggered
+                )
+            elif policy.name == POLICY_PROCESSED_OBSERVATION:
+                if abs(fast_error) <= resume_band and post_move_feedback_ready:
+                    resume_stable_s += step_dt
+                else:
+                    resume_stable_s = 0.0
+                observation_ready = (
+                    observation_active
+                    and observation_elapsed_s >= policy.observation_min_s
+                    and observation.sample_count >= policy.observation_min_samples
+                    and observation.span_s
+                    >= min(
+                        policy.observation_min_s,
+                        policy.observation_max_s,
+                    )
+                    - plant.sample_period_s
+                )
+                observation_centered = (
+                    observation_ready
+                    and abs(observation.center_mpa)
+                    <= policy.observation_center_band_mpa
+                    and abs(observation.slope_mpa_s)
+                    <= policy.observation_slope_max_mpa_s
+                    and abs(fast_error) <= policy.observation_fast_veto_mpa
+                    and abs(measured_stress - plant.target_stress_mpa)
+                    <= policy.observation_fast_veto_mpa
+                )
+                should_resume = (
+                    resume_stable_s >= policy.baseline_resume_stable_s
+                    or observation_centered
+                )
+                if (
+                    observation_active
+                    and observation_elapsed_s >= policy.observation_max_s
+                    and not observation_centered
+                ):
+                    observation_active = False
+                    observation_elapsed_s = 0.0
+                    observation_samples.clear()
+                decision = (
+                    "resume_processed_observation"
+                    if observation_centered
+                    else (
+                        "observe_processed_center"
+                        if observation_active
+                        else "recover_processed_center"
+                    )
                 )
             else:
                 if (
@@ -746,6 +877,7 @@ def run_iso_stress_simulation(
                     POLICY_CYCLE_CENTER_MOTOR,
                     POLICY_CYCLE_CENTER_RESUME,
                     POLICY_CYCLE_CENTER_COMBINED,
+                    POLICY_PROCESSED_OBSERVATION,
                 }
                 and last_resume_s is not None
                 and direction > 0
@@ -827,6 +959,11 @@ def run_iso_stress_simulation(
         motor_due = (
             elapsed_s - last_motor_move_s >= plant.motor_correction_interval_s
         )
+        suppress_observation_motor = (
+            policy.name == POLICY_PROCESSED_OBSERVATION
+            and phase == "hold"
+            and observation_active
+        )
         if (
             suppress_cycle_motor
             and abs(fast_error) > policy.correction_deadband_mpa
@@ -834,6 +971,12 @@ def run_iso_stress_simulation(
         ):
             cycle_motor_suppressions += 1
             decision = "suppress_cycle_phase_motor"
+        elif (
+            suppress_observation_motor
+            and abs(fast_error) > policy.correction_deadband_mpa
+            and motor_due
+        ):
+            decision = "observe_without_motor"
         elif (
             abs(motor_error) > policy.correction_deadband_mpa
             and motor_due
@@ -848,10 +991,16 @@ def run_iso_stress_simulation(
             motor_delta = math.copysign(magnitude, desired)
             motor_mm += motor_delta
             last_motor_move_s = elapsed_s
+            if policy.name == POLICY_PROCESSED_OBSERVATION:
+                observation_active = False
+                observation_samples.clear()
+                observation_elapsed_s = 0.0
             motor_travel += abs(motor_delta)
             motor_sign = 1 if motor_delta > 0.0 else -1
             if previous_motor_sign and motor_sign != previous_motor_sign:
                 motor_reversals += 1
+                if phase == "hold":
+                    hold_motor_reversals += 1
             previous_motor_sign = motor_sign
 
         effective_rate = plant.requested_rate_ma_s * rate_multiplier
