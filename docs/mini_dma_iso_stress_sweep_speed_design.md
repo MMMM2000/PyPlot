@@ -448,3 +448,6 @@ oscillation around an acceptable mean is not chased.
 **Current decision:** retain the narrow lifecycle fix, keep the observation
 policy offline, and do not run another hardware campaign until an
 estimator-based candidate passes the real-run hold-outs.
+
+The broader approach catalogue, ranking, and restart checklist are maintained
+in [Mini DMA iso-stress control options](mini_dma_iso_stress_control_options.md).
