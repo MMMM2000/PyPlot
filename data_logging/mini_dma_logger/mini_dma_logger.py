@@ -2433,7 +2433,7 @@ def _first_overheating_preflight_required(
     continuation: bool = False,
 ) -> bool:
     return (
-        recipe_mode in CURRENT_SWEEP_MODES
+        (recipe_mode in CURRENT_SWEEP_MODES or recipe_mode == CONSTANT_CURRENT_STRAIN_SWEEP)
         and not first_overheating_enabled
         and not previous_tma_measurement_found
         and not continuation
@@ -8223,6 +8223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
+        self._current_sweep_endpoint_seek_accepted_step_index: int | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
         self._current_sweep_ramp_hold_entry_signed_error: float | None = None
         self._current_sweep_ramp_hold_entry_pause_band: float | None = None
@@ -11054,6 +11055,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_start_row, self.label_constant_current_start_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_start_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target start", constant_current_start_row)
         self.label_constant_current_start_target_row = constant_current_form.labelForField(
@@ -11066,6 +11069,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_end_row, self.label_constant_current_end_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_end_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target end", constant_current_end_row)
         self.label_constant_current_end_target_row = constant_current_form.labelForField(constant_current_end_row)
@@ -11182,6 +11187,144 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_step_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         constant_current_form.addRow("Step", constant_current_step_mA_row)
         self.label_constant_current_step_mA_row = constant_current_form.labelForField(constant_current_step_mA_row)
+        self.label_constant_current_first_overheating_section = QtWidgets.QLabel(
+            "First overheating",
+            automation_box,
+        )
+        constant_current_first_overheating_font = self.label_constant_current_first_overheating_section.font()
+        constant_current_first_overheating_font.setBold(True)
+        self.label_constant_current_first_overheating_section.setFont(
+            constant_current_first_overheating_font
+        )
+        constant_current_form.insertRow(
+            0,
+            "",
+            self.label_constant_current_first_overheating_section,
+        )
+        self.check_constant_current_first_overheating = QtWidgets.QCheckBox(
+            "Enable first-overheating iso-stress loop",
+            automation_box,
+        )
+        self.check_constant_current_first_overheating.setChecked(False)
+        self.check_constant_current_first_overheating.setToolTip(
+            "Before the iso-current mechanical scan, run one established iso-stress "
+            "current loop up to the configured maximum and back to the minimum current."
+        )
+        constant_current_form.insertRow(
+            1,
+            "",
+            self.check_constant_current_first_overheating,
+        )
+        self.spin_constant_current_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_first_overheating_target_mpa.setDecimals(3)
+        self.spin_constant_current_first_overheating_target_mpa.setRange(0.001, 100000.0)
+        self.spin_constant_current_first_overheating_target_mpa.setValue(20.0)
+        self.spin_constant_current_first_overheating_target_mpa.setSuffix(" MPa")
+        (
+            self.row_constant_current_first_overheating_target,
+            self.label_constant_current_first_overheating_target_equiv,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_target_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        constant_current_form.insertRow(
+            2,
+            "Stress",
+            self.row_constant_current_first_overheating_target,
+        )
+        self.label_constant_current_first_overheating_target = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_target
+        )
+        self.spin_constant_current_first_overheating_end_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_first_overheating_end_mA.setDecimals(2)
+        self.spin_constant_current_first_overheating_end_mA.setRange(0.0, 5000.0)
+        self.spin_constant_current_first_overheating_end_mA.setValue(80.0)
+        self.spin_constant_current_first_overheating_end_mA.setSuffix(" mA")
+        (
+            self.row_constant_current_first_overheating_end,
+            self.label_constant_current_first_overheating_end_density,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_end_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_first_overheating_end_density.setTextFormat(
+            QtCore.Qt.TextFormat.RichText
+        )
+        constant_current_form.insertRow(
+            3,
+            "Maximum current",
+            self.row_constant_current_first_overheating_end,
+        )
+        self.label_constant_current_first_overheating_end = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_end
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s = CompactDoubleSpinBox(
+            automation_box
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setDecimals(3)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setRange(0.001, 100000.0)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setSuffix(" MPa/s")
+        (
+            self.row_constant_current_first_overheating_target_rate,
+            self.label_constant_current_first_overheating_target_rate_equiv,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        constant_current_form.insertRow(
+            4,
+            "Stress ramp",
+            self.row_constant_current_first_overheating_target_rate,
+        )
+        self.label_constant_current_first_overheating_target_rate = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_target_rate
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s = CompactDoubleSpinBox(
+            automation_box
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setDecimals(3)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setRange(0.001, 5000.0)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(1.0)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setSuffix(" mA/s")
+        self.row_constant_current_first_overheating_current_rate, self.label_constant_current_first_overheating_rate_density = (
+            self._spin_with_equivalent_label(
+                automation_box,
+                self.spin_constant_current_first_overheating_current_rate_mA_s,
+                spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+                label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+            )
+        )
+        self.label_constant_current_first_overheating_rate_density.setTextFormat(
+            QtCore.Qt.TextFormat.RichText
+        )
+        constant_current_form.insertRow(
+            5,
+            "Current ramp",
+            self.row_constant_current_first_overheating_current_rate,
+        )
+        self.label_constant_current_first_overheating_current_rate = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_current_rate
+        )
+        self.check_constant_current_first_overheating_hold_on_error = QtWidgets.QCheckBox(
+            "Pause current while stress recovers",
+            automation_box,
+        )
+        self.check_constant_current_first_overheating_hold_on_error.setChecked(True)
+        self.check_constant_current_first_overheating_hold_on_error.setToolTip(
+            "Use the established iso-stress held-current recovery gates during first overheating."
+        )
+        constant_current_form.insertRow(
+            6,
+            "",
+            self.check_constant_current_first_overheating_hold_on_error,
+        )
         constant_transition_header = QtWidgets.QWidget(automation_box)
         constant_transition_header_layout = QtWidgets.QHBoxLayout(constant_transition_header)
         constant_transition_header_layout.setContentsMargins(0, 0, 0, 0)
@@ -11225,6 +11368,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_transition_row, self.label_constant_current_transition_equiv = self._spin_with_equivalent_label(
             self.constant_current_transition_panel,
             self.spin_constant_current_transition_stress_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_transition_form.addRow("Stress", constant_current_transition_row)
         self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(self.constant_current_transition_panel)
@@ -11262,6 +11407,29 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_constant_current_return_to_start.setChecked(True)
         self.check_constant_current_return_to_start.setVisible(False)
+        for constant_current_input in (
+            self.combo_constant_current_start_basis,
+            self.spin_constant_current_start_target,
+            self.spin_constant_current_end_target,
+            self.combo_constant_current_step_basis,
+            self.spin_constant_current_step_size,
+            self.spin_constant_current_hold_s,
+            self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_release_record_s,
+            self.spin_constant_current_move_speed_mm_s,
+            self.spin_constant_current_stress_ramp_rate_mpa_s,
+            self.spin_constant_current_start_mA,
+            self.spin_constant_current_end_mA,
+            self.spin_constant_current_step_mA,
+            self.spin_constant_current_first_overheating_target_mpa,
+            self.spin_constant_current_first_overheating_end_mA,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.spin_constant_current_first_overheating_current_rate_mA_s,
+            self.spin_constant_current_transition_stress_mpa,
+            self.spin_constant_current_transition_rate_mA_s,
+            self.spin_constant_current_transition_settle_s,
+        ):
+            constant_current_input.setFixedWidth(RECIPE_SPINBOX_WIDTH_PX)
         self.recipe_stack.addWidget(constant_current_page)
 
         automation_form.addRow("", self.recipe_stack)
@@ -11739,6 +11907,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA,
             self.spin_constant_current_end_mA,
             self.spin_constant_current_step_mA,
+            self.spin_constant_current_first_overheating_target_mpa,
+            self.spin_constant_current_first_overheating_end_mA,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.spin_constant_current_first_overheating_current_rate_mA_s,
             self.spin_constant_current_transition_stress_mpa,
             self.spin_constant_current_transition_rate_mA_s,
             self.spin_constant_current_transition_settle_s,
@@ -11757,6 +11929,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating_use_normal_end.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_first_overheating.toggled.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_first_overheating_hold_on_error.toggled.connect(
+            self._update_recipe_mode_ui
+        )
         self.check_constant_current_transition_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
@@ -13334,11 +13510,21 @@ class MainWindow(QtWidgets.QMainWindow):
             and hasattr(self, "spin_current_sweep_first_overheating_end_mA")
         ):
             first_overheating_end_mA = float(self.spin_current_sweep_first_overheating_end_mA.value())
+        constant_current_first_overheating_end_mA = 0.0
+        if (
+            hasattr(self, "check_constant_current_first_overheating")
+            and self.check_constant_current_first_overheating.isChecked()
+            and hasattr(self, "spin_constant_current_first_overheating_end_mA")
+        ):
+            constant_current_first_overheating_end_mA = float(
+                self.spin_constant_current_first_overheating_end_mA.value()
+            )
         return max(
             float(self.spin_supply_manual_current.value()),
             float(self.spin_current_sweep_start_mA.value()),
             float(self.spin_current_sweep_end_mA.value()),
             first_overheating_end_mA,
+            constant_current_first_overheating_end_mA,
             float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
             1.0,
         )
@@ -17452,6 +17638,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_current_first_overheating_end_density.setText(
             self._current_density_text(float(self.spin_current_sweep_first_overheating_end_mA.value()))
+        )
+        self.label_constant_current_first_overheating_target_equiv.setText(
+            self._load_equivalent_text(
+                float(self.spin_constant_current_first_overheating_target_mpa.value())
+            )
+        )
+        self.label_constant_current_first_overheating_end_density.setText(
+            self._current_density_text(
+                float(self.spin_constant_current_first_overheating_end_mA.value())
+            )
+        )
+        self.label_constant_current_first_overheating_target_rate_equiv.setText(
+            self._load_equivalent_text(
+                float(self.spin_constant_current_first_overheating_target_rate_mpa_s.value()),
+                per_second=True,
+            )
+        )
+        self.label_constant_current_first_overheating_rate_density.setText(
+            self._current_density_text(
+                float(self.spin_constant_current_first_overheating_current_rate_mA_s.value()),
+                per_second=True,
+            )
         )
         for label, spinbox in (
             (self.label_current_target_start_equiv, self.spin_current_sweep_target_start),
@@ -23402,6 +23610,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.row_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
         if self.label_current_sweep_first_overheating_end is not None:
             self.label_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
+        constant_current_first_overheating_mode = self._is_constant_current_strain_sweep_mode(mode)
+        constant_current_first_overheating_enabled = (
+            constant_current_first_overheating_mode
+            and self.check_constant_current_first_overheating.isChecked()
+        )
+        for widget in (
+            self.label_constant_current_first_overheating_section,
+            self.check_constant_current_first_overheating,
+        ):
+            widget.setVisible(constant_current_first_overheating_mode)
+        for widget in (
+            self.row_constant_current_first_overheating_target,
+            self.row_constant_current_first_overheating_end,
+            self.row_constant_current_first_overheating_target_rate,
+            self.row_constant_current_first_overheating_current_rate,
+            self.check_constant_current_first_overheating_hold_on_error,
+        ):
+            widget.setVisible(constant_current_first_overheating_enabled)
+        for label in (
+            self.label_constant_current_first_overheating_target,
+            self.label_constant_current_first_overheating_end,
+            self.label_constant_current_first_overheating_target_rate,
+            self.label_constant_current_first_overheating_current_rate,
+        ):
+            if label is not None:
+                label.setVisible(constant_current_first_overheating_enabled)
         if hasattr(self, "row_current_sweep_target_end"):
             self.row_current_sweep_target_end.setVisible(not fatigue_mode)
         if hasattr(self, "label_current_sweep_target_end") and self.label_current_sweep_target_end is not None:
@@ -26632,6 +26866,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
+                "iso_current_first_overheating": {
+                    "enabled": bool(self.check_constant_current_first_overheating.isChecked()),
+                    "target_mpa": float(
+                        self.spin_constant_current_first_overheating_target_mpa.value()
+                    ),
+                    "current_end_mA": float(
+                        self.spin_constant_current_first_overheating_end_mA.value()
+                    ),
+                    "target_ramp_rate_mpa_s": float(
+                        self.spin_constant_current_first_overheating_target_rate_mpa_s.value()
+                    ),
+                    "current_ramp_rate_mA_s": float(
+                        self.spin_constant_current_first_overheating_current_rate_mA_s.value()
+                    ),
+                    "hold_on_error": bool(
+                        self.check_constant_current_first_overheating_hold_on_error.isChecked()
+                    ),
+                    "lifecycle": "iso_stress_up_and_return",
+                },
                 "reverse_current": (
                     True
                     if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE
@@ -28796,6 +29049,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
                 "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
                 "transition_hold_on_error": bool(self.check_constant_current_transition_hold_on_error.isChecked()),
+                "first_overheating": bool(
+                    self.check_constant_current_first_overheating.isChecked()
+                ),
+                "first_overheating_target_mpa": float(
+                    self.spin_constant_current_first_overheating_target_mpa.value()
+                ),
+                "first_overheating_current_end_mA": float(
+                    self.spin_constant_current_first_overheating_end_mA.value()
+                ),
+                "first_overheating_target_ramp_rate_mpa_s": float(
+                    self.spin_constant_current_first_overheating_target_rate_mpa_s.value()
+                ),
+                "first_overheating_current_ramp_rate_mA_s": float(
+                    self.spin_constant_current_first_overheating_current_rate_mA_s.value()
+                ),
+                "first_overheating_hold_on_error": bool(
+                    self.check_constant_current_first_overheating_hold_on_error.isChecked()
+                ),
+                "first_overheating_lifecycle": "iso_stress_up_and_return",
                 "return_to_start": True,
             }
         if self._is_constant_current_stress_ramp_mode(mode):
@@ -28985,6 +29257,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA.setValue(float(constant_current.get("current_start_mA", self.spin_constant_current_start_mA.value())))
             self.spin_constant_current_end_mA.setValue(float(constant_current.get("current_end_mA", self.spin_constant_current_end_mA.value())))
             self.spin_constant_current_step_mA.setValue(float(constant_current.get("current_step_mA", self.spin_constant_current_step_mA.value())))
+            self.check_constant_current_first_overheating.setChecked(
+                bool(
+                    constant_current.get(
+                        "first_overheating",
+                        self.check_constant_current_first_overheating.isChecked(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_target_mpa.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_target_mpa",
+                        self.spin_constant_current_first_overheating_target_mpa.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_end_mA.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_current_end_mA",
+                        self.spin_constant_current_first_overheating_end_mA.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_target_ramp_rate_mpa_s",
+                        self.spin_constant_current_first_overheating_target_rate_mpa_s.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_current_ramp_rate_mA_s",
+                        self.spin_constant_current_first_overheating_current_rate_mA_s.value(),
+                    )
+                )
+            )
+            self.check_constant_current_first_overheating_hold_on_error.setChecked(
+                bool(
+                    constant_current.get(
+                        "first_overheating_hold_on_error",
+                        self.check_constant_current_first_overheating_hold_on_error.isChecked(),
+                    )
+                )
+            )
             self.check_constant_current_transition_enabled.setChecked(True)
             self.spin_constant_current_transition_stress_mpa.setValue(
                 float(
@@ -29252,8 +29572,10 @@ class MainWindow(QtWidgets.QMainWindow):
         end_mA = step.current_end_mA
         if start_mA is None or end_mA is None:
             return f"Current sweep at {target_text}"
-        direction = "increasing" if float(end_mA) >= float(start_mA) else "decreasing"
         target_current = self._automation_current_target_text(end_mA)
+        if abs(float(end_mA) - float(start_mA)) <= 1e-12:
+            return f"At {target_text}: holding current at {target_current}"
+        direction = "increasing" if float(end_mA) > float(start_mA) else "decreasing"
         return f"At {target_text}: {direction} current to {target_current}"
 
     def _previous_current_sweep_step_for_settle(self, step_index: int, step: AutomationStep) -> AutomationStep | None:
@@ -29300,8 +29622,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return "Starting measurement log"
 
         if (
-            self._is_current_sweep_mode(self._automation_name)
-            and self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
+            self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
+            and self._active_current_sweep_display_target_mA is not None
         ):
             context_target_text = self._automation_target_text(self._automation_basis, self._automation_target_value)
             if self._automation_phase == "current_hold":
@@ -29309,8 +29631,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 return f"At {context_target_text}: holding {held}, recovering target"
             target_current = self._automation_current_target_text(self._active_current_sweep_display_target_mA)
             direction_value = self._active_current_sweep_display_direction
+            start_for_display = self._active_current_sweep_last_setpoint_mA
+            if (
+                start_for_display is not None
+                and self._active_current_sweep_display_target_mA is not None
+                and abs(
+                    float(self._active_current_sweep_display_target_mA)
+                    - float(start_for_display)
+                )
+                <= 1e-12
+            ):
+                return f"At {context_target_text}: holding current at {target_current}"
             if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
-                start_for_display = self._active_current_sweep_last_setpoint_mA
                 if start_for_display is not None:
                     direction_value = float(self._active_current_sweep_display_target_mA) - float(start_for_display)
             direction = "increasing" if direction_value >= 0.0 else "decreasing"
@@ -30829,6 +31161,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
+        self._current_sweep_endpoint_seek_accepted_step_index = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -31006,18 +31339,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _focus_first_overheating_controls(self) -> None:
         self.control_tabs.setCurrentWidget(self.experiment_tab)
         self._update_recipe_mode_ui()
+        recipe_mode = str(self.combo_recipe_mode.currentData() or "")
+        target_widget = (
+            self.spin_constant_current_first_overheating_target_mpa
+            if self._is_constant_current_strain_sweep_mode(recipe_mode)
+            else self.spin_current_sweep_first_overheating_target_mpa
+        )
 
         def _reveal() -> None:
             if self._control_scroll_area is not None:
                 self._control_scroll_area.ensureWidgetVisible(
-                    self.spin_current_sweep_first_overheating_target_mpa,
+                    target_widget,
                     24,
                     48,
                 )
-            self.spin_current_sweep_first_overheating_target_mpa.setFocus(
-                QtCore.Qt.FocusReason.OtherFocusReason
-            )
-            self.spin_current_sweep_first_overheating_target_mpa.selectAll()
+            target_widget.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            target_widget.selectAll()
 
         QtCore.QTimer.singleShot(0, _reveal)
 
@@ -31026,15 +31363,23 @@ class MainWindow(QtWidgets.QMainWindow):
         identity = self._current_tma_sample_identity()
         recipe_mode = str(self.combo_recipe_mode.currentData() or "")
         history_found = self._has_previous_tma_measurement(identity)
+        first_overheating_enabled = (
+            self.check_constant_current_first_overheating.isChecked()
+            if self._is_constant_current_strain_sweep_mode(recipe_mode)
+            else self.check_current_sweep_first_overheating.isChecked()
+        )
         if not _first_overheating_preflight_required(
             recipe_mode=recipe_mode,
-            first_overheating_enabled=self.check_current_sweep_first_overheating.isChecked(),
+            first_overheating_enabled=first_overheating_enabled,
             previous_tma_measurement_found=history_found,
         ):
             return True
         action = self._ask_first_overheating_preflight_action()
         if action == FIRST_OVERHEATING_CONFIGURE:
-            self.check_current_sweep_first_overheating.setChecked(True)
+            if self._is_constant_current_strain_sweep_mode(recipe_mode):
+                self.check_constant_current_first_overheating.setChecked(True)
+            else:
+                self.check_current_sweep_first_overheating.setChecked(True)
             self._focus_first_overheating_controls()
             return False
         if action != FIRST_OVERHEATING_CONTINUE:
@@ -32845,12 +33190,34 @@ class MainWindow(QtWidgets.QMainWindow):
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
             transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            first_overheating_enabled = bool(
+                self.check_constant_current_first_overheating.isChecked()
+            )
+            first_overheating_target_mpa = float(
+                self.spin_constant_current_first_overheating_target_mpa.value()
+            )
+            first_overheating_end_mA = self._recipe_current_setpoint_mA(
+                float(self.spin_constant_current_first_overheating_end_mA.value())
+            )
+            first_overheating_target_rate_mpa_s = abs(
+                float(self.spin_constant_current_first_overheating_target_rate_mpa_s.value())
+            )
+            first_overheating_current_rate_mA_s = abs(
+                float(self.spin_constant_current_first_overheating_current_rate_mA_s.value())
+            )
+            first_overheating_hold_enabled = bool(
+                self.check_constant_current_first_overheating_hold_on_error.isChecked()
+            )
             if mechanical_step_value <= 0.0:
                 raise ValueError("Set a non-zero mechanical step size.")
             if current_step <= 0.0:
                 raise ValueError("Set a non-zero current step.")
             if transition_enabled and transition_rate_mA_s <= 0.0:
                 raise ValueError("Set a non-zero current-transition ramp rate.")
+            if first_overheating_enabled and first_overheating_target_rate_mpa_s <= 0.0:
+                raise ValueError("Set a non-zero first-overheating stress-ramp rate.")
+            if first_overheating_enabled and first_overheating_current_rate_mA_s <= 0.0:
+                raise ValueError("Set a non-zero first-overheating current-ramp rate.")
             current_targets = []
             for current_target in self._build_numeric_targets(current_start, current_end, current_step):
                 clamped_target = self._recipe_current_setpoint_mA(current_target)
@@ -32858,6 +33225,59 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_targets.append(clamped_target)
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_current_mA = MIN_RECIPE_CURRENT_MA
+            if first_overheating_enabled:
+                first_overheating_start_mA = self._recipe_current_setpoint_mA(
+                    MIN_RECIPE_CURRENT_MA
+                )
+                steps.extend(
+                    (
+                        AutomationStep(
+                            "set_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_mA=first_overheating_start_mA,
+                            note="first_overheating",
+                        ),
+                        AutomationStep(
+                            "ramp_target",
+                            target_value=first_overheating_target_mpa,
+                            target_start_value=0.0,
+                            target_end_value=first_overheating_target_mpa,
+                            target_ramp_rate_value_s=first_overheating_target_rate_mpa_s,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            note="first_overheating",
+                        ),
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_start_mA=first_overheating_start_mA,
+                            current_end_mA=first_overheating_end_mA,
+                            current_ramp_rate_mA_s=first_overheating_current_rate_mA_s,
+                            current_hold_enabled=first_overheating_hold_enabled,
+                            current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                            current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                            current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                            note="first_overheating",
+                        ),
+                    )
+                )
+                if abs(first_overheating_end_mA - first_overheating_start_mA) > 1e-12:
+                    steps.append(
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_start_mA=first_overheating_end_mA,
+                            current_end_mA=first_overheating_start_mA,
+                            current_ramp_rate_mA_s=first_overheating_current_rate_mA_s,
+                            current_hold_enabled=first_overheating_hold_enabled,
+                            current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                            current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                            current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                            note="first_overheating",
+                        )
+                    )
             for current_index, current_mA in enumerate(current_targets, start=1):
                 note_prefix = f"{current_index}"
                 transition_start_mA = self._recipe_current_setpoint_mA(previous_current_mA)
@@ -32969,6 +33389,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 if transition_hold_enabled:
                     summary += " Current transition pauses while the target recovers."
+            if first_overheating_enabled:
+                summary += (
+                    " First overheating enabled: one established iso-stress current loop at "
+                    f"{first_overheating_target_mpa:.3f} MPa, "
+                    f"{first_overheating_start_mA:.2f} to {first_overheating_end_mA:.2f} mA "
+                    f"and back at {first_overheating_current_rate_mA_s:.3f} mA/s."
+                )
             summary += " Each current leg scans up and back to the start target."
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
@@ -33615,6 +34042,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return signed_error, abs(signed_error), max(1e-12, abs(float(acceptance_tolerance))), max(0.0, noise_value)
 
     def _current_sweep_endpoint_recovered(self, step: AutomationStep) -> bool:
+        step_index = self._active_current_sweep_step_index
+        if (
+            step_index is not None
+            and self._current_sweep_endpoint_seek_accepted_step_index == int(step_index)
+        ):
+            return True
         if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return True
         if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE:
@@ -33864,6 +34297,8 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         now_s: float,
     ) -> tuple[bool, bool]:
+        if self._current_sweep_endpoint_seek_accepted_step_index == int(step_index):
+            return False, False
         if not step.current_hold_enabled:
             if self._current_sweep_ramp_hold_step_index == step_index:
                 self._clear_current_sweep_ramp_hold()
@@ -34064,6 +34499,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"{stable_s:.2f} s"
                     ),
                 )
+                self._current_sweep_endpoint_seek_accepted_step_index = (
+                    self._active_current_sweep_step_index
+                )
             else:
                 self._log_waiting_for_feedback(
                     "Held-current recovery reached the target; confirming stable recovery before resuming current."
@@ -34167,6 +34605,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -34469,6 +34908,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_schedule_update_s = now_s
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -34577,6 +35017,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -35962,6 +36403,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_end_mA", self.spin_constant_current_end_mA.value())
         self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
         self.settings.setValue(
+            "constant_current_first_overheating",
+            self.check_constant_current_first_overheating.isChecked(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_target_mpa",
+            self.spin_constant_current_first_overheating_target_mpa.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_current_end_mA",
+            self.spin_constant_current_first_overheating_end_mA.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_target_ramp_rate_mpa_s",
+            self.spin_constant_current_first_overheating_target_rate_mpa_s.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_current_ramp_rate_mA_s",
+            self.spin_constant_current_first_overheating_current_rate_mA_s.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_hold_on_error",
+            self.check_constant_current_first_overheating_hold_on_error.isChecked(),
+        )
+        self.settings.setValue(
             "constant_current_transition_enabled",
             True,
         )
@@ -36724,6 +37189,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
         self.spin_constant_current_step_mA.setValue(
             max(0.01, float(self.settings.value("constant_current_step_mA", 10.0)))
+        )
+        self.check_constant_current_first_overheating.setChecked(
+            bool(
+                self.settings.value(
+                    "constant_current_first_overheating",
+                    False,
+                    type=bool,
+                )
+            )
+        )
+        self.spin_constant_current_first_overheating_target_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_target_mpa",
+                        20.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_end_mA.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_current_end_mA",
+                        80.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_target_ramp_rate_mpa_s",
+                        5.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_current_ramp_rate_mA_s",
+                        1.0,
+                    )
+                ),
+            )
+        )
+        self.check_constant_current_first_overheating_hold_on_error.setChecked(
+            bool(
+                self.settings.value(
+                    "constant_current_first_overheating_hold_on_error",
+                    True,
+                    type=bool,
+                )
+            )
         )
         self.check_constant_current_transition_enabled.setChecked(
             True
