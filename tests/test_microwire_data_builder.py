@@ -2954,6 +2954,8 @@ def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
         assert snapshot["run::50 MPa"]["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED
         assert snapshot["run::50 MPa"]["values"] == {"As": 30.0, "Af": 70.0}
     finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
