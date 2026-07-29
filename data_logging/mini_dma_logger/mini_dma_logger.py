@@ -32338,19 +32338,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_pyqtgraph_curve_style(
         self,
         curve: Any | None,
-        color: str,
+        color: str | QtGui.QColor,
         *,
         width: float,
         symbol: str | None,
+        alpha: int = 255,
+        symbol_size: float = 4.0,
     ) -> None:
         if curve is None or pg is None:
             return
-        curve.setPen(pg.mkPen(color, width=width))
+        rendered_color = QtGui.QColor(color)
+        rendered_color.setAlpha(max(0, min(255, int(alpha))))
+        curve.setPen(pg.mkPen(rendered_color, width=width))
         curve.setSymbol(symbol)
         if symbol is not None:
-            curve.setSymbolSize(4)
-            curve.setSymbolBrush(color)
-            curve.setSymbolPen(color)
+            curve.setSymbolSize(symbol_size)
+            curve.setSymbolBrush(rendered_color)
+            curve.setSymbolPen(rendered_color)
 
     def _plot_xy_values(
         self,
@@ -36278,14 +36282,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for curve in curves[desired_count:]:
             self._set_pyqtgraph_curve_data(curve, [], [])
         active_target = self._active_adaptive_stress_target_mpa()
+        comparison_mode = selected_target is None and len(targets) > 1
         for index, curve in enumerate(curves[:desired_count]):
-            color = (
-                "#e8ad43"
-                if key == "strain" and selected_target is not None
-                else "#14b8a6"
-                if key == "resistance" and selected_target is not None
-                else self._adaptive_result_curve_color(index)
-            )
             target = targets[index] if index < len(targets) else selected_target
             is_active = (
                 target is not None
@@ -36297,11 +36295,29 @@ class MainWindow(QtWidgets.QMainWindow):
                     abs_tol=1e-6,
                 )
             )
+            if comparison_mode:
+                color = "#e8ad43" if is_active else "#56b6b0"
+                width = 2.2 if is_active else 0.9
+                alpha = 255 if is_active else 118
+                symbol_size = 4.0 if is_active else 2.2
+            else:
+                color = (
+                    "#e8ad43"
+                    if key == "strain" and selected_target is not None
+                    else "#14b8a6"
+                    if key == "resistance" and selected_target is not None
+                    else self._adaptive_result_curve_color(index)
+                )
+                width = 1.6 if is_active else 1.0
+                alpha = 255
+                symbol_size = 4.0
             self._set_pyqtgraph_curve_style(
                 curve,
                 color,
-                width=1.6 if is_active else 1.0,
+                width=width,
                 symbol="o",
+                alpha=alpha,
+                symbol_size=symbol_size,
             )
         self._set_pyqtgraph_curve_data(bundle.left_curve, [], [])
         return curves[:desired_count]
@@ -36593,12 +36609,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 else format_target_mpa(headline_target)
             )
         phase = str(self._automation_phase or "idle").replace("_", " ").strip()
-        phase_text = (
-            "STRESS RECOVERY HOLD"
-            if phase == "current hold"
+        if (
+            phase == "current hold"
             and str(self._automation_basis or "") == HSW_BASIS_STRESS_MPA
-            else phase.upper()
-        )
+        ):
+            phase_text = "STRESS RECOVERY HOLD"
+        elif (
+            phase == "current"
+            and str(self._automation_name or "") == CURRENT_SWEEP_STRESS
+        ):
+            phase_text = "CURRENT SWEEP"
+        else:
+            phase_text = phase.upper()
         if self._adaptive_workspace_phase_label is not None:
             self._adaptive_workspace_phase_label.setText(phase_text)
         if self._adaptive_workspace_phase_hint_label is not None:
@@ -36617,6 +36639,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Current held while the motor restores the target"
                     if current_mA is None
                     else f"Current held at {float(current_mA):.1f} mA while the motor restores the target"
+                )
+            elif phase_text == "CURRENT SWEEP":
+                hint = (
+                    "Waiting for a current reading"
+                    if current_mA is None
+                    else f"{float(current_mA):.1f} mA measured"
                 )
             elif phase_text in {"IDLE", "START"}:
                 hint = "Waiting for the recipe to start"

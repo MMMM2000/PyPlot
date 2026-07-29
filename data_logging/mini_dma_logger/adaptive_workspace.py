@@ -334,10 +334,19 @@ class StressTargetNavigator(QtWidgets.QWidget):
                 )
                 font.setBold(is_active)
                 item.setFont(0, font)
-                if is_active:
-                    item.setText(0, f"{format_target_mpa(float(value))}  active")
-                elif isinstance(value, (int, float)):
-                    item.setText(0, format_target_mpa(float(value)))
+                if isinstance(value, (int, float)):
+                    target_text = format_target_mpa(float(value))
+                    item.setText(0, target_text)
+                    equivalent = self._equivalent_by_target.get(
+                        round(float(value), 9),
+                        "",
+                    )
+                    item.setToolTip(
+                        0,
+                        ("Active target. " if is_active else "")
+                        + f"Inspect plots for {target_text}"
+                        + ("" if not equivalent else f" ({equivalent})"),
+                    )
                 item.setForeground(
                     0,
                     QtGui.QBrush(

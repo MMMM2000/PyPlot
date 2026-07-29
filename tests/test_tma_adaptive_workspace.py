@@ -239,6 +239,11 @@ def test_target_navigation_scopes_results_and_progress(
     assert navigator.target_list.topLevelItemCount() == 21
     assert navigator.target_list.topLevelItem(0).text(0) == "All targets"
     assert navigator.active_label.text() == "Active  100 MPa"
+    active_item = navigator.target_list.topLevelItem(2)
+    assert active_item.text(0) == "100 MPa"
+    assert active_item.font(0).bold()
+    assert active_item.foreground(0).color().name() == "#e8ad43"
+    assert active_item.toolTip(0).startswith("Active target.")
     assert navigator.inspected_label.text() == "Inspecting  100 MPa"
     assert "Following active target | live target 100 MPa" in (
         window._adaptive_workspace_context_label.text()
@@ -281,6 +286,16 @@ def test_target_navigation_scopes_results_and_progress(
         if len(curve.getData()[0]) > 0
     ]
     assert len(visible_result_curves) == 2
+    inactive_pen = visible_result_curves[0].opts["pen"]
+    active_pen = visible_result_curves[1].opts["pen"]
+    assert inactive_pen.color().name() == "#56b6b0"
+    assert inactive_pen.color().alpha() == 118
+    assert inactive_pen.widthF() == pytest.approx(0.9)
+    assert visible_result_curves[0].opts["symbolSize"] == pytest.approx(2.2)
+    assert active_pen.color().name() == "#e8ad43"
+    assert active_pen.color().alpha() == 255
+    assert active_pen.widthF() == pytest.approx(2.2)
+    assert visible_result_curves[1].opts["symbolSize"] == pytest.approx(4.0)
 
     future_item = navigator.target_list.topLevelItem(
         navigator.target_list.topLevelItemCount() - 1
@@ -401,6 +416,29 @@ def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
         .name()
         == "#191c20"
     )
+
+
+def test_adaptive_current_phase_uses_distinct_status_and_measurement(
+    window: object,
+) -> None:
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._session_points = _synthetic_points()
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_target_value = 100.0
+    window._automation_phase = "current"
+
+    window._refresh_plots()
+
+    assert window._adaptive_workspace_phase_label.text() == "CURRENT SWEEP"
+    assert (
+        window._adaptive_workspace_phase_hint_label.text()
+        == "3.1 mA measured"
+    )
+    window._automation_active = False
 
 
 def test_run_log_button_reuses_existing_log_panel(window: object) -> None:
