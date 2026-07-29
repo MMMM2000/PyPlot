@@ -7511,11 +7511,11 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 9.7 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "Estimated:" in window.recipe_progress.format()
-        assert "8.1 min" in window.recipe_progress.format()
+        assert "9.7 min" in window.recipe_progress.format()
     finally:
         _close_test_window(window)
 
@@ -29164,6 +29164,31 @@ def test_current_sweep_settings_load_disabled_return_target(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_current_sweep_target_hold_defaults_enabled(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.check_current_sweep_hold_on_error.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.isChecked() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_hold_preserves_saved_disabled_choice(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("current_sweep_hold_on_error", False)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.check_current_sweep_hold_on_error.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.isChecked() is False
+    finally:
+        _close_test_window(window)
+
+
 def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -31520,6 +31545,29 @@ def test_auto_output_base_filename_includes_current_sweep_recipe_type(
         window._sync_stale_log_name_from_sample()
 
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 11_1 iso-strain"
+    finally:
+        _close_test_window(window)
+
+
+def test_auto_output_base_filename_and_metadata_mark_fatigue_recipe(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+    window.combo_recipe_mode.setCurrentIndex(index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("11/1")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 11/1")
+    window.edit_log_name.setText(mini_dma_mod.DEFAULT_LOG_BASENAME)
+
+    try:
+        window._sync_stale_log_name_from_sample()
+        metadata = window._session_metadata_from_ui()
+
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 11_1 iso-stress-fatigue"
+        assert metadata["recipe_mode"] == mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        assert metadata["controlled_current_sweep"]["mode"] == mini_dma_mod.CURRENT_SWEEP_FATIGUE
     finally:
         _close_test_window(window)
 

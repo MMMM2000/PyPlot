@@ -10876,6 +10876,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Pause while target recovers",
             automation_box,
         )
+        self.check_current_sweep_hold_on_error.setChecked(True)
         self.check_current_sweep_hold_on_error.setToolTip(
             "Hold the current setpoint when absolute load/stress/strain error is too far from the requested target, "
             "while the displacement servo keeps correcting."
@@ -36579,7 +36580,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.check_current_sweep_hold_on_error.setChecked(
-            bool(self.settings.value("current_sweep_hold_on_error", False, type=bool))
+            bool(self.settings.value("current_sweep_hold_on_error", True, type=bool))
         )
         self.spin_current_sweep_hold_pause_factor.setValue(
             max(
