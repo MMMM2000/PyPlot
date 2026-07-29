@@ -11055,6 +11055,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_start_row, self.label_constant_current_start_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_start_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target start", constant_current_start_row)
         self.label_constant_current_start_target_row = constant_current_form.labelForField(
@@ -11067,6 +11069,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_end_row, self.label_constant_current_end_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_end_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target end", constant_current_end_row)
         self.label_constant_current_end_target_row = constant_current_form.labelForField(constant_current_end_row)
@@ -11222,6 +11226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ) = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_first_overheating_target_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.insertRow(
             2,
@@ -11263,13 +11269,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setRange(0.001, 100000.0)
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setSuffix(" MPa/s")
+        (
+            self.row_constant_current_first_overheating_target_rate,
+            self.label_constant_current_first_overheating_target_rate_equiv,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
         constant_current_form.insertRow(
             4,
             "Stress ramp",
-            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.row_constant_current_first_overheating_target_rate,
         )
         self.label_constant_current_first_overheating_target_rate = constant_current_form.labelForField(
-            self.spin_constant_current_first_overheating_target_rate_mpa_s
+            self.row_constant_current_first_overheating_target_rate
         )
         self.spin_constant_current_first_overheating_current_rate_mA_s = CompactDoubleSpinBox(
             automation_box
@@ -11278,7 +11293,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_first_overheating_current_rate_mA_s.setRange(0.001, 5000.0)
         self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(1.0)
         self.spin_constant_current_first_overheating_current_rate_mA_s.setSuffix(" mA/s")
-        constant_current_first_overheating_rate_row, self.label_constant_current_first_overheating_rate_density = (
+        self.row_constant_current_first_overheating_current_rate, self.label_constant_current_first_overheating_rate_density = (
             self._spin_with_equivalent_label(
                 automation_box,
                 self.spin_constant_current_first_overheating_current_rate_mA_s,
@@ -11292,10 +11307,10 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_form.insertRow(
             5,
             "Current ramp",
-            constant_current_first_overheating_rate_row,
+            self.row_constant_current_first_overheating_current_rate,
         )
         self.label_constant_current_first_overheating_current_rate = constant_current_form.labelForField(
-            constant_current_first_overheating_rate_row
+            self.row_constant_current_first_overheating_current_rate
         )
         self.check_constant_current_first_overheating_hold_on_error = QtWidgets.QCheckBox(
             "Pause current while stress recovers",
@@ -11353,6 +11368,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_transition_row, self.label_constant_current_transition_equiv = self._spin_with_equivalent_label(
             self.constant_current_transition_panel,
             self.spin_constant_current_transition_stress_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_transition_form.addRow("Stress", constant_current_transition_row)
         self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(self.constant_current_transition_panel)
@@ -11390,6 +11407,29 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_constant_current_return_to_start.setChecked(True)
         self.check_constant_current_return_to_start.setVisible(False)
+        for constant_current_input in (
+            self.combo_constant_current_start_basis,
+            self.spin_constant_current_start_target,
+            self.spin_constant_current_end_target,
+            self.combo_constant_current_step_basis,
+            self.spin_constant_current_step_size,
+            self.spin_constant_current_hold_s,
+            self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_release_record_s,
+            self.spin_constant_current_move_speed_mm_s,
+            self.spin_constant_current_stress_ramp_rate_mpa_s,
+            self.spin_constant_current_start_mA,
+            self.spin_constant_current_end_mA,
+            self.spin_constant_current_step_mA,
+            self.spin_constant_current_first_overheating_target_mpa,
+            self.spin_constant_current_first_overheating_end_mA,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.spin_constant_current_first_overheating_current_rate_mA_s,
+            self.spin_constant_current_transition_stress_mpa,
+            self.spin_constant_current_transition_rate_mA_s,
+            self.spin_constant_current_transition_settle_s,
+        ):
+            constant_current_input.setFixedWidth(RECIPE_SPINBOX_WIDTH_PX)
         self.recipe_stack.addWidget(constant_current_page)
 
         automation_form.addRow("", self.recipe_stack)
@@ -17609,6 +17649,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_constant_current_first_overheating_end_mA.value())
             )
         )
+        self.label_constant_current_first_overheating_target_rate_equiv.setText(
+            self._load_equivalent_text(
+                float(self.spin_constant_current_first_overheating_target_rate_mpa_s.value()),
+                per_second=True,
+            )
+        )
         self.label_constant_current_first_overheating_rate_density.setText(
             self._current_density_text(
                 float(self.spin_constant_current_first_overheating_current_rate_mA_s.value()),
@@ -23577,8 +23623,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for widget in (
             self.row_constant_current_first_overheating_target,
             self.row_constant_current_first_overheating_end,
-            self.spin_constant_current_first_overheating_target_rate_mpa_s,
-            self.spin_constant_current_first_overheating_current_rate_mA_s,
+            self.row_constant_current_first_overheating_target_rate,
+            self.row_constant_current_first_overheating_current_rate,
             self.check_constant_current_first_overheating_hold_on_error,
         ):
             widget.setVisible(constant_current_first_overheating_enabled)

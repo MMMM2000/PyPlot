@@ -4,4 +4,4 @@
 
 ### Added
 
-- Add optional first overheating to iso-current stress-strain recipes, reusing one complete iso-stress current loop (up to the configured maximum and back) before the constant-current mechanical scan, with persisted controls, safety-limit accounting, metadata, and recipe-file support.
+- Add optional first overheating to iso-current stress-strain recipes, reusing one complete iso-stress current loop (up to the configured maximum and back) before the constant-current mechanical scan, with top-positioned, consistently sized controls, stress-ramp load-rate equivalents, persisted settings, safety-limit accounting, metadata, and recipe-file support.

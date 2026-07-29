@@ -8528,13 +8528,39 @@ def test_iso_current_first_overheating_controls_expand_without_hiding_transition
         assert window.check_constant_current_first_overheating.isHidden() is False
         assert window.row_constant_current_first_overheating_target.isHidden() is True
         assert window.row_constant_current_first_overheating_end.isHidden() is True
+        assert window.row_constant_current_first_overheating_target_rate.isHidden() is True
+        assert window.row_constant_current_first_overheating_current_rate.isHidden() is True
 
         window.check_constant_current_first_overheating.setChecked(True)
+        window.spin_diameter.setValue(0.03)
+        window.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
+        window._update_recipe_mode_ui()
 
         assert window.row_constant_current_first_overheating_target.isHidden() is False
         assert window.row_constant_current_first_overheating_end.isHidden() is False
-        assert window.spin_constant_current_first_overheating_target_rate_mpa_s.isHidden() is False
-        assert window.spin_constant_current_first_overheating_current_rate_mA_s.isHidden() is False
+        assert window.row_constant_current_first_overheating_target_rate.isHidden() is False
+        assert window.row_constant_current_first_overheating_current_rate.isHidden() is False
+        assert window.label_constant_current_first_overheating_target_rate_equiv.text() == "0.36 g/s"
+        first_overheating_spin_widths = {
+            window.spin_constant_current_first_overheating_target_mpa.width(),
+            window.spin_constant_current_first_overheating_end_mA.width(),
+            window.spin_constant_current_first_overheating_target_rate_mpa_s.width(),
+            window.spin_constant_current_first_overheating_current_rate_mA_s.width(),
+        }
+        assert first_overheating_spin_widths == {mini_dma_mod.RECIPE_SPINBOX_WIDTH_PX}
+        iso_current_input_widths = {
+            window.combo_constant_current_start_basis.width(),
+            window.spin_constant_current_start_target.width(),
+            window.spin_constant_current_end_target.width(),
+            window.combo_constant_current_step_basis.width(),
+            window.spin_constant_current_step_size.width(),
+            window.spin_constant_current_hold_s.width(),
+            window.spin_constant_current_move_speed_mm_s.width(),
+            window.spin_constant_current_start_mA.width(),
+            window.spin_constant_current_end_mA.width(),
+            window.spin_constant_current_step_mA.width(),
+        }
+        assert iso_current_input_widths == {mini_dma_mod.RECIPE_SPINBOX_WIDTH_PX}
         assert window.check_constant_current_first_overheating_hold_on_error.isHidden() is False
         assert window.button_constant_current_transition_details.isHidden() is False
     finally:
