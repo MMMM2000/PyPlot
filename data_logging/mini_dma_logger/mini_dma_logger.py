@@ -31893,15 +31893,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._prepare_continuity_current_for_recipe(steps):
             self._first_overheating_preflight_decision = None
             return
-        process = self._create_production_control_process()
-        try:
-            # Starting the empty worker process does not acquire hardware. Do
-            # it before the operator prompt so Windows spawn/import latency is
-            # paid while the operator measures and enters the wire length.
-            process.start_process()
-        except Exception:
-            process.close()
-            raise
         starting_length_mm: float | None = None
         has_length_setup = any(
             step.action == "starting_length_prompt" for step in steps
@@ -31924,7 +31915,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if not accepted:
                 self._log("Recipe start cancelled before transferring hardware ownership.")
                 self._close_length_setup_dialog()
-                process.close()
                 self._first_overheating_preflight_decision = None
                 return
             starting_length_mm = float(starting_length_mm)
@@ -31933,6 +31923,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             starting_length_mm=starting_length_mm,
             cadence_downgrade_accepted=True,
+        )
+        process = self._create_production_control_process()
+        self._update_length_setup_dialog(
+            "Starting dedicated controller process; hardware remains UI-owned."
+        )
+        try:
+            process.start_process()
+            process.wait_until_ready(timeout_s=10.0)
+        except Exception as exc:
+            process.close()
+            self._log(
+                "Dedicated-process startup failed before hardware ownership "
+                f"transfer: {exc}"
+            )
+            self._update_length_setup_dialog(
+                "Controller startup failed; hardware remains connected to the UI."
+            )
+            QtWidgets.QMessageBox.critical(
+                self,
+                APP_NAME,
+                "The dedicated controller did not become ready. No hardware "
+                f"ownership was transferred and PSU outputs were not changed.\n\n{exc}",
+            )
+            self._first_overheating_preflight_decision = None
+            return
+        self._log(
+            "Dedicated controller process reported ready; beginning hardware "
+            "ownership transfer."
         )
         self._stop_manual_jog()
         if (

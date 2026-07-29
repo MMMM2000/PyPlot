@@ -1655,6 +1655,12 @@ class _FakeIsolatedControlProcess:
         self.requests.append(request)
         return 1
 
+    def wait_until_ready(self, *, timeout_s: float = 10.0) -> object:
+        del timeout_s
+        if not self.started:
+            raise RuntimeError("process not started")
+        return SimpleNamespace(state=mini_dma_mod.ControlState.IDLE)
+
     def pause(self, identity: object) -> int:
         self.commands.append(("pause", identity))
         return 2
@@ -2441,7 +2447,7 @@ def test_isolated_start_does_not_spawn_when_visible_hardware_preflight_fails(
         _close_test_window(window)
 
 
-def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_session(
+def test_isolated_start_proves_child_ready_before_releasing_ui_hardware(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -2454,6 +2460,7 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
     process = _FakeIsolatedControlProcess()
     ordering: list[str] = []
     original_start_process = process.start_process
+    original_wait_until_ready = process.wait_until_ready
 
     def _preflight(_steps: object, *, show_progress: bool) -> bool:
         assert show_progress is True
@@ -2468,11 +2475,18 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
         setattr(window, attribute, None)
 
     def _start_process() -> None:
-        ordering.append("child_prewarmer")
+        ordering.append("child_spawn")
         assert window._scale_thread is not None
         assert window._supply_controller is not None
         assert window._tic_command_dispatcher is not None
         original_start_process()
+
+    def _wait_until_ready(*, timeout_s: float = 10.0) -> object:
+        ordering.append("child_ready")
+        assert window._scale_thread is not None
+        assert window._supply_controller is not None
+        assert window._tic_command_dispatcher is not None
+        return original_wait_until_ready(timeout_s=timeout_s)
 
     original_start_session = process.start_session
 
@@ -2485,6 +2499,7 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
 
     window._create_production_control_process = lambda: process  # type: ignore[method-assign]
     process.start_process = _start_process  # type: ignore[method-assign]
+    process.wait_until_ready = _wait_until_ready  # type: ignore[method-assign]
     process.start_session = _start_session  # type: ignore[method-assign]
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
         [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
@@ -2511,7 +2526,8 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
 
         assert ordering == [
             "ui_preflight",
-            "child_prewarmer",
+            "child_spawn",
+            "child_ready",
             "stop_manual_jog",
             "release_scale",
             "release_tic",
@@ -2526,7 +2542,87 @@ def test_isolated_start_prewarms_inert_child_then_releases_ui_hardware_before_se
         _close_test_window(window)
 
 
-def test_isolated_start_cancelled_length_closes_prewarmed_control_process(
+def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    scale = object()
+    supply = object()
+    tic_dispatcher = object()
+    critical_messages: list[str] = []
+    transfer_attempts: list[str] = []
+
+    def _preflight(_steps: object, *, show_progress: bool) -> bool:
+        assert show_progress is True
+        window._scale_thread = scale
+        window._supply_controller = supply
+        window._tic_command_dispatcher = tic_dispatcher
+        return True
+
+    process.wait_until_ready = (  # type: ignore[method-assign]
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated child startup failure")
+        )
+    )
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: transfer_attempts.append(  # type: ignore[method-assign]
+        "scale"
+    )
+    window._stop_tic_dispatcher = lambda *args, **kwargs: transfer_attempts.append(  # type: ignore[method-assign]
+        "tic"
+    ) or True
+    window._detach_supply_for_handoff = lambda: transfer_attempts.append(  # type: ignore[method-assign]
+        "supply"
+    ) or {}
+    window._emergency_shared_supply_outputs_off = lambda: transfer_attempts.append(  # type: ignore[method-assign]
+        "emergency_supply_off"
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: critical_messages.append(str(message)),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
+        assert transfer_attempts == []
+        assert window._scale_thread is scale
+        assert window._supply_controller is supply
+        assert window._tic_command_dispatcher is tic_dispatcher
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+        assert critical_messages
+        assert "No hardware ownership was transferred" in critical_messages[0]
+        assert "PSU outputs were not changed" in critical_messages[0]
+        assert "before hardware ownership transfer" in window.log_output.toPlainText()
+    finally:
+        window._scale_thread = None
+        window._supply_controller = None
+        window._tic_command_dispatcher = None
+        _close_test_window(window)
+
+
+def test_isolated_start_cancelled_length_does_not_spawn_control_process(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -2556,8 +2652,8 @@ def test_isolated_start_cancelled_length_closes_prewarmed_control_process(
     try:
         window._start_auto_ramp()
 
-        assert process.started is True
-        assert process.closed is True
+        assert process.started is False
+        assert process.closed is False
         assert process.requests == []
         assert window._isolated_recipe_active is False
         assert "before transferring hardware ownership" in window.log_output.toPlainText()

@@ -14,3 +14,7 @@ fallback if the child cannot take ownership. Setup snapshots continue
 after the visible pre-prompt samples on one display timeline, recipe plots
 accept their new elapsed clock immediately, and transient setup graphs refresh
 at the faster UI cadence.
+The controller process must now publish an explicit idle/ready snapshot while
+the UI still owns scale, Tic, and PSU hardware. A child that exits or times out
+before that handshake leaves all UI hardware ownership and PSU output state
+unchanged instead of entering the post-transfer emergency shutdown path.

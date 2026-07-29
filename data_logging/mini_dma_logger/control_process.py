@@ -710,6 +710,29 @@ class MiniDmaControlProcess:
     def start_session(self, request: ControlStartRequest) -> int:
         return self._send(ControlCommandKind.START, request.identity, start_request=request)
 
+    def wait_until_ready(self, *, timeout_s: float = 10.0) -> ControlSnapshot:
+        """Wait for the child's explicit idle snapshot before hardware handoff."""
+
+        deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            snapshot = self.poll_latest_snapshot()
+            if snapshot is not None and snapshot.state is ControlState.IDLE:
+                return snapshot
+            if not self.is_alive():
+                detail, _traceback = self.poll_fault_detail()
+                raise RuntimeError(
+                    detail
+                    or (
+                        "control process exited before reporting ready"
+                        if self.exitcode is None
+                        else f"control process exited with code {self.exitcode} before reporting ready"
+                    )
+                )
+            remaining_s = deadline_s - time.monotonic()
+            if remaining_s <= 0.0:
+                raise TimeoutError("control process did not report ready before timeout")
+            time.sleep(min(0.01, remaining_s))
+
     def pause(self, identity: ControlSessionIdentity) -> int:
         return self._send(ControlCommandKind.PAUSE, identity)
 

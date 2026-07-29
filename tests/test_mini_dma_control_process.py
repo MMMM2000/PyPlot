@@ -10,6 +10,7 @@ import pytest
 from PyQt6 import QtWidgets
 
 from data_logging.mini_dma_logger.control_process import (
+    BackendFactorySpec,
     ControlBackpressureError,
     ControlEvent,
     ControlEventKind,
@@ -102,6 +103,67 @@ def test_operator_command_channel_reports_backpressure() -> None:
         with pytest.raises(ControlBackpressureError, match="queue is full"):
             process.start_session(request)
     finally:
+        process._command_queue.close()
+        process._command_queue.join_thread()
+
+
+def test_spawned_process_reports_ready_before_session_start() -> None:
+    process = MiniDmaControlProcess(heartbeat_interval_s=0.02)
+    try:
+        process.start_process()
+
+        ready = process.wait_until_ready(timeout_s=3.0)
+
+        assert ready.state is ControlState.IDLE
+        assert ready.identity is None
+        assert ready.owner_pid == process.pid
+        assert process.is_alive()
+    finally:
+        assert process.close()
+
+
+def test_production_backend_process_reports_ready_without_acquiring_hardware() -> None:
+    process = MiniDmaControlProcess(
+        heartbeat_interval_s=0.02,
+        backend_factory_spec=BackendFactorySpec(
+            module="data_logging.mini_dma_logger.production_control_backend",
+            factory="create_production_backend",
+        ),
+    )
+    try:
+        process.start_process()
+
+        ready = process.wait_until_ready(timeout_s=10.0)
+
+        assert ready.state is ControlState.IDLE
+        assert ready.identity is None
+        assert ready.owner_pid == process.pid
+        assert ready.readback_value("started") is False
+        assert ready.readback_value("scale_connected") is None
+        assert ready.readback_value("supply_connected") is None
+        assert ready.readback_value("tic_connected") is None
+    finally:
+        assert process.close()
+
+
+def test_wait_until_ready_reports_child_exit_detail() -> None:
+    class _ExitedProcess:
+        exitcode = 17
+
+        @staticmethod
+        def is_alive() -> bool:
+            return False
+
+    process = MiniDmaControlProcess()
+    process._process = _ExitedProcess()  # type: ignore[assignment]
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="exited with code 17 before reporting ready",
+        ):
+            process.wait_until_ready(timeout_s=0.1)
+    finally:
+        process._process = None
         process._command_queue.close()
         process._command_queue.join_thread()
 
