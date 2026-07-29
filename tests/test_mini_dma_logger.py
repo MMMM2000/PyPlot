@@ -7511,11 +7511,11 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 9.7 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "Estimated:" in window.recipe_progress.format()
-        assert "8.1 min" in window.recipe_progress.format()
+        assert "9.7 min" in window.recipe_progress.format()
     finally:
         _close_test_window(window)
 
@@ -8426,6 +8426,163 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         assert "Each current leg scans up and back" in summary
     finally:
         _close_test_window(window)
+
+
+def test_iso_current_one_milliamp_first_overheating_reuses_iso_stress_loop(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(
+            mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+        )
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_constant_current_first_overheating.setChecked(True)
+        window.spin_constant_current_first_overheating_target_mpa.setValue(20.0)
+        window.spin_constant_current_first_overheating_end_mA.setValue(80.0)
+        window.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
+        window.spin_constant_current_first_overheating_current_rate_mA_s.setValue(2.0)
+        window.check_constant_current_first_overheating_hold_on_error.setChecked(True)
+        window.spin_constant_current_start_mA.setValue(1.0)
+        window.spin_constant_current_end_mA.setValue(1.0)
+        window.spin_constant_current_step_mA.setValue(10.0)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        recipe_start = next(index for index, step in enumerate(steps) if step.action == "start_session")
+        recipe_steps = steps[recipe_start + 1 :]
+        assert [(step.action, step.note) for step in recipe_steps[:4]] == [
+            ("set_current", "first_overheating"),
+            ("ramp_target", "first_overheating"),
+            ("sweep_current", "first_overheating"),
+            ("sweep_current", "first_overheating"),
+        ]
+        first_up, first_down = recipe_steps[2:4]
+        assert (first_up.current_start_mA, first_up.current_end_mA) == pytest.approx((1.0, 80.0))
+        assert (first_down.current_start_mA, first_down.current_end_mA) == pytest.approx((80.0, 1.0))
+        assert first_up.target_value == pytest.approx(20.0)
+        assert first_down.target_value == pytest.approx(20.0)
+        assert first_up.current_ramp_rate_mA_s == pytest.approx(2.0)
+        assert first_down.current_ramp_rate_mA_s == pytest.approx(2.0)
+        assert first_up.current_hold_enabled is True
+        assert recipe_steps[1].target_start_value == pytest.approx(0.0)
+        assert recipe_steps[1].target_end_value == pytest.approx(20.0)
+        assert recipe_steps[1].target_ramp_rate_value_s == pytest.approx(5.0)
+
+        normal_transition = next(
+            step
+            for step in recipe_steps[4:]
+            if step.action == "sweep_current" and step.note == "1"
+        )
+        assert (normal_transition.current_start_mA, normal_transition.current_end_mA) == pytest.approx(
+            (1.0, 1.0)
+        )
+        assert any(step.action == "mechanical_scan" for step in recipe_steps[4:])
+        assert "one established iso-stress current loop" in summary
+
+        payload = window._current_recipe_payload()["recipe"]["constant_current_stress_strain"]
+        assert payload["first_overheating"] is True
+        assert payload["first_overheating_target_mpa"] == pytest.approx(20.0)
+        assert payload["first_overheating_current_end_mA"] == pytest.approx(80.0)
+        assert payload["first_overheating_lifecycle"] == "iso_stress_up_and_return"
+
+        window.check_constant_current_first_overheating.setChecked(False)
+        window.spin_constant_current_first_overheating_target_mpa.setValue(30.0)
+        window.spin_constant_current_first_overheating_end_mA.setValue(20.0)
+        window._apply_recipe_payload(window._current_recipe_payload() | {
+            "recipe": {
+                **window._current_recipe_payload()["recipe"],
+                "constant_current_stress_strain": payload,
+            }
+        })
+        assert window.check_constant_current_first_overheating.isChecked() is True
+        assert window.spin_constant_current_first_overheating_target_mpa.value() == pytest.approx(20.0)
+        assert window.spin_constant_current_first_overheating_end_mA.value() == pytest.approx(80.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_first_overheating_controls_expand_without_hiding_transition(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(
+            mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+        )
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        constant_current_form = window.recipe_stack.currentWidget().layout()
+        first_overheating_row, _ = constant_current_form.getWidgetPosition(
+            window.label_constant_current_first_overheating_section
+        )
+        stress_targets_row, _ = constant_current_form.getWidgetPosition(
+            window.label_constant_current_targets_section
+        )
+        assert first_overheating_row == 0
+        assert first_overheating_row < stress_targets_row
+
+        assert window.label_constant_current_first_overheating_section.isHidden() is False
+        assert window.check_constant_current_first_overheating.isHidden() is False
+        assert window.row_constant_current_first_overheating_target.isHidden() is True
+        assert window.row_constant_current_first_overheating_end.isHidden() is True
+        assert window.row_constant_current_first_overheating_target_rate.isHidden() is True
+        assert window.row_constant_current_first_overheating_current_rate.isHidden() is True
+
+        window.check_constant_current_first_overheating.setChecked(True)
+        window.spin_diameter.setValue(0.03)
+        window.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
+        window._update_recipe_mode_ui()
+
+        assert window.row_constant_current_first_overheating_target.isHidden() is False
+        assert window.row_constant_current_first_overheating_end.isHidden() is False
+        assert window.row_constant_current_first_overheating_target_rate.isHidden() is False
+        assert window.row_constant_current_first_overheating_current_rate.isHidden() is False
+        assert window.label_constant_current_first_overheating_target_rate_equiv.text() == "0.36 g/s"
+        first_overheating_spin_widths = {
+            window.spin_constant_current_first_overheating_target_mpa.width(),
+            window.spin_constant_current_first_overheating_end_mA.width(),
+            window.spin_constant_current_first_overheating_target_rate_mpa_s.width(),
+            window.spin_constant_current_first_overheating_current_rate_mA_s.width(),
+        }
+        assert first_overheating_spin_widths == {mini_dma_mod.RECIPE_SPINBOX_WIDTH_PX}
+        iso_current_input_widths = {
+            window.combo_constant_current_start_basis.width(),
+            window.spin_constant_current_start_target.width(),
+            window.spin_constant_current_end_target.width(),
+            window.combo_constant_current_step_basis.width(),
+            window.spin_constant_current_step_size.width(),
+            window.spin_constant_current_hold_s.width(),
+            window.spin_constant_current_move_speed_mm_s.width(),
+            window.spin_constant_current_start_mA.width(),
+            window.spin_constant_current_end_mA.width(),
+            window.spin_constant_current_step_mA.width(),
+        }
+        assert iso_current_input_widths == {mini_dma_mod.RECIPE_SPINBOX_WIDTH_PX}
+        assert window.check_constant_current_first_overheating_hold_on_error.isHidden() is False
+        assert window.button_constant_current_transition_details.isHidden() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_first_overheating_uses_existing_new_wire_preflight_gate() -> None:
+    assert mini_dma_mod._first_overheating_preflight_required(
+        recipe_mode=mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP,
+        first_overheating_enabled=False,
+        previous_tma_measurement_found=False,
+    )
+    assert not mini_dma_mod._first_overheating_preflight_required(
+        recipe_mode=mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP,
+        first_overheating_enabled=True,
+        previous_tma_measurement_found=False,
+    )
+    assert not mini_dma_mod._first_overheating_preflight_required(
+        recipe_mode=mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP,
+        first_overheating_enabled=False,
+        previous_tma_measurement_found=True,
+    )
 
 
 def test_mini_dma_recipe_dropdown_hides_legacy_open_loop_recipes(tmp_path: Path, qtbot) -> None:
@@ -16940,6 +17097,82 @@ def test_current_sweep_hold_resumes_after_recovery_seek_stays_accepted(
 
         assert window._current_sweep_ramp_hold_step_index is None
         assert window._active_current_sweep_started_s == pytest.approx(96.2)
+        assert "recovery seek stayed accepted for 1.00 s" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_one_milliamp_low_stress_backlash_acceptance_completes_transition(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 1.0}
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 1.0
+
+        def set_current_mA(self, _current_mA: float) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=10.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=1.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_resume_stable_s=1.0,
+        note="1",
+    )
+    window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+    window._automation_steps = [step]
+    window._automation_index = 0
+    window._active_current_sweep_step_index = 0
+    window._active_current_sweep_started_s = 100.0
+    window._active_current_sweep_wall_started_s = 100.0
+    window._active_current_sweep_last_setpoint_mA = 1.0
+    window._active_current_sweep_display_target_mA = 1.0
+    window._active_current_sweep_display_direction = 1.0
+    window._current_sweep_ramp_hold_step_index = 0
+    window._current_sweep_ramp_hold_started_s = 100.0
+    window._current_sweep_ramp_hold_seek_accepted_since_s = 100.0
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._current_distribution_value = lambda *_args, **_kwargs: 6.8  # type: ignore[method-assign]
+    window._maybe_record_scheduled_point = lambda **_kwargs: True  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 102.0)
+
+    try:
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            plateau_index=1,
+        )
+        assert window._current_task_summary() == "At 10 MPa: holding 1 mA, recovering target"
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=1,
+            tolerance=1.0,
+        ) is False
+        assert window._current_sweep_endpoint_seek_accepted_step_index == 0
+
+        assert window._handle_current_sweep_step(step, 0) is True
+        assert window._active_current_sweep_step_index is None
+        assert window._current_sweep_endpoint_seek_accepted_step_index is None
         assert "recovery seek stayed accepted for 1.00 s" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -29675,6 +29908,31 @@ def test_current_sweep_settings_load_disabled_return_target(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_current_sweep_target_hold_defaults_enabled(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.check_current_sweep_hold_on_error.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.isChecked() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_hold_preserves_saved_disabled_choice(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("current_sweep_hold_on_error", False)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.check_current_sweep_hold_on_error.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.isChecked() is False
+    finally:
+        _close_test_window(window)
+
+
 def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -32039,6 +32297,29 @@ def test_auto_output_base_filename_includes_current_sweep_recipe_type(
         window._sync_stale_log_name_from_sample()
 
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 11_1 iso-strain"
+    finally:
+        _close_test_window(window)
+
+
+def test_auto_output_base_filename_and_metadata_mark_fatigue_recipe(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+    window.combo_recipe_mode.setCurrentIndex(index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("11/1")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 11/1")
+    window.edit_log_name.setText(mini_dma_mod.DEFAULT_LOG_BASENAME)
+
+    try:
+        window._sync_stale_log_name_from_sample()
+        metadata = window._session_metadata_from_ui()
+
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 11_1 iso-stress-fatigue"
+        assert metadata["recipe_mode"] == mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        assert metadata["controlled_current_sweep"]["mode"] == mini_dma_mod.CURRENT_SWEEP_FATIGUE
     finally:
         _close_test_window(window)
 
