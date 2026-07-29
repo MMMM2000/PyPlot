@@ -110,6 +110,20 @@ def test_v3_round_trip_uses_split_entries_and_content_addressed_blobs(tmp_path: 
     ]
 
 
+def test_table_projection_selects_sections_without_loading_payloads(tmp_path: Path) -> None:
+    target = tmp_path / "project.pydpj"
+    project_package.write_project_package(target, _payload())
+
+    projected = project_package.load_project_table_projection(
+        target,
+        section_keys=("assemble",),
+    )
+
+    assert set(projected["sections"]) == {"assemble"}
+    assert projected["sections"]["assemble"]["rows"][0]["Microwire"] == "1/1"
+    assert "payloads" not in projected["sections"]["assemble"]
+
+
 def test_payload_resolver_decodes_only_records_matching_table_paths(tmp_path: Path) -> None:
     first_path = tmp_path / "first.VSM-HYS-DATA"
     second_path = tmp_path / "second.VSM-HYS-DATA"
