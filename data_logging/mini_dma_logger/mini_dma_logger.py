@@ -36061,6 +36061,8 @@ class MainWindow(QtWidgets.QMainWindow):
         normalized_view = str(view).strip().lower()
         if normalized_view not in {"prepare", "run", "review"}:
             normalized_view = "prepare"
+        if normalized_view == "run" and not self._adaptive_workspace_supported():
+            normalized_view = "prepare"
         run_view = normalized_view == "run"
         review_view = normalized_view == "review"
         target_index = 1 if run_view else 2 if review_view else 0

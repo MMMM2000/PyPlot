@@ -199,6 +199,43 @@ def test_non_stress_current_sweeps_keep_custom_dashboard(
     assert window._control_view_stack.currentIndex() == 0
 
 
+@pytest.mark.parametrize(
+    ("mode", "adaptive_supported"),
+    [
+        (mini_dma_mod.CALIBRATION, False),
+        (mini_dma_mod.CURRENT_SWEEP_LOAD, False),
+        (mini_dma_mod.CURRENT_SWEEP_STRESS, True),
+        (mini_dma_mod.CURRENT_SWEEP_STRAIN, False),
+        (mini_dma_mod.CURRENT_SWEEP_FATIGUE, False),
+        (mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP, False),
+        (mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP, False),
+        (mini_dma_mod.ELASTOCALORIC_EFFECT, False),
+    ],
+)
+def test_recipe_matrix_routes_each_mode_to_a_compatible_workspace(
+    window: object,
+    mode: str,
+    adaptive_supported: bool,
+) -> None:
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mode))
+    window._adaptive_workspace_user_prefers_custom = False
+    window._sync_dashboard_workspace_mode()
+
+    assert window._adaptive_workspace_supported() is adaptive_supported
+    assert window._adaptive_plot_stack.currentIndex() == (
+        0 if adaptive_supported else 1
+    )
+    assert window._control_view_tabs.isTabEnabled(1) is adaptive_supported
+    assert len(window._plot_tiles) == 4
+    assert all(tile.x_combo.count() > 0 for tile in window._plot_tiles)
+
+    window._set_control_view("run")
+    assert window._control_view_stack.currentIndex() == (
+        1 if adaptive_supported else 0
+    )
+
+
 def test_active_stress_run_ignores_staged_recipe_selector_change(
     window: object,
 ) -> None:
@@ -215,6 +252,27 @@ def test_active_stress_run_ignores_staged_recipe_selector_change(
     assert window._adaptive_plot_stack.currentIndex() == 0
     assert not window._dashboard_view_tabs.isVisible()
     assert window._control_view_tabs.isTabEnabled(1)
+
+    window._automation_active = False
+    window._automation_name = ""
+
+
+def test_active_nonstress_run_cannot_be_replaced_by_staged_stress_workspace(
+    window: object,
+) -> None:
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE))
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._adaptive_workspace_user_prefers_custom = False
+    window._sync_dashboard_workspace_mode()
+
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+    window._sync_dashboard_workspace_mode()
+
+    assert window._dashboard_recipe_mode() == mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    assert window._adaptive_plot_stack.currentIndex() == 1
+    assert not window._control_view_tabs.isTabEnabled(1)
 
     window._automation_active = False
     window._automation_name = ""

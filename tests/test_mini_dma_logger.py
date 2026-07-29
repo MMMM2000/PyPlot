@@ -22534,7 +22534,8 @@ def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
         window._current_sweep_runtime_applied_values = window._current_sweep_visible_runtime_values_from_controls()
         window._update_recipe_buttons()
 
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.button_apply_current_sweep_edits.isEnabled() is False
 
         window.spin_current_sweep_target_end.setValue(150.0)
         window._update_recipe_buttons()
