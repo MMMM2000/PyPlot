@@ -225,6 +225,64 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert target["final_values"] == {}
 
 
+def test_tma_review_draft_collapses_repeated_stress_sweeps(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from plotting.plugins.mini_dma import core as tma_core
+    from plotting.shared.transition_review_adapters import tma_review_draft
+
+    measurement = tmp_path / "measurement.csv"
+    measurement.write_text("synthetic\n", encoding="utf-8")
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0],
+            "automation_target_value": [50.0, 50.0],
+            "current_mA": [1.0, 2.0],
+            "strain_pct": [0.0, 0.1],
+            "resistance_ohm": [10.0, 9.0],
+        }
+    )
+    run = SimpleNamespace(
+        frame=frame,
+        measurement_path=measurement,
+        sample_name="synthetic sample",
+    )
+    summaries = SimpleNamespace(
+        targets=(
+            SimpleNamespace(
+                stress_mpa=50.0,
+                load_g=1.0,
+                as_current_mA=10.0,
+                af_current_mA=20.0,
+                ms_current_mA=None,
+                mf_current_mA=None,
+            ),
+            SimpleNamespace(
+                stress_mpa=50.0,
+                load_g=1.0,
+                as_current_mA=12.0,
+                af_current_mA=22.0,
+                ms_current_mA=None,
+                mf_current_mA=None,
+            ),
+        )
+    )
+    monkeypatch.setattr(tma_core, "load_run", lambda _path: run)
+    monkeypatch.setattr(tma_core, "supports_transition_review", lambda _run: True)
+    monkeypatch.setattr(tma_core, "summarize_current_sweep", lambda _run: summaries)
+
+    draft = tma_review_draft(tmp_path)
+
+    assert len(draft["targets"]) == 1
+    target = draft["targets"][0]
+    assert target["target_key"] == "stress_mpa:50"
+    assert target["auto_values"] == {"As": 12.0, "Af": 22.0}
+    assert target["target"]["sweep_count"] == 2
+    assert target["target"]["selected_sweep"] == 2
+
 def test_builder_imports_matching_tma_sidecar_by_stress_target(
     tmp_path, monkeypatch
 ) -> None:
@@ -285,6 +343,25 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
     assert imported["manual_values_mA"] == {"As": 21.0}
     assert imported["portable_review_revision"] == 2
 
+
+def test_backfill_candidate_never_uses_an_exact_path_outside_roots(tmp_path) -> None:
+    from scripts.backfill_transition_reviews import _candidate
+
+    allowed = tmp_path / "Prague"
+    outside = tmp_path / "Kosice" / "measurement.txt"
+    allowed.mkdir()
+    outside.parent.mkdir()
+    outside.write_text("outside\n", encoding="utf-8")
+
+    candidate, match = _candidate(outside, (), [allowed.resolve()])
+    assert candidate is None
+    assert match == "outside_roots"
+
+    inside = allowed / outside.name
+    inside.write_text("inside\n", encoding="utf-8")
+    candidate, match = _candidate(outside, (outside.name,), [allowed.resolve()])
+    assert candidate == inside.resolve()
+    assert match == "unique_name"
 
 def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     from scripts.backfill_transition_reviews import _apply_ca_review, _apply_tma_reviews

@@ -9,7 +9,7 @@ import argparse
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -47,25 +47,68 @@ def _records(section: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def _candidate(path_text: object, names: Iterable[object], roots: list[Path]) -> tuple[Path | None, str]:
+def _build_name_index(
+    roots: Iterable[Path],
+    wanted_names: Iterable[object],
+) -> dict[str, list[Path]]:
+    wanted = {
+        Path(str(value)).name.casefold()
+        for value in wanted_names
+        if str(value or "").strip()
+    }
+    index: dict[str, list[Path]] = defaultdict(list)
+    if not wanted:
+        return index
+    for root in roots:
+        for path in root.rglob("*"):
+            key = path.name.casefold()
+            if key in wanted:
+                index[key].append(path)
+    return index
+
+
+def _candidate(
+    path_text: object,
+    names: Iterable[object],
+    roots: list[Path],
+    *,
+    name_index: Mapping[str, Iterable[Path]] | None = None,
+) -> tuple[Path | None, str]:
     text = str(path_text or "").strip()
+    outside_roots = False
     if text:
         direct = Path(text)
         if direct.exists():
-            return direct, "exact_path"
+            resolved = direct.resolve()
+            if any(resolved == root or resolved.is_relative_to(root) for root in roots):
+                return resolved, "exact_path"
+            outside_roots = True
     wanted = {
         Path(str(value)).name.casefold()
         for value in names
         if str(value or "").strip()
     }
     matches: list[Path] = []
-    for root in roots:
+    if name_index is None:
+        for root in roots:
+            for name in wanted:
+                matches.extend(path for path in root.rglob("*") if path.name.casefold() == name)
+    else:
         for name in wanted:
-            matches.extend(path for path in root.rglob("*") if path.name.casefold() == name)
-    unique = list(dict.fromkeys(path.resolve() for path in matches))
+            matches.extend(Path(path) for path in name_index.get(name, ()))
+    unique = list(
+        dict.fromkeys(
+            resolved
+            for path in matches
+            for resolved in (path.resolve(),)
+            if any(resolved == root or resolved.is_relative_to(root) for root in roots)
+        )
+    )
     if len(unique) == 1:
         return unique[0], "unique_name"
-    return None, "ambiguous" if unique else "missing"
+    if unique:
+        return None, "ambiguous"
+    return None, "outside_roots" if outside_roots else "missing"
 
 
 def _same_review(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
@@ -171,6 +214,16 @@ def main() -> int:
     if not isinstance(sections, Mapping):
         raise SystemExit("Project has no sections mapping.")
     roots = [path.resolve() for path in args.root]
+    search_names: set[object] = set()
+    annealing_section = sections.get("annealing")
+    if isinstance(annealing_section, Mapping):
+        for review in _records(annealing_section, "transition_reviews").values():
+            search_names.update((review.get("graph_label"), review.get("source_path")))
+    tma_section = sections.get("mini_dma")
+    if isinstance(tma_section, Mapping):
+        for review in _records(tma_section, "mini_dma_transition_reviews").values():
+            search_names.update((review.get("source_name"), review.get("record_path")))
+    name_index = _build_name_index(roots, search_names)
     rows: list[dict[str, Any]] = []
 
     annealing = sections.get("annealing")
@@ -180,8 +233,15 @@ def main() -> int:
                 review.get("source_path"),
                 (review.get("graph_label"), review.get("source_path")),
                 roots,
+                name_index=name_index,
             )
-            row = {"family": "current_annealing", "record_id": record_id, "match": match}
+            row = {
+                "family": "current_annealing",
+                "record_id": record_id,
+                "requested_path": str(review.get("source_path") or ""),
+                "status": str(review.get("status") or "unreviewed"),
+                "match": match,
+            }
             if source is None:
                 row["result"] = match
                 rows.append(row)
@@ -206,8 +266,18 @@ def main() -> int:
                 record_path,
                 [review.get("source_name") for review in reviews],
                 roots,
+                name_index=name_index,
             )
-            row = {"family": "tma", "record_path": record_path, "match": match}
+            status_counts = Counter(
+                str(review.get("status") or "unreviewed") for review in reviews
+            )
+            row = {
+                "family": "tma",
+                "record_path": record_path,
+                "target_count": len(reviews),
+                "status_counts": dict(sorted(status_counts.items())),
+                "match": match,
+            }
             if source is None:
                 row["result"] = match
                 rows.append(row)

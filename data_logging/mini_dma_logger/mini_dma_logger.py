@@ -11441,6 +11441,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
+        self.button_review_transitions = QtWidgets.QToolButton(hero_box)
+        self.button_review_transitions.setText("Review transitions...")
+        self.button_review_transitions.setToolTip(
+            "Review transition currents for the latest completed TMA run. "
+            "Use the arrow to choose an older run folder."
+        )
+        self.button_review_transitions.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
+        self.button_review_transitions.clicked.connect(
+            self._review_latest_tma_transitions
+        )
+        transition_menu = QtWidgets.QMenu(self.button_review_transitions)
+        choose_transition_run = transition_menu.addAction(
+            "Choose completed run folder..."
+        )
+        choose_transition_run.triggered.connect(
+            self._choose_tma_run_for_transition_review
+        )
+        self.button_review_transitions.setMenu(transition_menu)
+        hero_layout.addWidget(self.button_review_transitions)
 
         self.dashboard_status_box = QtWidgets.QFrame(hero_box)
         status_layout = QtWidgets.QGridLayout(self.dashboard_status_box)
@@ -14437,6 +14458,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+        self._open_tma_transition_review(Path(run_dir))
+
+    def _open_tma_transition_review(self, run_dir: Path) -> None:
         try:
             from plotting.shared.transition_review_dialog import review_tma_run
 
@@ -14444,6 +14468,67 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._log(f"Post-run TMA transition review failed for {run_dir}: {exc}")
             QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+    def _latest_completed_tma_run_dir(self) -> Path | None:
+        candidates: list[Path] = []
+        if self._session_base_path is not None and not self._session_active:
+            candidates.append(self._session_base_path.parent)
+        if self._tma_history_root == self._current_tma_history_root():
+            for record in self._tma_history_records:
+                try:
+                    candidates.append(Path(record.source).parent)
+                except (TypeError, ValueError):
+                    continue
+        existing = list(dict.fromkeys(path for path in candidates if path.is_dir()))
+        if not existing:
+            return None
+        return max(
+            existing,
+            key=lambda path: (
+                (path / SESSION_METADATA_JSON).stat().st_mtime_ns
+                if (path / SESSION_METADATA_JSON).exists()
+                else path.stat().st_mtime_ns
+            ),
+        )
+
+    def _review_latest_tma_transitions(self) -> None:
+        if self._session_active:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "Finish or stop the active TMA run before reviewing its transitions.",
+            )
+            return
+        run_dir = self._latest_completed_tma_run_dir()
+        if run_dir is None:
+            self._choose_tma_run_for_transition_review()
+            return
+        self._open_tma_transition_review(run_dir)
+
+    def _choose_tma_run_for_transition_review(self) -> None:
+        start_dir = self._latest_completed_tma_run_dir() or self._current_tma_history_root()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose completed TMA run folder",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        run_dir = Path(selected)
+        active_run = (
+            self._session_base_path.parent
+            if self._session_active and self._session_base_path is not None
+            else None
+        )
+        if active_run is not None and run_dir.resolve() == active_run.resolve():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "The selected TMA run is still active. Finish or stop it first.",
+            )
+            return
+        self._open_tma_transition_review(run_dir)
+
     def _maybe_offer_run_cleanup(self, current_run: Path | None = None) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(

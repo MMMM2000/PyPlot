@@ -1262,6 +1262,72 @@ print("daemon-started", flush=True)
     assert "daemon-started" in result.stdout
 
 
+def test_transition_review_button_opens_latest_completed_run(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    older = tmp_path / "older"
+    latest = tmp_path / "latest"
+    older.mkdir()
+    latest.mkdir()
+    older_metadata = older / mini_dma_mod.SESSION_METADATA_JSON
+    latest_metadata = latest / mini_dma_mod.SESSION_METADATA_JSON
+    older_metadata.write_text("{}", encoding="utf-8")
+    latest_metadata.write_text("{}", encoding="utf-8")
+    os.utime(older_metadata, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(latest_metadata, ns=(2_000_000_000, 2_000_000_000))
+
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._tma_history_root = tmp_path
+        window._tma_history_records = (
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+                source=str(older_metadata),
+            ),
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/3"),
+                source=str(latest_metadata),
+            ),
+        )
+        opened: list[Path] = []
+        window._open_tma_transition_review = opened.append  # type: ignore[method-assign]
+
+        assert window.button_review_transitions.text() == "Review transitions..."
+        assert window.button_review_transitions.menu() is not None
+        assert [action.text() for action in window.button_review_transitions.menu().actions()] == [
+            "Choose completed run folder..."
+        ]
+        window.button_review_transitions.click()
+
+        assert opened == [latest]
+    finally:
+        _close_test_window(window)
+
+
+def test_transition_review_button_can_choose_older_run_folder(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = tmp_path / "selected-run"
+    selected.mkdir()
+    window = _build_window(tmp_path, qtbot)
+    opened: list[Path] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getExistingDirectory",
+            lambda *_args, **_kwargs: str(selected),
+        )
+        window._open_tma_transition_review = opened.append  # type: ignore[method-assign]
+
+        window._choose_tma_run_for_transition_review()
+
+        assert opened == [selected]
+    finally:
+        _close_test_window(window)
+
 def test_tma_history_scan_keeps_only_latest_pending_root(
     tmp_path: Path,
     qtbot,

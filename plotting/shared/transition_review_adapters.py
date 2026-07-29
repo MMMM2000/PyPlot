@@ -87,9 +87,13 @@ def tma_review_draft(run_path: Path) -> dict[str, Any]:
         ),
     )
     summary = tma_core.summarize_current_sweep(run)
-    targets: list[dict[str, Any]] = []
+    summaries_by_target: dict[str, tuple[Any, int]] = {}
     for item in summary.targets:
         target_key = f"stress_mpa:{float(item.stress_mpa):.9g}"
+        previous = summaries_by_target.get(target_key)
+        summaries_by_target[target_key] = (item, 1 if previous is None else previous[1] + 1)
+    targets: list[dict[str, Any]] = []
+    for target_key, (item, sweep_count) in summaries_by_target.items():
         auto_values = {
             label: float(value)
             for label, value in (
@@ -110,6 +114,8 @@ def tma_review_draft(run_path: Path) -> dict[str, Any]:
         target["target"] = {
             "stress_mpa": float(item.stress_mpa),
             "load_g": None if item.load_g is None else float(item.load_g),
+            "sweep_count": sweep_count,
+            "selected_sweep": sweep_count,
         }
         targets.append(target)
     if not targets:
