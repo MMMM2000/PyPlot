@@ -483,3 +483,31 @@ it produced zero activations: the measured strain span crossed the 0.30%
 transformation gate at 350.5 seconds, before any qualifying dense volatile
 response burst. This is trigger and non-regression evidence, not causal replay;
 live acceptance still requires a checked campaign and guarded hardware ladder.
+
+### Guarded live validation (2026-07-29)
+
+The checked
+`20260729_Ni47_2-1_36p82mm_volatile-observer` campaign used the remounted
+Ni47Fe24Ga23Co6 2/1 wire (36.82 mm mounted length, 15.1 um database diameter),
+50 MPa target, 300 MPa hard guard, and the observer opt-in. Both stages
+completed normally and the supervisor verified CH3/CH4 off afterward:
+
+- the 1->10->1 mA probe completed in 245.6 s with 143.9 s in current hold,
+  4.16 MPa RMS error, and 8.05 MPa p95 absolute error;
+- the full 1->40->1 mA loop completed in 741.8 s with 486.5 s in current hold,
+  6.00 MPa RMS error, 11.21 MPa p95 absolute error, and 31.997 MPa maximum
+  absolute error;
+- archived run 15 stopped without completing a loop after 1,892.8 s, including
+  1,680.5 s in current hold, with 17.61 MPa RMS and 40.63 MPa p95 absolute
+  error;
+- archived completed run 06 took 2,194.4 s, including 1,937.7 s in current
+  hold, with 9.71 MPa RMS and 18.73 MPa p95 absolute error.
+
+The full live run contained one extreme volatile-response episode at 31.2 mA,
+but not three distinct qualifying groups within 15 seconds. The observer
+therefore never activated. The completed loop validates branch-level safety and
+performance and demonstrates that the dormant opt-in does not perturb a
+recoverable run; it does **not** causally attribute the improvement to the
+observer. The conservative trigger remains unchanged to avoid fitting a policy
+to one remount. Activation and good-transforming-wire behavior still require
+direct live validation before the feature can be enabled by default.

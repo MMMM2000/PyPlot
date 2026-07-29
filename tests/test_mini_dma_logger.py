@@ -31892,6 +31892,11 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         assert payload["logging"]["run_log_incomplete_lines"] == 0
         assert payload["logging"]["raw_scale_max_gap_s"] == pytest.approx(0.05)
         assert "remote_debugging_observability" in payload["control_logic"]["features"]
+        assert "current_hold_volatile_response_observer" in payload["control_logic"]["features"]
+        assert (
+            payload["controlled_current_sweep"]["current_hold_volatile_observer_enabled"]
+            is False
+        )
     finally:
         _close_test_window(window)
 
