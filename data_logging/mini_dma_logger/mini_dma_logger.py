@@ -2316,6 +2316,14 @@ def _builder_project_cache_key(path: Path) -> tuple[str, int, int]:
     return (path_text, int(stat_result.st_mtime_ns), int(stat_result.st_size))
 
 
+def _load_builder_project_table_projection(path: Path) -> dict[str, Any]:
+    """Load Builder table data through the safe non-UI project APIs."""
+
+    from microwire_data_builder.project_package import load_project_table_projection
+
+    return load_project_table_projection(path)
+
+
 def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     cache_key = _builder_project_cache_key(path)
     with _BUILDER_PROJECT_CACHE_LOCK:
@@ -2326,7 +2334,7 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
                 oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
                 _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
             return cached
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_builder_project_table_projection(path)
     entry = BuilderProjectCacheEntry(
         payload=payload,
         suggestions=_project_sample_suggestions_from_payload(payload),

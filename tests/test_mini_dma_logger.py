@@ -32,6 +32,7 @@ pytest.importorskip(
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from data_logging.shared_power_supply.profiles import HMP4040_PROFILE
+from microwire_data_builder import project_package, safe_codec
 
 TEST_QSETTINGS_ROOT = Path(
     os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
@@ -49,6 +50,29 @@ stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
 source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+
+
+def _write_synthetic_builder_package(path: Path, *rows: Mapping[str, object]) -> None:
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    project_package.write_project_package(
+        path,
+        {
+            "kind": project_package.PROJECT_KIND,
+            "version": project_package.PACKAGE_VERSION,
+            "sections": {
+                "microscope": {
+                    "columns": columns,
+                    "rows": [dict(row) for row in rows],
+                    "index": list(range(len(rows))),
+                    "payloads": {
+                        "synthetic_preview": safe_codec.encode_envelope(
+                            {"raw": b"table-projection-must-not-load-this"}
+                        )
+                    },
+                }
+            },
+        },
+    )
 
 
 class _ControlledSourceProvenanceCache:
@@ -10521,6 +10545,44 @@ def test_builder_project_startup_import_never_probes_saved_path_on_gui_thread(
         _close_test_window(window)
 
 
+def test_packaged_builder_project_import_uses_real_async_signal_path(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "packaged_project.pydpj"
+    _write_synthetic_builder_package(
+        project_path,
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "d (um)": 19.1,
+        },
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/4",
+            "d (um)": 17.8,
+        },
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window.edit_project_path.setText(str(project_path))
+
+        assert window._auto_import_builder_project_if_possible(async_load=True) is True
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert window._builder_project_sample_suggestions == {
+            "Ni50Fe27Ga23": ("12/3", "12/4")
+        }
+        assert "Imported" in window.label_project_status.text()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
 def test_builder_project_explicit_reload_refreshes_replaced_file_in_background(
     tmp_path: Path,
     qtbot,
@@ -11289,6 +11351,168 @@ def test_builder_project_cache_reuses_payload_for_sample_suggestions(
     finally:
         with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
             mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+
+
+def test_packaged_builder_project_cache_reuses_table_projection(tmp_path: Path) -> None:
+    project_path = tmp_path / "packaged_project.pydpj"
+    _write_synthetic_builder_package(
+        project_path,
+        {
+            "Composition": "Ni44Fe27Ga23Cu3Co3",
+            "Microwire": "1/5",
+            "d (um)": 17.6,
+        },
+    )
+    with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+        mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+        mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.clear()
+
+    try:
+        first = mini_dma_mod._read_builder_project_cache_entry(project_path)
+        second = mini_dma_mod._read_builder_project_cache_entry(project_path)
+
+        assert first is second
+        assert first.suggestions == {"Ni44Fe27Ga23Cu3Co3": ("1/5",)}
+        microscope = first.payload["sections"]["microscope"]
+        assert microscope["rows"][0]["d (um)"] == pytest.approx(17.6)
+        assert "payloads" not in microscope
+    finally:
+        with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+            mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+            mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.clear()
+
+
+def test_builder_project_worker_reports_actionable_corrupt_format_error(tmp_path: Path) -> None:
+    project_path = tmp_path / "corrupt_project.pydpj"
+    project_path.write_bytes(b"\x88not-a-builder-project")
+    request_key = (str(project_path), "Ni50Fe27Ga23", "12/3", "")
+    worker = mini_dma_mod.BuilderProjectImportWorker(
+        project_path,
+        composition="Ni50Fe27Ga23",
+        microwire="12/3",
+        specimen="",
+        request_key=request_key,
+    )
+    failures: list[str] = []
+    worker.failed.connect(lambda _path, _key, message: failures.append(str(message)))
+
+    worker.run()
+
+    assert len(failures) == 1
+    assert "Unsupported or corrupt Builder project" in failures[0]
+    assert "Builder package v3 or legacy UTF-8 Builder JSON" in failures[0]
+    assert "Invalid JSON file" in failures[0]
+    assert "codec can't decode" not in failures[0]
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_builder_project_legacy_json_versions_keep_table_import_data_only(
+    tmp_path: Path,
+    version: int,
+) -> None:
+    project_path = tmp_path / f"legacy_v{version}.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": project_package.PROJECT_KIND,
+                "version": version,
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ],
+                        "payloads": {
+                            "legacy_preview": {
+                                "encoding": "pickle-base64",
+                                "data": "synthetic-blocked-payload",
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entry = mini_dma_mod._read_builder_project_cache_entry(project_path)
+    match = mini_dma_mod._find_project_sample_in_payload(
+        entry.payload,
+        project_path,
+        composition="Ni50Fe27Ga23",
+        microwire="12/3",
+        specimen="",
+        require_current_sample_match=True,
+    )
+
+    assert match is not None
+    assert match.diameter_mm == pytest.approx(0.0191)
+    assert "payloads" not in entry.payload["sections"]["microscope"]
+
+
+def test_builder_project_worker_cancellation_drops_loaded_package_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "packaged_project.pydpj"
+    _write_synthetic_builder_package(
+        project_path,
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "d (um)": 19.1,
+        },
+    )
+    request_key = (str(project_path), "Ni50Fe27Ga23", "12/3", "")
+    worker = mini_dma_mod.BuilderProjectImportWorker(
+        project_path,
+        composition="Ni50Fe27Ga23",
+        microwire="12/3",
+        specimen="",
+        request_key=request_key,
+    )
+    original_read = mini_dma_mod._read_builder_project_cache_entry
+
+    def _read_then_cancel(path: Path) -> mini_dma_mod.BuilderProjectCacheEntry:
+        entry = original_read(path)
+        worker.cancel()
+        return entry
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_read_builder_project_cache_entry",
+        _read_then_cancel,
+    )
+    emitted: list[str] = []
+    worker.suggestions.connect(lambda *_args: emitted.append("suggestions"))
+    worker.succeeded.connect(lambda *_args: emitted.append("succeeded"))
+    worker.failed.connect(lambda *_args: emitted.append("failed"))
+    worker.no_match.connect(lambda *_args: emitted.append("no_match"))
+    worker.finished.connect(lambda: emitted.append("finished"))
+
+    worker.run()
+
+    assert emitted == ["finished"]
+
+
+def test_builder_project_rejects_unsupported_declared_json_version(tmp_path: Path) -> None:
+    project_path = tmp_path / "future_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": project_package.PROJECT_KIND,
+                "version": 99,
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported legacy Builder JSON version 99"):
+        mini_dma_mod._read_builder_project_cache_entry(project_path)
 
 
 def test_builder_project_stale_async_suggestions_are_ignored(tmp_path: Path, qtbot) -> None:
