@@ -11293,10 +11293,7 @@ def test_builder_project_legacy_json_versions_keep_table_import_data_only(
 
     assert match is not None
     assert match.diameter_mm == pytest.approx(0.0191)
-    assert entry.payload["sections"]["microscope"]["payloads"]["legacy_preview"] == {
-        "encoding": "pickle-base64",
-        "data": "synthetic-blocked-payload",
-    }
+    assert "payloads" not in entry.payload["sections"]["microscope"]
 
 
 def test_builder_project_worker_cancellation_drops_loaded_package_result(

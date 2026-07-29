@@ -2272,52 +2272,9 @@ def _builder_project_cache_key(path: Path) -> tuple[str, int, int]:
 def _load_builder_project_table_projection(path: Path) -> dict[str, Any]:
     """Load Builder table data through the safe non-UI project APIs."""
 
-    from microwire_data_builder.project_package import (
-        PACKAGE_VERSION,
-        PROJECT_KIND,
-        inspect_project_package,
-        is_project_package,
-        load_project,
-    )
-    from microwire_data_builder.safe_codec import SafeCodecError
+    from microwire_data_builder.project_package import load_project_table_projection
 
-    try:
-        if is_project_package(path):
-            index = inspect_project_package(path)
-            payload = index.project_header()
-            with index.open_reader() as reader:
-                payload["sections"] = {
-                    section_key: reader.read_section(section_key, load_payloads=False)
-                    for section_key in index.sections
-                }
-        else:
-            payload = load_project(path)
-    except SafeCodecError as exc:
-        raise ValueError(
-            "Unsupported or corrupt Builder project; expected "
-            f"Builder package v{PACKAGE_VERSION} or legacy UTF-8 Builder JSON. {exc}"
-        ) from exc
-
-    kind = payload.get("kind")
-    if isinstance(kind, str) and kind and kind != PROJECT_KIND:
-        raise ValueError(
-            f"Unsupported Builder project kind {kind!r}; expected {PROJECT_KIND!r}."
-        )
-    version = payload.get("version")
-    supported_json_versions = frozenset({1, 2, PACKAGE_VERSION})
-    if version is not None and (
-        isinstance(version, bool)
-        or not isinstance(version, int)
-        or version not in supported_json_versions
-    ):
-        supported_versions = ", ".join(
-            str(item) for item in sorted(supported_json_versions)
-        )
-        raise ValueError(
-            f"Unsupported legacy Builder JSON version {version!r}; "
-            f"supported versions are {supported_versions}."
-        )
-    return payload
+    return load_project_table_projection(path)
 
 
 def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
