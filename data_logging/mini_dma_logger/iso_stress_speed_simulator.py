@@ -26,6 +26,7 @@ POLICY_CYCLE_CENTER_MOTOR = "cycle_center_motor"
 POLICY_CYCLE_CENTER_RESUME = "cycle_center_resume"
 POLICY_CYCLE_CENTER_COMBINED = "cycle_center_combined"
 POLICY_PROCESSED_OBSERVATION = "processed_observation"
+POLICY_ADAPTIVE_RESPONSE_WINDOW = "adaptive_response_window"
 POLICIES = (
     POLICY_BASELINE,
     POLICY_EVIDENCE,
@@ -35,6 +36,7 @@ POLICIES = (
     POLICY_CYCLE_CENTER_RESUME,
     POLICY_CYCLE_CENTER_COMBINED,
     POLICY_PROCESSED_OBSERVATION,
+    POLICY_ADAPTIVE_RESPONSE_WINDOW,
 )
 CYCLE_MOTOR_POLICIES = {
     POLICY_CYCLE_CENTER_MOTOR,
@@ -189,6 +191,8 @@ class IsoStressPolicyConfig:
     observation_center_band_mpa: float = 5.0
     observation_slope_max_mpa_s: float = 0.5
     observation_fast_veto_mpa: float = 35.0
+    adaptive_response_trigger_reversals: int = 2
+    adaptive_response_observation_s: float = 10.0
 
     def validated(self) -> "IsoStressPolicyConfig":
         if self.name not in POLICIES:
@@ -227,6 +231,10 @@ class IsoStressPolicyConfig:
             raise ValueError("observation trigger noise minimum must be non-negative")
         if self.observation_trigger_max_sample_interval_s <= 0.0:
             raise ValueError("observation trigger sample interval must be positive")
+        if self.adaptive_response_trigger_reversals < 1:
+            raise ValueError("adaptive response trigger reversals must be positive")
+        if self.adaptive_response_observation_s <= 0.0:
+            raise ValueError("adaptive response observation must be positive")
         return self
 
 
@@ -738,7 +746,11 @@ def run_iso_stress_simulation(
                 elapsed_s - last_motor_move_s
                 >= plant.hold_resume_post_move_settle_s
             )
-            if policy.name in {POLICY_BASELINE, POLICY_CYCLE_CENTER_MOTOR}:
+            if policy.name in {
+                POLICY_BASELINE,
+                POLICY_CYCLE_CENTER_MOTOR,
+                POLICY_ADAPTIVE_RESPONSE_WINDOW,
+            }:
                 if abs(fast_error) <= resume_band and post_move_feedback_ready:
                     resume_stable_s += step_dt
                 else:
@@ -853,7 +865,10 @@ def run_iso_stress_simulation(
                     phase = "probe"
                     probe_elapsed_s = 0.0
                     probe_samples = 0
-                elif policy.name in {POLICY_EVIDENCE_PROBATION, POLICY_PROPOSED}:
+                elif policy.name in {
+                    POLICY_EVIDENCE_PROBATION,
+                    POLICY_PROPOSED,
+                }:
                     phase = "probation"
                     probation_level = 0
                     probation_level_elapsed_s = 0.0
@@ -878,6 +893,7 @@ def run_iso_stress_simulation(
                     POLICY_CYCLE_CENTER_RESUME,
                     POLICY_CYCLE_CENTER_COMBINED,
                     POLICY_PROCESSED_OBSERVATION,
+                    POLICY_ADAPTIVE_RESPONSE_WINDOW,
                 }
                 and last_resume_s is not None
                 and direction > 0
@@ -946,6 +962,7 @@ def run_iso_stress_simulation(
 
         motor_delta = 0.0
         motor_error = fast_error
+        motor_gain = plant.motor_gain
         suppress_cycle_motor = False
         if (
             policy.name in CYCLE_MOTOR_POLICIES
@@ -959,6 +976,21 @@ def run_iso_stress_simulation(
         motor_due = (
             elapsed_s - last_motor_move_s >= plant.motor_correction_interval_s
         )
+        if (
+            policy.name == POLICY_ADAPTIVE_RESPONSE_WINDOW
+            and phase == "hold"
+            and hold_motor_reversals
+            >= policy.adaptive_response_trigger_reversals
+        ):
+            motor_due = (
+                elapsed_s - last_motor_move_s
+                >= policy.adaptive_response_observation_s
+            )
+            if cycle_ready:
+                motor_error = cycle.center_mpa
+                decision = "adaptive_response_cycle_center"
+            elif not motor_due:
+                decision = "adaptive_response_observation"
         suppress_observation_motor = (
             policy.name == POLICY_PROCESSED_OBSERVATION
             and phase == "hold"
@@ -977,11 +1009,8 @@ def run_iso_stress_simulation(
             and motor_due
         ):
             decision = "observe_without_motor"
-        elif (
-            abs(motor_error) > policy.correction_deadband_mpa
-            and motor_due
-        ):
-            desired = -motor_error / plant.stiffness_mpa_per_mm * plant.motor_gain
+        elif abs(motor_error) > policy.correction_deadband_mpa and motor_due:
+            desired = -motor_error / plant.stiffness_mpa_per_mm * motor_gain
             max_by_speed = plant.motor_effective_speed_mm_s * step_dt
             max_step = max(
                 plant.motor_min_step_mm,

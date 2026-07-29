@@ -9,6 +9,7 @@ import pytest
 
 from data_logging.mini_dma_logger.iso_stress_speed_simulator import (
     POLICIES,
+    POLICY_ADAPTIVE_RESPONSE_WINDOW,
     POLICY_BASELINE,
     POLICY_CYCLE_CENTER_MOTOR,
     POLICY_PROCESSED_OBSERVATION,
@@ -134,6 +135,52 @@ def test_processed_observation_breaks_hunting_and_is_neutral_on_holdouts() -> No
         candidate = run_iso_stress_simulation(
             scenario,
             policy_config(POLICY_PROCESSED_OBSERVATION),
+            seed=0,
+        ).summary
+
+        assert candidate.elapsed_s == baseline.elapsed_s
+        assert candidate.hold_s == baseline.hold_s
+        assert candidate.p95_abs_true_error_mpa == baseline.p95_abs_true_error_mpa
+        assert candidate.motor_travel_mm == baseline.motor_travel_mm
+
+
+def test_adaptive_response_window_breaks_hunting_and_is_neutral_on_holdouts() -> None:
+    hunting = scenario_by_name("prague_stationary_hunting")
+    baseline_hunting = run_iso_stress_simulation(
+        hunting,
+        policy_config(POLICY_BASELINE),
+        seed=0,
+    ).summary
+    candidate_hunting = run_iso_stress_simulation(
+        hunting,
+        policy_config(POLICY_ADAPTIVE_RESPONSE_WINDOW),
+        seed=0,
+    ).summary
+
+    assert candidate_hunting.completed
+    assert candidate_hunting.elapsed_s < baseline_hunting.elapsed_s * 0.50
+    assert candidate_hunting.hold_s < baseline_hunting.hold_s * 0.45
+    assert (
+        candidate_hunting.p95_abs_true_error_mpa
+        <= baseline_hunting.p95_abs_true_error_mpa * 1.05
+    )
+
+    for scenario_name in (
+        "prague_volatile",
+        "calm",
+        "coherent_transformation",
+        "sparse_feedback",
+        "heavy_tail",
+    ):
+        scenario = scenario_by_name(scenario_name)
+        baseline = run_iso_stress_simulation(
+            scenario,
+            policy_config(POLICY_BASELINE),
+            seed=0,
+        ).summary
+        candidate = run_iso_stress_simulation(
+            scenario,
+            policy_config(POLICY_ADAPTIVE_RESPONSE_WINDOW),
             seed=0,
         ).summary
 

@@ -16810,6 +16810,83 @@ def test_current_sweep_hold_response_observation_blocks_rapid_compounding(
         _close_test_window(window)
 
 
+def test_current_sweep_volatile_observer_requires_dense_response_groups(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_volatile_observer_enabled = True
+    seek_key = window._seek_error_key(
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        50.0,
+    )
+    start_s = time.time()
+
+    try:
+        for offset_s in (0.0, 5.0):
+            window._latest_scale_timestamp = start_s + offset_s
+            assert not window._update_current_sweep_hold_volatile_observer(
+                seek_key,
+                volatile_unsettled=True,
+            )
+            window._latest_scale_timestamp += 0.1
+            assert not window._update_current_sweep_hold_volatile_observer(
+                seek_key,
+                volatile_unsettled=False,
+            )
+
+        window._latest_scale_timestamp = start_s + 10.0
+        assert window._update_current_sweep_hold_volatile_observer(
+            seek_key,
+            volatile_unsettled=True,
+        )
+        assert seek_key in window._current_sweep_hold_observer_keys
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_volatile_observer_yields_to_transformation_activity(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_volatile_observer_enabled = True
+    seek_key = window._seek_error_key(
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        50.0,
+    )
+    window._current_sweep_hold_observer_keys.add(seek_key)
+    window._current_sweep_observed_strain_min_pct = 0.0
+    window._current_sweep_observed_strain_max_pct = (
+        mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_ACTIVITY_SPAN_PCT
+    )
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        assert window._current_sweep_transformation_activity_detected()
+        assert not window._update_current_sweep_hold_volatile_observer(
+            seek_key,
+            volatile_unsettled=True,
+        )
+        assert seek_key not in window._current_sweep_hold_observer_keys
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_response_learning_is_consumed_once_per_correction(
     tmp_path: Path,
     qtbot,

@@ -451,3 +451,35 @@ estimator-based candidate passes the real-run hold-outs.
 
 The broader approach catalogue, ranking, and restart checklist are maintained
 in [Mini DMA iso-stress control options](mini_dma_iso_stress_control_options.md).
+
+## Volatile-response observer candidate (2026-07-29)
+
+A wholesale slow-estimator actuator was rejected in closed-loop simulation. It
+shortened stationary hunting but serialized ordinary calm and transforming
+holds, exposing a semantic deadlock where the processed center said "do not
+move" while the narrower fast resume gate said "do not resume."
+
+The retained candidate is narrower. The existing fast/raw channels still own
+hold entry, normal resume, stale feedback, wire-break detection, and stress
+safety. After three distinct `volatile_response_unsettled` groups within
+15 seconds at held current, the experimental controller waits 10 seconds after
+the last motor response before allowing another correction. A mature
+cycle-center signal then either suppresses a centered correction or supplies
+the correction error. The mode is disabled after the measured session strain
+span reaches 0.30%, so a large-strain transforming wire stays on the established
+disturbance-following path. The feature is non-UI and opt-in through
+`MINI_DMA_VOLATILE_RESPONSE_OBSERVER=1`.
+
+Four-seed closed-loop screening of `adaptive_response_window` reduced median
+stationary-hunting elapsed time by 62.8% and hold time by 68.0%, while improving
+p95 true stress error by 3.3%. It was exactly inactive in the simulator's
+volatile, calm, coherent-transformation, sparse-feedback, and heavy-tail
+hold-outs.
+
+The same-timeline real-trace shadow screen used response classifications rather
+than waveform appearance. On run 15 it would activate in five long holds
+covering approximately 625 seconds. On the finalized transforming Prague trace
+it produced zero activations: the measured strain span crossed the 0.30%
+transformation gate at 350.5 seconds, before any qualifying dense volatile
+response burst. This is trigger and non-regression evidence, not causal replay;
+live acceptance still requires a checked campaign and guarded hardware ladder.
