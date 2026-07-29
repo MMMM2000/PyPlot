@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import gc
 import json
+import os
 import sys
 import threading
 import time
@@ -575,6 +576,63 @@ def test_current_annealing_uses_recipe_and_hardware_tabs(qtbot) -> None:
     assert window.ui.checkBox_reverse.isHidden()
     assert window.ui.frame_process_settings.isEnabled()
     assert not window._overlay.isVisible()
+
+
+def test_current_annealing_transition_button_opens_latest_completed_measurement(
+    tmp_path, qtbot
+) -> None:
+    older = tmp_path / "older" / "measurement.txt"
+    latest = tmp_path / "latest" / "measurement.txt"
+    older.parent.mkdir()
+    latest.parent.mkdir()
+    older.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    latest.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    os.utime(older, (1, 1))
+    os.utime(latest, (2, 2))
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.process_running = False
+    window.f_name = ""
+    window._measurement_history = [
+        {"source": str(older)},
+        {"source": str(latest)},
+    ]
+    opened = []
+    window._open_transition_review = opened.append
+
+    assert window.ui.pushButton_review_transitions.text() == "Review transitions..."
+    assert [
+        action.text() for action in window.ui.pushButton_review_transitions.menu().actions()
+    ] == ["Choose run folder...", "Choose legacy measurement file..."]
+
+    window.ui.pushButton_review_transitions.click()
+
+    assert opened == [latest]
+    window.close()
+
+
+def test_current_annealing_transition_button_can_choose_run_folder(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    measurement = tmp_path / "run" / "measurement.txt"
+    measurement.parent.mkdir()
+    measurement.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    opened = []
+    window._open_transition_review = opened.append
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(measurement.parent),
+    )
+
+    window._choose_transition_run_folder()
+
+    assert opened == [measurement]
+    window.close()
 
 
 def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:

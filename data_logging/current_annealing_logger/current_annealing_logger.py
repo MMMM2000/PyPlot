@@ -6165,9 +6165,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
                 self.ui.pushButton_configure_plots.setObjectName("pushButton_configure_plots")
                 self.ui.pushButton_configure_plots.clicked.connect(self.handle_configure_plots_clicked)
+                self.ui.pushButton_review_transitions = QtWidgets.QToolButton(container)
+                self.ui.pushButton_review_transitions.setText("Review transitions...")
+                self.ui.pushButton_review_transitions.setToolTip(
+                    "Review the latest completed Current Annealing run. "
+                    "Use the arrow to choose an older measurement."
+                )
+                self.ui.pushButton_review_transitions.setPopupMode(
+                    QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+                )
+                self.ui.pushButton_review_transitions.clicked.connect(
+                    self._review_latest_transition_measurement
+                )
+                transition_menu = QtWidgets.QMenu(self.ui.pushButton_review_transitions)
+                choose_run_folder = transition_menu.addAction("Choose run folder...")
+                choose_run_folder.triggered.connect(self._choose_transition_run_folder)
+                choose_legacy_file = transition_menu.addAction("Choose legacy measurement file...")
+                choose_legacy_file.triggered.connect(self._choose_transition_measurement_file)
+                self.ui.pushButton_review_transitions.setMenu(transition_menu)
                 header_row.addStretch(1)
                 header_row.addWidget(title_label, 3)
                 header_row.addWidget(self.ui.pushButton_configure_plots, 0)
+                header_row.addWidget(self.ui.pushButton_review_transitions, 0)
                 layout.addLayout(header_row)
                 self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
                 self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
@@ -6687,19 +6706,104 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+        self._open_transition_review(Path(output_path))
+
+    def _transition_review_sample(self, output_path: Path) -> Dict[str, str]:
+        try:
+            payload = json.loads(self._metadata_path(str(output_path)).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            key: str(payload.get(key) or self._ui_text(widget_name))
+            for key, widget_name in (
+                ("composition", "lineEdit_composition"),
+                ("microwire", "lineEdit_microwire"),
+                ("sample", "lineEdit_sample"),
+                ("load", "lineEdit_load"),
+            )
+        }
+
+    def _open_transition_review(self, output_path: Path) -> None:
         try:
             from plotting.shared.transition_review_dialog import review_current_annealing_file
 
-            sample = {
-                "composition": self._ui_text("lineEdit_composition"),
-                "microwire": self._ui_text("lineEdit_microwire"),
-                "sample": self._ui_text("lineEdit_sample"),
-                "load": self._ui_text("lineEdit_load"),
-            }
-            review_current_annealing_file(self, Path(output_path), sample=sample)
+            path = Path(output_path)
+            review_current_annealing_file(
+                self,
+                path,
+                sample=self._transition_review_sample(path),
+            )
         except Exception as exc:
             LOGGER.exception("Post-run Current Annealing transition review failed")
             QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+    def _latest_completed_transition_measurement(self) -> Path | None:
+        candidates: list[Path] = []
+        if not self.process_running and self.f_name:
+            candidates.append(Path(self.f_name))
+        for entry in self._measurement_history:
+            source = str(entry.get("source") or "").strip()
+            if source:
+                candidates.append(Path(source))
+        existing = list(dict.fromkeys(path for path in candidates if path.is_file()))
+        if not existing:
+            return None
+        return max(existing, key=lambda path: path.stat().st_mtime_ns)
+
+    def _review_latest_transition_measurement(self) -> None:
+        if self.process_running:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "Finish or stop the active Current Annealing run before reviewing transitions.",
+            )
+            return
+        output_path = self._latest_completed_transition_measurement()
+        if output_path is None:
+            self._choose_transition_run_folder()
+            return
+        self._open_transition_review(output_path)
+
+    def _choose_transition_run_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose completed Current Annealing run folder",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        measurement = Path(selected) / "measurement.txt"
+        if not measurement.is_file():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Transition review unavailable",
+                "The selected folder does not contain measurement.txt.",
+            )
+            return
+        self._open_transition_review(measurement)
+
+    def _choose_transition_measurement_file(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose Current Annealing measurement",
+            str(start_dir),
+            "Current Annealing measurements (*.txt *.dat *.csv);;All files (*)",
+        )
+        if selected:
+            self._open_transition_review(Path(selected))
+
     def _write_source_provenance_completion(self, output_path: str, token: object) -> None:
         if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
             return

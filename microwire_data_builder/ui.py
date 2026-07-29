@@ -7668,8 +7668,14 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             payload = self._review_payload_for_id(entry.record_id)
             values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
             if values:
+                manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+                status = (
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+                    if manual_values or values != dict(entry.auto_values)
+                    else TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO
+                )
                 self._store_current_review(
-                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    status,
                     included=True,
                     values=values,
                     refresh_display=False,

@@ -9649,7 +9649,9 @@ def test_annealing_transition_review_actions_update_visible_statuses() -> None:
         dialog._phase_controls.set_target("As1")  # noqa: SLF001
         dialog._handle_plot_pick(12.5)  # noqa: SLF001
         dialog._accept_current_and_next()  # noqa: SLF001
-        assert dialog._tree.topLevelItem(0).text(1) == "Accepted"  # noqa: SLF001
+        assert dialog._tree.topLevelItem(0).text(1) == "Manual adjusted"  # noqa: SLF001
+        first_id = builder_ui._transition_record_id_for_annealing_record(records[0])  # noqa: SLF001
+        assert stored[first_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
 
         dialog._mark_current_no_transition()  # noqa: SLF001
         assert dialog._tree.topLevelItem(1).text(1) == "No transition"  # noqa: SLF001

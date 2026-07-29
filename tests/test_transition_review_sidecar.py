@@ -401,6 +401,20 @@ def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     assert ca_draft["targets"][0]["analysis_included"] is True
     assert ca_draft["targets"][0]["final_values"] == {}
 
+    _apply_ca_review(
+        ca_draft,
+        {
+            "status": "accepted_auto",
+            "auto_values_mA": {"As1": 20.0},
+            "manual_values_mA": {"As1": 21.0},
+            "final_values_mA": {"As1": 21.0},
+        },
+    )
+    assert ca_draft["targets"][0]["status"] == "manual_adjusted"
+    assert ca_draft["targets"][0]["included"] is True
+    assert ca_draft["targets"][0]["analysis_included"] is True
+    assert ca_draft["targets"][0]["final_values"] == {"As1": 21.0}
+
     tma_target = make_target(
         family="tma",
         measurement_fingerprint=fingerprint,

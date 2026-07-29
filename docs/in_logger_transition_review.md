@@ -6,6 +6,8 @@ Current annealing and TMA loggers offer transition review immediately after a ru
 
 The TMA Dashboard header also has a permanent `Review transitions...` split button. Its main action opens the latest completed run; the arrow menu selects an older run folder. The logger refuses to review the actively acquiring run. The automatic post-run prompt remains available after successful recipe completion.
 
+The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder or a legacy standalone measurement file. The logger also refuses to review an actively acquiring run.
+
 This keeps the fast experimental workflow Martin wants while preserving Builder as the place for cross-sample overview, conflict review, column selection, and public database export.
 
 ## Safety and process boundary
@@ -51,6 +53,8 @@ uv run python scripts/backfill_transition_reviews.py --project <copy.pydpj> --ro
 ```
 
 The command is a dry run by default. Add `--write` only after reviewing the audit summary. Every candidate, including an absolute path saved in the project, must resolve inside one of the explicit `--root` directories. An out-of-root path is reported and never read or written. The command writes a sidecar only for an exact or unique in-root measurement match, never overwrites a conflicting sidecar, and records every written, skipped, ambiguous, stale, or conflicting item in a JSON audit manifest. Repeated TMA sweeps at the same stress are represented by one stress target using the final sweep, with the sweep count retained in target metadata.
+
+Historical Current Annealing reviews that contain manual final values but were stored as `accepted_auto` are normalized to `manual_adjusted` during backfill. This repairs the review-state label without changing the reviewed transition values.
 
 For runs that were never reviewed in Builder, load the legacy file or new run folder in the Current Annealing PyPlot plugin and use `Review loaded transitions...`. Saving creates `transition_review.json` inside a new-style run folder or `<stem>.transition-review.json` beside a legacy flat file. The stored values are transition currents in mA; converting them to transition temperatures requires a separate calibrated current-to-temperature relationship.
 

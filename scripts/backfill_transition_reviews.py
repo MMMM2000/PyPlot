@@ -138,9 +138,20 @@ def _publish(
     return "ready", ""
 
 
+def _ca_review_status(review: Mapping[str, Any]) -> str:
+    status = str(review.get("status") or "unreviewed")
+    if status != "accepted_auto":
+        return status
+    manual_values = dict(review.get("manual_values_mA") or {})
+    final_values = dict(review.get("final_values_mA") or review.get("values") or {})
+    if manual_values and final_values:
+        return "manual_adjusted"
+    return status
+
+
 def _apply_ca_review(draft: dict[str, Any], review: Mapping[str, Any]) -> None:
     target = draft["targets"][0]
-    status = str(review.get("status") or "unreviewed")
+    status = _ca_review_status(review)
     target["status"] = status
     target["included"] = status in {"accepted_auto", "manual_adjusted"}
     target["analysis_included"] = status in {
@@ -239,7 +250,8 @@ def main() -> int:
                 "family": "current_annealing",
                 "record_id": record_id,
                 "requested_path": str(review.get("source_path") or ""),
-                "status": str(review.get("status") or "unreviewed"),
+                "stored_status": str(review.get("status") or "unreviewed"),
+                "status": _ca_review_status(review),
                 "match": match,
             }
             if source is None:
