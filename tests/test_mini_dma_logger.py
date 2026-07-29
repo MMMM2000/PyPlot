@@ -8514,6 +8514,16 @@ def test_iso_current_first_overheating_controls_expand_without_hiding_transition
         )
         window.combo_recipe_mode.setCurrentIndex(mode_index)
 
+        constant_current_form = window.recipe_stack.currentWidget().layout()
+        first_overheating_row, _ = constant_current_form.getWidgetPosition(
+            window.label_constant_current_first_overheating_section
+        )
+        stress_targets_row, _ = constant_current_form.getWidgetPosition(
+            window.label_constant_current_targets_section
+        )
+        assert first_overheating_row == 0
+        assert first_overheating_row < stress_targets_row
+
         assert window.label_constant_current_first_overheating_section.isHidden() is False
         assert window.check_constant_current_first_overheating.isHidden() is False
         assert window.row_constant_current_first_overheating_target.isHidden() is True

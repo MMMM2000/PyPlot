@@ -11192,7 +11192,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_first_overheating_section.setFont(
             constant_current_first_overheating_font
         )
-        constant_current_form.addRow("", self.label_constant_current_first_overheating_section)
+        constant_current_form.insertRow(
+            0,
+            "",
+            self.label_constant_current_first_overheating_section,
+        )
         self.check_constant_current_first_overheating = QtWidgets.QCheckBox(
             "Enable first-overheating iso-stress loop",
             automation_box,
@@ -11202,7 +11206,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Before the iso-current mechanical scan, run one established iso-stress "
             "current loop up to the configured maximum and back to the minimum current."
         )
-        constant_current_form.addRow("", self.check_constant_current_first_overheating)
+        constant_current_form.insertRow(
+            1,
+            "",
+            self.check_constant_current_first_overheating,
+        )
         self.spin_constant_current_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_first_overheating_target_mpa.setDecimals(3)
         self.spin_constant_current_first_overheating_target_mpa.setRange(0.001, 100000.0)
@@ -11215,7 +11223,8 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
             self.spin_constant_current_first_overheating_target_mpa,
         )
-        constant_current_form.addRow(
+        constant_current_form.insertRow(
+            2,
             "Stress",
             self.row_constant_current_first_overheating_target,
         )
@@ -11239,7 +11248,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_first_overheating_end_density.setTextFormat(
             QtCore.Qt.TextFormat.RichText
         )
-        constant_current_form.addRow(
+        constant_current_form.insertRow(
+            3,
             "Maximum current",
             self.row_constant_current_first_overheating_end,
         )
@@ -11253,7 +11263,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setRange(0.001, 100000.0)
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
         self.spin_constant_current_first_overheating_target_rate_mpa_s.setSuffix(" MPa/s")
-        constant_current_form.addRow(
+        constant_current_form.insertRow(
+            4,
             "Stress ramp",
             self.spin_constant_current_first_overheating_target_rate_mpa_s,
         )
@@ -11278,7 +11289,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_first_overheating_rate_density.setTextFormat(
             QtCore.Qt.TextFormat.RichText
         )
-        constant_current_form.addRow(
+        constant_current_form.insertRow(
+            5,
             "Current ramp",
             constant_current_first_overheating_rate_row,
         )
@@ -11293,7 +11305,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_constant_current_first_overheating_hold_on_error.setToolTip(
             "Use the established iso-stress held-current recovery gates during first overheating."
         )
-        constant_current_form.addRow(
+        constant_current_form.insertRow(
+            6,
             "",
             self.check_constant_current_first_overheating_hold_on_error,
         )
