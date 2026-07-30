@@ -135,7 +135,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-29.1"
+CONTROL_LOGIC_VERSION = "2026-07-30.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -195,6 +195,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_keeps_shortened_return_leg",
     "voltage_limit_preserves_rate_limited_nominal_return",
     "voltage_limit_unwind_obeys_current_hold",
+    "voltage_limit_unwind_rearms_decreasing_leg_hold",
     "voltage_limit_unwind_waits_for_target_recovery",
     "first_overheating_current_included_in_channel_limit",
     "wire_break_recovery_prompt_ui_thread",
@@ -14786,6 +14787,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_voltage_limit_step_index = step_index
         self._current_sweep_voltage_limit_started_s = started_s if started_s is not None else time.monotonic()
         self._current_sweep_voltage_limit_start_mA = self._quantize_supply_current_mA(start_mA or 0.0)
+        # A recovery accepted earlier in the upward leg must not suppress hold
+        # entry on the voltage-limited return.  The unwind is a new decreasing
+        # control leg even though it reuses the upward recipe step index.
+        self._current_sweep_endpoint_seek_accepted_step_index = None
+        self._reset_current_sweep_ramp_hold_candidate()
         self._log(
             f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
             "reversing recipe current back to the sweep start current and continuing."
@@ -35230,9 +35236,20 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"{stable_s:.2f} s"
                     ),
                 )
-                self._current_sweep_endpoint_seek_accepted_step_index = (
-                    self._active_current_sweep_step_index
-                )
+                active_setpoint_mA = self._active_current_sweep_last_setpoint_mA
+                display_target_mA = self._active_current_sweep_display_target_mA
+                if (
+                    self._active_current_sweep_step_index is not None
+                    and active_setpoint_mA is not None
+                    and display_target_mA is not None
+                    and abs(float(active_setpoint_mA) - float(display_target_mA))
+                    <= self._supply_current_resolution_mA() * 0.5
+                ):
+                    self._current_sweep_endpoint_seek_accepted_step_index = (
+                        self._active_current_sweep_step_index
+                    )
+                else:
+                    self._current_sweep_endpoint_seek_accepted_step_index = None
             else:
                 self._log_waiting_for_feedback(
                     "Held-current recovery reached the target; confirming stable recovery before resuming current."
@@ -35256,8 +35273,17 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         target_mA = self._recipe_current_setpoint_mA(target_mA)
         start_mA = max(target_mA, self._current_sweep_voltage_limit_start_mA)
+        unwind_step = replace(
+            step,
+            current_start_mA=start_mA,
+            current_end_mA=target_mA,
+        )
         if self._current_sweep_voltage_limit_started_s is None:
             self._current_sweep_voltage_limit_started_s = time.monotonic()
+        self._active_current_sweep_display_target_mA = target_mA
+        self._active_current_sweep_display_direction = (
+            -1.0 if start_mA > target_mA else 0.0
+        )
         plateau_index = int(step.note) if step.note.isdigit() else None
         self._set_automation_context(
             phase="current_limit_unwind",
@@ -35270,7 +35296,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         now_s = time.monotonic()
         holding_current, stopped_for_hold = self._update_current_sweep_ramp_hold(
-            step,
+            unwind_step,
             step_index,
             now_s=now_s,
         )
@@ -35278,7 +35304,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if holding_current:
             return self._handle_current_sweep_held_recovery(
-                step,
+                unwind_step,
                 plateau_index=plateau_index,
                 tolerance=tolerance,
             )
@@ -35305,7 +35331,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if setpoint_mA <= target_mA + 1e-12:
             current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
-            if not target_recovered or not self._current_sweep_endpoint_recovered(step):
+            if not target_recovered or not self._current_sweep_endpoint_recovered(unwind_step):
                 self._write_control_trace(
                     decision="wait",
                     basis=step.basis,

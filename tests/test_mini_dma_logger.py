@@ -18283,11 +18283,19 @@ def test_voltage_limit_unwind_holds_current_when_target_load_collapses(
     window._active_current_sweep_last_schedule_update_s = 100.0
     window._active_current_sweep_last_setpoint_mA = 60.0
     window._active_current_sweep_display_direction = -1.0
-    window._current_sweep_voltage_limit_step_index = 4
-    window._current_sweep_voltage_limit_started_s = 100.0
-    window._current_sweep_voltage_limit_start_mA = 60.0
+    window._current_sweep_endpoint_seek_accepted_step_index = 4
     window._current_sweep_target_error_and_tolerance = lambda *_args, **_kwargs: (-50.0, 50.0, 1.0, 0.0)  # type: ignore[method-assign]
-    window._current_sweep_hold_entry_confirmed = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    hold_entry_steps: list[mini_dma_mod.AutomationStep] = []
+
+    def _confirm_hold_entry(
+        candidate_step: mini_dma_mod.AutomationStep,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        hold_entry_steps.append(candidate_step)
+        return True
+
+    window._current_sweep_hold_entry_confirmed = _confirm_hold_entry  # type: ignore[method-assign]
     window._seek_distribution_target = lambda basis, target, tolerance: seeks.append((basis, target, tolerance)) or False  # type: ignore[method-assign]
     window._maybe_record_scheduled_point = lambda **_kwargs: None  # type: ignore[method-assign]
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 105.0)
@@ -18306,6 +18314,13 @@ def test_voltage_limit_unwind_holds_current_when_target_load_collapses(
     )
 
     try:
+        window._mark_current_sweep_voltage_limit(
+            measured_v=32.055,
+            limit_v=32.05,
+            started_s=100.0,
+        )
+        assert window._current_sweep_endpoint_seek_accepted_step_index is None
+
         assert window._handle_current_sweep_step(step, 4) is False
 
         assert supply.commands == []
@@ -18318,7 +18333,51 @@ def test_voltage_limit_unwind_holds_current_when_target_load_collapses(
                 pytest.approx(window._automation_tolerance_for_step(step)),
             )
         ]
+        assert len(hold_entry_steps) == 1
+        assert hold_entry_steps[0].current_start_mA == pytest.approx(60.0)
+        assert hold_entry_steps[0].current_end_mA == pytest.approx(1.0)
+        assert window._active_current_sweep_display_target_mA == pytest.approx(1.0)
+        assert window._active_current_sweep_display_direction == pytest.approx(-1.0)
         assert "Holding current ramp at 60.000 mA" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_mid_ramp_hold_recovery_does_not_disable_later_hold_entry(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 37.0
+    window._active_current_sweep_display_target_mA = 40.0
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_seek_accepted_since_s = 99.0
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._maybe_record_scheduled_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 100.0)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=0.4,
+        current_hold_enabled=True,
+        current_hold_resume_stable_s=0.5,
+    )
+
+    try:
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=None,
+            tolerance=1.0,
+        ) is False
+
+        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_endpoint_seek_accepted_step_index is None
     finally:
         _close_test_window(window)
 
