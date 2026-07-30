@@ -131,7 +131,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-21.2"
+CONTROL_LOGIC_VERSION = "2026-07-30.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -175,6 +175,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
     "kern_kcp_iso_current_settle_uses_processed_timed_recovery",
+    "current_hold_endpoint_acceptance_only_at_sweep_endpoint",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -34087,6 +34088,21 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return error_value <= recovery_band
 
+    def _current_sweep_setpoint_is_at_endpoint(self, step: AutomationStep) -> bool:
+        step_index = self._active_current_sweep_step_index
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if step_index is None or setpoint_mA is None:
+            return False
+        endpoint_mA = (
+            step.current_start_mA
+            if self._current_sweep_voltage_limit_step_index == step_index
+            else step.current_end_mA
+        )
+        if endpoint_mA is None:
+            return False
+        endpoint_mA = self._recipe_current_setpoint_mA(float(endpoint_mA))
+        return abs(float(setpoint_mA) - endpoint_mA) <= 1e-9
+
     def _current_sweep_hold_entry_confirmed(
         self,
         step: AutomationStep,
@@ -34507,9 +34523,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"{stable_s:.2f} s"
                     ),
                 )
-                self._current_sweep_endpoint_seek_accepted_step_index = (
-                    self._active_current_sweep_step_index
-                )
+                if self._current_sweep_setpoint_is_at_endpoint(step):
+                    self._current_sweep_endpoint_seek_accepted_step_index = (
+                        self._active_current_sweep_step_index
+                    )
             else:
                 self._log_waiting_for_feedback(
                     "Held-current recovery reached the target; confirming stable recovery before resuming current."

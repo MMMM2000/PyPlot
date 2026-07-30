@@ -17254,6 +17254,7 @@ def test_current_sweep_hold_resumes_after_recovery_seek_stays_accepted(
 
         assert window._current_sweep_ramp_hold_step_index is None
         assert window._active_current_sweep_started_s == pytest.approx(96.2)
+        assert window._current_sweep_endpoint_seek_accepted_step_index is None
         assert "recovery seek stayed accepted for 1.00 s" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
