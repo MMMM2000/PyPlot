@@ -218,6 +218,15 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert not hasattr(dialog, "pick_label")
     assert not hasattr(dialog, "clear_boxes")
 
+    dialog.show()
+    qtbot.wait(20)
+    canvas_top_left = dialog.canvas.mapTo(dialog, dialog.canvas.rect().topLeft())
+    values_top_left = dialog.values_box.mapTo(dialog, dialog.values_box.rect().topLeft())
+    assert canvas_top_left.x() + dialog.canvas.width() < values_top_left.x()
+    assert dialog.values_box.width() <= 390
+    assert dialog.width() <= 1050
+    assert dialog.height() <= 560
+
     dialog.exclude_check.setChecked(True)
     dialog._store_target_controls()  # noqa: SLF001
     assert target["status"] == "excluded"

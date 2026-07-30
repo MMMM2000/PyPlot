@@ -54,20 +54,25 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._loading = False
         self._target_index = -1
         self.setWindowTitle("Transition review")
-        self.resize(1050, 720)
+        self.resize(1050, 560)
+        self.setMinimumSize(820, 500)
 
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
         heading = QtWidgets.QLabel(
-            f"Review after safe run completion · saves {self.sidecar_path.name} only"
+            f"Review after safe run completion \N{MIDDLE DOT} saves {self.sidecar_path.name} only"
         )
-        heading.setWordWrap(True)
         root.addWidget(heading)
 
-        split = QtWidgets.QSplitter()
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         root.addWidget(split, 1)
         left = QtWidgets.QWidget()
         self.target_panel = left
+        left.setMinimumWidth(170)
+        left.setMaximumWidth(250)
         left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 4, 0)
         self.target_list = QtWidgets.QListWidget()
         for target in self.payload.get("targets", []):
             self.target_list.addItem(self._target_display_label(target))
@@ -76,21 +81,33 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         split.addWidget(left)
         left.setVisible(self.target_list.count() > 1)
 
-        right = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right)
+        right = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        plot_panel = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(plot_panel)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
         self.figure = Figure(figsize=(7.2, 4.3), constrained_layout=True)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.mpl_connect("button_press_event", self._plot_clicked)
-        right_layout.addWidget(self.canvas, 1)
+        plot_layout.addWidget(self.canvas, 1)
+        right.addWidget(plot_panel)
 
-        decision_box = QtWidgets.QGroupBox("What did this run show?")
+        review_panel = QtWidgets.QWidget()
+        review_panel.setMinimumWidth(310)
+        review_panel.setMaximumWidth(390)
+        review_layout = QtWidgets.QVBoxLayout(review_panel)
+        review_layout.setContentsMargins(6, 0, 0, 0)
+        review_layout.setSpacing(6)
+
+        decision_box = QtWidgets.QGroupBox("Review decision")
         decision_box.setStyleSheet(
-            "QPushButton { padding: 7px 14px; } "
+            "QPushButton { padding: 5px 8px; } "
             "QPushButton:checked { background: #2563eb; color: white; "
             "border: 1px solid #1d4ed8; border-radius: 3px; }"
         )
         decision_layout = QtWidgets.QHBoxLayout(decision_box)
-        self.accept_auto_button = QtWidgets.QPushButton("Accept automatic")
+        decision_layout.setContentsMargins(6, 4, 6, 4)
+        decision_layout.setSpacing(4)
+        self.accept_auto_button = QtWidgets.QPushButton("Accept auto")
         self.manual_button = QtWidgets.QPushButton("Adjust manually")
         self.no_transition_button = QtWidgets.QPushButton("No transition")
         self.decision_group = QtWidgets.QButtonGroup(self)
@@ -104,14 +121,14 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             button.setProperty("reviewStatus", status)
             self.decision_group.addButton(button)
             decision_layout.addWidget(button)
-        right_layout.addWidget(decision_box)
+        review_layout.addWidget(decision_box)
 
-        self.values_box = QtWidgets.QGroupBox("Transition values")
+        self.values_box = QtWidgets.QGroupBox("Transition values (mA)")
         values_layout = QtWidgets.QVBoxLayout(self.values_box)
+        values_layout.setContentsMargins(6, 4, 6, 4)
+        values_layout.setSpacing(4)
         self.values_table = QtWidgets.QTableWidget(0, 3)
-        self.values_table.setHorizontalHeaderLabels(
-            ["Point", "Automatic (mA)", "Chosen (mA)"]
-        )
+        self.values_table.setHorizontalHeaderLabels(["Point", "Auto", "Chosen"])
         self.values_table.verticalHeader().setVisible(False)
         self.values_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -119,40 +136,51 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.values_table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
         )
-        self.values_table.horizontalHeader().setStretchLastSection(True)
+        table_header = self.values_table.horizontalHeader()
+        table_header.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        table_header.setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        table_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.value_edits: dict[str, QtWidgets.QLineEdit] = {}
         self._cleared_labels: set[str] = set()
         values_layout.addWidget(self.values_table)
 
         values_actions = QtWidgets.QHBoxLayout()
-        self.graph_hint = QtWidgets.QLabel(
-            "Select a row, then click the graph to set that point."
-        )
+        values_actions.setSpacing(4)
+        self.graph_hint = QtWidgets.QLabel("Select a row, then click the graph.")
         self.graph_hint.setWordWrap(True)
-        self.omit_button = QtWidgets.QPushButton("Omit selected point")
+        self.omit_button = QtWidgets.QPushButton("Omit point")
         values_actions.addWidget(self.graph_hint, 1)
         values_actions.addWidget(self.omit_button)
         values_layout.addLayout(values_actions)
-        right_layout.addWidget(self.values_box)
+        review_layout.addWidget(self.values_box)
 
-        self.exclude_check = QtWidgets.QCheckBox(
-            "Exclude this target from Builder analysis"
-        )
+        self.exclude_check = QtWidgets.QCheckBox("Exclude from Builder analysis")
         self.exclude_check.setToolTip(
             "Keep the reviewed values in the run folder, but do not use this "
             "target in Builder analysis."
         )
-        right_layout.addWidget(self.exclude_check)
+        review_layout.addWidget(self.exclude_check)
         self.decision_summary = QtWidgets.QLabel()
         self.decision_summary.setWordWrap(True)
-        right_layout.addWidget(self.decision_summary)
+        review_layout.addWidget(self.decision_summary)
+        review_layout.addStretch(1)
 
         self.decision_group.buttonClicked.connect(self._decision_changed)
         self.exclude_check.toggled.connect(self._update_decision_summary)
         self.values_table.itemSelectionChanged.connect(self._selected_row_changed)
         self.omit_button.clicked.connect(self._toggle_selected_point)
+        right.addWidget(review_panel)
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 0)
+        right.setSizes([720, 340])
         split.addWidget(right)
+        split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
+        split.setSizes([190, 910] if self.target_list.count() > 1 else [0, 1100])
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Save
@@ -240,7 +268,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             if labels:
                 self.values_table.selectRow(0)
             self.values_table.setMaximumHeight(
-                min(300, self.values_table.horizontalHeader().height() + 34 * max(len(labels), 1) + 4)
+                min(290, self.values_table.horizontalHeader().height() + 31 * max(len(labels), 1) + 4)
             )
             self.accept_auto_button.setEnabled(bool(auto))
         finally:
@@ -317,7 +345,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         manual_mode = self._current_decision() == "manual_adjusted"
         self.omit_button.setEnabled(bool(label) and manual_mode)
         self.omit_button.setText(
-            "Restore selected point" if label in self._cleared_labels else "Omit selected point"
+            "Restore point" if label in self._cleared_labels else "Omit point"
         )
 
     def _toggle_selected_point(self) -> None:

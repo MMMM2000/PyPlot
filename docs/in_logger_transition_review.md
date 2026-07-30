@@ -17,9 +17,9 @@ The logger-facing editor is decision-first rather than schema-first:
 - **Accept automatic** saves the automatic transition points as reviewed.
 - **Adjust manually** shows one compact table of the relevant points. Select a row and click the graph, or type the chosen value. Saving stays disabled until at least one point is adjusted or omitted.
 - **No transition** records a reviewed categorical result with no final numeric transition values.
-- **Exclude this target from Builder analysis** is a secondary option. It retains the reviewed values in the sidecar while setting `analysis_included: false`.
+- **Exclude from Builder analysis** is a secondary option. It retains the reviewed values in the sidecar while setting `analysis_included: false`.
 
-Only targets present in the run are shown. Current Annealing hides the target list because it has one graph; multi-stress TMA runs retain a short target list with human labels such as `100 MPa · 2.92 g`. A single **Omit selected point** action replaces the former per-label clear-checkbox grid.
+Only targets present in the run are shown. Current Annealing hides the target list because it has one graph; multi-stress TMA runs retain a short target list with human labels such as `100 MPa · 2.92 g`. A single **Omit point** action replaces the former per-label clear-checkbox grid. The compact review panel sits beside the graph, keeping the plot large without spending a full-width block below it.
 
 ## Safety and process boundary
 
