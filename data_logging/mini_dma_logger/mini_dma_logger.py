@@ -82,6 +82,9 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlPolicy,
     ForceControlProfile,
 )
+from data_logging.mini_dma_logger.metadata_checkpoints import (
+    SessionMetadataCheckpointStore,
+)
 
 try:
     import serial
@@ -7912,7 +7915,13 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     _control_ui_event = QtCore.pyqtSignal(object)
 
-    def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+    def __init__(
+        self,
+        log_dir: str | None = None,
+        *,
+        persist_settings: bool = True,
+        metadata_checkpoint_root: str | Path | None = None,
+    ) -> None:
         super().__init__()
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
@@ -7923,6 +7932,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_restore_in_progress = False
         self._settings_persistence_ready = False
         self._provided_log_dir = log_dir
+        self._metadata_checkpoint_root = (
+            None if metadata_checkpoint_root is None else Path(metadata_checkpoint_root)
+        )
         self._restored_log_dir = ""
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
@@ -8048,6 +8060,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path: Path | None = None
         self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
+        self._session_metadata_store: SessionMetadataCheckpointStore | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
         self._session_run_log_path: Path | None = None
@@ -26244,7 +26257,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
                 return
             try:
-                patch_source_control_metadata(metadata_path, snapshot)
+                if self._session_active and metadata_path == self._session_json_path:
+                    self._write_session_metadata_locked(force_canonical=True)
+                else:
+                    patch_source_control_metadata(metadata_path, snapshot)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 self._log(
                     f"Source provenance metadata update failed for {metadata_path}: {exc}"
@@ -26915,15 +26931,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
-    def _write_session_metadata(self, *, finished_utc: str | None = None, throttle: bool = False) -> None:
+    def _write_session_metadata(
+        self,
+        *,
+        finished_utc: str | None = None,
+        throttle: bool = False,
+        force_canonical: bool = False,
+    ) -> None:
         with self._session_metadata_write_lock:
-            self._write_session_metadata_locked(finished_utc=finished_utc, throttle=throttle)
+            self._write_session_metadata_locked(
+                finished_utc=finished_utc,
+                throttle=throttle,
+                force_canonical=force_canonical,
+            )
 
     def _write_session_metadata_locked(
         self,
         *,
         finished_utc: str | None = None,
         throttle: bool = False,
+        force_canonical: bool = False,
     ) -> None:
         if self._session_json_path is None:
             return
@@ -26936,6 +26963,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_metadata_dirty = True
                 return
         payload = self._session_metadata()
+        payload["session_identity"] = self._session_identity
         payload["point_count"] = self._session_point_count()
         payload["memory_retained_point_count"] = len(self._session_points)
         payload["memory_discarded_point_count"] = int(
@@ -26948,25 +26976,28 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["session_state"] = "finished"
         if finished_utc:
             payload["finished_utc"] = finished_utc
-        temporary = self._session_json_path.with_name(
-            f".{self._session_json_path.name}.{uuid4().hex}.tmp"
-        )
         try:
-            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(temporary, self._session_json_path)
+            store = self._session_metadata_store
+            if store is None:
+                raise OSError("session metadata checkpoint store is unavailable")
+            result = store.write(
+                payload,
+                final=finished_utc is not None,
+                force_canonical=force_canonical,
+            )
             self._last_session_metadata_write_s = time.monotonic()
             self._session_metadata_dirty = False
+            if result.checkpoint_cleanup_error:
+                self._log(
+                    "Final metadata was saved, but its local recovery checkpoint "
+                    f"could not be removed: {result.checkpoint_cleanup_error}"
+                )
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
                 reason="metadata_write_failed",
                 error=exc,
             )
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def _session_recovery_root(self) -> Path:
         return Path(_default_download_dir()) / "MiniDMA_recovered_sessions"
@@ -27223,6 +27254,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path = txt_path
         self._session_csv_path = csv_path
         self._session_json_path = json_path
+        self._session_metadata_store = SessionMetadataCheckpointStore(
+            json_path,
+            session_identity=self._session_identity,
+            checkpoint_root=self._metadata_checkpoint_root,
+        )
         self._request_session_source_provenance()
         self._session_raw_scale_path = raw_scale_path
         self._session_ir_temperature_path = ir_temperature_path
