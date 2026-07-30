@@ -39,6 +39,9 @@ TEST_QSETTINGS_ROOT = Path(
 )
 TEST_QSETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
+TEST_METADATA_CHECKPOINT_ROOT = Path("artifacts/test-metadata-checkpoints")
+TEST_METADATA_CHECKPOINT_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ["MINI_DMA_METADATA_CHECKPOINT_DIR"] = str(TEST_METADATA_CHECKPOINT_ROOT)
 
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
@@ -938,7 +941,11 @@ def _build_window(
         settings = _test_settings()
         settings.clear()
         settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        metadata_checkpoint_root=tmp_path / "metadata-checkpoints",
+    )
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
     window.check_zero_position_on_start.setChecked(False)
@@ -30830,7 +30837,7 @@ def test_session_metadata_records_source_control_snapshot(
         assert payload["source_control"]["is_dirty"] is True
         assert payload["source_control"]["remote_url"] == "https://example.test/repo.git"
         assert payload["source_control"]["dirty_state"] == "dirty"
-        assert patch_threads == [window.thread()]
+        assert patch_threads == []
 
         window.edit_run_notes.setPlainText("operator changed notes after capture")
         for _ in range(5):
