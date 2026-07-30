@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, FrozenInstanceError
 import json
 import os
+from pathlib import Path
 import time
 from types import SimpleNamespace
 
@@ -126,7 +128,7 @@ def test_production_backend_process_reports_ready_without_acquiring_hardware() -
     process = MiniDmaControlProcess(
         heartbeat_interval_s=0.02,
         backend_factory_spec=BackendFactorySpec(
-            module="data_logging.mini_dma_logger.production_control_backend",
+            module="data_logging.tma_logger.production_control_backend",
             factory="create_production_backend",
         ),
     )
@@ -144,6 +146,99 @@ def test_production_backend_process_reports_ready_without_acquiring_hardware() -
         assert ready.readback_value("tic_connected") is None
     finally:
         assert process.close()
+
+
+@pytest.mark.parametrize("policy", [ControlPolicy.PRAGUE, ControlPolicy.KOSICE])
+def test_spawned_production_adapter_runs_fake_hardware_lifecycle(
+    policy: ControlPolicy,
+    tmp_path: Path,
+) -> None:
+    process = MiniDmaControlProcess(
+        heartbeat_interval_s=0.02,
+        backend_factory_spec=BackendFactorySpec(
+            module="data_logging.tma_logger.fake_production_backend",
+            factory="create_fake_production_backend",
+        ),
+    )
+    identity = ControlSessionIdentity(f"fake-{policy.value}", 1)
+    output_dir = tmp_path / policy.value
+    payload = {
+        "schema_version": 1,
+        "widgets": {},
+        "starting_length_mm": 50.0,
+        "output_collision_action": "replace",
+        "cadence_downgrade_accepted": True,
+        "supply_lease_owner": f"tma-test-{policy.value}",
+        "fake_policy": "kosice" if policy is ControlPolicy.KOSICE else "prague",
+        "fake_output_dir": str(output_dir),
+    }
+    try:
+        process.start_process()
+        process.wait_until_ready(timeout_s=10.0)
+        process.start_session(
+            ControlStartRequest(
+                identity=identity,
+                policy=policy,
+                config_json=json.dumps(payload),
+                control_interval_s=0.01,
+                snapshot_interval_s=0.02,
+                parent_heartbeat_timeout_s=1.0,
+            )
+        )
+        running = _wait_for_snapshot(
+            process,
+            lambda item: (
+                item.identity == identity
+                and item.state is ControlState.RUNNING
+                and item.tick_count >= 2
+            ),
+            timeout_s=10.0,
+        )
+        assert running.owner_pid != os.getpid()
+        assert running.readback_value("scale_connected") is True
+        assert running.readback_value("supply_connected") is True
+        assert running.readback_value("tic_connected") is True
+        assert running.readback_value("ir_connected") is True
+
+        process.pause(identity)
+        paused = _wait_for_snapshot(
+            process,
+            lambda item: item.state is ControlState.PAUSED,
+            timeout_s=3.0,
+        )
+        assert paused.readback_value("automation_paused") is True
+
+        process.resume(identity)
+        _wait_for_snapshot(
+            process,
+            lambda item: item.state is ControlState.RUNNING,
+            timeout_s=3.0,
+        )
+        completed = _wait_for_snapshot(
+            process,
+            lambda item: item.state is ControlState.STOPPED,
+            timeout_s=10.0,
+        )
+        completion_event = _wait_for_event(
+            process,
+            ControlEventKind.RECIPE_COMPLETE,
+            timeout_s=3.0,
+        )
+        assert completion_event.detail == "production recipe completed"
+        assert completed.readback_value("supply_output_enabled") is False
+        rows = list(csv.DictReader((output_dir / "fake_measurement.csv").open(
+            newline="",
+            encoding="utf-8",
+        )))
+        assert rows
+        expected_policy = (
+            "kosice_adaptive"
+            if policy is ControlPolicy.KOSICE
+            else "prague_legacy"
+        )
+        assert {row["policy"] for row in rows} == {expected_policy}
+    finally:
+        assert process.close(timeout_s=2.0, force=True)
 
 
 def test_wait_until_ready_reports_child_exit_detail() -> None:
@@ -565,6 +660,56 @@ def test_production_backend_emergency_does_not_preserve_motor_supply() -> None:
     assert backend._window._preserve_motor_supply_on_close is False
     assert backend._window.motor_supply_disable_calls == 1
     assert backend._window.supply_disable_calls == 1
+    backend.close()
+
+
+def test_production_backend_natural_completion_preserves_motor_supply() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    backend._window._automation_active = False
+
+    assert backend.completion_detail() == "production recipe completed"
+    assert backend._window._preserve_motor_supply_on_close is True
+    backend.close()
+
+
+def test_production_backend_rejects_policy_profile_mismatch() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+
+    class _KosiceWindow(_FakeProductionWindow):
+        @staticmethod
+        def _force_control_profile() -> object:
+            return SimpleNamespace(value="kosice_adaptive")
+
+    backend = ProductionMiniDmaBackend(window_factory=_KosiceWindow)
+
+    with pytest.raises(ValueError, match="IPC policy does not match"):
+        backend.start(
+            ControlStartRequest(
+                identity=_identity(),
+                policy=ControlPolicy.PRAGUE,
+                config_json=(
+                    '{"schema_version":1,"widgets":{},'
+                    '"starting_length_mm":57.25,'
+                    '"output_collision_action":"replace",'
+                    '"cadence_downgrade_accepted":true}'
+                ),
+            )
+        )
     backend.close()
 
 

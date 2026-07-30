@@ -1699,8 +1699,8 @@ class _FakeIsolatedControlProcess:
     def is_alive(self) -> bool:
         return self.started and not self.closed
 
-    def close(self, *, timeout_s: float = 2.0) -> bool:
-        del timeout_s
+    def close(self, *, timeout_s: float = 2.0, force: bool = False) -> bool:
+        del timeout_s, force
         self.closed = True
         return True
 
@@ -1843,7 +1843,7 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
 
         assert window._connect_scale(show_errors=False) is False
         assert window._connect_supply(show_errors=False) is False
-        with pytest.raises(RuntimeError, match="dedicated Mini DMA control process"):
+        with pytest.raises(RuntimeError, match="dedicated TMA control process"):
             window._build_tic_dispatcher()
         _confirm(mini_dma_mod.ControlState.STOPPED)
         qtbot.waitUntil(lambda: recovery_prompts == [True], timeout=1000)
@@ -2063,6 +2063,7 @@ def test_isolated_emergency_uses_out_of_band_path_and_waits_for_confirmation(
     window._automation_active = True
     window._isolated_command_pending = "pause"
     local_safety_calls: list[str] = []
+    broker_safety_calls: list[str] = []
     window._disable_motor_supply_output = (  # type: ignore[method-assign]
         lambda: local_safety_calls.append("motor")
     )
@@ -2072,12 +2073,16 @@ def test_isolated_emergency_uses_out_of_band_path_and_waits_for_confirmation(
     window._stop_auto_ramp = (  # type: ignore[method-assign]
         lambda **_kwargs: local_safety_calls.append("stop")
     )
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
 
     try:
         window._emergency_stop()
 
         assert process.commands == [("emergency", None)]
         assert local_safety_calls == []
+        assert broker_safety_calls == ["all-off"]
         assert window._isolated_command_pending == "emergency"
         assert window._isolated_pending_sequence is None
         assert "awaiting child safe-state confirmation" in (
@@ -2542,6 +2547,90 @@ def test_isolated_start_proves_child_ready_before_releasing_ui_hardware(
         _close_test_window(window)
 
 
+def test_isolated_command_deadline_forces_child_and_broker_safe_state(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="deadline-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_command_pending = "start"
+    window._isolated_pending_sequence = 1
+    window._isolated_command_deadline_s = time.monotonic() - 0.01
+    broker_safety_calls: list[str] = []
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
+
+    try:
+        window._poll_production_control_process()
+
+        assert ("emergency", None) in process.commands
+        assert broker_safety_calls == ["all-off"]
+        assert process.closed is True
+        assert window._production_control_process is None
+        assert window._isolated_recipe_active is False
+        assert "did not acknowledge start" in (
+            window.label_control_process_status.text()
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_stop_backpressure_escalates_to_emergency(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="backpressure-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    process.stop = lambda _identity: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("control command queue is full")
+    )
+    broker_safety_calls: list[str] = []
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
+
+    try:
+        window._stop_recipe_from_button()
+
+        assert process.commands == [("emergency", None)]
+        assert broker_safety_calls == ["all-off"]
+        assert window._isolated_command_pending == "emergency"
+        assert "queue is full" in window.log_output.toPlainText()
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
     tmp_path: Path,
     qtbot,
@@ -2702,6 +2791,7 @@ def test_isolated_start_aborts_when_tic_dispatcher_cannot_quiesce(
 def test_isolated_start_failure_forces_shared_supply_off_even_if_child_emergency_fails(
     tmp_path: Path,
     qtbot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = mini_dma_mod.MainWindow(
         log_dir=str(tmp_path),
@@ -2711,6 +2801,7 @@ def test_isolated_start_failure_forces_shared_supply_off_even_if_child_emergency
     qtbot.addWidget(window)
     process = _FakeIsolatedControlProcess()
     forced_shutdowns: list[bool] = []
+    critical_messages: list[str] = []
     window._create_production_control_process = lambda: process  # type: ignore[method-assign]
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
         [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
@@ -2729,14 +2820,23 @@ def test_isolated_start_failure_forces_shared_supply_off_even_if_child_emergency
     window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
         lambda: forced_shutdowns.append(True)
     )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: critical_messages.append(str(message)),
+    )
 
     try:
-        with pytest.raises(RuntimeError, match="start failed"):
-            window._start_auto_ramp()
+        window._start_auto_ramp()
 
         assert process.closed is True
         assert forced_shutdowns == [True]
         assert "control-process emergency command failed" in window.log_output.toPlainText()
+        assert "could not accept the recipe" in window.log_output.toPlainText()
+        assert critical_messages
+        assert "All shared PSU outputs were commanded off" in critical_messages[0]
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
     finally:
         _close_test_window(window)
 
@@ -20230,18 +20330,33 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
 
     started: dict[str, object] = {}
 
-    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
-        nonlocal broker_started
-        broker_started = True
-        server = _FakeServer()
-        thread = _FakeThread()
-        started.update({"broker": broker, "host": host, "port": port, "server": server, "thread": thread})
-        return server, thread
+    class _FakeBrokerProcess:
+        def __init__(self, config: object) -> None:
+            started["config"] = config
+
+        def start(self) -> None:
+            return None
+
+        def wait_until_ready(self, *, timeout_s: float) -> object:
+            nonlocal broker_started
+            broker_started = True
+            config = started["config"]
+            return SimpleNamespace(
+                owner_pid=1234,
+                host=getattr(config, "host"),
+                port=getattr(config, "port"),
+            )
+
+        def close(self, *, timeout_s: float, force: bool) -> bool:
+            return True
 
     try:
         monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
-        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
-        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "SharedPowerSupplyBrokerProcess",
+            _FakeBrokerProcess,
+        )
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_supply_port.addItem("COM3", "COM3")
@@ -20259,16 +20374,16 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert window._connect_supply(show_errors=False) is True
 
         assert broker_started is True
-        assert started["host"] == "127.0.0.1"
-        assert started["port"] == 8765
-        assert getattr(started["broker"], "driver").identify_calls == 2
-        broker_profile = getattr(started["broker"], "bench_profile")
-        assert broker_profile.channels[4].voltage_limit_v == pytest.approx(1.0)
-        assert broker_profile.channels[4].current_limit_a is None
-        assert broker_profile.channels[3].voltage_limit_v == pytest.approx(12.0)
-        assert broker_profile.channels[3].current_limit_a == pytest.approx(0.4)
+        config = started["config"]
+        assert getattr(config, "host") == "127.0.0.1"
+        assert getattr(config, "port") == 8765
+        channels = {item.channel: item for item in getattr(config, "channels")}
+        assert channels[4].voltage_limit_v == pytest.approx(1.0)
+        assert channels[4].current_limit_a is None
+        assert channels[3].voltage_limit_v == pytest.approx(12.0)
+        assert channels[3].current_limit_a == pytest.approx(0.4)
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
-        assert "Started shared HMP broker" in window.log_output.toPlainText()
+        assert "Started process-owned TMA HMP broker" in window.log_output.toPlainText()
         assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -20581,9 +20696,23 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
         def join(self, timeout: float | None = None) -> None:
             return None
 
-    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
-        started.update({"broker": broker, "host": host, "port": port})
-        return _FakeServer(), _FakeThread()
+    class _FakeBrokerProcess:
+        def __init__(self, config: object) -> None:
+            started["config"] = config
+
+        def start(self) -> None:
+            return None
+
+        def wait_until_ready(self, *, timeout_s: float) -> object:
+            config = started["config"]
+            return SimpleNamespace(
+                owner_pid=1234,
+                host=getattr(config, "host"),
+                port=getattr(config, "port"),
+            )
+
+        def close(self, *, timeout_s: float, force: bool) -> bool:
+            return True
 
     try:
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
@@ -20606,8 +20735,11 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
                 "idn_text": "ROHDE&SCHWARZ,HMP4040",
             },
         )
-        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
-        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "SharedPowerSupplyBrokerProcess",
+            _FakeBrokerProcess,
+        )
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -20618,8 +20750,9 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
 
         assert window.combo_supply_port.currentData() == "COM7"
         assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
-        assert started["host"] == "127.0.0.1"
-        assert started["port"] == 8765
+        config = started["config"]
+        assert getattr(config, "host") == "127.0.0.1"
+        assert getattr(config, "port") == 8765
         assert "Auto-detected HMP supply on COM7" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -33071,7 +33204,7 @@ def test_session_stop_recovers_metadata_when_output_folder_was_moved(
 
         window._stop_session(reason="recipe_control_stop", detail="metadata write failed")
 
-        recovery_dirs = list(recovery_root.glob("MiniDMA_recovered_*"))
+        recovery_dirs = list(recovery_root.glob("TMA_recovered_*"))
         assert len(recovery_dirs) == 1
         recovered_metadata = json.loads((recovery_dirs[0] / "metadata.json").read_text(encoding="utf-8"))
         with (recovery_dirs[0] / "measurement.csv").open("r", encoding="utf-8", newline="") as handle:

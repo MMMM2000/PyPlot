@@ -1,4 +1,4 @@
-"""Production Mini DMA backend hosted exclusively in the control child.
+"""Production TMA backend hosted exclusively in the control child.
 
 The existing Prague/Košice recipe and hardware implementation remains the
 single policy implementation.  This adapter constructs its ``MainWindow`` host
@@ -14,7 +14,7 @@ import json
 import os
 from typing import Any, Mapping
 
-from .control_process import ControlStartRequest, ReadbackValue
+from .control_process import ControlPolicy, ControlStartRequest, ReadbackValue
 
 
 CONFIG_SCHEMA_VERSION = 1
@@ -77,6 +77,9 @@ def capture_window_configuration(
             getattr(window, "_controller_process_output_collision_action", "cancel")
         ),
         "cadence_downgrade_accepted": bool(cadence_downgrade_accepted),
+        "supply_lease_owner": str(
+            getattr(window, "_supply_lease_owner", "")
+        ),
         "parent_pid": os.getpid(),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -187,6 +190,7 @@ def _hardware_preflight_readback(window: object) -> dict[str, ReadbackValue]:
         getattr(window, "_tic_controller", None) is not None
         or getattr(window, "_tic_command_dispatcher", None) is not None
     )
+    ir_connected = getattr(window, "_ir_thread", None) is not None
     detail_parts = [
         (
             f"scale {scale_port or 'connected'}"
@@ -200,6 +204,7 @@ def _hardware_preflight_readback(window: object) -> dict[str, ReadbackValue]:
             else "PSU not required"
         ),
         "Tic connected" if tic_connected else "Tic not required",
+        "IR connected" if ir_connected else "IR not required",
     ]
     return {
         "hardware_preflight_detail": "; ".join(detail_parts),
@@ -209,10 +214,11 @@ def _hardware_preflight_readback(window: object) -> dict[str, ReadbackValue]:
         "supply_connected": supply_connected,
         "supply_endpoint": supply_endpoint or None,
         "tic_connected": tic_connected,
+        "ir_connected": ir_connected,
     }
 
 
-class ProductionMiniDmaBackend:
+class ProductionTmaBackend:
     """Child-owned adapter around the existing production controller."""
 
     def __init__(self, *, window_factory: object | None = None) -> None:
@@ -251,6 +257,40 @@ class ProductionMiniDmaBackend:
         )
         self._window._control_process_log_sink = self._capture_ui_log_line
         _apply_window_configuration(self._window, payload)
+        payload_hook = getattr(
+            self._window,
+            "_apply_controller_process_payload",
+            None,
+        )
+        if callable(payload_hook):
+            payload_hook(payload)
+        self._window._supply_lease_owner = str(
+            payload.get("supply_lease_owner") or ""
+        )
+        if not self._window._supply_lease_owner:
+            # Compatibility for tests and serialized requests created before
+            # the owner token was added. New UI requests always provide it.
+            self._window._supply_lease_owner = (
+                f"tma-session-{request.identity.session_id}"
+            )
+        profile_method = getattr(self._window, "_force_control_profile", None)
+        if callable(profile_method):
+            selected_profile = profile_method()
+            profile_value = str(
+                getattr(selected_profile, "value", selected_profile)
+            ).casefold()
+            policy_matches = (
+                request.policy is ControlPolicy.PRAGUE
+                and "prague" in profile_value
+            ) or (
+                request.policy is ControlPolicy.KOSICE
+                and "kosice" in profile_value
+            )
+            if not policy_matches:
+                raise ValueError(
+                    "TMA IPC policy does not match the reconstructed hardware "
+                    f"profile ({request.policy.value} vs {profile_value})."
+                )
         self._window._controller_process_cadence_downgrade_accepted = bool(
             payload.get("cadence_downgrade_accepted", False)
         )
@@ -281,8 +321,21 @@ class ProductionMiniDmaBackend:
             if recent_log:
                 detail = f"{detail} Child log: {recent_log}"
             raise RuntimeError(detail)
-        self._hardware_preflight = _hardware_preflight_readback(self._window)
         self._window._controller_process_hardware_preflight_complete = True
+        should_connect_ir = getattr(
+            self._window,
+            "_manual_auto_connect_should_connect_ir",
+            lambda: False,
+        )
+        if (
+            bool(should_connect_ir())
+            and getattr(self._window, "_ir_thread", None) is None
+            and not self._window._connect_ir_thermometer(show_errors=False)
+        ):
+            raise RuntimeError(
+                "controller-process IR acquisition could not be started"
+            )
+        self._hardware_preflight = _hardware_preflight_readback(self._window)
         requires_starting_length = any(
             step.action == "starting_length_prompt" for step in steps
         )
@@ -309,7 +362,13 @@ class ProductionMiniDmaBackend:
         self._stopped = False
 
     def tick(self, now_s: float) -> None:
-        del now_s
+        tick_hook = getattr(
+            self._require_window(),
+            "_controller_process_tick_hook",
+            None,
+        )
+        if callable(tick_hook):
+            tick_hook(now_s)
         self._drain_events()
 
     def pause(self) -> None:
@@ -483,6 +542,9 @@ class ProductionMiniDmaBackend:
             and self._window is not None
             and not self._window._automation_active
         ):
+            # Normal recipe completion has the same motor-supply policy as an
+            # operator Stop: preserve the separately configured motor channel.
+            self._window._preserve_motor_supply_on_close = True
             self._stopped = True
             return "production recipe completed"
         return None
@@ -509,13 +571,18 @@ class ProductionMiniDmaBackend:
             app.processEvents()
 
 
-def create_production_backend() -> ProductionMiniDmaBackend:
-    return ProductionMiniDmaBackend()
+def create_production_backend() -> ProductionTmaBackend:
+    return ProductionTmaBackend()
+
+
+# Compatibility alias for older imports. New code uses ProductionTmaBackend.
+ProductionMiniDmaBackend = ProductionTmaBackend
 
 
 __all__ = [
     "CONFIG_SCHEMA_VERSION",
     "ProductionMiniDmaBackend",
+    "ProductionTmaBackend",
     "capture_runtime_configuration",
     "capture_window_configuration",
     "create_production_backend",

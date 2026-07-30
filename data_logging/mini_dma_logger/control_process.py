@@ -405,7 +405,7 @@ class _ControlProcessRuntime:
                 try:
                     with open(diagnostic_path, "a", encoding="utf-8") as handle:
                         handle.write(
-                            "\n=== dedicated Mini DMA control process fault ===\n"
+                            "\n=== dedicated TMA control process fault ===\n"
                         )
                         handle.write(fault_traceback)
                         handle.flush()
@@ -631,7 +631,7 @@ def _run_control_process(
     runtime.run()
 
 
-class MiniDmaControlProcess:
+class TmaControlProcess:
     """UI-side supervisor for the bounded process-control channels."""
 
     def __init__(
@@ -685,7 +685,7 @@ class MiniDmaControlProcess:
             raise RuntimeError("control process was already started")
         self._process = self._context.Process(
             target=_run_control_process,
-            name="MiniDMAControlProcess",
+            name="TmaControlProcess",
             args=(
                 self._command_queue,
                 self._heartbeat_queue,
@@ -702,7 +702,7 @@ class MiniDmaControlProcess:
         if self._heartbeat_interval_s is not None:
             self._heartbeat_thread = Thread(
                 target=self._heartbeat_loop,
-                name="MiniDMAControlHeartbeat",
+                name="TmaControlHeartbeat",
                 daemon=True,
             )
             self._heartbeat_thread.start()
@@ -799,7 +799,7 @@ class MiniDmaControlProcess:
             self._last_fault_traceback = str(payload.get("traceback") or "")
         return self._last_fault_detail, self._last_fault_traceback
 
-    def close(self, *, timeout_s: float = 2.0) -> bool:
+    def close(self, *, timeout_s: float = 2.0, force: bool = False) -> bool:
         self._heartbeat_stop.set()
         self._shutdown_event.set()
         heartbeat_thread = self._heartbeat_thread
@@ -809,6 +809,9 @@ class MiniDmaControlProcess:
         if process is None:
             return True
         process.join(timeout=max(0.0, timeout_s))
+        if process.is_alive() and force:
+            process.terminate()
+            process.join(timeout=max(0.0, timeout_s))
         if not process.is_alive():
             try:
                 self._fault_connection.close()
@@ -865,7 +868,12 @@ __all__ = [
     "ControlSnapshot",
     "ControlStartRequest",
     "ControlState",
-    "MiniDmaControlProcess",
+    "TmaControlProcess",
     "SimulatedBackendConfig",
     "SimulatedControlBackend",
 ]
+
+# Compatibility for external code cloned before the TMA terminology migration.
+# New code must use TmaControlProcess.
+MiniDmaControlProcess = TmaControlProcess
+__all__.append("MiniDmaControlProcess")

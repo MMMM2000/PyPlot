@@ -42,9 +42,12 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
-from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
-from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
-from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.broker import (
+    ROLE_MINI_DMA_CURRENT,
+    ROLE_MINI_DMA_MOTOR,
+    ROLE_TMA_CURRENT,
+    ROLE_TMA_MOTOR,
+)
 from data_logging.shared_power_supply.discovery import (
     SerialPortIdentity,
     sort_hmp_port_identities,
@@ -52,7 +55,11 @@ from data_logging.shared_power_supply.discovery import (
 from data_logging.shared_power_supply.protocol import (
     BrokerJsonClient,
     broker_failure_diagnostic,
-    start_broker_server,
+)
+from data_logging.shared_power_supply.process import (
+    BrokerChannelConfig,
+    BrokerProcessConfig,
+    SharedPowerSupplyBrokerProcess,
 )
 from data_logging.source_provenance import (
     CAPTURE_PENDING,
@@ -89,7 +96,7 @@ from data_logging.mini_dma_logger.control_process import (
     ControlSessionIdentity,
     ControlStartRequest,
     ControlState,
-    MiniDmaControlProcess,
+    TmaControlProcess,
 )
 from data_logging.mini_dma_logger.production_control_backend import (
     capture_runtime_configuration,
@@ -113,6 +120,9 @@ DEFAULT_KOSICE_FOLDER = Path(
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
+TMA_START_ACK_TIMEOUT_S = 30.0
+TMA_COMMAND_ACK_TIMEOUT_S = 5.0
+TMA_EMERGENCY_ACK_TIMEOUT_S = 3.0
 DEFAULT_SHARED_BROKER_PORT = 8765
 SHARED_BROKER_SUPPLY_PROFILE_ID = "shared_hmp_broker"
 SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S = 0.5
@@ -5186,7 +5196,7 @@ class AutomationControlLoop:
                 return
             self._running = True
             self._paused = False
-            self._thread = Thread(target=self._run, name="MiniDMAAutomationControlLoop", daemon=True)
+            self._thread = Thread(target=self._run, name="TmaAutomationControlLoop", daemon=True)
             self._thread.start()
             self._condition.notify_all()
 
@@ -6480,7 +6490,7 @@ class TicCommandDispatcher:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_requested = False
-            self._thread = Thread(target=self._run, name="MiniDMATicCommandDispatcher", daemon=True)
+            self._thread = Thread(target=self._run, name="TmaTicCommandDispatcher", daemon=True)
             self._thread.start()
             self._condition.notify_all()
 
@@ -7080,7 +7090,7 @@ class SharedBrokerSupplyController:
                 channel=channel,
                 requested_hz=self.requested_readback_hz,
                 owner=self.owner,
-                role=ROLE_MINI_DMA_CURRENT,
+                role=ROLE_TMA_CURRENT,
             )
         )
 
@@ -7213,8 +7223,8 @@ class SharedBrokerSupplyController:
 
     def _role_for_channel(self, channel: int) -> str:
         if self.motor_channel is not None and int(channel) == self.motor_channel:
-            return ROLE_MINI_DMA_MOTOR
-        return ROLE_MINI_DMA_CURRENT
+            return ROLE_TMA_MOTOR
+        return ROLE_TMA_CURRENT
 
     def _limits_for_channel(self, channel: int) -> tuple[float | None, float | None]:
         if self.motor_channel is not None and int(channel) == self.motor_channel:
@@ -8009,12 +8019,13 @@ class MainWindow(QtWidgets.QMainWindow):
             else bool(control_process_enabled)
         )
         self._controller_process_mode = bool(controller_process_mode)
+        self._supply_lease_owner = f"tma-session-{uuid4()}"
         self._controller_process_error = ""
         self._controller_process_cadence_downgrade_accepted = False
         self._controller_process_prior_run_preflight_complete = False
         self._controller_process_hardware_preflight_complete = False
         self._controller_process_output_collision_action = OUTPUT_COLLISION_CANCEL
-        self._production_control_process: MiniDmaControlProcess | None = None
+        self._production_control_process: TmaControlProcess | None = None
         self._production_control_identity: ControlSessionIdentity | None = None
         self._production_control_generation = 0
         self._production_control_snapshot: object | None = None
@@ -8022,6 +8033,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_recipe_paused = False
         self._isolated_command_pending: str | None = None
         self._isolated_pending_sequence: int | None = None
+        self._isolated_command_deadline_s: float | None = None
         self._isolated_runtime_update_values: dict[str, float | bool] | None = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s: float | None = None
@@ -8438,7 +8450,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
-        self._owned_shared_broker_driver: HmpSerialDriver | None = None
+        self._owned_shared_broker_driver: None = None
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._sync_name_fields_in_progress = False
@@ -13554,6 +13566,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current_limit_a=None,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                 motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                owner=self._supply_lease_owner,
                 requested_readback_hz=self._requested_supply_readback_hz(),
             )
         return PowerSupplyController(
@@ -13743,46 +13756,49 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._motor_supply_enabled() and motor_channel is None:
             raise RuntimeError("Select a motor supply channel before starting the shared HMP broker.")
 
-        driver = HmpSerialDriver(
-            port_name=port_name,
-            baudrate=int(self.combo_supply_baud.currentText()),
-            timeout_s=0.7,
-        )
-        try:
-            driver.connect()
-            idn_text = identify_hmp_with_blank_retry(driver)
-            if driver.profile is None:
-                raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
-            broker = SharedPowerSupplyBroker(driver, driver.profile)
-            broker.assign_role(
+        channels = [
+            BrokerChannelConfig(
                 channel=current_channel,
-                role=ROLE_MINI_DMA_CURRENT,
-                confirmed=True,
+                role=ROLE_TMA_CURRENT,
                 voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
-                current_limit_a=None,
             )
-            if motor_channel is not None:
-                broker.assign_role(
+        ]
+        if motor_channel is not None:
+            channels.append(
+                BrokerChannelConfig(
                     channel=motor_channel,
-                    role=ROLE_MINI_DMA_MOTOR,
-                    confirmed=True,
+                    role=ROLE_TMA_MOTOR,
                     voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                     current_limit_a=float(self.spin_motor_supply_current_limit.value()),
                 )
-            broker.confirm_profile(name="TMA auto-started shared HMP broker")
-            server, thread = start_broker_server(
-                broker,
+            )
+        broker_process = SharedPowerSupplyBrokerProcess(
+            BrokerProcessConfig(
+                port_name=port_name,
+                baudrate=int(self.combo_supply_baud.currentText()),
                 host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
                 port=int(self.spin_shared_broker_port.value()),
+                channels=tuple(channels),
+                confirmation_name="TMA dedicated HMP broker",
+                parent_pid=os.getpid(),
             )
+        )
+        try:
+            broker_process.start()
+            ready = broker_process.wait_until_ready(timeout_s=10.0)
         except Exception:
-            driver.close()
+            broker_process.close(timeout_s=1.0, force=True)
             raise
 
-        self._owned_shared_broker_server = server
-        self._owned_shared_broker_thread = thread
-        self._owned_shared_broker_driver = driver
-        self._log(f"Started shared HMP broker on {self.edit_shared_broker_host.text().strip() or '127.0.0.1'}:{self.spin_shared_broker_port.value()} for {port_name}.")
+        # Keep the existing attribute as a compatibility boundary for older
+        # tests/plugins, but it now references a real OS-process supervisor.
+        self._owned_shared_broker_server = broker_process
+        self._owned_shared_broker_thread = None
+        self._owned_shared_broker_driver = None
+        self._log(
+            "Started process-owned TMA HMP broker "
+            f"PID {ready.owner_pid} on {ready.host}:{ready.port} for {port_name}."
+        )
 
     def _stop_owned_shared_broker(self) -> None:
         server = self._owned_shared_broker_server
@@ -13791,7 +13807,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_server = None
         self._owned_shared_broker_thread = None
         self._owned_shared_broker_driver = None
-        if server is not None:
+        if isinstance(server, SharedPowerSupplyBrokerProcess):
+            try:
+                server.close(timeout_s=2.0, force=True)
+            except Exception:
+                pass
+        elif server is not None:
+            # Compatibility with a broker created by an older in-memory
+            # window instance.
             try:
                 server.shutdown()
             except Exception:
@@ -14294,8 +14317,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.label_control_process_status.setText(detail)
                 self.label_control_process_status.setVisible(True)
                 return
+            try:
+                # The broker is a separate process, so this safety command
+                # remains available even if the recipe child is blocked.
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(
+                    "EMERGENCY STOP could not confirm broker outputs off: "
+                    f"{exc}"
+                )
             self._isolated_command_pending = "emergency"
             self._isolated_pending_sequence = None
+            self._isolated_command_deadline_s = (
+                time.monotonic() + TMA_EMERGENCY_ACK_TIMEOUT_S
+            )
             self.label_control_process_status.setStyleSheet("color: #b91c1c;")
             self.label_control_process_status.setText(
                 "Controller: EMERGENCY STOP requested; awaiting child safe-state confirmation"
@@ -16512,7 +16547,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _assert_local_hardware_access_allowed(self, resource: str) -> None:
         if self._isolated_recipe_active and not self._controller_process_mode:
             raise RuntimeError(
-                f"{resource} is owned by the dedicated Mini DMA control process"
+                f"{resource} is owned by the dedicated TMA control process"
             )
 
     def _connect_scale(self, checked: bool = False, *, show_errors: bool = True) -> bool:
@@ -27264,7 +27299,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _session_recovery_root(self) -> Path:
-        return Path(_default_download_dir()) / "MiniDMA_recovered_sessions"
+        return Path(_default_download_dir()) / "TMA_recovered_sessions"
 
     def _write_emergency_session_snapshot(
         self,
@@ -27281,7 +27316,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_name).strip("._") or "session"
                 self._session_recovery_path = (
                     self._session_recovery_root()
-                    / f"MiniDMA_recovered_{safe_name}_{_utc_filename_timestamp()}"
+                    / f"TMA_recovered_{safe_name}_{_utc_filename_timestamp()}"
                 )
             self._session_recovery_path.mkdir(parents=True, exist_ok=True)
             recovery_payload = dict(payload)
@@ -30848,13 +30883,29 @@ class MainWindow(QtWidgets.QMainWindow):
             ):
                 return False
             values = self._current_sweep_override_values_from_controls()
-            sequence = process.update_config(
-                identity,
-                capture_runtime_configuration(self),
-            )
+            try:
+                sequence = process.update_config(
+                    identity,
+                    capture_runtime_configuration(self),
+                )
+            except Exception as exc:
+                self._isolated_runtime_update_values = None
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
+                self._log(f"TMA runtime update could not be queued: {exc}")
+                self.label_control_process_status.setText(
+                    f"Controller: runtime update not sent ({exc})"
+                )
+                self.label_control_process_status.setVisible(True)
+                self._update_recipe_buttons()
+                return False
             self._isolated_runtime_update_values = dict(values)
             self._isolated_command_pending = "update_config"
             self._isolated_pending_sequence = sequence
+            self._isolated_command_deadline_s = (
+                time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+            )
             self.label_control_process_status.setText(
                 "Controller: runtime settings sent; awaiting child confirmation"
             )
@@ -31832,11 +31883,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._write_session_metadata()
 
-    def _create_production_control_process(self) -> MiniDmaControlProcess:
-        return MiniDmaControlProcess(
+    def _create_production_control_process(self) -> TmaControlProcess:
+        return TmaControlProcess(
             backend_factory_spec=BackendFactorySpec(
                 module=(
-                    "data_logging.mini_dma_logger."
+                    "data_logging.tma_logger."
                     "production_control_backend"
                 ),
                 factory="create_production_backend",
@@ -31861,6 +31912,17 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        if not self._using_shared_broker_supply():
+            shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
+            if shared_index < 0:
+                raise RuntimeError(
+                    "Process-isolated TMA requires the shared HMP broker profile."
+                )
+            self.combo_supply_profile.setCurrentIndex(shared_index)
+            self._log(
+                "Selected the process-owned shared HMP broker for isolated "
+                "TMA safety."
+            )
         if self._resume_recipe_state is not None:
             if self._resume_recipe_state.summary == summary:
                 resume_choice = self._ask_resume_stopped_recipe()
@@ -31955,6 +32017,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_manual_jog()
         if (
             self._scale_thread is not None
+            or self._ir_thread is not None
             or self._supply_controller is not None
             or self._tic_command_dispatcher is not None
             or self._tic_controller is not None
@@ -31967,6 +32030,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._disconnect_scale()
             self._log("UI scale ownership released.")
+            if self._ir_thread is not None:
+                self._disconnect_ir_thermometer()
+                self._log("UI IR ownership released.")
             if not self._stop_tic_dispatcher():
                 self._log(
                     "Dedicated-process startup aborted because the UI Tic worker did "
@@ -31991,7 +32057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_timer.stop()
         self._production_control_generation += 1
         identity = ControlSessionIdentity(
-            session_id=f"mini-dma-{uuid4()}",
+            session_id=f"tma-{uuid4()}",
             generation=self._production_control_generation,
         )
         policy = (
@@ -32010,7 +32076,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     config_json=config_json,
                 )
             )
-        except Exception:
+        except Exception as exc:
             try:
                 process.emergency_stop()
             except Exception as emergency_exc:
@@ -32031,13 +32097,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_supply_handoff_leases
             )
             self._isolated_supply_handoff_leases = {}
-            raise
+            detail = (
+                "Dedicated controller could not accept the recipe after "
+                f"hardware ownership transfer: {exc}"
+            )
+            self._log(detail)
+            self._close_length_setup_dialog()
+            self._first_overheating_preflight_decision = None
+            self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+            self.label_control_process_status.setText(
+                f"Controller: dedicated process start failed: {exc}"
+            )
+            self.label_control_process_status.setVisible(True)
+            QtWidgets.QMessageBox.critical(
+                self,
+                APP_NAME,
+                f"{detail}\n\nAll shared PSU outputs were commanded off.",
+            )
+            self._update_recipe_buttons()
+            return
         self._production_control_process = process
         self._production_control_identity = identity
         self._isolated_recipe_active = True
         self._isolated_recipe_paused = False
         self._isolated_command_pending = "start"
         self._isolated_pending_sequence = start_sequence
+        self._isolated_command_deadline_s = time.monotonic() + TMA_START_ACK_TIMEOUT_S
         self._isolated_last_plot_elapsed_s = None
         self._isolated_setup_elapsed_offset_s = None
         self._isolated_session_logging_enabled = False
@@ -32059,6 +32144,35 @@ class MainWindow(QtWidgets.QMainWindow):
         process = self._production_control_process
         if process is None:
             self._control_process_poll_timer.stop()
+            return
+        deadline_s = self._isolated_command_deadline_s
+        if (
+            self._isolated_command_pending is not None
+            and deadline_s is not None
+            and time.monotonic() >= deadline_s
+        ):
+            pending = self._isolated_command_pending
+            detail = (
+                f"TMA controller did not acknowledge {pending} before the "
+                "safety deadline."
+            )
+            self._log(detail)
+            try:
+                process.emergency_stop()
+            except Exception as exc:
+                self._log(f"TMA emergency signal after timeout failed: {exc}")
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(f"TMA broker emergency shutdown after timeout failed: {exc}")
+            try:
+                process.close(timeout_s=1.0, force=True)
+            except TypeError:
+                process.close(timeout_s=1.0)
+            self._finish_isolated_recipe(
+                state=ControlState.FAULTED,
+                detail=detail,
+            )
             return
         poll_fault_detail = getattr(process, "poll_fault_detail", None)
         fault_detail, _fault_traceback = (
@@ -32098,6 +32212,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 detail = str(getattr(snapshot, "last_command_detail", "") or "")
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
                 self._isolated_runtime_update_values = None
                 self._log(f"Control-process command rejected: {detail}")
                 self._update_recipe_buttons()
@@ -32117,6 +32232,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_runtime_update_values = None
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
                 if snapshot.state is ControlState.RUNNING:
                     self.label_control_process_status.setVisible(False)
                 self._update_recipe_buttons()
@@ -32137,6 +32253,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ):
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
                 self._update_recipe_buttons()
             self._automation_phase = str(
                 readback.get("automation_phase") or snapshot.state.value
@@ -32241,6 +32358,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_recipe_paused = False
         self._isolated_command_pending = None
         self._isolated_pending_sequence = None
+        self._isolated_command_deadline_s = None
         self._isolated_runtime_update_values = None
         self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s = None
@@ -32254,7 +32372,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._production_control_process = None
         self._production_control_identity = None
         if process is not None:
-            process.close(timeout_s=2.0)
+            closed = process.close(timeout_s=2.0)
+            if not closed:
+                self._log(
+                    "TMA controller did not exit after its terminal state; "
+                    "forcing process cleanup."
+                )
+                try:
+                    process.close(timeout_s=1.0, force=True)
+                except TypeError:
+                    process.close(timeout_s=1.0)
         if self._isolated_supply_handoff_leases:
             if state in {ControlState.FAULTED, ControlState.EMERGENCY}:
                 try:
@@ -32309,8 +32436,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if sequence <= self._isolated_last_log_sequence:
                 continue
             if (
-                self._isolated_last_log_sequence
-                and sequence > self._isolated_last_log_sequence + 1
+                sequence > self._isolated_last_log_sequence + 1
             ):
                 missed = sequence - self._isolated_last_log_sequence - 1
                 self._queue_run_log_display_line(
@@ -32331,6 +32457,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._live_plot_points = self._downsample_display_plot_points(
             list(self._live_plot_points)
         )
+
+    def _compact_length_setup_points(self) -> None:
+        """Bound setup rendering while retaining its complete time span."""
+
+        limit = 1000
+        if len(self._length_setup_points) <= limit:
+            return
+        recent_count = 200
+        older = self._length_setup_points[:-recent_count]
+        recent = self._length_setup_points[-recent_count:]
+        sampled = self._stable_downsample_older_plot_points(
+            older,
+            limit - recent_count,
+        )
+        self._length_setup_points = sampled + recent
 
     def _consume_isolated_plot_snapshot(
         self,
@@ -32388,8 +32529,7 @@ class MainWindow(QtWidgets.QMainWindow):
             display_elapsed_s = elapsed_s + self._isolated_setup_elapsed_offset_s
             point = replace(point, elapsed_s=display_elapsed_s)
             self._length_setup_points.append(point)
-            if len(self._length_setup_points) > 1000:
-                self._length_setup_points = self._length_setup_points[-1000:]
+            self._compact_length_setup_points()
             now_s = time.monotonic()
             if self._dialog_plot_refresh_due(
                 self._last_length_setup_plot_refresh_s,
@@ -32600,8 +32740,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 and identity is not None
                 and self._isolated_command_pending is None
             ):
-                self._isolated_pending_sequence = process.pause(identity)
+                try:
+                    self._isolated_pending_sequence = process.pause(identity)
+                except Exception as exc:
+                    self._log(f"TMA pause could not be queued: {exc}")
+                    self.label_control_process_status.setText(
+                        f"Controller: pause not sent ({exc})"
+                    )
+                    self.label_control_process_status.setVisible(True)
+                    self._update_recipe_buttons()
+                    return
                 self._isolated_command_pending = "pause"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
                 self.label_control_process_status.setText(
                     "Controller: pause requested; awaiting child confirmation"
                 )
@@ -32651,8 +32803,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 and identity is not None
                 and self._isolated_command_pending is None
             ):
-                self._isolated_pending_sequence = process.resume(identity)
+                try:
+                    self._isolated_pending_sequence = process.resume(identity)
+                except Exception as exc:
+                    self._log(f"TMA resume could not be queued: {exc}")
+                    self.label_control_process_status.setText(
+                        f"Controller: resume not sent ({exc})"
+                    )
+                    self.label_control_process_status.setVisible(True)
+                    self._update_recipe_buttons()
+                    return
                 self._isolated_command_pending = "resume"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
                 self.label_control_process_status.setText(
                     "Controller: resume requested; awaiting child confirmation"
                 )
@@ -32714,8 +32878,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 and identity is not None
                 and self._isolated_command_pending is None
             ):
-                self._isolated_pending_sequence = process.stop(identity)
+                try:
+                    self._isolated_pending_sequence = process.stop(identity)
+                except Exception as exc:
+                    self._log(f"TMA stop could not be queued: {exc}")
+                    # Stop is safety-relevant. Escalate immediately to the
+                    # independent emergency path rather than leaving a run
+                    # active with an ambiguous operator request.
+                    self._emergency_stop()
+                    return
                 self._isolated_command_pending = "stop"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
                 self._isolated_user_stop_requested = True
                 self.label_control_process_status.setText(
                     "Controller: stop requested; awaiting safe child shutdown"
@@ -33009,8 +33184,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._write_setup_point(point, flush=flush_now)
         if flush_now:
             self._last_session_data_flush_s = now_s
-        if len(self._length_setup_points) > 1000:
-            self._length_setup_points = self._length_setup_points[-1000:]
+        self._compact_length_setup_points()
         if self._dialog_plot_refresh_due(self._last_length_setup_plot_refresh_s, now_s=now_s):
             self._last_length_setup_plot_refresh_s = now_s
             self._refresh_length_setup_plot()
@@ -38351,7 +38525,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_periodic_callbacks_for_close()
         if self._isolated_recipe_active and self._production_control_process is not None:
             self._production_control_process.emergency_stop()
-            self._production_control_process.close(timeout_s=2.0)
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(
+                    "Application close could not confirm TMA broker outputs "
+                    f"off: {exc}"
+                )
+            self._production_control_process.close(timeout_s=2.0, force=True)
             self._production_control_process = None
             self._production_control_identity = None
             self._isolated_recipe_active = False

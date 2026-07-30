@@ -81,8 +81,8 @@ def test_launch_experiment_process_starts_child_from_repo_root(
 ) -> None:
     spec = ExperimentProcessSpec(
         display_name="TMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
     )
     calls: list[dict[str, object]] = []
 
@@ -102,7 +102,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     assert calls[0]["args"] == [
         str(tmp_path / "python.exe"),
         "-m",
-        "data_logging.mini_dma_logger.mini_dma_logger",
+        "data_logging.tma_logger.tma_logger",
     ]
     assert calls[0]["cwd"] == str(Path(__file__).resolve().parents[1])
     assert calls[0]["stdin"] is subprocess.DEVNULL
@@ -121,11 +121,11 @@ def test_launch_experiment_process_starts_child_from_repo_root(
 def test_experiment_process_log_path_uses_ignored_logs_dir() -> None:
     spec = ExperimentProcessSpec(
         display_name="TMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
     )
 
     path = experiment_process_log_path(spec, pid=123)
 
     assert path.parent == Path(__file__).resolve().parents[1] / "logs" / "experiment_processes"
-    assert path.name.endswith("-123-mini_dma.log")
+    assert path.name.endswith("-123-tma.log")

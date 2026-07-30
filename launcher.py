@@ -121,10 +121,16 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         module="data_logging.current_annealing_logger.current_annealing_logger",
         resource_tag="current_annealing",
     ),
+    "tma": ExperimentProcessSpec(
+        display_name="TMA Logger",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
+    ),
+    # Compatibility for frozen launchers and older shortcuts.
     "mini_dma": ExperimentProcessSpec(
         display_name="TMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
     ),
     "ac_susceptibility": ExperimentProcessSpec(
         display_name="AC Susceptibility Logger",
@@ -7601,8 +7607,8 @@ LOGGERS: Dict[str, LauncherFactory] = {
     ),
     "TMA Logger": _experiment_process_launcher(
         "TMA Logger",
-        "data_logging.mini_dma_logger.mini_dma_logger",
-        "mini_dma",
+        "data_logging.tma_logger.tma_logger",
+        "tma",
     ),
     "Shared HMP PSU Setup": _lazy(
         "data_logging.shared_power_supply.setup_ui", "main"

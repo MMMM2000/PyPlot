@@ -1,4 +1,4 @@
-# Mini DMA/TMA control-process migration
+# TMA control-process migration
 
 Status: production cutover on `codex/tma-control-process-production` (PR 301).
 PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
@@ -39,7 +39,7 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
    configuration, stops its acquisition workers, closes its PSU and Tic
    objects, explicitly releases the Tic ownership lease, and starts the child.
    A failed or non-quiescent release aborts startup.
-4. A production child adapter reconstructs the existing Mini DMA runtime only
+4. A production child adapter reconstructs the existing TMA runtime only
    inside the spawned process, reacquires the required hardware, verifies the
    handoff, and then starts the recipe. Scale acquisition, Tic and PSU objects,
    recipe clocks/state, immediate confirmation, and all run writers remain
@@ -69,6 +69,12 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
 Normal persisted app launches default to the isolated production path. The
 in-process path remains as an explicit constructor seam for deterministic tests
 and for the child-host adapter.
+
+New launch and controller code uses the canonical
+`data_logging.tma_logger` namespace. The historical
+`data_logging.mini_dma_logger` package, serialized builder section keys, bench
+role values, and existing data-folder names remain compatibility boundaries;
+renaming them in place would break old projects and confirmed bench profiles.
 
 ## Manual-control provenance
 

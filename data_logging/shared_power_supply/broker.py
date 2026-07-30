@@ -14,6 +14,10 @@ from .profiles import HMP_PROFILES, SupplyProfile
 ROLE_UNUSED = "unused"
 ROLE_MINI_DMA_MOTOR = "mini_dma_motor_supply"
 ROLE_MINI_DMA_CURRENT = "mini_dma_current_sweep"
+# Canonical source names. The serialized role values intentionally remain
+# unchanged so existing confirmed bench profiles are safe and compatible.
+ROLE_TMA_MOTOR = ROLE_MINI_DMA_MOTOR
+ROLE_TMA_CURRENT = ROLE_MINI_DMA_CURRENT
 ROLE_CURRENT_ANNEALING = "current_annealing"
 ROLE_AC_SUSCEPTIBILITY = "ac_susceptibility"
 ROLE_OTHER_MANUAL = "other_manual"
