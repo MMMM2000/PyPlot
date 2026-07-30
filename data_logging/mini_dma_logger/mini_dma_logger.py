@@ -82,6 +82,10 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlPolicy,
     ForceControlProfile,
 )
+from data_logging.mini_dma_logger.time_axis import (
+    TimeAxisDisplay,
+    time_axis_display as _time_axis_display,
+)
 
 try:
     import serial
@@ -2242,26 +2246,6 @@ class PlotChannel:
     color: str
     getter: Callable[[MeasurementPoint], float | None]
     hidden_from_picker: bool = False
-
-
-@dataclass(frozen=True)
-class TimeAxisDisplay:
-    divisor_s: float
-    label: str
-
-
-def _time_axis_display(max_elapsed_s: float) -> TimeAxisDisplay:
-    """Choose a readable display unit while keeping stored elapsed time in seconds."""
-    finite_elapsed_s = (
-        max(0.0, float(max_elapsed_s))
-        if math.isfinite(max_elapsed_s)
-        else 0.0
-    )
-    if finite_elapsed_s >= 3600.0:
-        return TimeAxisDisplay(divisor_s=3600.0, label="Time (h)")
-    if finite_elapsed_s >= 60.0:
-        return TimeAxisDisplay(divisor_s=60.0, label="Time (min)")
-    return TimeAxisDisplay(divisor_s=1.0, label="Time (s)")
 
 
 @dataclass
