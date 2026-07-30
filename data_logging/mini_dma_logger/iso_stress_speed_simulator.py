@@ -1,4 +1,4 @@
-"""Closed-loop, software-only Mini DMA iso-stress speed-policy simulator.
+"""Closed-loop, software-only TMA iso-stress speed-policy simulator.
 
 This module is intentionally independent of Qt, serial, PSU, scale, and Tic
 drivers.  It compares hold/resume policy shapes; it is not a digital twin and
@@ -1333,7 +1333,7 @@ def write_policy_matrix_outputs(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compare current and proposed Mini DMA iso-stress speed policies offline.")
+    parser = argparse.ArgumentParser(description="Compare current and proposed TMA iso-stress speed policies offline.")
     parser.add_argument("--scenario", action="append", choices=scenario_names())
     parser.add_argument("--policy", action="append", choices=POLICIES)
     parser.add_argument("--seeds", type=int, default=12)

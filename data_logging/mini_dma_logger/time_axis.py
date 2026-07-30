@@ -1,4 +1,4 @@
-"""Shared elapsed-time display units for live and saved Mini DMA plots."""
+"""Shared elapsed-time display units for live and saved TMA plots."""
 
 from __future__ import annotations
 

@@ -401,7 +401,7 @@ def _write_summary(path: Path | None, summary: Mapping[str, Any]) -> None:
 def _ensure_qapplication(qt_args: Sequence[str] | None) -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if not isinstance(app, QtWidgets.QApplication):
-        app = QtWidgets.QApplication(["mini-dma-bench", *(qt_args or [])])
+        app = QtWidgets.QApplication(["tma-bench", *(qt_args or [])])
     ensure_app_theme(app)
     return app
 

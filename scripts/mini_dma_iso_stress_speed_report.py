@@ -136,7 +136,7 @@ WHERE policy <> 'baseline'
     manifest = {
         "version": 1,
         "surface": "report",
-        "title": "Mini DMA iso-stress sweep policy simulation",
+        "title": "TMA iso-stress sweep policy simulation",
         "description": "Offline comparison of current hold/resume control and proposed speed policies.",
         "generatedAt": generated_at,
         "sources": [kpi_source, prague_source, stress_source, table_source, audit_source],
@@ -231,7 +231,7 @@ WHERE policy <> 'baseline'
             }
         ],
         "blocks": [
-            {"id": "title", "type": "markdown", "body": "# Mini DMA iso-stress sweep policy simulation\n\nOffline closed-loop comparison. No controller or hardware behavior was changed."},
+            {"id": "title", "type": "markdown", "body": "# TMA iso-stress sweep policy simulation\n\nOffline closed-loop comparison. No controller or hardware behavior was changed."},
             {"id": "technical-summary", "type": "markdown", "body": "## Technical summary\n\nNo simulated candidate passed all pre-registered gates. Evidence-only provides the only material Prague-like speed gain, but fails stress noninferiority in multiple hold-outs. Evidence plus probation preserves more stress control but misses the material speed target. The full proposed stack improves stress error in most scenarios but is slower than baseline. Do not implement these controller policies yet."},
             {"id": "kpi-strip", "type": "metric-strip", "cardIds": ["prague-speed", "prague-hold", "prague-error", "accepted"]},
             {"id": "prague-finding", "type": "markdown", "sourceId": "simulation-prague", "body": "## Key findings\n\nEvidence-only reduced Prague-like median elapsed time by 23.3% and hold time by 22.3%, with p95 true stress error 2.5% above baseline. It missed the 25% hold-time target. Evidence plus probation reduced elapsed time by only 7.5%. The full stack increased elapsed time by 2.2%."},

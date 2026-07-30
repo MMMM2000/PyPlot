@@ -1,4 +1,4 @@
-# Mini DMA iso-stress current-sweep speed design
+# TMA iso-stress current-sweep speed design
 
 Status: analysis and design only. No controller behavior is changed by this document.
 
@@ -6,7 +6,7 @@ Date: 2026-07-21
 
 ## Scope and provenance
 
-This design addresses the wall-clock cost of Mini DMA iso-stress current sweeps while preserving stress control. Its primary evidence is the finalized Prague run:
+This design addresses the wall-clock cost of TMA iso-stress current sweeps while preserving stress control. Its primary evidence is the finalized Prague run:
 
 `G:\My Drive\1 Projects\Praha\mini DMA\Ni48Fe25Ga23Co4 1_7 iso-stress`
 
@@ -450,7 +450,7 @@ policy offline, and do not run another hardware campaign until an
 estimator-based candidate passes the real-run hold-outs.
 
 The broader approach catalogue, ranking, and restart checklist are maintained
-in [Mini DMA iso-stress control options](mini_dma_iso_stress_control_options.md).
+in [TMA iso-stress control options](mini_dma_iso_stress_control_options.md).
 
 ## Volatile-response observer candidate (2026-07-29)
 

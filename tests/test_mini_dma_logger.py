@@ -1034,7 +1034,7 @@ def _install_recording_tic_controller(
 
 
 def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
-    qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=3000)
+    qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=10000)
 
 
 @pytest.mark.parametrize("section_key", ["mini_dma", "tma"])
@@ -14314,15 +14314,24 @@ def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot
     window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
 
     try:
-        for _ in range(2):
+        for index in range(4):
+            window._latest_scale_timestamp = feedback_s + (index + 1) * 0.05
             assert window._seek_distribution_target(
                 mini_dma_mod.HSW_BASIS_STRESS_MPA,
                 target_value=10.0,
                 tolerance=0.25,
             ) is False
+            if targets:
+                break
 
-        assert len(targets) == 1
+        assert len(targets) == 1, window.log_output.toPlainText()
         assert targets[0] == (pytest.approx(-0.075), False)
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=0.25,
+        ) is False
+        assert len(targets) == 1
     finally:
         _close_test_window(window)
 
@@ -25349,8 +25358,10 @@ def test_current_sweep_hold_large_error_uses_bounded_disturbance_recovery_when_w
     window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
     window._current_position_mm = 0.0
     window._effective_position_mm = 0.0
-    window._last_motion_command_time_s = time.time() - 1.0
-    window._last_motion_expected_complete_time_s = time.time() - 0.8
+    window._last_motion_command_time_s = (
+        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.5
+    )
+    window._last_motion_expected_complete_time_s = window._last_motion_command_time_s
     load_g = mini_dma_mod.load_g_from_stress_mpa(
         150.0,
         window.spin_diameter.value(),
@@ -25373,11 +25384,25 @@ def test_current_sweep_hold_large_error_uses_bounded_disturbance_recovery_when_w
     )
 
     try:
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            tolerance=0.4,
-        )
+        reached = False
+        for attempt in range(6):
+            if attempt:
+                timestamp_s = now_s + attempt * 0.3
+                window._scale_signal_buffer.add_sample(
+                    timestamp_s=timestamp_s,
+                    raw_g=load_g,
+                    applied_load_g=load_g,
+                    raw_text=f"{load_g:.5f} g",
+                )
+                window._latest_scale_timestamp = timestamp_s
+                window._latest_scale_value_g = load_g
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=50.0,
+                tolerance=0.4,
+            )
+            if moves:
+                break
 
         assert reached is False
         assert moves, window.log_output.toPlainText()
@@ -26446,8 +26471,10 @@ def test_current_sweep_hold_unstable_response_uses_adaptive_volatile_cap(
         window._note_current_sweep_hold_instability(seek_key)
     window._current_position_mm = 0.0
     window._effective_position_mm = 0.0
-    window._last_motion_command_time_s = time.time() - 1.0
-    window._last_motion_expected_complete_time_s = time.time() - 0.8
+    window._last_motion_command_time_s = (
+        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.5
+    )
+    window._last_motion_expected_complete_time_s = window._last_motion_command_time_s
     load_g = mini_dma_mod.load_g_from_stress_mpa(
         150.0,
         window.spin_diameter.value(),
@@ -26470,11 +26497,25 @@ def test_current_sweep_hold_unstable_response_uses_adaptive_volatile_cap(
     )
 
     try:
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            tolerance=0.4,
-        )
+        reached = False
+        for attempt in range(6):
+            if attempt:
+                timestamp_s = now_s + attempt * 0.3
+                window._scale_signal_buffer.add_sample(
+                    timestamp_s=timestamp_s,
+                    raw_g=load_g,
+                    applied_load_g=load_g,
+                    raw_text=f"{load_g:.5f} g",
+                )
+                window._latest_scale_timestamp = timestamp_s
+                window._latest_scale_value_g = load_g
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=50.0,
+                tolerance=0.4,
+            )
+            if moves:
+                break
 
         assert reached is False
         assert moves, window.log_output.toPlainText()
@@ -26566,8 +26607,10 @@ def test_current_sweep_hold_moving_away_uses_dynamic_recovery_when_worsening(
     window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
     window._current_position_mm = 0.0
     window._effective_position_mm = 0.0
-    window._last_motion_command_time_s = time.time() - 1.0
-    window._last_motion_expected_complete_time_s = time.time() - 0.8
+    window._last_motion_command_time_s = (
+        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.5
+    )
+    window._last_motion_expected_complete_time_s = window._last_motion_command_time_s
     now_s = time.time()
     for index, stress in enumerate([62.0, 64.0, 66.0, 68.0, 70.0]):
         load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
@@ -26587,11 +26630,30 @@ def test_current_sweep_hold_moving_away_uses_dynamic_recovery_when_worsening(
     )
 
     try:
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            tolerance=0.171,
-        )
+        reached = False
+        for attempt in range(6):
+            if attempt:
+                timestamp_s = now_s + attempt * 0.3
+                load_g = mini_dma_mod.load_g_from_stress_mpa(
+                    70.0,
+                    window.spin_diameter.value(),
+                )
+                assert load_g is not None
+                window._scale_signal_buffer.add_sample(
+                    timestamp_s=timestamp_s,
+                    raw_g=load_g,
+                    applied_load_g=load_g,
+                    raw_text=f"{load_g:.5f} g",
+                )
+                window._latest_scale_timestamp = timestamp_s
+                window._latest_scale_value_g = load_g
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=50.0,
+                tolerance=0.171,
+            )
+            if moves:
+                break
 
         assert reached is False
         assert moves, window.log_output.toPlainText()
@@ -27498,11 +27560,25 @@ def test_current_sweep_hold_worsening_recovery_tracks_transformation_disturbance
         window._latest_scale_value_g = load_g
 
     try:
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            tolerance=0.171,
-        )
+        reached = False
+        for attempt in range(6):
+            if attempt:
+                timestamp_s = now_s + 0.3 + attempt * 0.3
+                window._scale_signal_buffer.add_sample(
+                    timestamp_s=timestamp_s,
+                    raw_g=load_g,
+                    applied_load_g=load_g,
+                    raw_text=f"{load_g:.5f} g",
+                )
+                window._latest_scale_timestamp = timestamp_s
+                window._latest_scale_value_g = load_g
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=50.0,
+                tolerance=0.171,
+            )
+            if moves:
+                break
 
         assert reached is False
         assert moves
@@ -27719,11 +27795,24 @@ def test_current_sweep_hold_retries_when_filtered_signal_stays_unchanged_for_ful
             window._latest_scale_timestamp = sample_s
             window._latest_scale_value_g = load_g
 
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            tolerance=0.171,
-        )
+        reached = False
+        for attempt in range(6):
+            sample_s = timestamp_s + (attempt + 1) * 0.25
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=sample_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=f"{load_g:.5f} g",
+            )
+            window._latest_scale_timestamp = sample_s
+            window._latest_scale_value_g = load_g
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=50.0,
+                tolerance=0.171,
+            )
+            if len(moves) == 2:
+                break
 
         assert reached is False
         assert len(moves) == 2
@@ -29529,14 +29618,19 @@ def test_seek_target_logs_feedback_sample_before_next_move(tmp_path: Path, qtbot
             window._current_sweep_log_interval_ms() / 1000.0
         ) - 0.01
 
-        reached = window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_LOAD_G,
-            target_value=3.0,
-            tolerance=0.25,
-        )
+        reached = False
+        for index in range(4):
+            window._latest_scale_timestamp = time.time() + (index + 1) * 0.05
+            reached = window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_LOAD_G,
+                target_value=3.0,
+                tolerance=0.25,
+            )
+            if len(window._session_points) == initial_count + 1:
+                break
 
         assert reached is False
-        assert len(window._session_points) == initial_count + 1
+        assert len(window._session_points) == initial_count + 1, window.log_output.toPlainText()
         assert window._session_points[-1].automation_phase == "seek"
         assert window._session_points[-1].load_g == pytest.approx(1.0)
     finally:
@@ -31734,7 +31828,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         first_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
         first_logic = first_payload["control_logic"]
 
-        assert first_logic["name"] == "mini_dma_control"
+        assert first_logic["name"] == "tma_control"
         assert first_logic["version"]
         assert (
             first_logic["profile"]

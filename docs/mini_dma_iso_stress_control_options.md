@@ -1,4 +1,4 @@
-# Mini DMA iso-stress control options
+# TMA iso-stress control options
 
 Status: offline design catalogue. This document does not authorize controller
 or hardware changes.
@@ -515,4 +515,3 @@ When this task resumes:
 6. implement only the shadow estimator first;
 7. do not touch hardware until the offline matrix passes and a new
    `campaign.yaml` is approved.
-

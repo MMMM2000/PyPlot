@@ -134,8 +134,8 @@ RUNTIME_PENDING_SPINBOX_STYLE = (
 RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; }"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
-CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-30.1"
+CONTROL_LOGIC_NAME = "tma_control"
+CONTROL_LOGIC_VERSION = "2026-07-30.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -21478,8 +21478,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if change > required_change:
             return True
         latest_s = self._latest_scale_sample_time_s()
-        clock_key = seek_key[0], seek_key[1]
-        last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
+        last_s = self._seek_last_scale_timestamp_by_key.get(seek_key)
         if latest_s is None or last_s is None:
             return False
         return latest_s - float(last_s) >= self._current_sweep_hold_filter_window_s()
@@ -22375,7 +22374,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if last_s is None or latest_s > float(last_s) + 1e-9:
             count = min(required_samples, count + 1)
             self._seek_post_move_sample_count_by_key[seek_key] = count
-            self._seek_last_scale_timestamp_by_key[seek_key] = latest_s
             self._seek_last_scale_timestamp_by_clock[clock_key] = latest_s
         return was_short
 

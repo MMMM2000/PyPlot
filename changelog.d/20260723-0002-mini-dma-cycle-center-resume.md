@@ -1,4 +1,4 @@
-Mini DMA iso-stress current sweeps can now resume heating when a mature
+TMA iso-stress current sweeps can now resume heating when a mature
 fixed-current stress distribution is centered on the target, even if the
 short processed window continues to oscillate. The resume requires stationary
 long-window behavior, bounded robust dispersion, bounded fast and latest
