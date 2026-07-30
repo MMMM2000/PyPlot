@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -87,13 +88,20 @@ def tma_review_draft(run_path: Path) -> dict[str, Any]:
         ),
     )
     summary = tma_core.summarize_current_sweep(run)
-    summaries_by_target: dict[str, tuple[Any, int]] = {}
-    for item in summary.targets:
-        target_key = f"stress_mpa:{float(item.stress_mpa):.9g}"
-        previous = summaries_by_target.get(target_key)
-        summaries_by_target[target_key] = (item, 1 if previous is None else previous[1] + 1)
+    target_items = list(summary.targets)
+    sweep_counts = Counter(
+        f"{float(item.stress_mpa):.9g}" for item in target_items
+    )
+    sweep_indices: Counter[str] = Counter()
     targets: list[dict[str, Any]] = []
-    for target_key, (item, sweep_count) in summaries_by_target.items():
+    for item in target_items:
+        stress_key = f"{float(item.stress_mpa):.9g}"
+        sweep_indices[stress_key] += 1
+        sweep_index = int(sweep_indices[stress_key])
+        sweep_count = int(sweep_counts[stress_key])
+        target_key = f"stress_mpa:{stress_key}"
+        if sweep_count > 1:
+            target_key += f"|sweep:{sweep_index}"
         auto_values = {
             label: float(value)
             for label, value in (
@@ -114,8 +122,8 @@ def tma_review_draft(run_path: Path) -> dict[str, Any]:
         target["target"] = {
             "stress_mpa": float(item.stress_mpa),
             "load_g": None if item.load_g is None else float(item.load_g),
+            "sweep_index": sweep_index,
             "sweep_count": sweep_count,
-            "selected_sweep": sweep_count,
         }
         targets.append(target)
     if not targets:

@@ -11460,6 +11460,12 @@ class MainWindow(QtWidgets.QMainWindow):
         choose_transition_run.triggered.connect(
             self._choose_tma_run_for_transition_review
         )
+        choose_transition_parent = transition_menu.addAction(
+            "Review runs in parent folder..."
+        )
+        choose_transition_parent.triggered.connect(
+            self._choose_tma_parent_for_transition_review
+        )
         self.button_review_transitions.setMenu(transition_menu)
         hero_layout.addWidget(self.button_review_transitions)
 
@@ -14528,6 +14534,49 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         self._open_tma_transition_review(run_dir)
+
+    def _choose_tma_parent_for_transition_review(self) -> None:
+        if self._session_active:
+            self._review_latest_tma_transitions()
+            return
+        latest = self._latest_completed_tma_run_dir()
+        start_dir = latest.parent if latest is not None else self._current_tma_history_root()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose parent folder containing completed TMA runs",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        run_dirs: list[Path] = []
+        if (root / SESSION_MEASUREMENT_CSV).is_file():
+            run_dirs.append(root)
+        try:
+            children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+            return
+        run_dirs.extend(
+            child
+            for child in children
+            if child.is_dir() and (child / SESSION_MEASUREMENT_CSV).is_file()
+        )
+        if not run_dirs:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No completed runs found",
+                "No direct child run folders containing measurement.csv were found.",
+            )
+            return
+        try:
+            from plotting.shared.transition_review_dialog import review_tma_runs
+
+            review_tma_runs(self, run_dirs)
+        except Exception as exc:
+            self._log(f"TMA transition review queue failed for {root}: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
 
     def _maybe_offer_run_cleanup(self, current_run: Path | None = None) -> None:
         if not self._is_ui_thread():

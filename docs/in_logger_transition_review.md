@@ -4,9 +4,9 @@
 
 Current annealing and TMA loggers offer transition review immediately after a run reaches its finished state. The review result should be stored as a small, safe JSON sidecar beside the measurement data. Builder should import that sidecar as the portable review record instead of requiring the `.pydpj` project to be the only authority.
 
-The TMA Dashboard header also has a permanent `Review transitions...` split button. Its main action opens the latest completed run; the arrow menu selects an older run folder. The logger refuses to review the actively acquiring run. The automatic post-run prompt remains available after successful recipe completion.
+The TMA Dashboard header also has a permanent `Review transitions...` split button. Its main action opens the latest completed run; the arrow menu selects one older run or starts a queue from a selected parent folder. The queue includes only that folder and its direct child run folders containing `measurement.csv`. The logger refuses to review while acquisition is active. The automatic post-run prompt remains available after successful recipe completion.
 
-The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder or a legacy standalone measurement file. The logger also refuses to review an actively acquiring run.
+The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder, a legacy standalone measurement file, or a parent-folder queue. The queue includes only that folder and its direct child run folders containing `measurement.txt`. The logger also refuses to review while acquisition is active.
 
 This keeps the fast experimental workflow Martin wants while preserving Builder as the place for cross-sample overview, conflict review, column selection, and public database export.
 
@@ -21,6 +21,10 @@ The logger-facing editor reviews each transition point directly. Every As, Af, M
 The selected button is the chosen result, so there is no separate status dropdown or chosen-value column. Saving remains disabled until every displayed point at every TMA stress target has an explicit choice, and every selected manual point has a numeric value. Choosing **Not observed** for every point derives the whole-target `no_transition` status; mixed automatic, manual, and not-observed choices derive `manual_adjusted`. **Exclude from Builder analysis** remains an independent secondary decision and retains all reviewed values in the sidecar.
 
 Only targets present in the run are shown. Current Annealing hides the target list because it has one graph; multi-stress TMA runs retain a short target list with human labels such as `100 MPa · 2.92 g`. The compact choice panel sits beside the graph, keeping the plot large without spending a full-width block below it. Per-row decisions map backward-compatibly to `auto_values`, `manual_values`, `final_values`, and `cleared_labels`.
+
+The interactive plot uses PyQtGraph. Current Annealing uses a compact cycle selector so cycles 1, 2, and later cycles are reviewed independently without displaying every cycle row at once. Repeated TMA sweeps at the same stress are separate targets labelled `sweep 1/2`, `sweep 2/2`, and so on. The curve and marker objects are reused while navigating, downsampling and clipping are enabled, and manual markers remain draggable.
+
+A multi-run queue loads one run at a time, shows `run N/total`, changes the action to `Save & next`, and stops without touching later runs when Cancel is pressed. Each completed run is saved atomically before the next run opens.
 
 ## Safety and process boundary
 
@@ -64,7 +68,7 @@ Portable reviews can be created from existing Builder project decisions without 
 uv run python scripts/backfill_transition_reviews.py --project <copy.pydpj> --root <data-root> --out artifacts/transition-review-backfill
 ```
 
-The command is a dry run by default. Add `--write` only after reviewing the audit summary. Every candidate, including an absolute path saved in the project, must resolve inside one of the explicit `--root` directories. An out-of-root path is reported and never read or written. The command writes a sidecar only for an exact or unique in-root measurement match, never overwrites a conflicting sidecar, and records every written, skipped, ambiguous, stale, or conflicting item in a JSON audit manifest. Repeated TMA sweeps at the same stress are represented by one stress target using the final sweep, with the sweep count retained in target metadata.
+The command is a dry run by default. Add `--write` only after reviewing the audit summary. Every candidate, including an absolute path saved in the project, must resolve inside one of the explicit `--root` directories. An out-of-root path is reported and never read or written. The command writes a sidecar only for an exact or unique in-root measurement match, never overwrites a conflicting sidecar, and records every written, skipped, ambiguous, stale, or conflicting item in a JSON audit manifest. Repeated TMA sweeps at the same stress are preserved as separate targets. Historical `1st:` decisions map to the first sweep; an unqualified legacy stress decision maps to the final sweep for backward compatibility.
 
 Historical Current Annealing reviews that contain manual final values but were stored as `accepted_auto` are normalized to `manual_adjusted` during backfill. This repairs the review-state label without changing the reviewed transition values.
 

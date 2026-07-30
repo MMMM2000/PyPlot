@@ -6180,6 +6180,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 transition_menu = QtWidgets.QMenu(self.ui.pushButton_review_transitions)
                 choose_run_folder = transition_menu.addAction("Choose run folder...")
                 choose_run_folder.triggered.connect(self._choose_transition_run_folder)
+                choose_parent_folder = transition_menu.addAction("Review runs in parent folder...")
+                choose_parent_folder.triggered.connect(self._choose_transition_parent_folder)
                 choose_legacy_file = transition_menu.addAction("Choose legacy measurement file...")
                 choose_legacy_file.triggered.connect(self._choose_transition_measurement_file)
                 self.ui.pushButton_review_transitions.setMenu(transition_menu)
@@ -6788,6 +6790,56 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         self._open_transition_review(measurement)
+
+    def _choose_transition_parent_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose parent folder containing Current Annealing runs",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        measurements: list[Path] = []
+        own_measurement = root / "measurement.txt"
+        if own_measurement.is_file():
+            measurements.append(own_measurement)
+        try:
+            children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+            return
+        measurements.extend(
+            child / "measurement.txt"
+            for child in children
+            if child.is_dir() and (child / "measurement.txt").is_file()
+        )
+        if not measurements:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No completed runs found",
+                "No direct child run folders containing measurement.txt were found.",
+            )
+            return
+        try:
+            from plotting.shared.transition_review_dialog import (
+                review_current_annealing_files,
+            )
+
+            review_current_annealing_files(
+                self,
+                measurements,
+                sample_for_path=self._transition_review_sample,
+            )
+        except Exception as exc:
+            LOGGER.exception("Current Annealing transition review queue failed")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
 
     def _choose_transition_measurement_file(self) -> None:
         if self.process_running:

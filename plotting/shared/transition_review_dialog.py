@@ -6,12 +6,11 @@ import copy
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import pandas as pd
+import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
 
 from plotting.plugins.current_annealing import core as annealing_core
 from plotting.plugins.mini_dma import core as tma_core
@@ -60,10 +59,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
-        heading = QtWidgets.QLabel(
+        self.heading = QtWidgets.QLabel(
             f"Review after safe run completion \N{MIDDLE DOT} saves {self.sidecar_path.name} only"
         )
-        root.addWidget(heading)
+        root.addWidget(self.heading)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         root.addWidget(split, 1)
@@ -85,10 +84,19 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         plot_panel = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(0, 0, 0, 0)
-        self.figure = Figure(figsize=(7.2, 4.3), constrained_layout=True)
-        self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.mpl_connect("button_press_event", self._plot_clicked)
-        plot_layout.addWidget(self.canvas, 1)
+        self.plot_widget = pg.PlotWidget()
+        self.canvas = self.plot_widget
+        self.plot_item = self.plot_widget.getPlotItem()
+        self.plot_item.showGrid(x=True, y=True, alpha=0.16)
+        self.plot_item.setDownsampling(auto=True, mode="peak")
+        self.plot_item.setClipToView(True)
+        self.curve_item = self.plot_item.plot(
+            [], [], pen=pg.mkPen("#9ca3af", width=1.4)
+        )
+        self._auto_marker_items: dict[str, pg.InfiniteLine] = {}
+        self._manual_marker_items: dict[str, pg.InfiniteLine] = {}
+        self.plot_widget.scene().sigMouseClicked.connect(self._plot_scene_clicked)
+        plot_layout.addWidget(self.plot_widget, 1)
         right.addWidget(plot_panel)
 
         review_panel = QtWidgets.QWidget()
@@ -97,6 +105,18 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         review_layout = QtWidgets.QVBoxLayout(review_panel)
         review_layout.setContentsMargins(6, 0, 0, 0)
         review_layout.setSpacing(6)
+
+        self.review_unit_row = QtWidgets.QWidget()
+        review_unit_layout = QtWidgets.QHBoxLayout(self.review_unit_row)
+        review_unit_layout.setContentsMargins(0, 0, 0, 0)
+        review_unit_layout.setSpacing(4)
+        self.review_unit_label = QtWidgets.QLabel("Cycle")
+        self.review_unit_combo = QtWidgets.QComboBox()
+        review_unit_layout.addWidget(self.review_unit_label)
+        review_unit_layout.addWidget(self.review_unit_combo, 1)
+        review_layout.addWidget(self.review_unit_row)
+        self._review_unit_labels: list[list[str]] = []
+        self._active_unit_labels: list[str] = []
 
         self.values_box = QtWidgets.QGroupBox("Transition choices (mA)")
         self.values_box.setStyleSheet(
@@ -164,6 +184,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         review_layout.addStretch(1)
 
         self.exclude_check.toggled.connect(self._target_controls_changed)
+        self.review_unit_combo.currentIndexChanged.connect(
+            self._review_unit_changed
+        )
         self.values_table.itemSelectionChanged.connect(self._selected_row_changed)
         self.manual_value_edit.textChanged.connect(self._manual_text_changed)
         self.manual_value_edit.editingFinished.connect(
@@ -200,8 +223,15 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             load = metadata.get("load_g")
             if stress is not None:
                 label = f"{float(stress):.6g} MPa"
+                sweep_index = metadata.get("sweep_index")
+                sweep_count = metadata.get("sweep_count")
+                if sweep_index is not None and int(sweep_count or 1) > 1:
+                    label += (
+                        f" \N{MIDDLE DOT} sweep {int(sweep_index)}/"
+                        f"{int(sweep_count)}"
+                    )
                 if load is not None:
-                    label += f" · {float(load):.6g} g"
+                    label += f" \N{MIDDLE DOT} {float(load):.6g} g"
                 return label
         if self.payload.get("experiment_family") == "current_annealing":
             return "Current Annealing"
@@ -230,6 +260,59 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             available.update(("As", "Af", "Ms", "Mf"))
         return [label for label in LABELS if label in available]
 
+    def _review_units_for_target(
+        self,
+        target: Mapping[str, Any],
+    ) -> list[tuple[str, list[str]]]:
+        labels = self._labels_for_target(target)
+        if self.payload.get("experiment_family") != "current_annealing":
+            return [("Transitions", labels)]
+        loop_numbers = sorted(
+            {
+                int(label[-1])
+                for label in labels
+                if label[:-1] in {"As", "Af", "Ms", "Mf"}
+                and label[-1:].isdigit()
+            }
+        )
+        return [
+            (
+                f"Cycle {loop}",
+                [label for label in labels if label.endswith(str(loop))],
+            )
+            for loop in loop_numbers
+        ]
+
+    def _populate_review_units(self, target: Mapping[str, Any]) -> None:
+        blocker = QtCore.QSignalBlocker(self.review_unit_combo)
+        try:
+            units = self._review_units_for_target(target)
+            self.review_unit_combo.clear()
+            self._review_unit_labels = []
+            for title, labels in units:
+                self.review_unit_combo.addItem(title)
+                self._review_unit_labels.append(labels)
+            self.review_unit_combo.setCurrentIndex(0 if units else -1)
+            self._active_unit_labels = (
+                list(self._review_unit_labels[0]) if self._review_unit_labels else []
+            )
+            self.review_unit_row.setVisible(len(units) > 1)
+        finally:
+            del blocker
+
+    def _review_unit_changed(self, index: int) -> None:
+        if self._loading or index < 0 or index >= len(self._review_unit_labels):
+            return
+        self._store_target_controls()
+        self._active_unit_labels = list(self._review_unit_labels[index])
+        target = self._targets()[self._target_index]
+        self._loading = True
+        self._populate_values_table(target)
+        self._loading = False
+        self._selected_row_changed()
+        self._update_decision_summary()
+        self._draw_target()
+
     def _initial_choice(
         self,
         target: Mapping[str, Any],
@@ -251,7 +334,11 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
     def _populate_values_table(self, target: Mapping[str, Any]) -> None:
         blocker = QtCore.QSignalBlocker(self.values_table)
         try:
-            labels = self._labels_for_target(target)
+            labels = (
+                list(self._active_unit_labels)
+                if self._active_unit_labels
+                else self._labels_for_target(target)
+            )
             auto = target.get("auto_values") if isinstance(target.get("auto_values"), Mapping) else {}
             manual = target.get("manual_values") if isinstance(target.get("manual_values"), Mapping) else {}
             self.values_table.clearContents()
@@ -421,18 +508,21 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 return False
         return True
 
-    def _all_targets_ready(self) -> bool:
-        for index, target in enumerate(self._targets()):
-            if index == self._target_index:
-                if not self._current_target_ready():
-                    return False
-                continue
-            if str(target.get("status") or "unreviewed") in {
-                "unreviewed",
-                "needs_attention",
-            }:
+    def _target_ready(self, target: Mapping[str, Any]) -> bool:
+        for label in self._labels_for_target(target):
+            choice = self._initial_choice(target, label)
+            if choice is None:
                 return False
-        return bool(self._targets())
+            if choice == "manual":
+                manual = target.get("manual_values")
+                if not isinstance(manual, Mapping) or label not in manual:
+                    return False
+        return True
+
+    def _all_targets_ready(self) -> bool:
+        return bool(self._targets()) and all(
+            self._target_ready(target) for target in self._targets()
+        )
 
     def _update_decision_summary(self) -> None:
         choices = list(self._choices.values())
@@ -478,31 +568,68 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             return
         target = self._targets()[self._target_index]
         auto = dict(target.get("auto_values") or {})
-        ready = self._current_target_ready()
+        active_labels = set(self._choices)
         manual = {
-            label: self._manual_values[label]
-            for label, choice in self._choices.items()
-            if choice == "manual" and label in self._manual_values
+            str(label): float(value)
+            for label, value in dict(target.get("manual_values") or {}).items()
+            if label not in active_labels
         }
-        cleared = sorted(
+        manual.update(
+            {
+                label: self._manual_values[label]
+                for label, choice in self._choices.items()
+                if choice == "manual" and label in self._manual_values
+            }
+        )
+        cleared = {
+            str(label)
+            for label in target.get("cleared_labels", ())
+            if label not in active_labels
+        }
+        cleared.update(
             label
             for label, choice in self._choices.items()
             if choice == "not_observed"
         )
         final = {
-            label: float(auto[label])
-            for label, choice in self._choices.items()
-            if choice == "auto" and label in auto
+            str(label): float(value)
+            for label, value in dict(target.get("final_values") or {}).items()
+            if label not in active_labels
         }
-        final.update(manual)
-        selected = set(self._choices.values())
+        final.update(
+            {
+                label: float(auto[label])
+                for label, choice in self._choices.items()
+                if choice == "auto" and label in auto
+            }
+        )
+        final.update(
+            {
+                label: self._manual_values[label]
+                for label, choice in self._choices.items()
+                if choice == "manual" and label in self._manual_values
+            }
+        )
+        target["manual_values"] = manual
+        target["final_values"] = final
+        target["cleared_labels"] = sorted(cleared)
+        all_choices = {
+            label: (
+                self._choices[label]
+                if label in self._choices
+                else self._initial_choice(target, label)
+            )
+            for label in self._labels_for_target(target)
+        }
+        ready = all(choice is not None for choice in all_choices.values())
+        selected = set(all_choices.values())
         if not ready:
             base_status = "unreviewed"
         elif selected == {"auto"}:
             base_status = "accepted_auto"
         elif selected == {"not_observed"}:
             base_status = "no_transition"
-            final = {}
+            target["final_values"] = {}
         else:
             base_status = "manual_adjusted"
         excluded = self.exclude_check.isChecked() and ready
@@ -517,9 +644,6 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             "manual_adjusted",
             "no_transition",
         }
-        target["manual_values"] = manual
-        target["final_values"] = final
-        target["cleared_labels"] = cleared
 
     def _target_changed(self, row: int) -> None:
         if row < 0 or row >= len(self._targets()):
@@ -529,60 +653,145 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         target = self._targets()[row]
         self._loading = True
         self.exclude_check.setChecked(str(target.get("status") or "") == "excluded")
+        self._populate_review_units(target)
         self._populate_values_table(target)
         self._loading = False
         self._selected_row_changed()
         self._update_decision_summary()
         self._draw_target()
 
+    def _marker_item(
+        self,
+        pool: dict[str, pg.InfiniteLine],
+        label: str,
+        *,
+        color: str,
+        dashed: bool,
+        movable: bool,
+    ) -> pg.InfiniteLine:
+        marker = pool.get(label)
+        if marker is not None:
+            marker.setMovable(movable)
+            return marker
+        style = (
+            QtCore.Qt.PenStyle.DashLine
+            if dashed
+            else QtCore.Qt.PenStyle.SolidLine
+        )
+        marker = pg.InfiniteLine(
+            angle=90,
+            movable=movable,
+            pen=pg.mkPen(color, width=1.4, style=style),
+            hoverPen=pg.mkPen("#f59e0b", width=2.0),
+            label=label,
+            labelOpts={"position": 0.92, "color": color},
+        )
+        if movable:
+            marker.sigPositionChangeFinished.connect(
+                lambda moved, selected_label=label: self._manual_marker_moved(
+                    selected_label, float(moved.value())
+                )
+            )
+        self.plot_item.addItem(marker)
+        pool[label] = marker
+        return marker
+
+    def _hide_markers(self) -> None:
+        for marker in (
+            *self._auto_marker_items.values(),
+            *self._manual_marker_items.values(),
+        ):
+            marker.hide()
+
     def _draw_target(self) -> None:
-        self.figure.clear()
-        axes = self.figure.add_subplot(111)
+        self._hide_markers()
         target = self._targets()[self._target_index]
         plot = self.plots.get(str(target.get("target_key") or ""))
         if plot is None:
-            axes.text(0.5, 0.5, "Plot unavailable", ha="center", va="center")
-        else:
-            axes.plot(plot.x, plot.y, color="#1f2937", linewidth=1.2)
-            axes.set_xlabel("Current (mA)")
-            axes.set_ylabel(plot.y_label)
-            axes.set_title(plot.title)
-        auto = target.get("auto_values") if isinstance(target.get("auto_values"), Mapping) else {}
+            self.curve_item.setData([], [])
+            self.plot_item.setTitle("Plot unavailable")
+            return
+        x = pd.to_numeric(plot.x, errors="coerce")
+        y = pd.to_numeric(plot.y, errors="coerce")
+        valid = x.notna() & y.notna()
+        self.curve_item.setData(
+            x.loc[valid].to_numpy(dtype=float),
+            y.loc[valid].to_numpy(dtype=float),
+        )
+        self.plot_item.setLabel("bottom", "Current", units="mA")
+        self.plot_item.setLabel("left", plot.y_label)
+        self.plot_item.setTitle(plot.title)
+        auto = (
+            target.get("auto_values")
+            if isinstance(target.get("auto_values"), Mapping)
+            else {}
+        )
         for label, value in auto.items():
-            if self._choices.get(label) != "not_observed":
-                axes.axvline(
-                    float(value), color="#9ca3af", linestyle="--", linewidth=0.9
-                )
-                axes.text(
-                    float(value),
-                    0.98,
-                    label,
-                    transform=axes.get_xaxis_transform(),
-                    va="top",
-                )
+            if self._choices.get(label) == "not_observed":
+                continue
+            marker = self._marker_item(
+                self._auto_marker_items,
+                label,
+                color="#9ca3af",
+                dashed=True,
+                movable=False,
+            )
+            marker.setPos(float(value))
+            marker.show()
         for label, value in self._manual_values.items():
-            if self._choices.get(label) == "manual":
-                axes.axvline(float(value), color="#dc2626", linewidth=1.5)
-                axes.text(
-                    float(value),
-                    0.88,
-                    label,
-                    transform=axes.get_xaxis_transform(),
-                    va="top",
-                )
-        self.canvas.draw_idle()
+            if self._choices.get(label) != "manual":
+                continue
+            marker = self._marker_item(
+                self._manual_marker_items,
+                label,
+                color="#dc2626",
+                dashed=False,
+                movable=True,
+            )
+            marker.setPos(float(value))
+            marker.show()
+        self.plot_item.enableAutoRange()
+
+    def _set_manual_plot_value(self, value: float) -> None:
+        label = self._selected_label()
+        if not label or not math.isfinite(value):
+            return
+        self._choices[label] = "manual"
+        self._manual_values[label] = float(value)
+        self._update_choice_row(label)
+        self._selected_row_changed()
+        self._target_controls_changed()
+
+    def _plot_scene_clicked(self, event: object) -> None:
+        button = getattr(event, "button", lambda: None)()
+        if button not in {None, QtCore.Qt.MouseButton.LeftButton}:
+            return
+        scene_position = getattr(event, "scenePos", lambda: None)()
+        if scene_position is None:
+            return
+        view_box = self.plot_item.getViewBox()
+        if not self.plot_item.sceneBoundingRect().contains(scene_position):
+            return
+        value = view_box.mapSceneToView(scene_position).x()
+        self._set_manual_plot_value(float(value))
+
+    def _manual_marker_moved(self, label: str, value: float) -> None:
+        if label not in self._choices or not math.isfinite(value):
+            return
+        row = self._row_for_label(label)
+        if row >= 0:
+            self.values_table.selectRow(row)
+        self._choices[label] = "manual"
+        self._manual_values[label] = float(value)
+        self._update_choice_row(label)
+        self._selected_row_changed()
+        self._store_target_controls()
+        self._update_decision_summary()
 
     def _plot_clicked(self, event: Any) -> None:
         if event.inaxes is None or event.xdata is None:
             return
-        label = self._selected_label()
-        if not label:
-            return
-        self._choices[label] = "manual"
-        self._manual_values[label] = float(event.xdata)
-        self._update_choice_row(label)
-        self._selected_row_changed()
-        self._target_controls_changed()
+        self._set_manual_plot_value(float(event.xdata))
 
     def _save_and_accept(self) -> None:
         self._store_target_controls()
@@ -601,6 +810,7 @@ def review_current_annealing_file(
     measurement_path: Path,
     *,
     sample: Mapping[str, Any] | None = None,
+    queue_position: tuple[int, int] | None = None,
 ) -> bool:
     path = Path(measurement_path)
     sidecar = sidecar_path_for_measurement(path, family="current_annealing")
@@ -611,10 +821,16 @@ def review_current_annealing_file(
     frame = annealing_core.load_file(str(path))
     plot = ReviewPlot(frame["I_mA"], frame["R_Ohm"], path.parent.name or path.stem, "Resistance (ohm)")
     dialog = PortableTransitionReviewDialog(payload, {"graph": plot}, sidecar, parent)
+    _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
 
 
-def review_tma_run(parent: QtWidgets.QWidget, run_path: Path) -> bool:
+def review_tma_run(
+    parent: QtWidgets.QWidget,
+    run_path: Path,
+    *,
+    queue_position: tuple[int, int] | None = None,
+) -> bool:
     run_dir = Path(run_path)
     sidecar = sidecar_path_for_measurement(run_dir, family="tma")
     draft = tma_review_draft(run_dir)
@@ -623,21 +839,89 @@ def review_tma_run(parent: QtWidgets.QWidget, run_path: Path) -> bool:
         raise ValueError("Existing transition review belongs to different TMA run content.")
     run = tma_core.load_run(run_dir)
     plots: dict[str, ReviewPlot] = {}
-    for target, group in tma_core.current_sweep_groups(run.frame):
-        key = f"stress_mpa:{float(target):.9g}"
+    groups = tma_core.current_sweep_groups(run.frame)
+    sweep_counts: dict[str, int] = {}
+    for target, _group in groups:
+        stress_key = f"{float(target):.9g}"
+        sweep_counts[stress_key] = sweep_counts.get(stress_key, 0) + 1
+    sweep_indices: dict[str, int] = {}
+    for target, group in groups:
+        stress_key = f"{float(target):.9g}"
+        sweep_indices[stress_key] = sweep_indices.get(stress_key, 0) + 1
+        sweep_index = sweep_indices[stress_key]
+        sweep_count = sweep_counts[stress_key]
+        key = f"stress_mpa:{stress_key}"
+        if sweep_count > 1:
+            key += f"|sweep:{sweep_index}"
+        title = f"{run.sample_name} \N{MIDDLE DOT} {float(target):.6g} MPa"
+        if sweep_count > 1:
+            title += f" \N{MIDDLE DOT} sweep {sweep_index}/{sweep_count}"
         plots[key] = ReviewPlot(
             pd.to_numeric(group["current_mA"], errors="coerce"),
             pd.to_numeric(group["strain_pct"], errors="coerce"),
-            f"{run.sample_name} · {float(target):.6g} MPa",
+            title,
             "Strain (%)",
         )
     dialog = PortableTransitionReviewDialog(payload, plots, sidecar, parent)
+    _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
+
+
+def _apply_queue_context(
+    dialog: PortableTransitionReviewDialog,
+    queue_position: tuple[int, int] | None,
+) -> None:
+    if queue_position is None:
+        return
+    index, total = queue_position
+    dialog.setWindowTitle(f"Transition review - run {index}/{total}")
+    dialog.heading.setText(
+        f"Run {index}/{total} - "
+        f"saves {dialog.sidecar_path.name} in this run folder"
+    )
+    dialog.save_button.setText("Save && next" if index < total else "Save review")
+
+
+def review_current_annealing_files(
+    parent: QtWidgets.QWidget,
+    measurement_paths: Sequence[Path],
+    *,
+    sample_for_path: Callable[[Path], Mapping[str, Any] | None] | None = None,
+) -> int:
+    paths = [Path(path) for path in measurement_paths]
+    completed = 0
+    for index, path in enumerate(paths, start=1):
+        sample = sample_for_path(path) if sample_for_path is not None else None
+        if not review_current_annealing_file(
+            parent,
+            path,
+            sample=sample,
+            queue_position=(index, len(paths)),
+        ):
+            break
+        completed += 1
+    return completed
+
+
+def review_tma_runs(parent: QtWidgets.QWidget, run_paths: Sequence[Path]) -> int:
+    paths = [Path(path) for path in run_paths]
+    completed = 0
+    for index, path in enumerate(paths, start=1):
+        if not review_tma_run(
+            parent,
+            path,
+            queue_position=(index, len(paths)),
+        ):
+            break
+        completed += 1
+    return completed
 
 
 __all__ = [
     "PortableTransitionReviewDialog",
     "ReviewPlot",
     "review_current_annealing_file",
+    "review_current_annealing_files",
     "review_tma_run",
+    "review_tma_runs",
 ]

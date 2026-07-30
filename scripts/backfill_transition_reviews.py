@@ -185,9 +185,19 @@ def _apply_tma_reviews(draft: dict[str, Any], reviews: list[Mapping[str, Any]]) 
             and isinstance(target.get("target"), Mapping)
             and abs(float(target["target"]["stress_mpa"]) - stress) <= 1e-6
         ]
-        if len(candidates) != 1:
+        if not candidates:
             continue
-        target = candidates[0]
+        candidates.sort(
+            key=lambda candidate: int(
+                dict(candidate.get("target") or {}).get("sweep_index", 1) or 1
+            )
+        )
+        target_label = str(review.get("target_label") or "")
+        target = (
+            candidates[0]
+            if target_label.strip().casefold().startswith("1st:")
+            else candidates[-1]
+        )
         old_status = str(review.get("status") or "")
         manual = dict(review.get("manual_values_mA") or {})
         status = (

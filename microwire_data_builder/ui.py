@@ -8205,6 +8205,8 @@ class _MiniDmaTransitionReviewEntry:
     run: Any
     group: pd.DataFrame
     target_summary: Any
+    sweep_index: int = 1
+    sweep_count: int = 1
 
 
 def _transition_review_content_identity(
@@ -8451,8 +8453,22 @@ def _mini_dma_transition_review_entries(
             continue
         sample = str(getattr(record, "sample", "") or getattr(run, "sample_name", "") or path.name)
         run_label = str(getattr(record, "label", "") or path.name)
-        for (target, group), target_summary in zip(groups, summary.targets, strict=False):
-            target_label = mini_dma_core._format_plot_target_label(run, float(target), group)
+        paired = list(zip(groups, summary.targets, strict=False))
+        sweep_counts: Dict[str, int] = {}
+        for (target, _group), _target_summary in paired:
+            stress_key = f"{float(target):.9g}"
+            sweep_counts[stress_key] = sweep_counts.get(stress_key, 0) + 1
+        sweep_indices: Dict[str, int] = {}
+        for (target, group), target_summary in paired:
+            stress_key = f"{float(target):.9g}"
+            sweep_indices[stress_key] = sweep_indices.get(stress_key, 0) + 1
+            sweep_index = sweep_indices[stress_key]
+            sweep_count = sweep_counts[stress_key]
+            target_label = mini_dma_core._format_plot_target_label(
+                run, float(target), group
+            )
+            if sweep_count > 1:
+                target_label += f" \N{MIDDLE DOT} sweep {sweep_index}/{sweep_count}"
             entries.append(
                 _MiniDmaTransitionReviewEntry(
                     sample=sample,
@@ -8463,6 +8479,8 @@ def _mini_dma_transition_review_entries(
                     run=run,
                     group=group,
                     target_summary=target_summary,
+                    sweep_index=sweep_index,
+                    sweep_count=sweep_count,
                 )
             )
     return entries
@@ -8522,10 +8540,22 @@ def _import_portable_tma_reviews(
                     abs_tol=1e-9,
                 )
             ]
+            sweep_index = (
+                int(target_metadata.get("sweep_index", 0) or 0)
+                if isinstance(target_metadata, Mapping)
+                else 0
+            )
+            if sweep_index > 0:
+                matching_entries = [
+                    entry
+                    for entry in matching_entries
+                    if entry.sweep_index == sweep_index
+                ]
             if len(matching_entries) != 1:
                 logger.warning(
-                    "Could not uniquely match portable TMA target %.9g in %s",
+                    "Could not uniquely match portable TMA target %.9g sweep %s in %s",
                     stress_mpa,
+                    sweep_index or "unspecified",
                     review_path,
                 )
                 continue

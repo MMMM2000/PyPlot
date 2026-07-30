@@ -386,7 +386,118 @@ def test_review_dialog_requires_each_choice_and_uses_human_tma_labels(
     assert dialog.payload["targets"][1]["status"] == "no_transition"
     assert "4 not observed" in dialog.decision_summary.text()
 
-def test_tma_review_draft_collapses_repeated_stress_sweeps(
+def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -> None:
+    import pyqtgraph as pg
+
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    dialog = PortableTransitionReviewDialog(
+        _review(frame),
+        {
+            "graph": ReviewPlot(
+                frame["I_mA"], frame["R_ohm"], "test run", "Resistance (ohm)"
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    assert isinstance(dialog.plot_widget, pg.PlotWidget)
+    assert dialog.canvas is dialog.plot_widget
+    first_auto = dialog._auto_marker_items["As1"]  # noqa: SLF001
+    first_manual = dialog._manual_marker_items["As1"]  # noqa: SLF001
+    dialog._draw_target()  # noqa: SLF001
+    assert dialog._auto_marker_items["As1"] is first_auto  # noqa: SLF001
+    assert dialog._manual_marker_items["As1"] is first_manual  # noqa: SLF001
+
+    dialog._manual_marker_moved("As1", 84.25)  # noqa: SLF001
+    target = dialog.payload["targets"][0]
+    assert target["manual_values"]["As1"] == 84.25
+    assert target["final_values"]["As1"] == 84.25
+
+
+def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    fingerprint = dataframe_fingerprint(
+        frame, namespace="current_annealing", columns=("I_mA", "R_ohm")
+    )
+    auto = {
+        "As1": 20.0,
+        "Af1": 30.0,
+        "Ms1": 18.0,
+        "Mf1": 12.0,
+        "As2": 22.0,
+        "Af2": 32.0,
+        "Ms2": 19.0,
+        "Mf2": 13.0,
+    }
+    target = make_target(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        target_key="graph",
+        auto_values=auto,
+    )
+    payload = make_review(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "graph": ReviewPlot(
+                frame["I_mA"], frame["R_ohm"], "two cycles", "Resistance (ohm)"
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.review_unit_row.isVisible() is False
+    dialog.show()
+    qtbot.wait(20)
+    assert dialog.review_unit_row.isVisible() is True
+    assert [dialog.review_unit_combo.itemText(index) for index in range(2)] == [
+        "Cycle 1",
+        "Cycle 2",
+    ]
+    assert set(dialog.choice_buttons) == {"As1", "Af1", "Ms1", "Mf1"}
+    for label in tuple(dialog.choice_buttons):
+        dialog.choice_buttons[label]["auto"].click()
+    assert not dialog.save_button.isEnabled()
+
+    dialog.review_unit_combo.setCurrentIndex(1)
+    assert set(dialog.choice_buttons) == {"As2", "Af2", "Ms2", "Mf2"}
+    assert dialog.payload["targets"][0]["final_values"] == {
+        "As1": 20.0,
+        "Af1": 30.0,
+        "Ms1": 18.0,
+        "Mf1": 12.0,
+    }
+    for label in tuple(dialog.choice_buttons):
+        dialog.choice_buttons[label]["not_observed"].click()
+    assert dialog.save_button.isEnabled()
+    stored = dialog.payload["targets"][0]
+    assert stored["status"] == "manual_adjusted"
+    assert stored["cleared_labels"] == ["Af2", "As2", "Mf2", "Ms2"]
+
+    dialog.review_unit_combo.setCurrentIndex(0)
+    assert all(
+        dialog.choice_buttons[label]["auto"].isChecked()
+        for label in ("As1", "Af1", "Ms1", "Mf1")
+    )
+
+
+def test_tma_review_draft_preserves_repeated_stress_sweeps(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -437,12 +548,16 @@ def test_tma_review_draft_collapses_repeated_stress_sweeps(
 
     draft = tma_review_draft(tmp_path)
 
-    assert len(draft["targets"]) == 1
-    target = draft["targets"][0]
-    assert target["target_key"] == "stress_mpa:50"
-    assert target["auto_values"] == {"As": 12.0, "Af": 22.0}
-    assert target["target"]["sweep_count"] == 2
-    assert target["target"]["selected_sweep"] == 2
+    assert len(draft["targets"]) == 2
+    first, second = draft["targets"]
+    assert first["target_key"] == "stress_mpa:50|sweep:1"
+    assert second["target_key"] == "stress_mpa:50|sweep:2"
+    assert first["auto_values"] == {"As": 10.0, "Af": 20.0}
+    assert second["auto_values"] == {"As": 12.0, "Af": 22.0}
+    assert first["target"]["sweep_index"] == 1
+    assert second["target"]["sweep_index"] == 2
+    assert first["target"]["sweep_count"] == 2
+    assert second["target"]["sweep_count"] == 2
 
 def test_builder_imports_matching_tma_sidecar_by_stress_target(
     tmp_path, monkeypatch
@@ -615,3 +730,111 @@ def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     assert tma_draft["targets"][0]["included"] is False
     assert tma_draft["targets"][0]["analysis_included"] is True
     assert tma_draft["targets"][0]["final_values"] == {}
+
+
+def test_review_queue_is_lazy_and_stops_after_cancel(tmp_path, monkeypatch) -> None:
+    from plotting.shared import transition_review_dialog as review_dialog
+
+    first = tmp_path / "first" / "measurement.txt"
+    second = tmp_path / "second" / "measurement.txt"
+    third = tmp_path / "third" / "measurement.txt"
+    calls = []
+
+    def fake_review(parent, path, *, sample=None, queue_position=None):
+        calls.append((path, sample, queue_position))
+        return path != second
+
+    monkeypatch.setattr(review_dialog, "review_current_annealing_file", fake_review)
+
+    completed = review_dialog.review_current_annealing_files(
+        None,
+        [first, second, third],
+        sample_for_path=lambda path: {"sample": path.parent.name},
+    )
+
+    assert completed == 1
+    assert calls == [
+        (first, {"sample": "first"}, (1, 3)),
+        (second, {"sample": "second"}, (2, 3)),
+    ]
+
+
+def test_tma_review_queue_reports_each_run_position(tmp_path, monkeypatch) -> None:
+    from plotting.shared import transition_review_dialog as review_dialog
+
+    run_dirs = [tmp_path / "run-a", tmp_path / "run-b"]
+    calls = []
+
+    def fake_review(parent, path, *, queue_position=None):
+        calls.append((path, queue_position))
+        return True
+
+    monkeypatch.setattr(review_dialog, "review_tma_run", fake_review)
+
+    assert review_dialog.review_tma_runs(None, run_dirs) == 2
+    assert calls == [(run_dirs[0], (1, 2)), (run_dirs[1], (2, 2))]
+
+
+def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatch) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from microwire_data_builder import ui as builder_ui
+    from plotting.shared import transition_review as review_module
+    from plotting.shared import transition_review_adapters as adapter_module
+
+    run_dir = tmp_path / "tma-run"
+    run_dir.mkdir()
+    (run_dir / "transition_review.json").write_text("{}", encoding="utf-8")
+    fingerprint = "sha256:" + "c" * 64
+    payload = {
+        "experiment_family": "tma",
+        "measurement_fingerprint": fingerprint,
+        "targets": [
+            {
+                "status": "accepted_auto",
+                "target": {"stress_mpa": 50.0, "sweep_index": 1},
+                "auto_values": {"As": 20.0},
+                "final_values": {"As": 20.0},
+            },
+            {
+                "status": "manual_adjusted",
+                "target": {"stress_mpa": 50.0, "sweep_index": 2},
+                "auto_values": {"As": 22.0},
+                "manual_values": {"As": 23.0},
+                "final_values": {"As": 23.0},
+            },
+        ],
+    }
+    entries = [
+        SimpleNamespace(
+            sample="sample",
+            run_label="run",
+            target_label=f"50 MPa - sweep {index}/2",
+            status="accepted",
+            sweep_index=index,
+            target_summary=SimpleNamespace(stress_mpa=50.0),
+        )
+        for index in (1, 2)
+    ]
+    monkeypatch.setattr(review_module, "load_review", lambda _path: payload)
+    monkeypatch.setattr(
+        adapter_module,
+        "tma_review_draft",
+        lambda _path: {"measurement_fingerprint": fingerprint},
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_transition_review_entries",
+        lambda _records, _logger: entries,
+    )
+    reviews = {}
+
+    assert builder_ui._import_portable_tma_reviews(
+        [SimpleNamespace(path=run_dir)], reviews, logging.getLogger(__name__)
+    ) is True
+    assert {review["target_label"] for review in reviews.values()} == {
+        "50 MPa - sweep 1/2",
+        "50 MPa - sweep 2/2",
+    }
+    assert {review["values"]["As"] for review in reviews.values()} == {20.0, 23.0}

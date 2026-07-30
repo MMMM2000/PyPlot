@@ -604,7 +604,11 @@ def test_current_annealing_transition_button_opens_latest_completed_measurement(
     assert window.ui.pushButton_review_transitions.text() == "Review transitions..."
     assert [
         action.text() for action in window.ui.pushButton_review_transitions.menu().actions()
-    ] == ["Choose run folder...", "Choose legacy measurement file..."]
+    ] == [
+        "Choose run folder...",
+        "Review runs in parent folder...",
+        "Choose legacy measurement file...",
+    ]
 
     window.ui.pushButton_review_transitions.click()
 
@@ -3708,3 +3712,35 @@ def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pyte
 
     window.send_safe_end_commands()
     assert calls == ["acquire", "release"]
+
+
+def test_current_annealing_parent_folder_queue_is_bounded_to_direct_runs(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    direct = tmp_path / "run-a" / "measurement.txt"
+    nested = tmp_path / "group" / "run-b" / "measurement.txt"
+    direct.parent.mkdir()
+    nested.parent.mkdir(parents=True)
+    direct.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    nested.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    queued = []
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        transition_review_dialog,
+        "review_current_annealing_files",
+        lambda parent, paths, **kwargs: queued.extend(paths) or len(paths),
+    )
+
+    window._choose_transition_parent_folder()
+
+    assert queued == [direct]
+    window.close()

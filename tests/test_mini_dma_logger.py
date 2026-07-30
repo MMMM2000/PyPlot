@@ -1296,7 +1296,8 @@ def test_transition_review_button_opens_latest_completed_run(
         assert window.button_review_transitions.text() == "Review transitions..."
         assert window.button_review_transitions.menu() is not None
         assert [action.text() for action in window.button_review_transitions.menu().actions()] == [
-            "Choose completed run folder..."
+            "Choose completed run folder...",
+            "Review runs in parent folder...",
         ]
         window.button_review_transitions.click()
 
@@ -33080,5 +33081,38 @@ def test_load_target_ramp_waits_for_new_scale_sample_even_as_target_changes(tmp_
         ) is False
         assert len(moves) == 1
         assert "new scale sample" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_tma_parent_folder_queue_is_bounded_to_direct_runs(
+    tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    direct = tmp_path / "run-a"
+    nested = tmp_path / "group" / "run-b"
+    direct.mkdir()
+    nested.mkdir(parents=True)
+    (direct / mini_dma_mod.SESSION_MEASUREMENT_CSV).write_text("time_s\n", encoding="utf-8")
+    (nested / mini_dma_mod.SESSION_MEASUREMENT_CSV).write_text("time_s\n", encoding="utf-8")
+
+    window = _build_window(tmp_path, qtbot)
+    queued: list[Path] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getExistingDirectory",
+            lambda *_args, **_kwargs: str(tmp_path),
+        )
+        monkeypatch.setattr(
+            transition_review_dialog,
+            "review_tma_runs",
+            lambda parent, paths: queued.extend(paths) or len(paths),
+        )
+
+        window._choose_tma_parent_for_transition_review()
+
+        assert queued == [direct]
     finally:
         _close_test_window(window)
