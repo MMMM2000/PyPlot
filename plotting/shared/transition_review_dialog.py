@@ -98,37 +98,19 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         review_layout.setContentsMargins(6, 0, 0, 0)
         review_layout.setSpacing(6)
 
-        decision_box = QtWidgets.QGroupBox("Review decision")
-        decision_box.setStyleSheet(
-            "QPushButton { padding: 5px 8px; } "
+        self.values_box = QtWidgets.QGroupBox("Transition choices (mA)")
+        self.values_box.setStyleSheet(
+            "QPushButton { padding: 4px 5px; } "
             "QPushButton:checked { background: #2563eb; color: white; "
             "border: 1px solid #1d4ed8; border-radius: 3px; }"
         )
-        decision_layout = QtWidgets.QHBoxLayout(decision_box)
-        decision_layout.setContentsMargins(6, 4, 6, 4)
-        decision_layout.setSpacing(4)
-        self.accept_auto_button = QtWidgets.QPushButton("Accept auto")
-        self.manual_button = QtWidgets.QPushButton("Adjust manually")
-        self.no_transition_button = QtWidgets.QPushButton("No transition")
-        self.decision_group = QtWidgets.QButtonGroup(self)
-        self.decision_group.setExclusive(True)
-        for button, status in (
-            (self.accept_auto_button, "accepted_auto"),
-            (self.manual_button, "manual_adjusted"),
-            (self.no_transition_button, "no_transition"),
-        ):
-            button.setCheckable(True)
-            button.setProperty("reviewStatus", status)
-            self.decision_group.addButton(button)
-            decision_layout.addWidget(button)
-        review_layout.addWidget(decision_box)
-
-        self.values_box = QtWidgets.QGroupBox("Transition values (mA)")
         values_layout = QtWidgets.QVBoxLayout(self.values_box)
         values_layout.setContentsMargins(6, 4, 6, 4)
         values_layout.setSpacing(4)
-        self.values_table = QtWidgets.QTableWidget(0, 3)
-        self.values_table.setHorizontalHeaderLabels(["Point", "Auto", "Chosen"])
+        self.values_table = QtWidgets.QTableWidget(0, 4)
+        self.values_table.setHorizontalHeaderLabels(
+            ["Point", "Auto", "Manual", "Not observed"]
+        )
         self.values_table.verticalHeader().setVisible(False)
         self.values_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -136,26 +118,38 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.values_table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
         )
+        self.values_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
         table_header = self.values_table.horizontalHeader()
         table_header.setSectionResizeMode(
             0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
-        table_header.setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-        table_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.value_edits: dict[str, QtWidgets.QLineEdit] = {}
-        self._cleared_labels: set[str] = set()
+        for column in range(1, 4):
+            table_header.setSectionResizeMode(
+                column, QtWidgets.QHeaderView.ResizeMode.Stretch
+            )
+        self.choice_buttons: dict[str, dict[str, QtWidgets.QPushButton]] = {}
+        self.choice_groups: dict[str, QtWidgets.QButtonGroup] = {}
+        self._choices: dict[str, str | None] = {}
+        self._manual_values: dict[str, float] = {}
         values_layout.addWidget(self.values_table)
 
-        values_actions = QtWidgets.QHBoxLayout()
-        values_actions.setSpacing(4)
-        self.graph_hint = QtWidgets.QLabel("Select a row, then click the graph.")
-        self.graph_hint.setWordWrap(True)
-        self.omit_button = QtWidgets.QPushButton("Omit point")
-        values_actions.addWidget(self.graph_hint, 1)
-        values_actions.addWidget(self.omit_button)
-        values_layout.addLayout(values_actions)
+        self.manual_editor = QtWidgets.QWidget()
+        manual_layout = QtWidgets.QHBoxLayout(self.manual_editor)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.setSpacing(4)
+        self.manual_editor_label = QtWidgets.QLabel("Manual value")
+        self.manual_value_edit = QtWidgets.QLineEdit()
+        self.manual_value_edit.setMaximumWidth(86)
+        manual_validator = QtGui.QDoubleValidator(self.manual_value_edit)
+        manual_validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
+        self.manual_value_edit.setValidator(manual_validator)
+        self.manual_graph_hint = QtWidgets.QLabel("mA \N{MIDDLE DOT} or click graph")
+        manual_layout.addWidget(self.manual_editor_label)
+        manual_layout.addWidget(self.manual_value_edit)
+        manual_layout.addWidget(self.manual_graph_hint, 1)
+        values_layout.addWidget(self.manual_editor)
         review_layout.addWidget(self.values_box)
 
         self.exclude_check = QtWidgets.QCheckBox("Exclude from Builder analysis")
@@ -169,10 +163,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         review_layout.addWidget(self.decision_summary)
         review_layout.addStretch(1)
 
-        self.decision_group.buttonClicked.connect(self._decision_changed)
-        self.exclude_check.toggled.connect(self._update_decision_summary)
+        self.exclude_check.toggled.connect(self._target_controls_changed)
         self.values_table.itemSelectionChanged.connect(self._selected_row_changed)
-        self.omit_button.clicked.connect(self._toggle_selected_point)
+        self.manual_value_edit.textChanged.connect(self._manual_text_changed)
+        self.manual_value_edit.editingFinished.connect(
+            self._manual_value_committed
+        )
         right.addWidget(review_panel)
         right.setStretchFactor(0, 1)
         right.setStretchFactor(1, 0)
@@ -211,12 +207,6 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             return "Current Annealing"
         return str(target.get("target_key") or "Transition target")
 
-    def _current_decision(self) -> str:
-        for button in self.decision_group.buttons():
-            if button.isChecked():
-                return str(button.property("reviewStatus") or "unreviewed")
-        return "unreviewed"
-
     def _labels_for_target(self, target: Mapping[str, Any]) -> list[str]:
         available: set[str] = set()
         for field in ("auto_values", "manual_values", "final_values"):
@@ -224,12 +214,39 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             if isinstance(values, Mapping):
                 available.update(str(label) for label in values)
         available.update(str(label) for label in target.get("cleared_labels", ()))
-        if not available:
-            if self.payload.get("experiment_family") == "current_annealing":
-                available.update(("As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2"))
-            else:
-                available.update(("As", "Af", "Ms", "Mf"))
+        if self.payload.get("experiment_family") == "current_annealing":
+            loop_numbers = {
+                int(label[-1])
+                for label in available
+                if label[:-1] in {"As", "Af", "Ms", "Mf"} and label[-1:].isdigit()
+            }
+            if not loop_numbers:
+                loop_numbers = {1, 2}
+            for loop in loop_numbers:
+                available.update(
+                    (f"As{loop}", f"Af{loop}", f"Ms{loop}", f"Mf{loop}")
+                )
+        else:
+            available.update(("As", "Af", "Ms", "Mf"))
         return [label for label in LABELS if label in available]
+
+    def _initial_choice(
+        self,
+        target: Mapping[str, Any],
+        label: str,
+    ) -> str | None:
+        status = str(target.get("status") or "unreviewed")
+        auto = target.get("auto_values") if isinstance(target.get("auto_values"), Mapping) else {}
+        manual = target.get("manual_values") if isinstance(target.get("manual_values"), Mapping) else {}
+        final = target.get("final_values") if isinstance(target.get("final_values"), Mapping) else {}
+        cleared = set(str(item) for item in target.get("cleared_labels", ()))
+        if status == "no_transition" or label in cleared:
+            return "not_observed"
+        if label in manual:
+            return "manual"
+        if label in auto and (status == "accepted_auto" or label in final):
+            return "auto"
+        return None
 
     def _populate_values_table(self, target: Mapping[str, Any]) -> None:
         blocker = QtCore.QSignalBlocker(self.values_table)
@@ -239,38 +256,66 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             manual = target.get("manual_values") if isinstance(target.get("manual_values"), Mapping) else {}
             self.values_table.clearContents()
             self.values_table.setRowCount(len(labels))
-            self.value_edits = {}
+            self.choice_buttons = {}
+            self.choice_groups = {}
+            self._choices = {}
+            self._manual_values = {
+                label: float(value)
+                for label, value in manual.items()
+                if label in labels
+            }
             for row, label in enumerate(labels):
                 point_item = QtWidgets.QTableWidgetItem(label)
                 point_item.setFlags(point_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                 point_item.setData(QtCore.Qt.ItemDataRole.UserRole, label)
                 self.values_table.setItem(row, 0, point_item)
 
+                group = QtWidgets.QButtonGroup(self)
+                group.setExclusive(True)
+                buttons: dict[str, QtWidgets.QPushButton] = {}
+                for column, choice in enumerate(
+                    ("auto", "manual", "not_observed"), start=1
+                ):
+                    button = QtWidgets.QPushButton()
+                    button.setCheckable(True)
+                    button.setProperty("transitionChoice", choice)
+                    button.clicked.connect(
+                        lambda _checked=False, selected_label=label, selected_choice=choice: self._choice_clicked(
+                            selected_label, selected_choice
+                        )
+                    )
+                    group.addButton(button)
+                    self.values_table.setCellWidget(row, column, button)
+                    buttons[choice] = button
                 auto_value = auto.get(label)
-                auto_text = "—" if auto_value is None else f"{float(auto_value):.6g}"
-                auto_item = QtWidgets.QTableWidgetItem(auto_text)
-                auto_item.setTextAlignment(int(QtCore.Qt.AlignmentFlag.AlignCenter))
-                auto_item.setFlags(auto_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.values_table.setItem(row, 1, auto_item)
-
-                edit = QtWidgets.QLineEdit()
-                validator = QtGui.QDoubleValidator(edit)
-                validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
-                edit.setValidator(validator)
-                if label in manual:
-                    edit.setText(f"{float(manual[label]):.6g}")
-                edit.textChanged.connect(self._manual_text_changed)
-                edit.editingFinished.connect(self._manual_value_edited)
-                self.value_edits[label] = edit
-                self.values_table.setCellWidget(row, 2, edit)
-                self._update_value_row_state(row, label)
-            self.values_table.resizeRowsToContents()
+                buttons["auto"].setEnabled(auto_value is not None)
+                buttons["auto"].setText(
+                    "\N{EM DASH}" if auto_value is None else f"{float(auto_value):.6g}"
+                )
+                buttons["auto"].setToolTip(
+                    "Automatic detector did not return this point."
+                    if auto_value is None
+                    else f"Use automatic {label} = {float(auto_value):.6g} mA"
+                )
+                buttons["not_observed"].setText("\N{EM DASH}")
+                buttons["not_observed"].setToolTip(
+                    f"Mark {label} as reviewed but not observed in this run."
+                )
+                self.choice_buttons[label] = buttons
+                self.choice_groups[label] = group
+                self._choices[label] = self._initial_choice(target, label)
+                self._update_choice_row(label)
+                self.values_table.setRowHeight(row, 29)
             if labels:
                 self.values_table.selectRow(0)
             self.values_table.setMaximumHeight(
-                min(290, self.values_table.horizontalHeader().height() + 31 * max(len(labels), 1) + 4)
+                min(
+                    290,
+                    self.values_table.horizontalHeader().height()
+                    + 29 * max(len(labels), 1)
+                    + 4,
+                )
             )
-            self.accept_auto_button.setEnabled(bool(auto))
         finally:
             del blocker
         self._selected_row_changed()
@@ -280,133 +325,148 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         item = self.values_table.item(row, 0) if row >= 0 else None
         return str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "") if item else ""
 
-    def _update_value_row_state(self, row: int, label: str) -> None:
-        edit = self.value_edits.get(label)
-        if edit is None:
-            return
-        omitted = label in self._cleared_labels
-        manual_mode = self._current_decision() == "manual_adjusted"
-        auto_item = self.values_table.item(row, 1)
-        auto_text = auto_item.text() if auto_item is not None else "—"
-        edit.setEnabled(manual_mode and not omitted)
-        edit.setPlaceholderText(
-            "Omitted" if omitted else (f"Use automatic ({auto_text})" if auto_text != "—" else "Enter value")
-        )
-        point_item = self.values_table.item(row, 0)
-        if point_item is not None:
-            font = point_item.font()
-            font.setStrikeOut(omitted)
-            point_item.setFont(font)
-            text_color = (
-                QtGui.QColor("#6b7280")
-                if omitted
-                else self.values_table.palette().color(QtGui.QPalette.ColorRole.Text)
-            )
-            point_item.setForeground(QtGui.QBrush(text_color))
-
-    def _refresh_value_edit_state(self) -> None:
+    def _row_for_label(self, label: str) -> int:
         for row in range(self.values_table.rowCount()):
             item = self.values_table.item(row, 0)
-            label = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "") if item else ""
-            if label:
-                self._update_value_row_state(row, label)
+            if item and item.data(QtCore.Qt.ItemDataRole.UserRole) == label:
+                return row
+        return -1
+
+    def _update_choice_row(self, label: str) -> None:
+        buttons = self.choice_buttons.get(label, {})
+        choice = self._choices.get(label)
+        for name, button in buttons.items():
+            button.setChecked(name == choice)
+        manual_value = self._manual_values.get(label)
+        manual_button = buttons.get("manual")
+        if manual_button is not None:
+            manual_button.setText(
+                "Set…"
+                if manual_value is None
+                else f"{manual_value:.6g}"
+            )
+        row = self._row_for_label(label)
+        point_item = self.values_table.item(row, 0) if row >= 0 else None
+        if point_item is not None:
+            point_item.setToolTip(
+                "Choose the automatic value, set a manual value, or mark the point not observed."
+            )
+
+    def _choice_clicked(self, label: str, choice: str) -> None:
+        if self._loading:
+            return
+        row = self._row_for_label(label)
+        if row >= 0:
+            self.values_table.selectRow(row)
+        self._choices[label] = choice
+        self._update_choice_row(label)
         self._selected_row_changed()
-
-    def _decision_changed(self, _button: QtWidgets.QAbstractButton) -> None:
-        if self._loading:
-            return
-        if self._current_decision() == "accepted_auto":
-            self._cleared_labels.clear()
-            for edit in self.value_edits.values():
-                edit.clear()
-        self._refresh_value_edit_state()
-        self._store_target_controls()
-        self._draw_target()
-        self._update_decision_summary()
-
-    def _manual_text_changed(self, _text: str) -> None:
-        if self._loading or self._current_decision() != "manual_adjusted":
-            return
-        self.manual_button.setChecked(True)
-        self._refresh_value_edit_state()
-        self._update_decision_summary()
-
-    def _manual_value_edited(self) -> None:
-        if self._loading:
-            return
-        self.manual_button.setChecked(True)
-        self._store_target_controls()
-        self._draw_target()
-        self._refresh_value_edit_state()
-        self._update_decision_summary()
+        if choice == "manual":
+            self.manual_value_edit.setFocus()
+            self.manual_value_edit.selectAll()
+        self._target_controls_changed()
 
     def _selected_row_changed(self) -> None:
         label = self._selected_label()
-        manual_mode = self._current_decision() == "manual_adjusted"
-        self.omit_button.setEnabled(bool(label) and manual_mode)
-        self.omit_button.setText(
-            "Restore point" if label in self._cleared_labels else "Omit point"
+        choice = self._choices.get(label)
+        manual_mode = bool(label) and choice == "manual"
+        blocker = QtCore.QSignalBlocker(self.manual_value_edit)
+        try:
+            value = self._manual_values.get(label) if manual_mode else None
+            self.manual_value_edit.setText(
+                "" if value is None else f"{float(value):.6g}"
+            )
+        finally:
+            del blocker
+        self.manual_editor_label.setText(
+            f"Manual {label}" if label else "Manual value"
         )
+        self.manual_value_edit.setEnabled(manual_mode)
+        self.manual_graph_hint.setEnabled(manual_mode)
 
-    def _toggle_selected_point(self) -> None:
-        label = self._selected_label()
-        if not label or self._current_decision() != "manual_adjusted":
+    def _manual_text_changed(self, text: str) -> None:
+        if self._loading:
             return
-        if label in self._cleared_labels:
-            self._cleared_labels.remove(label)
+        label = self._selected_label()
+        if not label or self._choices.get(label) != "manual":
+            return
+        normalized = text.strip().replace(",", ".")
+        try:
+            value = float(normalized)
+        except ValueError:
+            self._manual_values.pop(label, None)
         else:
-            self._cleared_labels.add(label)
-        self._refresh_value_edit_state()
+            if math.isfinite(value):
+                self._manual_values[label] = value
+            else:
+                self._manual_values.pop(label, None)
+        self._update_choice_row(label)
+        self._store_target_controls()
+        self._update_decision_summary()
+
+    def _manual_value_committed(self) -> None:
+        if self._loading:
+            return
         self._store_target_controls()
         self._draw_target()
         self._update_decision_summary()
 
-    def _manual_values_from_edits(self) -> dict[str, float]:
-        manual: dict[str, float] = {}
-        for label, edit in self.value_edits.items():
-            text = edit.text().strip().replace(",", ".")
-            if not text:
-                continue
-            try:
-                value = float(text)
-            except ValueError:
-                continue
-            if math.isfinite(value):
-                manual[label] = value
-        return manual
+    def _current_target_ready(self) -> bool:
+        if not self._choices:
+            return False
+        for label, choice in self._choices.items():
+            if choice is None:
+                return False
+            if choice == "manual" and label not in self._manual_values:
+                return False
+        return True
 
-    def _has_manual_adjustment(self) -> bool:
-        return bool(self._cleared_labels or self._manual_values_from_edits())
+    def _all_targets_ready(self) -> bool:
+        for index, target in enumerate(self._targets()):
+            if index == self._target_index:
+                if not self._current_target_ready():
+                    return False
+                continue
+            if str(target.get("status") or "unreviewed") in {
+                "unreviewed",
+                "needs_attention",
+            }:
+                return False
+        return bool(self._targets())
 
     def _update_decision_summary(self) -> None:
-        decision = self._current_decision()
-        manual_ready = self._has_manual_adjustment()
-        if self.exclude_check.isChecked():
-            text = (
-                "The review will remain saved in this run folder, but this target "
-                "will be excluded from Builder analysis."
-            )
-        elif decision == "accepted_auto":
-            text = "Automatic values will be saved as the reviewed result."
-        elif decision == "manual_adjusted" and not manual_ready:
-            text = "Select a point and enter a value or click the graph before saving."
-        elif decision == "manual_adjusted":
-            text = (
-                "Chosen values override the automatic values. Select a row and click "
-                "the graph to adjust it."
-            )
-        elif decision == "no_transition":
-            text = (
-                "Reviewed result: no transition observed. This remains a useful "
-                "categorical result in Builder analysis."
-            )
-        else:
-            text = "Choose one of the three review decisions above."
-        self.decision_summary.setText(text)
-        self.save_button.setEnabled(
-            decision != "unreviewed"
-            and (decision != "manual_adjusted" or manual_ready)
+        choices = list(self._choices.values())
+        pending = sum(choice is None for choice in choices)
+        missing_manual = sum(
+            choice == "manual" and label not in self._manual_values
+            for label, choice in self._choices.items()
         )
+        if pending:
+            text = f"Choose a result for {pending} remaining point(s)."
+        elif missing_manual:
+            text = f"Enter or pick {missing_manual} remaining manual value(s)."
+        else:
+            counts = {
+                choice: choices.count(choice)
+                for choice in ("auto", "manual", "not_observed")
+            }
+            text = (
+                f"Chosen: {counts['auto']} auto, {counts['manual']} manual, "
+                f"{counts['not_observed']} not observed."
+            )
+        if self.exclude_check.isChecked():
+            text += " Excluded from Builder analysis."
+        elif self._current_target_ready() and not self._all_targets_ready():
+            text += " Review the remaining target(s) before saving."
+        self.decision_summary.setText(text)
+        self.save_button.setEnabled(self._all_targets_ready())
+
+    def _target_controls_changed(self, *_args: object) -> None:
+        if self._loading:
+            return
+        self._store_target_controls()
+        self._draw_target()
+        self._update_decision_summary()
 
     def _store_target_controls(self) -> None:
         if (
@@ -417,23 +477,42 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         ):
             return
         target = self._targets()[self._target_index]
-        decision = self._current_decision()
-        manual = self._manual_values_from_edits()
         auto = dict(target.get("auto_values") or {})
-        cleared = [] if decision == "accepted_auto" else sorted(self._cleared_labels)
-        final = {key: float(value) for key, value in auto.items() if key not in cleared}
-        final.update({key: value for key, value in manual.items() if key not in cleared})
-        if decision == "accepted_auto":
-            manual = {}
-            final = {key: float(value) for key, value in auto.items()}
-        elif decision in {"no_transition", "unreviewed"}:
+        ready = self._current_target_ready()
+        manual = {
+            label: self._manual_values[label]
+            for label, choice in self._choices.items()
+            if choice == "manual" and label in self._manual_values
+        }
+        cleared = sorted(
+            label
+            for label, choice in self._choices.items()
+            if choice == "not_observed"
+        )
+        final = {
+            label: float(auto[label])
+            for label, choice in self._choices.items()
+            if choice == "auto" and label in auto
+        }
+        final.update(manual)
+        selected = set(self._choices.values())
+        if not ready:
+            base_status = "unreviewed"
+        elif selected == {"auto"}:
+            base_status = "accepted_auto"
+        elif selected == {"not_observed"}:
+            base_status = "no_transition"
             final = {}
-        status = "excluded" if self.exclude_check.isChecked() else decision
-        if decision == "unreviewed" and str(target.get("status") or "") == "needs_attention":
-            status = "needs_attention"
+        else:
+            base_status = "manual_adjusted"
+        excluded = self.exclude_check.isChecked() and ready
+        status = "excluded" if excluded else base_status
         target["status"] = status
-        target["included"] = status in {"accepted_auto", "manual_adjusted"}
-        target["analysis_included"] = status in {
+        target["included"] = not excluded and base_status in {
+            "accepted_auto",
+            "manual_adjusted",
+        }
+        target["analysis_included"] = not excluded and base_status in {
             "accepted_auto",
             "manual_adjusted",
             "no_transition",
@@ -449,17 +528,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._target_index = row
         target = self._targets()[row]
         self._loading = True
-        status = str(target.get("status") or "unreviewed")
-        self.exclude_check.setChecked(status == "excluded")
-        decision = status
-        if status == "excluded":
-            decision = "manual_adjusted" if target.get("manual_values") else "accepted_auto"
-        for button in self.decision_group.buttons():
-            button.setChecked(str(button.property("reviewStatus") or "") == decision)
-        self._cleared_labels = set(str(label) for label in target.get("cleared_labels", ()))
+        self.exclude_check.setChecked(str(target.get("status") or "") == "excluded")
         self._populate_values_table(target)
         self._loading = False
-        self._refresh_value_edit_state()
+        self._selected_row_changed()
         self._update_decision_summary()
         self._draw_target()
 
@@ -476,39 +548,52 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             axes.set_ylabel(plot.y_label)
             axes.set_title(plot.title)
         auto = target.get("auto_values") if isinstance(target.get("auto_values"), Mapping) else {}
-        manual = target.get("manual_values") if isinstance(target.get("manual_values"), Mapping) else {}
-        cleared = set(target.get("cleared_labels") or ())
         for label, value in auto.items():
-            if label not in cleared:
-                axes.axvline(float(value), color="#9ca3af", linestyle="--", linewidth=0.9)
-                axes.text(float(value), 0.98, label, transform=axes.get_xaxis_transform(), va="top")
-        for label, value in manual.items():
-            if label not in cleared:
+            if self._choices.get(label) != "not_observed":
+                axes.axvline(
+                    float(value), color="#9ca3af", linestyle="--", linewidth=0.9
+                )
+                axes.text(
+                    float(value),
+                    0.98,
+                    label,
+                    transform=axes.get_xaxis_transform(),
+                    va="top",
+                )
+        for label, value in self._manual_values.items():
+            if self._choices.get(label) == "manual":
                 axes.axvline(float(value), color="#dc2626", linewidth=1.5)
-                axes.text(float(value), 0.88, label, transform=axes.get_xaxis_transform(), va="top")
+                axes.text(
+                    float(value),
+                    0.88,
+                    label,
+                    transform=axes.get_xaxis_transform(),
+                    va="top",
+                )
         self.canvas.draw_idle()
 
     def _plot_clicked(self, event: Any) -> None:
         if event.inaxes is None or event.xdata is None:
             return
         label = self._selected_label()
-        edit = self.value_edits.get(label)
-        if edit is None:
+        if not label:
             return
-        self.manual_button.setChecked(True)
-        self._cleared_labels.discard(label)
-        edit.setText(f"{float(event.xdata):.6g}")
-        self._refresh_value_edit_state()
-        self._store_target_controls()
-        self._draw_target()
-        self._update_decision_summary()
+        self._choices[label] = "manual"
+        self._manual_values[label] = float(event.xdata)
+        self._update_choice_row(label)
+        self._selected_row_changed()
+        self._target_controls_changed()
 
     def _save_and_accept(self) -> None:
         self._store_target_controls()
+        self._update_decision_summary()
+        if not self._all_targets_ready():
+            return
         self.payload["review_revision"] = int(self.payload.get("review_revision", 0) or 0) + 1
         self.payload["updated_utc"] = utc_now_text()
         atomic_write_review(self.sidecar_path, self.payload)
         self.accept()
+
 
 
 def review_current_annealing_file(

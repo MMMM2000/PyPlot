@@ -28,7 +28,7 @@ def _review(frame: pd.DataFrame) -> dict:
         measurement_fingerprint=fingerprint,
         target_key="graph",
         status="manual_adjusted",
-        auto_values={"As1": 80.0, "Af1": 100.0},
+        auto_values={"As1": 80.0, "Af1": 100.0, "Ms1": 60.0, "Mf1": 40.0},
         manual_values={"As1": 82.0, "Af1": 101.0},
         final_values={"As1": 82.0, "Af1": 101.0},
         cleared_labels=("Ms1", "Mf1"),
@@ -210,18 +210,23 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert target["manual_values"] == {"As1": 82.0, "Af1": 101.0}
     assert target["final_values"] == {"As1": 82.0, "Af1": 101.0}
 
-    assert dialog.manual_button.isChecked()
+    assert dialog.choice_buttons["As1"]["manual"].isChecked()
+    assert dialog.choice_buttons["Af1"]["manual"].isChecked()
+    assert dialog.choice_buttons["Ms1"]["not_observed"].isChecked()
+    assert dialog.choice_buttons["Mf1"]["not_observed"].isChecked()
     assert dialog.values_table.rowCount() == 4
     assert dialog.target_panel.isHidden()
     assert dialog.save_button.isEnabled()
-    assert not hasattr(dialog, "status_combo")
-    assert not hasattr(dialog, "pick_label")
-    assert not hasattr(dialog, "clear_boxes")
+    assert not hasattr(dialog, "decision_group")
+    assert not hasattr(dialog, "value_edits")
+    assert not hasattr(dialog, "omit_button")
 
     dialog.show()
     qtbot.wait(20)
     canvas_top_left = dialog.canvas.mapTo(dialog, dialog.canvas.rect().topLeft())
-    values_top_left = dialog.values_box.mapTo(dialog, dialog.values_box.rect().topLeft())
+    values_top_left = dialog.values_box.mapTo(
+        dialog, dialog.values_box.rect().topLeft()
+    )
     assert canvas_top_left.x() + dialog.canvas.width() < values_top_left.x()
     assert dialog.values_box.width() <= 390
     assert dialog.width() <= 1050
@@ -235,34 +240,41 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert target["final_values"] == {"As1": 82.0, "Af1": 101.0}
 
     dialog.exclude_check.setChecked(False)
-    dialog.no_transition_button.click()
+    for label in ("As1", "Af1", "Ms1", "Mf1"):
+        dialog.choice_buttons[label]["not_observed"].click()
     assert target["status"] == "no_transition"
     assert target["included"] is False
     assert target["analysis_included"] is True
-    assert target["manual_values"] == {"As1": 82.0, "Af1": 101.0}
+    assert target["manual_values"] == {}
     assert target["final_values"] == {}
+    assert target["cleared_labels"] == ["Af1", "As1", "Mf1", "Ms1"]
 
-    dialog.accept_auto_button.click()
+    for label in ("As1", "Af1", "Ms1", "Mf1"):
+        dialog.choice_buttons[label]["auto"].click()
     assert target["status"] == "accepted_auto"
     assert target["manual_values"] == {}
-    assert target["final_values"] == {"As1": 80.0, "Af1": 100.0}
+    assert target["final_values"] == {
+        "As1": 80.0,
+        "Af1": 100.0,
+        "Ms1": 60.0,
+        "Mf1": 40.0,
+    }
     assert target["cleared_labels"] == []
 
-    dialog.manual_button.click()
-    assert not dialog.save_button.isEnabled()
     dialog.values_table.selectRow(0)
     event = type("PlotClick", (), {"inaxes": object(), "xdata": 83.5})()
     dialog._plot_clicked(event)  # noqa: SLF001
-    assert dialog.manual_button.isChecked()
+    assert dialog.choice_buttons["As1"]["manual"].isChecked()
     assert dialog.save_button.isEnabled()
     assert target["status"] == "manual_adjusted"
     assert target["manual_values"] == {"As1": 83.5}
-    assert target["final_values"] == {"As1": 83.5, "Af1": 100.0}
+    assert target["final_values"]["As1"] == 83.5
+    assert target["final_values"]["Af1"] == 100.0
 
-    dialog.omit_button.click()
+    dialog.choice_buttons["As1"]["not_observed"].click()
     assert target["cleared_labels"] == ["As1"]
-    assert target["final_values"] == {"Af1": 100.0}
-
+    assert "As1" not in target["final_values"]
+    assert target["final_values"]["Af1"] == 100.0
 
 def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) -> None:
     from plotting.shared.transition_review_dialog import (
@@ -298,17 +310,25 @@ def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) ->
     qtbot.addWidget(dialog)
 
     assert not dialog.save_button.isEnabled()
-    dialog.accept_auto_button.click()
+    for label in ("As1", "Af1", "Ms1", "Mf1"):
+        dialog.choice_buttons[label]["auto"].click()
     assert dialog.save_button.isEnabled()
     dialog._save_and_accept()  # noqa: SLF001
 
     restored = load_review(sidecar)
     assert restored["review_revision"] == original_revision + 1
     assert restored["targets"][0]["status"] == "accepted_auto"
-    assert restored["targets"][0]["final_values"] == {"As1": 80.0, "Af1": 100.0}
+    assert restored["targets"][0]["final_values"] == {
+        "As1": 80.0,
+        "Af1": 100.0,
+        "Ms1": 60.0,
+        "Mf1": 40.0,
+    }
 
-
-def test_review_dialog_requires_a_decision_and_uses_human_tma_labels(tmp_path, qtbot) -> None:
+def test_review_dialog_requires_each_choice_and_uses_human_tma_labels(
+    tmp_path,
+    qtbot,
+) -> None:
     from plotting.shared.transition_review_dialog import (
         PortableTransitionReviewDialog,
         ReviewPlot,
@@ -342,19 +362,29 @@ def test_review_dialog_requires_a_decision_and_uses_human_tma_labels(tmp_path, q
     qtbot.addWidget(dialog)
 
     assert not dialog.target_panel.isHidden()
-    assert dialog.target_list.item(0).text() == "50 MPa \u00b7 1.46 g"
-    assert dialog.target_list.item(1).text() == "100 MPa \u00b7 2.92 g"
+    assert dialog.target_list.item(0).text() == "50 MPa · 1.46 g"
+    assert dialog.target_list.item(1).text() == "100 MPa · 2.92 g"
+    assert not dialog.choice_buttons["Ms"]["auto"].isEnabled()
     assert not dialog.save_button.isEnabled()
 
-    dialog.manual_button.click()
+    dialog.choice_buttons["As"]["manual"].click()
+    dialog.manual_value_edit.setText("31.5")
+    dialog.choice_buttons["Af"]["auto"].click()
+    dialog.choice_buttons["Ms"]["not_observed"].click()
+    dialog.choice_buttons["Mf"]["not_observed"].click()
     assert not dialog.save_button.isEnabled()
-    dialog.value_edits["As"].setText("31.5")
-    assert dialog.save_button.isEnabled()
+    assert "remaining target" in dialog.decision_summary.text()
+    first = dialog.payload["targets"][0]
+    assert first["status"] == "manual_adjusted"
+    assert first["final_values"] == {"As": 31.5, "Af": 70.0}
+    assert first["cleared_labels"] == ["Mf", "Ms"]
 
-    dialog.no_transition_button.click()
+    dialog.target_list.setCurrentRow(1)
+    for label in ("As", "Af", "Ms", "Mf"):
+        dialog.choice_buttons[label]["not_observed"].click()
     assert dialog.save_button.isEnabled()
-    assert "no transition observed" in dialog.decision_summary.text()
-
+    assert dialog.payload["targets"][1]["status"] == "no_transition"
+    assert "4 not observed" in dialog.decision_summary.text()
 
 def test_tma_review_draft_collapses_repeated_stress_sweeps(
     tmp_path,

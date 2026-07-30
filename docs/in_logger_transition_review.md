@@ -12,14 +12,15 @@ This keeps the fast experimental workflow Martin wants while preserving Builder 
 
 ## Review interaction
 
-The logger-facing editor is decision-first rather than schema-first:
+The logger-facing editor reviews each transition point directly. Every As, Af, Ms, and Mf row has three exclusive choices:
 
-- **Accept automatic** saves the automatic transition points as reviewed.
-- **Adjust manually** shows one compact table of the relevant points. Select a row and click the graph, or type the chosen value. Saving stays disabled until at least one point is adjusted or omitted.
-- **No transition** records a reviewed categorical result with no final numeric transition values.
-- **Exclude from Builder analysis** is a secondary option. It retains the reviewed values in the sidecar while setting `analysis_included: false`.
+- **Auto** shows and selects the detector value. It is disabled when the detector returned no value; a missing estimate is not silently treated as a confirmed absence.
+- **Manual** selects a graph-picked or directly entered value. One shared numeric field follows the selected row, avoiding a grid of text boxes.
+- **Not observed** records that the reviewer intentionally found no usable value for that individual point.
 
-Only targets present in the run are shown. Current Annealing hides the target list because it has one graph; multi-stress TMA runs retain a short target list with human labels such as `100 MPa · 2.92 g`. A single **Omit point** action replaces the former per-label clear-checkbox grid. The compact review panel sits beside the graph, keeping the plot large without spending a full-width block below it.
+The selected button is the chosen result, so there is no separate status dropdown or chosen-value column. Saving remains disabled until every displayed point at every TMA stress target has an explicit choice, and every selected manual point has a numeric value. Choosing **Not observed** for every point derives the whole-target `no_transition` status; mixed automatic, manual, and not-observed choices derive `manual_adjusted`. **Exclude from Builder analysis** remains an independent secondary decision and retains all reviewed values in the sidecar.
+
+Only targets present in the run are shown. Current Annealing hides the target list because it has one graph; multi-stress TMA runs retain a short target list with human labels such as `100 MPa · 2.92 g`. The compact choice panel sits beside the graph, keeping the plot large without spending a full-width block below it. Per-row decisions map backward-compatibly to `auto_values`, `manual_values`, `final_values`, and `cleared_labels`.
 
 ## Safety and process boundary
 
