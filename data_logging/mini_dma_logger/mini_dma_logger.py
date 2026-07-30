@@ -2244,6 +2244,26 @@ class PlotChannel:
     hidden_from_picker: bool = False
 
 
+@dataclass(frozen=True)
+class TimeAxisDisplay:
+    divisor_s: float
+    label: str
+
+
+def _time_axis_display(max_elapsed_s: float) -> TimeAxisDisplay:
+    """Choose a readable display unit while keeping stored elapsed time in seconds."""
+    finite_elapsed_s = (
+        max(0.0, float(max_elapsed_s))
+        if math.isfinite(max_elapsed_s)
+        else 0.0
+    )
+    if finite_elapsed_s >= 3600.0:
+        return TimeAxisDisplay(divisor_s=3600.0, label="Time (h)")
+    if finite_elapsed_s >= 60.0:
+        return TimeAxisDisplay(divisor_s=60.0, label="Time (min)")
+    return TimeAxisDisplay(divisor_s=1.0, label="Time (s)")
+
+
 @dataclass
 class PlotTileWidgets:
     visible: QtWidgets.QCheckBox
@@ -32769,6 +32789,30 @@ class MainWindow(QtWidgets.QMainWindow):
             previous_elapsed_s = elapsed_s
         return x_values, y_values
 
+    def _time_axis_display_for_points(
+        self,
+        points: Sequence[MeasurementPoint],
+    ) -> TimeAxisDisplay:
+        max_elapsed_s = max(
+            (
+                float(point.elapsed_s)
+                for point in points
+                if math.isfinite(float(point.elapsed_s))
+            ),
+            default=0.0,
+        )
+        return _time_axis_display(max_elapsed_s)
+
+    def _display_x_values(
+        self,
+        values: Sequence[float],
+        x_channel: PlotChannel,
+        time_axis: TimeAxisDisplay,
+    ) -> list[float]:
+        if x_channel.key != "elapsed_s" or time_axis.divisor_s == 1.0:
+            return list(values)
+        return [float(value) / time_axis.divisor_s for value in values]
+
     def _refresh_length_setup_plot(self) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_length_setup_plot)
@@ -32782,10 +32826,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 key=lambda indexed: (float(indexed[1].elapsed_s), indexed[0]),
             )
         )
+        time_axis = self._time_axis_display_for_points(points)
+        setup_time_label = time_axis.label.replace("Time", "Setup time", 1)
         self._style_pyqtgraph_plot(
             self._length_setup_stress_plot,
             title="Length setup load and stress",
-            x_label="Setup time (s)",
+            x_label=setup_time_label,
             left_label="Stress (MPa)",
             right_label="Load (g)",
             left_color=self._plot_channel_color("stress_mpa"),
@@ -32794,12 +32840,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._style_pyqtgraph_plot(
             self._length_setup_displacement_plot,
             title="Length setup displacement",
-            x_label="Setup time (s)",
+            x_label=setup_time_label,
             left_label="Displacement (mm)",
             right_label=None,
             left_color=self._plot_channel_color("position_mm"),
         )
-        x_values = [point.elapsed_s for point in points]
+        x_values = [point.elapsed_s / time_axis.divisor_s for point in points]
         stress_values = [
             float("nan") if point.stress_mpa is None else float(point.stress_mpa)
             for point in points
@@ -32826,17 +32872,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._recovery_plot is None:
             return
+        points = self._recovery_points
+        time_axis = self._time_axis_display_for_points(points)
+        recovery_time_label = time_axis.label.replace("Time", "Recovery time", 1)
         self._style_pyqtgraph_plot(
             self._recovery_plot,
             title="Recovery load + displacement vs time",
-            x_label="Recovery time (s)",
+            x_label=recovery_time_label,
             left_label="Applied tensile load (g)",
             right_label="Tensile displacement (mm)",
             left_color=self._plot_channel_color("load_g"),
             right_color=self._plot_channel_color("position_mm"),
         )
-        points = self._recovery_points
-        x_values = [point.elapsed_s for point in points]
+        x_values = [point.elapsed_s / time_axis.divisor_s for point in points]
         self._set_pyqtgraph_curve_data(
             self._recovery_left_curve,
             x_values,
@@ -36636,6 +36684,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_recovery_plot()
             return
         display_points = self._display_plot_points()
+        time_axis = self._time_axis_display_for_points(display_points)
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
@@ -36653,7 +36702,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._style_pyqtgraph_plot(
                 bundle,
                 title=self._plot_title(x_channel, y_left_channel, y_right_channel),
-                x_label=x_channel.label,
+                x_label=(
+                    time_axis.label
+                    if x_channel.key == "elapsed_s"
+                    else x_channel.label
+                ),
                 left_label=y_left_channel.label,
                 right_label=y_right_channel.label if y_right_channel is not None else None,
                 left_color=y_left_channel.color,
@@ -36666,6 +36719,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 symbol="o",
             )
             left_x, left_y = self._plot_xy_values(display_points, x_channel, y_left_channel)
+            left_x = self._display_x_values(left_x, x_channel, time_axis)
             self._set_pyqtgraph_curve_data(bundle.left_curve, left_x, left_y)
             if y_right_channel is not None:
                 self._set_pyqtgraph_curve_style(
@@ -36680,7 +36734,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     left_y,
                 )
                 if equivalent_axis_values is None:
-                    right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
+                    right_x, right_y = self._plot_xy_values(
+                        display_points,
+                        x_channel,
+                        y_right_channel,
+                    )
+                    right_x = self._display_x_values(right_x, x_channel, time_axis)
                     self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
                 else:
                     self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])

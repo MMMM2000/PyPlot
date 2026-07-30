@@ -14805,6 +14805,50 @@ def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+@pytest.mark.parametrize(
+    ("elapsed_s", "expected_divisor_s", "expected_label"),
+    [
+        (0.0, 1.0, "Time (s)"),
+        (59.999, 1.0, "Time (s)"),
+        (60.0, 60.0, "Time (min)"),
+        (3599.999, 60.0, "Time (min)"),
+        (3600.0, 3600.0, "Time (h)"),
+        (float("nan"), 1.0, "Time (s)"),
+    ],
+)
+def test_time_axis_display_selects_readable_units(
+    elapsed_s: float,
+    expected_divisor_s: float,
+    expected_label: str,
+) -> None:
+    display = mini_dma_mod._time_axis_display(elapsed_s)
+
+    assert display.divisor_s == pytest.approx(expected_divisor_s)
+    assert display.label == expected_label
+
+
+def test_elapsed_plot_values_are_scaled_for_display_only(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        elapsed_channel = window._plot_channel("elapsed_s")
+        load_channel = window._plot_channel("load_g")
+        assert elapsed_channel is not None
+        assert load_channel is not None
+
+        values = [0.0, 90.0, float("nan"), 180.0]
+        minutes = mini_dma_mod._time_axis_display(180.0)
+
+        elapsed_values = window._display_x_values(values, elapsed_channel, minutes)
+        load_values = window._display_x_values(values, load_channel, minutes)
+
+        assert elapsed_values[0:2] == pytest.approx([0.0, 1.5])
+        assert math.isnan(elapsed_values[2])
+        assert elapsed_values[3] == pytest.approx(3.0)
+        assert load_values[0:2] == pytest.approx([0.0, 90.0])
+    finally:
+        _close_test_window(window)
+
+
 def test_display_plot_points_connect_downsampled_history_to_recent_tail(
     tmp_path: Path,
     qtbot,
