@@ -2,7 +2,7 @@
 
 Status: production cutover on `codex/tma-control-process-production` (PR 301).
 PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
-2026-07-27; PR 301 must now target `main`.
+2026-07-30 (through PR 310); PR 301 must target `main`.
 
 ## Evidence from the previous architecture
 

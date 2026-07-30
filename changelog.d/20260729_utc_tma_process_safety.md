@@ -18,3 +18,5 @@
 - Add spawned fake-hardware coverage for both Prague and Košice policies,
   pause/resume/completion logging, broker parent loss, startup failure, policy
   mismatch, command saturation, and UI acknowledgement timeout.
+- Preserve complete local TMA emergency recovery when an established run
+  directory disappears instead of silently recreating an empty destination.
