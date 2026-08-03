@@ -1231,18 +1231,50 @@ def _fit_current_transition(
         transition_slope_sign=-1,
     )
     if not prefer_horizontal_after:
-        return generic
+        return (
+            generic
+            if _mini_dma_transition_signal_is_large_enough(generic, strain)
+            else None
+        )
     if generic is not None and _mini_dma_after_fit_is_flat_enough(
         generic,
         after_slope_hint=after_slope_hint,
     ):
-        return generic
+        return (
+            generic
+            if _mini_dma_transition_signal_is_large_enough(generic, strain)
+            else None
+        )
     anchored = _fit_current_transition_with_suffix_after(
         group,
         strain,
         after_slope_hint=after_slope_hint,
     )
-    return anchored if anchored is not None else generic
+    selected = anchored if anchored is not None else generic
+    return (
+        selected
+        if _mini_dma_transition_signal_is_large_enough(selected, strain)
+        else None
+    )
+
+
+def _mini_dma_transition_signal_is_large_enough(
+    fit: TangentTransitionFit | None,
+    strain_pct: pd.Series,
+) -> bool:
+    """Reject tangent fits whose absolute strain signal is only trace noise."""
+
+    if fit is None:
+        return False
+    strain = pd.to_numeric(strain_pct, errors="coerce").dropna()
+    if strain.empty:
+        return False
+    strain_range_pct = float(strain.max() - strain.min())
+    transition_width_mA = abs(float(fit.finish_x) - float(fit.start_x))
+    transition_excursion_pct = (
+        abs(float(fit.transition.slope)) * transition_width_mA
+    )
+    return strain_range_pct >= 0.5 and transition_excursion_pct >= 0.15
 
 
 def _high_current_cooling_slope(

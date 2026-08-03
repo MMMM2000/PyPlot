@@ -227,6 +227,11 @@ def main() -> int:
     parser.add_argument("--project", required=True, type=Path, help="Disposable project copy to read.")
     parser.add_argument("--root", action="append", type=Path, default=[], help="Measurement search root.")
     parser.add_argument("--out", required=True, type=Path, help="Audit manifest directory.")
+    parser.add_argument(
+        "--exact-only",
+        action="store_true",
+        help="Use exact in-root project paths only; do not scan roots by filename.",
+    )
     parser.add_argument("--write", action="store_true", help="Atomically create missing sidecars.")
     args = parser.parse_args()
 
@@ -244,7 +249,9 @@ def main() -> int:
     if isinstance(tma_section, Mapping):
         for review in _records(tma_section, "mini_dma_transition_reviews").values():
             search_names.update((review.get("source_name"), review.get("record_path")))
-    name_index = _build_name_index(roots, search_names)
+    name_index = (
+        {} if args.exact_only else _build_name_index(roots, search_names)
+    )
     rows: list[dict[str, Any]] = []
 
     annealing = sections.get("annealing")

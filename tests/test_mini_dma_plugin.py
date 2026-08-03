@@ -993,3 +993,39 @@ def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
     finally:
         host.close()
         app.processEvents()
+
+
+def test_tma_transition_signal_gate_rejects_trace_noise() -> None:
+    before = core.LinearSegmentFit(0.001, 0.0, 0.0, 20.0, 0.01)
+    transition = core.LinearSegmentFit(-0.01, 0.0, 20.0, 30.0, 0.01)
+    after = core.LinearSegmentFit(0.001, 0.0, 30.0, 50.0, 0.01)
+    fit = core.TangentTransitionFit(
+        start_x=20.0,
+        finish_x=30.0,
+        before=before,
+        transition=transition,
+        after=after,
+        rmse=0.01,
+    )
+
+    assert not core._mini_dma_transition_signal_is_large_enough(
+        fit,
+        pd.Series([0.0, 0.3]),
+    )
+    assert not core._mini_dma_transition_signal_is_large_enough(
+        fit,
+        pd.Series([0.0, 0.6]),
+    )
+
+    strong_fit = core.TangentTransitionFit(
+        start_x=20.0,
+        finish_x=30.0,
+        before=before,
+        transition=core.LinearSegmentFit(-0.02, 0.0, 20.0, 30.0, 0.01),
+        after=after,
+        rmse=0.01,
+    )
+    assert core._mini_dma_transition_signal_is_large_enough(
+        strong_fit,
+        pd.Series([0.0, 0.6]),
+    )

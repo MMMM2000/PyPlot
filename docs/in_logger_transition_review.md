@@ -68,6 +68,8 @@ Portable reviews can be created from existing Builder project decisions without 
 uv run python scripts/backfill_transition_reviews.py --project <copy.pydpj> --root <data-root> --out artifacts/transition-review-backfill
 ```
 
+When all reviewed measurements are expected to remain at their saved paths, add `--exact-only`. This disables recursive filename fallback, blocks existing out-of-root paths, and makes the audit substantially faster. Omit it only when a separately reviewed moved-file recovery pass is required.
+
 The command is a dry run by default. Add `--write` only after reviewing the audit summary. Every candidate, including an absolute path saved in the project, must resolve inside one of the explicit `--root` directories. An out-of-root path is reported and never read or written. The command writes a sidecar only for an exact or unique in-root measurement match, never overwrites a conflicting sidecar, and records every written, skipped, ambiguous, stale, or conflicting item in a JSON audit manifest. Repeated TMA sweeps at the same stress are preserved as separate targets. Historical `1st:` decisions map to the first sweep; an unqualified legacy stress decision maps to the final sweep for backward compatibility.
 
 Historical Current Annealing reviews that contain manual final values but were stored as `accepted_auto` are normalized to `manual_adjusted` during backfill. This repairs the review-state label without changing the reviewed transition values.

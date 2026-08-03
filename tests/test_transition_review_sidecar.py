@@ -639,6 +639,15 @@ def test_backfill_candidate_never_uses_an_exact_path_outside_roots(tmp_path) -> 
     assert candidate == inside.resolve()
     assert match == "unique_name"
 
+    candidate, match = _candidate(
+        outside,
+        (outside.name,),
+        [allowed.resolve()],
+        name_index={},
+    )
+    assert candidate is None
+    assert match == "outside_roots"
+
 def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     from scripts.backfill_transition_reviews import _apply_ca_review, _apply_tma_reviews
 

@@ -301,10 +301,9 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
 def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSummary, ...]:
     """Estimate annealing As/Af/Ms/Mf currents for each paired R(I) loop.
 
-    The annealing traces are deliberately gated more conservatively than TMA:
-    a loop is emitted only when its increasing-current leg has an accepted
-    austenite tangent fit. Cooling points are added for that same loop when the
-    following decreasing-current leg has a clear martensite fit.
+    Heating and cooling legs are assessed independently. A loop is emitted
+    when either leg has a clear transition, so a missed heating fit does not
+    suppress an otherwise well-defined cooling transition.
     """
 
     resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
@@ -324,22 +323,34 @@ def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSum
         if direction < 0:
             continue
         loop_index += 1
-        heating = _fit_heating_resistance_drop_segment(working.iloc[start:end].copy())
-        if heating is None:
-            continue
+        heating_segment = working.iloc[start:end].copy()
+        heating = _fit_heating_resistance_drop_segment(heating_segment)
+        wrong_signed_heating = (
+            _fit_annealing_transition_segment(
+                heating_segment,
+                transition_slope_sign=1,
+            )
+            if heating is None
+            else None
+        )
+        maximum_current_mA = (
+            heating.fit.finish_x
+            if heating is not None
+            else float(pd.to_numeric(heating_segment["I_mA"], errors="coerce").max())
+        )
         cooling_candidates: List[_AnnealingTransitionCandidate] = []
         for next_start, next_end, next_direction in segments[segment_index + 1 : segment_count]:
             if next_direction >= 0:
                 break
             candidate = _fit_cooling_resistance_increase_segment(
                 working.iloc[next_start:next_end].copy(),
-                max_current_mA=heating.fit.finish_x,
+                max_current_mA=maximum_current_mA,
             )
             if candidate is None:
                 continue
             if (
-                candidate.fit.finish_x < heating.fit.finish_x
-                and candidate.fit.start_x < heating.fit.finish_x
+                candidate.fit.finish_x < maximum_current_mA
+                and candidate.fit.start_x < maximum_current_mA
                 and candidate.fit.transition.slope < 0.0
             ):
                 cooling_candidates.append(candidate)
@@ -348,10 +359,14 @@ def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSum
             if cooling_candidates
             else None
         )
+        if heating is None and wrong_signed_heating is not None:
+            continue
+        if heating is None and cooling is None:
+            continue
         summaries.append(
             AnnealingTransitionSummary(
-                as_current_mA=heating.fit.start_x,
-                af_current_mA=heating.fit.finish_x,
+                as_current_mA=heating.fit.start_x if heating is not None else None,
+                af_current_mA=heating.fit.finish_x if heating is not None else None,
                 mf_current_mA=cooling.fit.start_x if cooling is not None else None,
                 ms_current_mA=cooling.fit.finish_x if cooling is not None else None,
                 loop_index=loop_index,
@@ -595,7 +610,7 @@ def _fit_cooling_resistance_increase_segment(
     min_rise = max(0.008 * median_resistance, 1.0 * noise, 0.8)
     min_span = max(0.8, scan_width * 0.04)
     max_span = max(3.5, scan_width * 0.25)
-    low_current_limit = float(np.nanmin(x)) + max(8.0, scan_width * 0.35)
+    low_current_limit = float(np.nanmin(x)) + max(8.0, scan_width * 0.60)
     candidates: List[tuple[float, int, int, float]] = []
     for start in range(2, len(x) - 5):
         if x[start] > low_current_limit:
@@ -621,7 +636,7 @@ def _fit_cooling_resistance_increase_segment(
                 if end < after_end
                 else float(smoothed[end])
             )
-            if after_peak > smoothed[end] + (0.7 * rise):
+            if after_peak > smoothed[end] + (0.9 * rise):
                 continue
             score = float(x[start]) + (span * 0.2) - (rise * 0.08)
             candidates.append((score, start, end, rise))

@@ -818,3 +818,26 @@ def test_current_annealing_plugin_reviews_loaded_run_into_sidecar(
 
     assert reviewed == [measurement]
     assert logged == [f"Saved transition review: {run_dir / 'transition_review.json'}"]
+
+
+def test_summarize_transition_loops_keeps_clear_cooling_without_heating_fit() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_resistance = 100.0 + (0.12 * up_current)
+    down_rise = np.clip((30.0 - down_current) / 6.0, 0.0, 1.0)
+    down_resistance = 80.0 + (10.0 * down_rise)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_Ohm": np.r_[up_resistance, down_resistance],
+        }
+    )
+
+    summaries = anneal_core.summarize_transition_loops(frame)
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary.as_current_mA is None
+    assert summary.af_current_mA is None
+    assert summary.ms_current_mA == pytest.approx(28.0, abs=1.5)
+    assert summary.mf_current_mA == pytest.approx(23.5, abs=1.5)
