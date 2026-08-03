@@ -10782,6 +10782,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_sweep_fatigue_cycles = current_sweep_form.labelForField(
             self.spin_current_sweep_fatigue_cycles
         )
+        self.label_current_sweep_fatigue_progress = QtWidgets.QLabel(
+            "Progress: 0/100 completed | not started",
+            automation_box,
+        )
+        self.label_current_sweep_fatigue_progress.setWordWrap(True)
+        self.label_current_sweep_fatigue_progress.setToolTip(
+            "Completed cycles are counted only after both the up and down current-sweep legs finish."
+        )
+        current_sweep_form.addRow("", self.label_current_sweep_fatigue_progress)
         self.current_sweep_advanced_panel = QtWidgets.QWidget(self)
         current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
         current_sweep_advanced_form.setContentsMargins(0, 0, 0, 0)
@@ -11681,26 +11690,15 @@ class MainWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(
             self._build_dashboard_value_cell(
                 self.dashboard_status_box,
-                "cycles",
-                "Cycles",
-                min_width=180,
+                "task",
+                "Task",
+                min_width=340,
                 fixed_height=24,
             ),
             2,
             0,
-        )
-        status_layout.addWidget(
-            self._build_dashboard_value_cell(
-                self.dashboard_status_box,
-                "task",
-                "Task",
-                min_width=300,
-                fixed_height=24,
-            ),
-            2,
             1,
-            1,
-            2,
+            3,
         )
         status_layout.setRowMinimumHeight(2, 26)
         hero_layout.addWidget(self.dashboard_status_box, stretch=1)
@@ -23704,6 +23702,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
         if hasattr(self, "label_current_sweep_fatigue_cycles") and self.label_current_sweep_fatigue_cycles is not None:
             self.label_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setVisible(fatigue_mode)
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         if mode == "cycle":
             summary = (
@@ -29986,24 +29987,27 @@ class MainWindow(QtWidgets.QMainWindow):
             "state": state,
         }
 
-    def _fatigue_dashboard_text(self) -> str:
+    def _fatigue_progress_text(self) -> str:
         progress = self._fatigue_progress_snapshot()
         if progress is None:
-            return "-"
+            configured_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            if configured_cycles == 0:
+                return "Progress: 0 completed | not started (Forever)"
+            return f"Progress: 0/{configured_cycles} completed | not started"
         completed = int(progress["completed_cycles"])
         cycle_limit = progress["cycle_limit"]
         active_cycle = progress["active_cycle"]
         state = str(progress["state"])
         completed_text = (
-            f"{completed} complete"
+            f"{completed} completed"
             if cycle_limit is None
-            else f"{completed}/{int(cycle_limit)} complete"
+            else f"{completed}/{int(cycle_limit)} completed"
         )
         if active_cycle is None:
-            return f"{completed_text} | {state}"
+            return f"Progress: {completed_text} | {state}"
         if state == "running" and progress["active_leg"]:
             state = str(progress["active_leg"])
-        return f"{completed_text} | #{int(active_cycle)} {state}"
+        return f"Progress: {completed_text} | cycle {int(active_cycle)} {state}"
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
@@ -36257,7 +36261,8 @@ class MainWindow(QtWidgets.QMainWindow):
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
         self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm")
-        self._set_dashboard_value("cycles", self._fatigue_dashboard_text())
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"

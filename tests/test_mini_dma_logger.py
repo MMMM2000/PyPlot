@@ -8149,6 +8149,9 @@ def test_iso_stress_fatigue_supports_forever_without_expanding_recipe(
             mini_dma_mod.MAX_FINITE_FATIGUE_CYCLES
         )
         assert window.spin_current_sweep_fatigue_cycles.specialValueText() == "Forever"
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 0 completed | not started (Forever)"
+        )
         tooltip = window.spin_current_sweep_fatigue_cycles.toolTip()
         assert "until the operator stops" in tooltip
         steps, summary, _interval_ms = window._build_automation_recipe()
@@ -8210,9 +8213,16 @@ def test_forever_fatigue_progress_reports_cycle_without_eta(tmp_path: Path, qtbo
         assert "cycle 37" in window.recipe_progress.format()
         assert "until stopped" in window.recipe_progress.format()
         assert "ETA" not in window.recipe_progress.format()
-        assert window._fatigue_dashboard_text() == "36 complete | #37 down"
-        window._set_dashboard_value("cycles", window._fatigue_dashboard_text())
-        assert window._dashboard_value_labels["cycles"].text() == "36 complete | #37 down"
+        assert window._fatigue_progress_text() == (
+            "Progress: 36 completed | cycle 37 down"
+        )
+        window.label_current_sweep_fatigue_progress.setText(
+            window._fatigue_progress_text()
+        )
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 36 completed | cycle 37 down"
+        )
+        assert "cycles" not in window._dashboard_value_labels
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -8232,17 +8242,21 @@ def test_fatigue_progress_distinguishes_paused_incomplete_and_complete(
         window._automation_active = True
         window._automation_paused = True
 
-        assert window._fatigue_dashboard_text() == "7/10 complete | #8 paused"
+        assert window._fatigue_progress_text() == (
+            "Progress: 7/10 completed | cycle 8 paused"
+        )
         assert window._fatigue_progress_snapshot()["state"] == "paused"
 
         window._automation_active = False
         window._automation_paused = False
-        assert window._fatigue_dashboard_text() == "7/10 complete | #8 incomplete"
+        assert window._fatigue_progress_text() == (
+            "Progress: 7/10 completed | cycle 8 incomplete"
+        )
         assert window._fatigue_progress_snapshot()["state"] == "incomplete"
 
         window._fatigue_cycle_index = 10
         window._fatigue_cycles_completed = 10
-        assert window._fatigue_dashboard_text() == "10/10 complete | complete"
+        assert window._fatigue_progress_text() == "Progress: 10/10 completed | complete"
         assert window._fatigue_progress_snapshot()["state"] == "complete"
     finally:
         window._automation_active = False
@@ -8378,6 +8392,10 @@ def test_iso_stress_fatigue_ui_hides_ladder_and_keeps_preheat_controls(tmp_path:
         assert window.label_current_sweep_target_step.isHidden() is True
         assert window.label_current_sweep_fatigue_section.isHidden() is False
         assert window.spin_current_sweep_fatigue_cycles.isHidden() is False
+        assert window.label_current_sweep_fatigue_progress.isHidden() is False
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 0/100 completed | not started"
+        )
         assert window.check_current_sweep_first_overheating.isHidden() is False
         assert window.label_current_sweep_first_overheating_section.isHidden() is False
         assert window.row_current_sweep_first_overheating_target.isHidden() is True
@@ -8392,6 +8410,7 @@ def test_iso_stress_fatigue_ui_hides_ladder_and_keeps_preheat_controls(tmp_path:
         assert window.row_current_sweep_target_end.isHidden() is False
         assert window.row_current_sweep_target_step.isHidden() is False
         assert window.label_current_sweep_fatigue_section.isHidden() is True
+        assert window.label_current_sweep_fatigue_progress.isHidden() is True
     finally:
         _close_test_window(window)
 
