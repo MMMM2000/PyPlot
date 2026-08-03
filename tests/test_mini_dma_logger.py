@@ -613,6 +613,9 @@ def test_automation_controller_executes_exact_finite_fatigue_cycles(
             ("sweep_current", 2, "up"),
             ("sweep_current", 2, "down"),
         ]
+        assert window._fatigue_cycles_completed == 2
+        assert "Completed fatigue cycle 1/2." in window.log_output.toPlainText()
+        assert "Completed fatigue cycle 2/2." in window.log_output.toPlainText()
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -663,6 +666,7 @@ def test_automation_controller_forever_fatigue_remains_bounded_until_stopped(
                 break
 
         assert observed_cycles == [1, 2, 3, 4, 5]
+        assert window._fatigue_cycles_completed == 4
         assert window._automation_active is True
         window._automation_active = False
         window._automation_controller.tick()
@@ -8195,14 +8199,51 @@ def test_forever_fatigue_progress_reports_cycle_without_eta(tmp_path: Path, qtbo
         window._automation_active = True
         window._fatigue_cycle_limit = None
         window._fatigue_cycle_index = 37
+        window._fatigue_cycles_completed = 36
+        window._automation_fatigue_leg = "down"
 
         window._update_recipe_progress()
 
         assert window.recipe_progress.minimum() == 0
         assert window.recipe_progress.maximum() == 0
-        assert "Fatigue cycle 37" in window.recipe_progress.format()
+        assert "36 complete" in window.recipe_progress.format()
+        assert "cycle 37" in window.recipe_progress.format()
         assert "until stopped" in window.recipe_progress.format()
         assert "ETA" not in window.recipe_progress.format()
+        assert window._fatigue_dashboard_text() == "36 complete | #37 down"
+        window._set_dashboard_value("cycles", window._fatigue_dashboard_text())
+        assert window._dashboard_value_labels["cycles"].text() == "36 complete | #37 down"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_fatigue_progress_distinguishes_paused_incomplete_and_complete(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._fatigue_cycle_limit = 10
+        window._fatigue_cycle_index = 8
+        window._fatigue_cycles_completed = 7
+        window._automation_fatigue_leg = "up"
+        window._automation_active = True
+        window._automation_paused = True
+
+        assert window._fatigue_dashboard_text() == "7/10 complete | #8 paused"
+        assert window._fatigue_progress_snapshot()["state"] == "paused"
+
+        window._automation_active = False
+        window._automation_paused = False
+        assert window._fatigue_dashboard_text() == "7/10 complete | #8 incomplete"
+        assert window._fatigue_progress_snapshot()["state"] == "incomplete"
+
+        window._fatigue_cycle_index = 10
+        window._fatigue_cycles_completed = 10
+        assert window._fatigue_dashboard_text() == "10/10 complete | complete"
+        assert window._fatigue_progress_snapshot()["state"] == "complete"
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -21726,6 +21767,11 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
 def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("ui_telemetry_session")
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._fatigue_cycle_limit = None
+    window._fatigue_cycle_index = 38
+    window._fatigue_cycles_completed = 37
+    window._automation_fatigue_leg = "down"
 
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
@@ -21756,10 +21802,21 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         assert rows[0]["handler_duration_ms"] == "12.000"
         assert rows[0]["graph_refresh_interval_ms"] == "500"
         assert rows[0]["task_text"] == "Manual mode"
+        assert rows[0]["fatigue_cycles_completed"] == "37"
+        assert rows[0]["fatigue_cycle_active"] == "38"
+        assert rows[0]["fatigue_cycle_limit"] == ""
+        assert rows[0]["fatigue_cycle_leg"] == "down"
         assert rows[0]["scale_sample_changed"] == "1"
         assert rows[0]["live_plot_sample_recorded"] == "1"
         assert rows[0]["dashboard_plot_refreshed"] == "1"
         assert metadata["logging"]["ui_telemetry_sample_count"] == 1
+        assert metadata["fatigue_progress"] == {
+            "cycle_limit": None,
+            "completed_cycles": 37,
+            "active_cycle": 38,
+            "active_leg": "down",
+            "state": "incomplete",
+        }
     finally:
         _close_test_window(window)
 
@@ -29184,6 +29241,8 @@ def test_stopped_current_sweep_resumes_in_new_session_from_saved_current(
         summary="fatigue resume test",
         current_setpoint_mA=23.4,
         source_run_path=str(tmp_path / "stopped-run"),
+        fatigue_cycle_index=4,
+        fatigue_cycles_completed=3,
     )
     starts: list[tuple[bool, bool]] = []
     setpoints: list[float] = []
@@ -29205,6 +29264,8 @@ def test_stopped_current_sweep_resumes_in_new_session_from_saved_current(
         assert starts == [(True, False)]
         assert window._automation_active is True
         assert window._automation_steps[0].current_start_mA == pytest.approx(23.4)
+        assert window._fatigue_cycle_index == 4
+        assert window._fatigue_cycles_completed == 3
         assert setpoints == [pytest.approx(23.4)]
         assert "finalized run" in window.log_output.toPlainText()
     finally:

@@ -197,6 +197,7 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
     "current_sweep_reverse_current_recipe_flag",
+    "fatigue_completed_cycle_tracking",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -306,6 +307,10 @@ UI_TELEMETRY_FIELDNAMES = [
     "graph_refresh_interval_ms",
     "task_text",
     "automation_active",
+    "fatigue_cycles_completed",
+    "fatigue_cycle_active",
+    "fatigue_cycle_limit",
+    "fatigue_cycle_leg",
     "session_active",
     "session_logging_enabled",
     "length_setup_dialog_visible",
@@ -1888,6 +1893,7 @@ class AutomationResumeState:
     current_setpoint_mA: float | None = None
     source_run_path: str | None = None
     fatigue_cycle_index: int = 0
+    fatigue_cycles_completed: int = 0
     fatigue_loop_anchor_index: int | None = None
 
 
@@ -8219,6 +8225,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_fatigue_cycle_index: int | None = None
         self._automation_fatigue_leg: str | None = None
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit: int | None = None
         self._fatigue_loop_anchor_index: int | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
@@ -11663,15 +11670,26 @@ class MainWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(
             self._build_dashboard_value_cell(
                 self.dashboard_status_box,
-                "task",
-                "Task",
-                min_width=340,
+                "cycles",
+                "Cycles",
+                min_width=180,
                 fixed_height=24,
             ),
             2,
             0,
+        )
+        status_layout.addWidget(
+            self._build_dashboard_value_cell(
+                self.dashboard_status_box,
+                "task",
+                "Task",
+                min_width=300,
+                fixed_height=24,
+            ),
+            2,
             1,
-            3,
+            1,
+            2,
         )
         status_layout.setRowMinimumHeight(2, 26)
         hero_layout.addWidget(self.dashboard_status_box, stretch=1)
@@ -26615,6 +26633,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         payload["recipe_summary"] = self._last_recipe_summary
         payload["recipe_estimated_points"] = int(self._recipe_estimated_points)
+        payload["fatigue_progress"] = self._fatigue_progress_snapshot()
         payload["first_overheating_preflight"] = self._first_overheating_preflight_decision
         payload["stop"] = self._session_stop_metadata()
         payload["source_control"] = self._source_control_metadata()
@@ -29801,6 +29820,53 @@ class MainWindow(QtWidgets.QMainWindow):
         direction = "up" if direction_value >= 0.0 else "down"
         return f"{target_text}, current {direction} {current_text}/{end_text}{sweep_text}"
 
+    def _fatigue_progress_snapshot(self) -> dict[str, object] | None:
+        if self._automation_name != CURRENT_SWEEP_FATIGUE:
+            return None
+        completed_cycles = max(0, int(self._fatigue_cycles_completed))
+        cycle_index = max(0, int(self._fatigue_cycle_index))
+        cycle_limit = self._fatigue_cycle_limit
+        active_cycle = cycle_index if cycle_index > completed_cycles else None
+        if cycle_limit is not None and completed_cycles >= int(cycle_limit):
+            state = "complete"
+        elif self._automation_active:
+            if self._automation_paused:
+                state = "paused"
+            elif active_cycle is None:
+                state = "preparing"
+            else:
+                state = "running"
+        elif active_cycle is not None:
+            state = "incomplete"
+        else:
+            state = "stopped"
+        return {
+            "cycle_limit": None if cycle_limit is None else int(cycle_limit),
+            "completed_cycles": completed_cycles,
+            "active_cycle": active_cycle,
+            "active_leg": self._automation_fatigue_leg if active_cycle is not None else None,
+            "state": state,
+        }
+
+    def _fatigue_dashboard_text(self) -> str:
+        progress = self._fatigue_progress_snapshot()
+        if progress is None:
+            return "-"
+        completed = int(progress["completed_cycles"])
+        cycle_limit = progress["cycle_limit"]
+        active_cycle = progress["active_cycle"]
+        state = str(progress["state"])
+        completed_text = (
+            f"{completed} complete"
+            if cycle_limit is None
+            else f"{completed}/{int(cycle_limit)} complete"
+        )
+        if active_cycle is None:
+            return f"{completed_text} | {state}"
+        if state == "running" and progress["active_leg"]:
+            state = str(progress["active_leg"])
+        return f"{completed_text} | #{int(active_cycle)} {state}"
+
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
             self._recipe_progress_pending_complete = self._recipe_progress_pending_complete or bool(complete)
@@ -29821,13 +29887,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recipe_progress_pending_complete = False
         if self._automation_name == CURRENT_SWEEP_FATIGUE:
             cycle_index = max(0, int(self._fatigue_cycle_index))
+            completed_cycles = max(0, int(self._fatigue_cycles_completed))
             cycle_limit = self._fatigue_cycle_limit
             current_sweep_text = self._active_current_sweep_progress_text()
             if complete:
                 completed_cycles = (
-                    cycle_index
+                    completed_cycles
                     if cycle_limit is None
-                    else max(cycle_index, int(cycle_limit))
+                    else max(completed_cycles, int(cycle_limit))
                 )
                 self.recipe_progress.setRange(0, max(1, completed_cycles))
                 self.recipe_progress.setValue(max(1, completed_cycles))
@@ -29843,14 +29910,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     progress_text = (
                         "Fatigue: preparing forever"
                         if cycle_index <= 0
-                        else f"Fatigue cycle {cycle_index} | running until stopped"
+                        else (
+                            f"Fatigue: {completed_cycles} complete | "
+                            f"cycle {cycle_index} | until stopped"
+                        )
                     )
-                    progress_value = cycle_index
-                    progress_total = max(1, cycle_index + 1)
+                    progress_value = completed_cycles
+                    progress_total = max(1, completed_cycles + 1)
                     percent = 0
                 else:
                     finite_limit = max(1, int(cycle_limit))
-                    completed_cycles = max(0, cycle_index - 1)
                     self.recipe_progress.setRange(0, finite_limit)
                     self.recipe_progress.setValue(min(completed_cycles, finite_limit))
                     progress_text = (
@@ -31114,6 +31183,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None if self._session_base_path is None else str(self._session_base_path.parent)
             ),
             fatigue_cycle_index=int(self._fatigue_cycle_index),
+            fatigue_cycles_completed=int(self._fatigue_cycles_completed),
             fatigue_loop_anchor_index=self._fatigue_loop_anchor_index,
         )
 
@@ -31170,6 +31240,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = int(state.interval_ms)
         self._automation_name = str(state.name)
         self._fatigue_cycle_index = int(state.fatigue_cycle_index)
+        self._fatigue_cycles_completed = int(state.fatigue_cycles_completed)
         self._fatigue_loop_anchor_index = state.fatigue_loop_anchor_index
         fatigue_loop_step = next(
             (step for step in reversed(self._automation_steps) if step.action == "fatigue_loop"),
@@ -31583,6 +31654,7 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
         )
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit = (
             None
             if fatigue_loop_step is None
@@ -32555,8 +32627,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._kosice_force_control = None
         self._automation_steps = []
         self._automation_index = 0
-        self._fatigue_cycle_index = 0
-        self._fatigue_cycle_limit = None
         self._fatigue_loop_anchor_index = None
         if not keep_progress:
             self._automation_completed_ticks = 0
@@ -34922,8 +34992,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._fatigue_loop_anchor_index is None:
             self._fatigue_loop_anchor_index = int(step_index)
         anchor_index = int(self._fatigue_loop_anchor_index)
-        next_cycle_index = int(self._fatigue_cycle_index) + 1
+        completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
+        if completed_cycle > int(self._fatigue_cycles_completed):
+            self._fatigue_cycles_completed = completed_cycle
+            limit_text = "forever" if cycle_limit is None else str(cycle_limit)
+            self._log(f"Completed fatigue cycle {completed_cycle}/{limit_text}.")
+            if self._session_active:
+                self._write_session_metadata()
+        next_cycle_index = int(self._fatigue_cycle_index) + 1
         if cycle_limit is not None and next_cycle_index > int(cycle_limit):
             del self._automation_steps[anchor_index:]
             self._automation_index = anchor_index
@@ -35678,6 +35755,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
+                "fatigue_cycles_completed": int(self._fatigue_cycles_completed),
+                "fatigue_cycle_active": (
+                    int(self._fatigue_cycle_index)
+                    if int(self._fatigue_cycle_index) > int(self._fatigue_cycles_completed)
+                    else ""
+                ),
+                "fatigue_cycle_limit": (
+                    "" if self._fatigue_cycle_limit is None else int(self._fatigue_cycle_limit)
+                ),
+                "fatigue_cycle_leg": self._automation_fatigue_leg or "",
                 "session_active": int(bool(self._session_active)),
                 "session_logging_enabled": int(bool(self._session_logging_enabled)),
                 "length_setup_dialog_visible": int(self._setup_dialog_visible()),
@@ -35977,6 +36064,7 @@ class MainWindow(QtWidgets.QMainWindow):
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
         self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm")
+        self._set_dashboard_value("cycles", self._fatigue_dashboard_text())
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"
