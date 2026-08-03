@@ -134,7 +134,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-30.1"
+CONTROL_LOGIC_VERSION = "2026-08-03.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -198,6 +198,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_sweep_progress_uses_current_fraction",
     "current_sweep_reverse_current_recipe_flag",
     "fatigue_completed_cycle_tracking",
+    "durable_stop_transition_tracking",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -5274,7 +5275,14 @@ class MiniDmaAutomationController:
             if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
             host._update_recipe_progress(complete=True)
-            host._stop_auto_ramp(log_completion=False, keep_progress=True)
+            completion_reason = "recovery_completed" if is_recovery else "recipe_completed"
+            completion_detail = "Recovery completed." if is_recovery else "Recipe completed."
+            host._stop_auto_ramp(
+                log_completion=False,
+                keep_progress=True,
+                stop_reason=completion_reason,
+                stop_detail=completion_detail,
+            )
             host._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and host._session_active:
                 host._stop_session(reason="recipe_completed", detail="Recipe completed.")
@@ -8088,6 +8096,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason: str | None = None
         self._session_stop_detail: str | None = None
         self._session_stop_recorded_utc: str | None = None
+        self._session_stop_transition: dict[str, Any] | None = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s: float | None = None
         self._session_raw_scale_max_gap_s = 0.0
@@ -8325,6 +8335,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
         self._run_log_mirror_generation: int | None = None
         self._pending_run_log_lines: list[str] = []
+        self._last_log_message: str | None = None
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
@@ -12799,6 +12810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(WeakOwnerCallback(self, "_log", message))
             return
+        self._last_log_message = str(message)
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self._queue_run_log_display_line(line)
@@ -26451,6 +26463,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _session_stop_label(self, reason: str | None) -> tuple[str, str]:
         labels = {
             "recipe_completed": ("normal", "Recipe completed normally"),
+            "recovery_completed": ("normal", "Recovery completed normally"),
             "manual_recipe_stop": ("operator", "Manual recipe stop"),
             "manual_session_stop": ("operator", "Manual session stop"),
             "emergency_stop": ("operator", "Emergency stop"),
@@ -26466,12 +26479,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _session_stop_metadata(self) -> dict[str, Any]:
         category, label = self._session_stop_label(self._session_stop_reason)
+        transition = None
+        if self._session_stop_transition is not None:
+            transition = dict(self._session_stop_transition)
+            transition["stages"] = [
+                dict(stage)
+                for stage in self._session_stop_transition.get("stages", [])
+                if isinstance(stage, dict)
+            ]
         return {
             "reason": self._session_stop_reason,
             "category": category,
             "label": label,
             "detail": self._session_stop_detail,
             "recorded_utc": self._session_stop_recorded_utc,
+            "transition": transition,
         }
 
     def _mark_session_stop_reason(
@@ -26486,6 +26508,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = str(reason)
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
+
+    def _stop_origin_from_caller(self) -> str:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back.f_back if frame is not None and frame.f_back is not None else None
+            if caller is None:
+                return "unknown"
+            return f"{caller.f_code.co_name}:{caller.f_lineno}"
+        finally:
+            del frame
+
+    def _begin_session_stop_transition(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        origin: str,
+        force_reason: bool = False,
+    ) -> None:
+        self._mark_session_stop_reason(reason, detail=detail, force=force_reason)
+        transition_created = self._session_stop_transition is None
+        if transition_created:
+            self._session_stop_transition = {
+                "transition_id": uuid4().hex,
+                "state": "requested",
+                "reason": self._session_stop_reason,
+                "detail": self._session_stop_detail,
+                "origin": str(origin or "unknown"),
+                "trigger_log_message": self._last_log_message,
+                "requested_utc": self._session_stop_recorded_utc,
+                "last_stage_utc": self._session_stop_recorded_utc,
+                "automation_name": self._automation_name,
+                "automation_phase": self._automation_phase,
+                "automation_index": int(self._automation_index),
+                "task": self._current_task_summary(),
+                "fatigue_progress": self._fatigue_progress_snapshot(),
+                "stages": [],
+            }
+        else:
+            self._session_stop_transition["reason"] = self._session_stop_reason
+            self._session_stop_transition["detail"] = self._session_stop_detail
+        if transition_created:
+            self._record_session_stop_stage("requested", detail=detail, force_canonical=True)
+
+    def _record_session_stop_stage(
+        self,
+        stage: str,
+        *,
+        detail: str | None = None,
+        error: BaseException | None = None,
+        force_canonical: bool = True,
+    ) -> None:
+        transition = self._session_stop_transition
+        if transition is None:
+            return
+        recorded_utc = _utc_timestamp()
+        stage_record: dict[str, Any] = {
+            "stage": str(stage),
+            "recorded_utc": recorded_utc,
+        }
+        if detail:
+            stage_record["detail"] = str(detail)
+        if error is not None:
+            stage_record["error_type"] = error.__class__.__name__
+            stage_record["error"] = str(error) or error.__class__.__name__
+        stages = transition.setdefault("stages", [])
+        if isinstance(stages, list):
+            stages.append(stage_record)
+        transition["state"] = str(stage)
+        transition["last_stage_utc"] = recorded_utc
+        transition["fatigue_progress"] = self._fatigue_progress_snapshot()
+        if error is not None:
+            transition["failure_stage"] = str(stage)
+            transition["failure_type"] = error.__class__.__name__
+            transition["failure_detail"] = str(error) or error.__class__.__name__
+        if (
+            not force_canonical
+            or self._session_json_path is None
+            or self._session_metadata_store is None
+            or self._stop_transition_metadata_write_in_progress
+        ):
+            return
+        self._stop_transition_metadata_write_in_progress = True
+        try:
+            self._write_session_metadata(force_canonical=True)
+        except Exception as exc:
+            # Stop diagnostics must never prevent the physical stop sequence.
+            self._queue_run_log_display_line(
+                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"Stop-transition metadata write failed at {stage}: {exc}"
+            )
+        finally:
+            self._stop_transition_metadata_write_in_progress = False
 
     def _freeze_run_metadata_snapshot(self) -> MiniDmaRunMetadataSnapshot:
         if not self._is_ui_thread():
@@ -27219,6 +27334,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = None
         self._session_stop_detail = None
         self._session_stop_recorded_utc = None
+        self._session_stop_transition = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_recovery_path = None
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s = None
@@ -27465,19 +27582,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._session_active:
             return
-        self._finalize_calibration_report_if_needed()
+        resolved_reason = reason or self._session_stop_reason or "manual_session_stop"
+        resolved_detail = detail or self._session_stop_detail
+        if resolved_detail is None:
+            resolved_detail = (
+                "Session stopped without completing an active recipe."
+                if resolved_reason == "manual_session_stop"
+                else self._session_stop_label(resolved_reason)[1]
+            )
+        stop_origin = self._stop_origin_from_caller()
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=stop_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
+        self._record_session_stop_stage("session_finalization_started")
+        try:
+            self._finalize_calibration_report_if_needed()
+        except Exception as exc:
+            self._record_session_stop_stage("calibration_report_finalize_failed", error=exc)
+            self._log(f"Session stop could not finalize the calibration report: {exc}")
         self._stop_auto_ramp(
             log_completion=False,
-            stop_reason=reason,
-            stop_detail=detail,
+            stop_reason=resolved_reason,
+            stop_detail=resolved_detail,
+            stop_origin=stop_origin,
         )
-        if reason is not None:
-            self._mark_session_stop_reason(reason, detail=detail, force=reason != "app_closed")
-        elif self._session_stop_reason is None:
-            self._mark_session_stop_reason(
-                "manual_session_stop",
-                detail="Session stopped without completing an active recipe.",
-            )
         if (
             self._session_csv_writer is not None
             and self._session_stop_reason == "recipe_completed"
@@ -27503,6 +27634,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
+        self._record_session_stop_stage("session_logging_fenced")
         timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
         if self._session_txt_handle is not None:
@@ -27530,6 +27662,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_setup_csv_handle.close()
             self._session_setup_csv_handle = None
         self._session_setup_csv_writer = None
+        self._record_session_stop_stage("session_files_closed")
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = self._session_point_count()
@@ -27573,6 +27706,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 reconcile_run_log = True
         self._session_run_log_accepting = False
         if self._session_json_path is not None:
+            self._record_session_stop_stage(
+                "completed",
+                detail="Recipe and session teardown completed.",
+                force_canonical=False,
+            )
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
             if (
@@ -32558,7 +32696,9 @@ class MainWindow(QtWidgets.QMainWindow):
         offer_recovery: bool = False,
         stop_reason: str | None = None,
         stop_detail: str | None = None,
+        stop_origin: str | None = None,
     ) -> None:
+        resolved_origin = stop_origin or self._stop_origin_from_caller()
         if not self._is_ui_thread():
             self._automation_paused = True
             self._run_on_ui_thread(
@@ -32571,32 +32711,66 @@ class MainWindow(QtWidgets.QMainWindow):
                     offer_recovery=offer_recovery,
                     stop_reason=stop_reason,
                     stop_detail=stop_detail,
+                    stop_origin=resolved_origin,
                 )
             )
             return
         if not self._automation_active:
             return
-        if stop_reason is not None:
-            self._mark_session_stop_reason(stop_reason, detail=stop_detail, force=stop_reason != "app_closed")
-        elif user_initiated:
-            self._mark_session_stop_reason(
-                "manual_recipe_stop",
-                detail="Recipe stop was requested by the operator.",
-            )
-        elif offer_recovery:
-            self._mark_session_stop_reason(
-                "recipe_control_stop",
-                detail="Recipe stopped before completion and recovery was offered.",
-            )
+        resolved_reason = stop_reason
+        resolved_detail = stop_detail
+        if resolved_reason is None and user_initiated:
+            resolved_reason = "manual_recipe_stop"
+            resolved_detail = resolved_detail or "Recipe stop was requested by the operator."
+        elif resolved_reason is None:
+            resolved_reason = "recipe_control_stop"
+            if resolved_detail is None and self._last_log_message:
+                resolved_detail = f"Automatic stop followed: {self._last_log_message}"
+            elif resolved_detail is None and offer_recovery:
+                resolved_detail = "Recipe stopped before completion and recovery was offered."
+            elif resolved_detail is None:
+                resolved_detail = "An automatic safety/control path requested a recipe stop."
+        if resolved_detail is None:
+            resolved_detail = self._session_stop_label(resolved_reason)[1]
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=resolved_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
         should_store_resume = user_initiated and self._automation_index < len(self._automation_steps)
         if should_store_resume:
-            self._store_resume_state()
+            try:
+                self._store_resume_state()
+                self._record_session_stop_stage("resume_state_saved")
+            except Exception as exc:
+                self._record_session_stop_stage("resume_state_save_failed", error=exc)
+                self._log(f"Recipe stop could not preserve resume state: {exc}")
         self._automation_active = False
         self._automation_paused = True
+        self._record_session_stop_stage("automation_fenced")
         if self._supply_output_enabled:
-            self._disable_supply_output()
-        self._stop_automation_control_loop()
-        self._stop_tic_keepalive()
+            try:
+                self._disable_supply_output()
+                self._record_session_stop_stage("supply_disabled")
+            except Exception as exc:
+                self._supply_output_enabled = False
+                self._record_session_stop_stage("supply_disable_failed", error=exc)
+                self._log(f"Recipe stop could not disable supply output: {exc}")
+        else:
+            self._record_session_stop_stage("supply_already_disabled")
+        try:
+            self._stop_automation_control_loop()
+            self._record_session_stop_stage("control_loop_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("control_loop_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop the control loop cleanly: {exc}")
+        try:
+            self._stop_tic_keepalive()
+            self._record_session_stop_stage("tic_keepalive_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("tic_keepalive_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop Tic keepalive cleanly: {exc}")
         motion_halted = False
         try:
             dispatcher = self._build_tic_dispatcher()
@@ -32608,6 +32782,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 timeout_s=2.0,
             )
         except Exception as exc:
+            self._record_session_stop_stage("tic_halt_failed", error=exc)
             self._log(f"Recipe stop could not halt Tic: {exc}")
         if motion_halted:
             try:
@@ -32615,8 +32790,18 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._release_motion_tracking_after_halt(reason="recipe stop")
+            self._record_session_stop_stage("tic_motion_halted")
         else:
             self._tic_motor_power_ok = False
+            if not any(
+                stage.get("stage") == "tic_halt_failed"
+                for stage in (self._session_stop_transition or {}).get("stages", [])
+                if isinstance(stage, dict)
+            ):
+                self._record_session_stop_stage(
+                    "tic_halt_unconfirmed",
+                    detail="Tic halt was not confirmed within the bounded stop wait.",
+                )
             self._log(
                 "Recipe stopped, but Tic halt was not confirmed; automatic and manual motion "
                 "remain blocked until motor status is checked."
@@ -32687,12 +32872,20 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self._run_on_ui_thread(self._sync_manual_motion_base_from_current_position)
         self._set_automation_context(phase="idle")
+        self._record_session_stop_stage("recipe_state_cleared")
         if log_completion:
             self._log("Recipe stopped.")
         self._close_length_setup_dialog()
         if (user_initiated or offer_recovery) and self._session_active:
-            self._stop_session()
+            self._record_session_stop_stage("session_finalization_requested")
+            self._stop_session(reason=resolved_reason, detail=resolved_detail)
+        elif self._session_active:
+            self._record_session_stop_stage(
+                "automation_stopped_session_open",
+                detail="Automation stopped while session logging remained active.",
+            )
         elif not self._session_active:
+            self._record_session_stop_stage("automation_stop_completed", force_canonical=False)
             self._clear_recovery_tic_command_context(retain_capture=False)
         if not keep_progress:
             self._update_recipe_progress()

@@ -70,6 +70,7 @@ class SessionMetadataCheckpointStore:
         self.canonical_write_interval_s = max(0.0, float(canonical_write_interval_s))
         self._monotonic = monotonic
         self._last_canonical_write_s = 0.0
+        self._canonical_parent_established = self.canonical_path.parent.is_dir()
 
     def _checkpoint_text(self, payload: Mapping[str, Any]) -> str:
         envelope = {
@@ -112,8 +113,14 @@ class SessionMetadataCheckpointStore:
         )
         canonical_written = False
         if write_canonical:
+            if self._canonical_parent_established and not self.canonical_path.parent.is_dir():
+                raise FileNotFoundError(
+                    f"established canonical metadata directory disappeared: "
+                    f"{self.canonical_path.parent}"
+                )
             _atomic_replace_text(self.canonical_path, canonical_text)
             self._last_canonical_write_s = now_s
+            self._canonical_parent_established = True
             canonical_written = True
 
         if checkpoint_error is not None:

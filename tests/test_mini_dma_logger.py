@@ -31166,6 +31166,13 @@ def test_session_metadata_records_manual_recipe_stop_reason(tmp_path: Path, qtbo
         assert payload["stop"]["reason"] == "manual_recipe_stop"
         assert payload["stop"]["category"] == "operator"
         assert "Manual" in payload["stop"]["label"]
+        transition = payload["stop"]["transition"]
+        assert transition["reason"] == "manual_recipe_stop"
+        assert transition["origin"].startswith(
+            "test_session_metadata_records_manual_recipe_stop_reason:"
+        )
+        assert transition["stages"][0]["stage"] == "requested"
+        assert transition["stages"][-1]["stage"] == "completed"
         assert "Manual recipe stop" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -31286,11 +31293,126 @@ def test_worker_thread_stop_auto_ramp_marshals_to_ui_thread(tmp_path: Path, qtbo
         assert payload["session_state"] == "finished"
         assert payload["stop"]["reason"] == "recipe_control_stop"
         assert payload["stop"]["detail"] == "Scale feedback was stale during current hold."
+        assert payload["stop"]["transition"]["origin"].startswith(
+            "test_worker_thread_stop_auto_ramp_marshals_to_ui_thread:"
+        )
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, False)]
     finally:
         window._ui_thread_id = original_ui_thread_id
         window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_stop_transition_is_durable_before_abrupt_teardown_interruption(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_abrupt_stop_transition")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    original_disable_supply = window._disable_supply_output
+
+    try:
+        window._start_session()
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("sweep_current", note="test")]
+        window._automation_index = 0
+        window._fatigue_cycle_index = 178
+        window._fatigue_cycles_completed = 177
+        window._automation_fatigue_leg = "down"
+        window._supply_output_enabled = True
+
+        def _interrupt_supply_shutdown() -> None:
+            raise KeyboardInterrupt("synthetic process interruption")
+
+        window._disable_supply_output = _interrupt_supply_shutdown  # type: ignore[method-assign]
+
+        with pytest.raises(KeyboardInterrupt, match="synthetic process interruption"):
+            window._stop_auto_ramp(
+                log_completion=False,
+                stop_reason="recipe_control_stop",
+                stop_detail="Synthetic automatic stop for interruption testing.",
+            )
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        transition = payload["stop"]["transition"]
+        assert payload["session_state"] == "running"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert transition["state"] == "automation_fenced"
+        assert [stage["stage"] for stage in transition["stages"]] == [
+            "requested",
+            "automation_fenced",
+        ]
+        assert transition["fatigue_progress"] == {
+            "cycle_limit": None,
+            "completed_cycles": 177,
+            "active_cycle": 178,
+            "active_leg": "down",
+            "state": "incomplete",
+        }
+    finally:
+        window._disable_supply_output = original_disable_supply  # type: ignore[method-assign]
+        window._supply_output_enabled = False
+        window._automation_active = False
+        if window._session_active:
+            window._stop_session(
+                reason="recipe_control_stop",
+                detail="Synthetic interruption test cleanup.",
+            )
+        _close_test_window(window)
+
+
+def test_stop_transition_records_teardown_error_and_completes_session(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_stop_teardown_error")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    original_stop_control_loop = window._stop_automation_control_loop
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="test")]
+        window._automation_index = 0
+
+        def _fail_control_loop_stop() -> None:
+            raise RuntimeError("synthetic control-loop stop failure")
+
+        window._stop_automation_control_loop = _fail_control_loop_stop  # type: ignore[method-assign]
+        window._log("Synthetic automatic condition requested a stop.")
+        window._stop_auto_ramp(log_completion=False, offer_recovery=True)
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        transition = payload["stop"]["transition"]
+        failed_stage = next(
+            stage
+            for stage in transition["stages"]
+            if stage["stage"] == "control_loop_stop_failed"
+        )
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert payload["stop"]["detail"] == (
+            "Automatic stop followed: Synthetic automatic condition requested a stop."
+        )
+        assert transition["trigger_log_message"] == (
+            "Synthetic automatic condition requested a stop."
+        )
+        assert transition["origin"].startswith(
+            "test_stop_transition_records_teardown_error_and_completes_session:"
+        )
+        assert failed_stage["error_type"] == "RuntimeError"
+        assert failed_stage["error"] == "synthetic control-loop stop failure"
+        assert transition["stages"][-1]["stage"] == "completed"
+    finally:
+        window._stop_automation_control_loop = original_stop_control_loop  # type: ignore[method-assign]
         window._automation_active = False
         _close_test_window(window)
 
@@ -31465,6 +31587,7 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
     append_started = threading.Event()
     release_failure = threading.Event()
     accepted_session_lines = 0
+    attempted_session_lines = 0
 
     class _FakeSleepGuard:
         def acquire(self) -> None:
@@ -31499,10 +31622,13 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
         *,
         generation: int | None = None,
     ) -> bool:
-        nonlocal accepted_session_lines
+        nonlocal accepted_session_lines, attempted_session_lines
         accepted = original_enqueue(channel, path, text, generation=generation)
-        if accepted and channel == "session":
-            accepted_session_lines += writer._text_line_count(text)
+        if channel == "session":
+            line_count = writer._text_line_count(text)
+            attempted_session_lines += line_count
+            if accepted:
+                accepted_session_lines += line_count
         return accepted
 
     writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
@@ -31525,12 +31651,13 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
         assert stop_elapsed_s < 1.0
         assert payload["logging"]["run_log_complete"] is False
         assert payload["logging"]["run_log_incomplete_reason"] == "write_failed"
-        assert payload["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert payload["logging"]["run_log_incomplete_lines"] == attempted_session_lines
         assert accepted_session_lines > 1
+        assert attempted_session_lines >= accepted_session_lines
 
         _ensure_app().processEvents()
         payload_after_callback = json.loads(metadata_path.read_text(encoding="utf-8"))
-        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == attempted_session_lines
     finally:
         release_failure.set()
         if timer is not None:
@@ -31827,6 +31954,9 @@ def test_session_stop_recovers_metadata_when_output_folder_was_moved(
             )
         )
         window._session_json_path = tmp_path / "missing_output" / "metadata.json"
+        assert window._session_metadata_store is not None
+        window._session_metadata_store.canonical_path = window._session_json_path
+        window._session_metadata_store._canonical_parent_established = True
 
         window._stop_session(reason="recipe_control_stop", detail="metadata write failed")
 
