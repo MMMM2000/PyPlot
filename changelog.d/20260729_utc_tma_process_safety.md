@@ -20,3 +20,5 @@
   mismatch, command saturation, and UI acknowledgement timeout.
 - Preserve complete local TMA emergency recovery when an established run
   directory disappears instead of silently recreating an empty destination.
+- Preserve the real shared-HMP broker startup exception across fast Windows
+  child-process exits instead of reducing it to an opaque exit-code message.

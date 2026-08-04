@@ -51,6 +51,25 @@ class BrokerProcessReady:
     port_name: str
 
 
+def _publish_ready_payload(ready_queue: Any, payload: object) -> None:
+    """Publish one startup result and synchronously flush the child feeder.
+
+    ``multiprocessing.Queue.put`` returns before its feeder thread necessarily
+    writes the payload to the parent-side pipe. A fast startup failure can
+    therefore exit first and make the supervisor report only exit code 1. The
+    broker publishes exactly one startup result, so it is safe to close and
+    join the child-side feeder immediately after that result is queued.
+    """
+
+    ready_queue.put(payload)
+    try:
+        ready_queue.close()
+        ready_queue.join_thread()
+    except (AttributeError, OSError, ValueError):
+        # Test doubles and interpreter shutdown may not expose a live feeder.
+        pass
+
+
 def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return True
@@ -127,14 +146,15 @@ def _run_broker_process(
             port=config.port,
         )
         actual_host, actual_port = server.server_address
-        ready_queue.put(
+        _publish_ready_payload(
+            ready_queue,
             BrokerProcessReady(
                 host=str(actual_host),
                 port=int(actual_port),
                 owner_pid=os.getpid(),
                 profile_id=driver.profile.profile_id,
                 port_name=driver.port_name,
-            )
+            ),
         )
 
         parent_missing_since_s: float | None = None
@@ -154,11 +174,12 @@ def _run_broker_process(
             break
     except BaseException as exc:
         try:
-            ready_queue.put(
+            _publish_ready_payload(
+                ready_queue,
                 {
                     "error": str(exc) or exc.__class__.__name__,
                     "traceback": traceback.format_exc(),
-                }
+                },
             )
         except Exception:
             pass
@@ -242,6 +263,18 @@ class SharedPowerSupplyBrokerProcess:
             if isinstance(payload, dict) and payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
             if not process.is_alive():
+                # The child may have exited immediately after publishing its
+                # failure. Give the queue pipe one short bounded drain before
+                # falling back to an otherwise opaque exit-code message.
+                try:
+                    payload = self._ready_queue.get(timeout=0.25)
+                except Empty:
+                    payload = None
+                if isinstance(payload, BrokerProcessReady):
+                    self._ready = payload
+                    return payload
+                if isinstance(payload, dict) and payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
                 raise RuntimeError(
                     "shared power-supply broker process exited before ready"
                     if process.exitcode is None

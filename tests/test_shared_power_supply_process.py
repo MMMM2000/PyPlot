@@ -105,3 +105,22 @@ def test_spawned_broker_reports_factory_startup_failure() -> None:
             process.wait_until_ready(timeout_s=5.0)
     finally:
         assert process.close(timeout_s=2.0, force=True)
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_fast_spawn_failure_never_degrades_to_opaque_exit_code(attempt: int) -> None:
+    process = SharedPowerSupplyBrokerProcess(
+        replace(
+            _fake_config(),
+            driver_factory_module=f"not_a_real_tma_driver_{attempt}",
+        )
+    )
+    try:
+        process.start()
+        with pytest.raises(RuntimeError) as failure:
+            process.wait_until_ready(timeout_s=5.0)
+        message = str(failure.value)
+        assert f"not_a_real_tma_driver_{attempt}" in message
+        assert "exited with code" not in message
+    finally:
+        assert process.close(timeout_s=2.0, force=True)
