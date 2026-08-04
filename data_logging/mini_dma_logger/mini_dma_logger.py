@@ -189,6 +189,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
     "kern_kcp_iso_current_settle_uses_processed_timed_recovery",
+    "current_hold_endpoint_acceptance_only_at_sweep_endpoint",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -34735,6 +34736,21 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return error_value <= recovery_band
 
+    def _current_sweep_setpoint_is_at_endpoint(self, step: AutomationStep) -> bool:
+        step_index = self._active_current_sweep_step_index
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if step_index is None or setpoint_mA is None:
+            return False
+        endpoint_mA = (
+            step.current_start_mA
+            if self._current_sweep_voltage_limit_step_index == step_index
+            else step.current_end_mA
+        )
+        if endpoint_mA is None:
+            return False
+        endpoint_mA = self._recipe_current_setpoint_mA(float(endpoint_mA))
+        return abs(float(setpoint_mA) - endpoint_mA) <= 1e-9
+
     def _current_sweep_hold_entry_confirmed(
         self,
         step: AutomationStep,
@@ -35270,15 +35286,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"{stable_s:.2f} s"
                     ),
                 )
-                active_setpoint_mA = self._active_current_sweep_last_setpoint_mA
-                display_target_mA = self._active_current_sweep_display_target_mA
-                if (
-                    self._active_current_sweep_step_index is not None
-                    and active_setpoint_mA is not None
-                    and display_target_mA is not None
-                    and abs(float(active_setpoint_mA) - float(display_target_mA))
-                    <= self._supply_current_resolution_mA() * 0.5
-                ):
+                if self._current_sweep_setpoint_is_at_endpoint(step):
                     self._current_sweep_endpoint_seek_accepted_step_index = (
                         self._active_current_sweep_step_index
                     )
