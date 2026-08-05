@@ -195,6 +195,120 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
     }
 
 
+def test_mini_dma_bench_plan_waits_for_serial_scan_before_hardware_overrides(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "hardware": {"scale_port": "COM6"},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append("process")
+            if windows:
+                windows[0]._serial_port_scan_completed = True
+
+    class _FakeCombo:
+        def findData(self, value: object) -> int:
+            events.append(f"find:{value}")
+            return 0
+
+        def setCurrentIndex(self, _index: int) -> None:
+            events.append("selected")
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._serial_port_scan_completed = False
+            self.combo_scale_port = _FakeCombo()
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            windows.append(self)
+
+        def _start_serial_port_enumeration(self) -> bool:
+            events.append("scan")
+            return True
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            pass
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            pass
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            pass
+
+        def _start_auto_ramp(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    windows: list[_FakeWindow] = []
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["runs"][0]["status"] == "completed"
+    assert events.index("scan") < events.index("find:COM6")
+    assert events.index("process") < events.index("find:COM6")
+
+
+def test_wait_for_tma_history_scan_blocks_until_current_root_is_ready(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class _FakeWindow:
+        _tma_history_root: Path | None = None
+
+        def _current_tma_history_root(self) -> Path:
+            return tmp_path
+
+        def _start_pending_tma_history_scan(self) -> None:
+            events.append("start")
+
+    window = _FakeWindow()
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append("process")
+            window._tma_history_root = tmp_path
+
+    bench_automation._wait_for_tma_history_scan(
+        window,
+        app=_FakeApp(),
+        sleep_fn=lambda _seconds: events.append("sleep"),
+    )
+
+    assert events == ["start", "process", "sleep", "process"]
+
+
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
