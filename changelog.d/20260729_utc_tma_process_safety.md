@@ -22,3 +22,6 @@
   directory disappears instead of silently recreating an empty destination.
 - Preserve the real shared-HMP broker startup exception across fast Windows
   child-process exits instead of reducing it to an opaque exit-code message.
+- Launch the process-owned HMP broker through a guarded module subprocess so
+  Windows does not need to reconstruct the visible Qt launcher's `__main__`
+  module before the broker can connect and report readiness.

@@ -8,13 +8,32 @@ exposing only a small lifecycle supervisor to Qt applications.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import importlib
-import multiprocessing
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import time
 import traceback
 from typing import Any
+
+
+def _append_bootstrap_diagnostic(message: str) -> None:
+    """Best-effort durable trace for failures before the startup pipe is usable."""
+
+    path_text = str(os.environ.get("PYPLOT_EXPERIMENT_LOG_PATH", "")).strip()
+    if not path_text:
+        return
+    try:
+        with open(path_text, "a", encoding="utf-8") as handle:
+            handle.write(
+                f"[TMA HMP broker PID {os.getpid()}] {message.rstrip()}\n"
+            )
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -111,17 +130,21 @@ def _run_broker_process(
     ready_sender: Any,
     stop_event: Any,
 ) -> None:
-    # Keep all hardware imports inside the spawned process.
-    from .bench_guard import identify_hmp_with_blank_retry
-    from .broker import SharedPowerSupplyBroker
-    from .driver import HmpSerialDriver
-    from .protocol import start_broker_server
-
     driver: Any = None
     server: Any = None
     thread: Any = None
-    broker: SharedPowerSupplyBroker | None = None
+    broker: Any = None
     try:
+        _append_bootstrap_diagnostic("bootstrap entered")
+        # Keep all hardware imports inside the spawned process and inside the
+        # reporting boundary. An import failure must reach the parent instead
+        # of degrading to an opaque exit-code-only error.
+        from .bench_guard import identify_hmp_with_blank_retry
+        from .broker import SharedPowerSupplyBroker
+        from .driver import HmpSerialDriver
+        from .protocol import start_broker_server
+
+        _append_bootstrap_diagnostic("hardware modules imported")
         if config.driver_factory_module and config.driver_factory_name:
             factory_module = importlib.import_module(config.driver_factory_module)
             factory = getattr(factory_module, config.driver_factory_name)
@@ -132,7 +155,11 @@ def _run_broker_process(
                 baudrate=config.baudrate,
                 timeout_s=config.driver_timeout_s,
             )
+        _append_bootstrap_diagnostic(
+            f"opening {config.port_name} at {config.baudrate} baud"
+        )
         _connect_driver_with_bounded_handoff_retry(driver)
+        _append_bootstrap_diagnostic("serial driver connected")
         idn_text = identify_hmp_with_blank_retry(driver)
         if driver.profile is None:
             raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
@@ -152,6 +179,9 @@ def _run_broker_process(
             port=config.port,
         )
         actual_host, actual_port = server.server_address
+        _append_bootstrap_diagnostic(
+            f"ready on {actual_host}:{actual_port} for {driver.port_name}"
+        )
         _publish_ready_payload(
             ready_sender,
             BrokerProcessReady(
@@ -179,17 +209,22 @@ def _run_broker_process(
             broker.emergency_all_outputs_off(intent="emergency_stop_all")
             break
     except BaseException as exc:
+        failure_traceback = traceback.format_exc()
+        _append_bootstrap_diagnostic(
+            f"startup failed: {exc.__class__.__name__}: {exc}\n{failure_traceback}"
+        )
         try:
             _publish_ready_payload(
                 ready_sender,
                 {
                     "error": str(exc) or exc.__class__.__name__,
-                    "traceback": traceback.format_exc(),
+                    "traceback": failure_traceback,
                 },
             )
         except Exception:
             pass
-        # The supervisor receives the durable traceback through ``ready_queue``.
+        # The supervisor receives the durable traceback through the startup
+        # status channel.
         # Exit non-zero without also dumping an unstructured child traceback to
         # the launcher console/log.
         raise SystemExit(1) from None
@@ -225,10 +260,12 @@ class SharedPowerSupplyBrokerProcess:
 
     def __init__(self, config: BrokerProcessConfig) -> None:
         self.config = config
-        self._context = multiprocessing.get_context("spawn")
-        self._ready_receiver, self._ready_sender = self._context.Pipe(duplex=False)
-        self._stop_event = self._context.Event()
-        self._process: multiprocessing.Process | None = None
+        self._runtime_dir: Path | None = None
+        self._config_path: Path | None = None
+        self._status_path: Path | None = None
+        self._stop_path: Path | None = None
+        self._status_consumed = False
+        self._process: subprocess.Popen[bytes] | None = None
         self._ready: BrokerProcessReady | None = None
 
     @property
@@ -237,7 +274,7 @@ class SharedPowerSupplyBrokerProcess:
 
     @property
     def exitcode(self) -> int | None:
-        return None if self._process is None else self._process.exitcode
+        return None if self._process is None else self._process.poll()
 
     @property
     def ready(self) -> BrokerProcessReady | None:
@@ -246,13 +283,39 @@ class SharedPowerSupplyBrokerProcess:
     def start(self) -> None:
         if self._process is not None:
             raise RuntimeError("shared power-supply broker process already started")
-        self._process = self._context.Process(
-            target=_run_broker_process,
-            args=(self.config, self._ready_sender, self._stop_event),
-            name="TmaPowerSupplyBroker",
+        runtime_dir = Path(tempfile.mkdtemp(prefix="tma-hmp-broker-"))
+        self._runtime_dir = runtime_dir
+        self._config_path = runtime_dir / "config.json"
+        self._status_path = runtime_dir / "status.json"
+        self._stop_path = runtime_dir / "stop"
+        self._config_path.write_text(
+            json.dumps(asdict(self.config), ensure_ascii=False),
+            encoding="utf-8",
         )
-        self._process.start()
-        self._ready_sender.close()
+        command = [
+            sys.executable,
+            "-m",
+            "data_logging.shared_power_supply.process_host",
+            str(self._config_path),
+            str(self._status_path),
+            str(self._stop_path),
+        ]
+        kwargs: dict[str, Any] = {
+            "cwd": str(Path(__file__).resolve().parents[2]),
+            "env": os.environ.copy(),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            kwargs["start_new_session"] = True
+        self._process = subprocess.Popen(command, **kwargs)
 
     def wait_until_ready(self, *, timeout_s: float = 10.0) -> BrokerProcessReady:
         process = self._process
@@ -265,8 +328,8 @@ class SharedPowerSupplyBrokerProcess:
                 self._ready = payload
                 return payload
             if isinstance(payload, dict) and payload.get("error"):
-                raise RuntimeError(str(payload["error"]))
-            if not process.is_alive():
+                raise RuntimeError(self._format_startup_error(payload))
+            if process.poll() is not None:
                 # The child may have exited immediately after publishing its
                 # failure. Give the startup pipe one short bounded drain before
                 # falling back to an otherwise opaque exit-code message.
@@ -275,13 +338,13 @@ class SharedPowerSupplyBrokerProcess:
                     self._ready = payload
                     return payload
                 if isinstance(payload, dict) and payload.get("error"):
-                    raise RuntimeError(str(payload["error"]))
+                    raise RuntimeError(self._format_startup_error(payload))
                 raise RuntimeError(
                     "shared power-supply broker process exited before ready"
-                    if process.exitcode is None
+                    if process.poll() is None
                     else (
                         "shared power-supply broker process exited with code "
-                        f"{process.exitcode} before ready"
+                        f"{process.poll()} before ready"
                     )
                 )
             remaining_s = deadline_s - time.monotonic()
@@ -291,32 +354,81 @@ class SharedPowerSupplyBrokerProcess:
                 )
             time.sleep(min(0.01, remaining_s))
 
+    @staticmethod
+    def _format_startup_error(payload: dict[str, object]) -> str:
+        message = str(payload.get("error") or "shared power-supply broker startup failed")
+        trace = str(payload.get("traceback") or "").strip()
+        if not trace:
+            return message
+        final_line = trace.splitlines()[-1].strip()
+        if final_line and final_line not in message:
+            return f"{message} ({final_line})"
+        return message
+
     def _receive_startup_payload(self, *, timeout_s: float) -> object | None:
-        try:
-            if not self._ready_receiver.poll(max(0.0, float(timeout_s))):
-                return None
-            return self._ready_receiver.recv()
-        except (EOFError, OSError):
+        if self._status_consumed or self._status_path is None:
             return None
+        deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            try:
+                payload = json.loads(self._status_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                payload = None
+            if isinstance(payload, dict):
+                self._status_consumed = True
+                if payload.get("kind") == "ready":
+                    return BrokerProcessReady(
+                        host=str(payload["host"]),
+                        port=int(payload["port"]),
+                        owner_pid=int(payload["owner_pid"]),
+                        profile_id=str(payload["profile_id"]),
+                        port_name=str(payload["port_name"]),
+                    )
+                return payload
+            remaining_s = deadline_s - time.monotonic()
+            if remaining_s <= 0.0:
+                return None
+            time.sleep(min(0.01, remaining_s))
 
     def is_alive(self) -> bool:
-        return self._process is not None and self._process.is_alive()
+        return self._process is not None and self._process.poll() is None
 
     def close(self, *, timeout_s: float = 2.0, force: bool = False) -> bool:
-        self._stop_event.set()
         process = self._process
         if process is None:
             return True
-        process.join(timeout=max(0.0, timeout_s))
-        if process.is_alive() and force:
-            process.terminate()
-            process.join(timeout=max(0.0, timeout_s))
-        if not process.is_alive():
+        if self._stop_path is not None:
             try:
-                self._ready_receiver.close()
+                self._stop_path.touch(exist_ok=True)
             except OSError:
                 pass
-        return not process.is_alive()
+        try:
+            process.wait(timeout=max(0.0, timeout_s))
+        except subprocess.TimeoutExpired:
+            if force:
+                process.terminate()
+                try:
+                    process.wait(timeout=max(0.0, timeout_s))
+                except subprocess.TimeoutExpired:
+                    pass
+        stopped = process.poll() is not None
+        if stopped:
+            self._cleanup_runtime_files()
+        return stopped
+
+    def _cleanup_runtime_files(self) -> None:
+        for path in (self._stop_path, self._status_path, self._config_path):
+            if path is None:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self._runtime_dir is not None:
+            try:
+                self._runtime_dir.rmdir()
+            except OSError:
+                pass
 
 
 __all__ = [
