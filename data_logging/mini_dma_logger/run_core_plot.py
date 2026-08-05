@@ -30,6 +30,7 @@ from .run_quality import (
     analyze_and_write_run_quality,
     analyze_run_quality,
 )
+from .time_axis import TimeAxisDisplay, time_axis_display
 
 MAX_TEMPERATURE_SIDECAR_BYTES = 512 * 1024 * 1024
 
@@ -400,7 +401,11 @@ def _add_banner(fig: plt.Figure, run_dir: Path, metadata: dict[str, Any], qualit
         fig.text(0.015, 0.022, detail[:230], fontsize=8.5, color="#374151", ha="left", va="bottom")
 
 
-def _shade_holds(ax: Axes, df: pd.DataFrame) -> None:
+def _shade_holds(
+    ax: Axes,
+    df: pd.DataFrame,
+    time_axis: TimeAxisDisplay,
+) -> None:
     if "automation_phase" not in df or "elapsed_s" not in df:
         return
     elapsed = _series(df, "elapsed_s")
@@ -415,11 +420,23 @@ def _shade_holds(ax: Axes, df: pd.DataFrame) -> None:
                 start = float(t_value)
             previous = float(t_value)
         elif start is not None:
-            ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+            ax.axvspan(
+                start / time_axis.divisor_s,
+                (previous if previous is not None else start) / time_axis.divisor_s,
+                color="#f59e0b",
+                alpha=0.18,
+                lw=0,
+            )
             start = None
             previous = None
     if start is not None:
-        ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+        ax.axvspan(
+            start / time_axis.divisor_s,
+            (previous if previous is not None else start) / time_axis.divisor_s,
+            color="#f59e0b",
+            alpha=0.18,
+            lw=0,
+        )
 
 
 def _style_axis(ax: Axes, title: str, xlabel: str, ylabel: str) -> None:
@@ -457,11 +474,15 @@ def _add_power_per_cm_axis(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any])
     top_ax.tick_params(axis="x", labelsize=8)
 
 
-def _plot_stress_time(ax: Axes, df: pd.DataFrame) -> None:
+def _plot_stress_time(
+    ax: Axes,
+    df: pd.DataFrame,
+    time_axis: TimeAxisDisplay,
+) -> None:
     x, y = _clean_xy(df, "elapsed_s", "stress_mpa")
     x, y = _decimate(x, y)
-    ax.plot(x, y, color="#2563eb", lw=1.25, label="stress")
-    _shade_holds(ax, df)
+    ax.plot(x / time_axis.divisor_s, y, color="#2563eb", lw=1.25, label="stress")
+    _shade_holds(ax, df, time_axis)
     mode = ""
     if "recipe_mode" in df and not df["recipe_mode"].dropna().empty:
         mode = str(df["recipe_mode"].dropna().mode().iloc[0])
@@ -473,8 +494,16 @@ def _plot_stress_time(ax: Axes, df: pd.DataFrame) -> None:
         tx, ty = elapsed[mask].to_numpy(), target[mask].to_numpy()
         tx, ty = _decimate(tx, ty)
         if len(tx):
-            ax.plot(tx, ty, color="#111827", lw=1.0, ls="--", alpha=0.7, label="target")
-    _style_axis(ax, "Stress vs time", "Time (s)", "Stress (MPa)")
+            ax.plot(
+                tx / time_axis.divisor_s,
+                ty,
+                color="#111827",
+                lw=1.0,
+                ls="--",
+                alpha=0.7,
+                label="target",
+            )
+    _style_axis(ax, "Stress vs time", time_axis.label, "Stress (MPa)")
     if ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8, loc="best")
 
@@ -538,16 +567,38 @@ def _plot_strain_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any], *
     _add_power_per_cm_axis(ax, df, metadata)
 
 
-def _plot_current_resistance(ax: Axes, df: pd.DataFrame) -> None:
+def _plot_current_resistance(
+    ax: Axes,
+    df: pd.DataFrame,
+    time_axis: TimeAxisDisplay,
+) -> None:
     df = _plot_rows(df)
     x, current = _clean_xy(df, "elapsed_s", "current_measured_mA")
     x, current = _decimate(x, current)
-    ax.plot(x, current, color="#e11d48", lw=1.2, label="current")
-    _style_axis(ax, "Current + resistance vs time", "Time (s)", "Current (mA)")
+    ax.plot(
+        x / time_axis.divisor_s,
+        current,
+        color="#e11d48",
+        lw=1.2,
+        label="current",
+    )
+    _style_axis(
+        ax,
+        "Current + resistance vs time",
+        time_axis.label,
+        "Current (mA)",
+    )
     ax2 = ax.twinx()
     rx, resistance = _clean_xy(df, "elapsed_s", "resistance_ohm")
     rx, resistance = _decimate(rx, resistance)
-    ax2.plot(rx, resistance, color="#0d9488", lw=1.0, alpha=0.9, label="resistance")
+    ax2.plot(
+        rx / time_axis.divisor_s,
+        resistance,
+        color="#0d9488",
+        lw=1.0,
+        alpha=0.9,
+        label="resistance",
+    )
     ax2.set_ylabel("Resistance (ohm)")
     ax2.tick_params(labelsize=9)
     lines, labels = ax.get_legend_handles_labels()
@@ -565,7 +616,12 @@ def _plot_resistance_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any
     _add_power_per_cm_axis(ax, df, metadata)
 
 
-def _plot_temperature(ax: Axes, df: pd.DataFrame, sidecar_df: pd.DataFrame | None = None) -> bool:
+def _plot_temperature(
+    ax: Axes,
+    df: pd.DataFrame,
+    time_axis: TimeAxisDisplay,
+    sidecar_df: pd.DataFrame | None = None,
+) -> bool:
     source = df
     temp_name = "ir_object_c_apparent" if "ir_object_c_apparent" in source else "frame_max_c"
     if temp_name not in source or not (_series(source, temp_name).notna().any()):
@@ -582,10 +638,23 @@ def _plot_temperature(ax: Axes, df: pd.DataFrame, sidecar_df: pd.DataFrame | Non
     x = elapsed[mask].to_numpy()
     y = temp[mask].to_numpy()
     xs, ys = _decimate(x, y)
-    ax.plot(xs, ys, color="#94a3b8", lw=0.8, alpha=0.34, label="raw")
+    ax.plot(
+        xs / time_axis.divisor_s,
+        ys,
+        color="#94a3b8",
+        lw=0.8,
+        alpha=0.34,
+        label="raw",
+    )
     xs, ys = _decimate(x, smooth.to_numpy())
-    ax.plot(xs, ys, color="#dc2626", lw=1.8, label="processed")
-    _style_axis(ax, "Temperature max vs time", "Time (s)", "Temperature (C)")
+    ax.plot(
+        xs / time_axis.divisor_s,
+        ys,
+        color="#dc2626",
+        lw=1.8,
+        label="processed",
+    )
+    _style_axis(ax, "Temperature max vs time", time_axis.label, "Temperature (C)")
     ax.legend(fontsize=8, loc="best")
     return True
 
@@ -598,14 +667,24 @@ def _plot_strain_stress(ax: Axes, df: pd.DataFrame) -> None:
     _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
 
 
-def _plot_error_trace(ax: Axes, df: pd.DataFrame, trace: pd.DataFrame) -> None:
+def _plot_error_trace(
+    ax: Axes,
+    df: pd.DataFrame,
+    trace: pd.DataFrame,
+    time_axis: TimeAxisDisplay,
+) -> None:
     source = trace if not trace.empty and {"elapsed_s", "error_value"}.issubset(trace.columns) else df
     y_name = "error_value" if "error_value" in source else "stress_mpa"
     x, y = _clean_xy(source, "elapsed_s", y_name)
     x, y = _decimate(x, y)
     ax.axhline(0, color="#111827", lw=0.8, alpha=0.6)
-    ax.plot(x, y, color="#db2777", lw=0.9)
-    _style_axis(ax, "Control error vs time", "Time (s)", "Stress error (MPa)" if y_name == "error_value" else "Stress (MPa)")
+    ax.plot(x / time_axis.divisor_s, y, color="#db2777", lw=0.9)
+    _style_axis(
+        ax,
+        "Control error vs time",
+        time_axis.label,
+        "Stress error (MPa)" if y_name == "error_value" else "Stress (MPa)",
+    )
 
 
 def _plot_phone_summary(
@@ -617,6 +696,7 @@ def _plot_phone_summary(
     quality: RunQuality,
     out: Path,
 ) -> None:
+    time_axis = time_axis_display(_max_or_none(_series(df, "elapsed_s")) or 0.0)
     fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor("white")
     grid = fig.add_gridspec(2, 3, left=0.055, right=0.97, top=0.78, bottom=0.10, wspace=0.32, hspace=0.42)
@@ -629,10 +709,10 @@ def _plot_phone_summary(
     else:
         _plot_strain_current(ax_main, df, metadata, grouped=True)
         ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold")
-    _plot_stress_time(fig.add_subplot(grid[0, 2]), df)
+    _plot_stress_time(fig.add_subplot(grid[0, 2]), df, time_axis)
     lower_right = fig.add_subplot(grid[1, 2])
-    if not _plot_temperature(lower_right, df, temperature):
-        _plot_current_resistance(lower_right, df)
+    if not _plot_temperature(lower_right, df, time_axis, temperature):
+        _plot_current_resistance(lower_right, df, time_axis)
     try:
         _atomic_save_figure(fig, out, dpi=160)
     finally:
@@ -648,16 +728,17 @@ def _plot_detail_summary(
     quality: RunQuality,
     out: Path,
 ) -> None:
+    time_axis = time_axis_display(_max_or_none(_series(df, "elapsed_s")) or 0.0)
     fig, axes = plt.subplots(3, 2, figsize=(15, 13))
     fig.subplots_adjust(left=0.07, right=0.96, top=0.82, bottom=0.07, hspace=0.48, wspace=0.30)
     fig.patch.set_facecolor("white")
     _add_banner(fig, run_dir, metadata, quality, df)
-    _plot_stress_time(axes[0, 0], df)
+    _plot_stress_time(axes[0, 0], df, time_axis)
     _plot_strain_current(axes[0, 1], df, metadata, grouped=True)
-    _plot_current_resistance(axes[1, 0], df)
-    if not _plot_temperature(axes[1, 1], df, temperature):
+    _plot_current_resistance(axes[1, 0], df, time_axis)
+    if not _plot_temperature(axes[1, 1], df, time_axis, temperature):
         _plot_resistance_current(axes[1, 1], df, metadata)
-    _plot_error_trace(axes[2, 0], df, trace)
+    _plot_error_trace(axes[2, 0], df, trace, time_axis)
     _plot_strain_stress(axes[2, 1], df)
     try:
         _atomic_save_figure(fig, out, dpi=150)

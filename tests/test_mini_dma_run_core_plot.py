@@ -7,7 +7,12 @@ import pytest
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot, _plot_strain_current
+from data_logging.mini_dma_logger.run_core_plot import (
+    _plot_stress_time,
+    _plot_strain_current,
+    generate_core_run_plot,
+)
+from data_logging.mini_dma_logger.time_axis import time_axis_display
 
 
 def test_generate_core_run_plot_writes_png_and_summary(tmp_path: Path) -> None:
@@ -120,6 +125,47 @@ def test_generate_core_run_plot_hides_wire_break_tail_from_result_axes(tmp_path:
 def test_generate_core_run_plot_rejects_missing_run_files(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="measurement.csv"):
         generate_core_run_plot(tmp_path / "missing")
+
+
+@pytest.mark.parametrize(
+    ("elapsed_s", "expected_divisor_s", "expected_label"),
+    [
+        (59.999, 1.0, "Time (s)"),
+        (60.0, 60.0, "Time (min)"),
+        (3599.999, 60.0, "Time (min)"),
+        (3600.0, 3600.0, "Time (h)"),
+    ],
+)
+def test_summary_time_axis_uses_shared_display_units(
+    elapsed_s: float,
+    expected_divisor_s: float,
+    expected_label: str,
+) -> None:
+    display = time_axis_display(elapsed_s)
+
+    assert display.divisor_s == pytest.approx(expected_divisor_s)
+    assert display.label == expected_label
+
+
+def test_stress_summary_scales_time_data_and_hold_shading_to_minutes() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0, 120.0],
+            "stress_mpa": [50.0, 55.0, 50.0],
+            "automation_phase": ["current", "current_hold", "current"],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_stress_time(ax, frame, time_axis_display(120.0))
+
+        assert ax.get_xlabel() == "Time (min)"
+        assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 1.0, 2.0])
+        hold_patch = ax.patches[0]
+        assert hold_patch.get_x() == pytest.approx(1.0)
+        assert hold_patch.get_x() + hold_patch.get_width() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
 
 
 def test_grouped_strain_current_keeps_rows_without_numeric_plateau_index() -> None:

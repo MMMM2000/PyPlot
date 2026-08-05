@@ -125,7 +125,22 @@ def _as_float(value: Any) -> float | None:
 
 
 def _git(args: Sequence[str], cwd: Path) -> str:
-    return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT).strip()
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            completed.args,
+            output=(completed.stdout + completed.stderr),
+        )
+    # Git can emit non-fatal filesystem warnings on stderr while porcelain
+    # stdout remains clean. Those warnings must not be mistaken for changes.
+    return completed.stdout.strip()
 
 
 @dataclass(frozen=True)
