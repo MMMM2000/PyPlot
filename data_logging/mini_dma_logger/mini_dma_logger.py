@@ -947,6 +947,7 @@ CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S = 15.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
+TMA_RECIPE_LOAD_LIMIT_RESERVE_G = 0.25
 CALIBRATION_MAX_AUTO_ACCEPTANCE_LOAD_G = 0.05
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
@@ -1952,6 +1953,38 @@ class AutomationStep:
     fatigue_cycle_index: int | None = None
     fatigue_leg: str | None = None
     fatigue_cycle_limit: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentSweepLoadLimitPlan:
+    basis: str
+    requested_targets: tuple[float, ...]
+    effective_targets: tuple[float, ...]
+    limit_g: float | None
+    planning_limit_g: float | None
+    reserve_g: float
+    requested_end: float
+    requested_end_load_g: float | None
+    effective_end: float | None
+    effective_end_load_g: float | None
+    theoretical_limit_target: float | None
+    clipped: bool
+    blocked_reason: str | None = None
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "basis": self.basis,
+            "requested_end": self.requested_end,
+            "requested_end_load_g": self.requested_end_load_g,
+            "effective_end": self.effective_end,
+            "effective_end_load_g": self.effective_end_load_g,
+            "active_limit_g": self.limit_g,
+            "planning_limit_g": self.planning_limit_g,
+            "reserve_g": self.reserve_g,
+            "theoretical_limit_target": self.theoretical_limit_target,
+            "clipped": self.clipped,
+            "blocked_reason": self.blocked_reason,
+        }
 
 
 @dataclass
@@ -8088,6 +8121,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
         self._isolated_supply_handoff_leases: dict[int, str] = {}
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = False
+        self._recovery_action_pending = False
+        self._recovery_prompt_generation = 0
         self._preserve_motor_supply_on_close = False
         self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
@@ -8405,6 +8442,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_progress_started_s = 0.0
         self._automation_progress_last_format_update_s = 0.0
         self._automation_name = ""
+        self._current_sweep_load_limit_plan_snapshot: CurrentSweepLoadLimitPlan | None = None
         self._automation_phase = "idle"
         self._automation_step_note: str | None = None
         self._automation_paused = False
@@ -10937,6 +10975,13 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_form.addRow("Step", current_step_row)
         self.row_current_sweep_target_step = current_step_row
         self.label_current_sweep_target_step = current_sweep_form.labelForField(current_step_row)
+        self.label_current_sweep_load_limit_warning = QtWidgets.QLabel("", automation_box)
+        self.label_current_sweep_load_limit_warning.setWordWrap(True)
+        self.label_current_sweep_load_limit_warning.setStyleSheet(
+            "color: #d97706; font-weight: 600;"
+        )
+        self.label_current_sweep_load_limit_warning.setVisible(False)
+        current_sweep_form.addRow("", self.label_current_sweep_load_limit_warning)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_ramp_rate.setDecimals(4)
         self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
@@ -12079,6 +12124,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
         self.spin_diameter.valueChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.check_max_load.toggled.connect(self._update_recipe_mode_ui)
+        self.spin_max_load_g.valueChanged.connect(self._update_recipe_mode_ui)
+        self.spin_zero_load_scale_g.valueChanged.connect(self._update_recipe_mode_ui)
         for widget in (
             self.spin_control_interval,
             self.spin_log_interval,
@@ -18073,6 +18121,25 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.label_current_tolerance_equiv, self.spin_current_sweep_tolerance),
         ):
             label.setText(self._target_equivalent_text(current_basis, float(spinbox.value())))
+        if hasattr(self, "label_current_sweep_load_limit_warning"):
+            self.label_current_target_end_equiv.setStyleSheet("")
+            self.label_current_target_end_equiv.setToolTip("")
+            self.label_current_sweep_load_limit_warning.setVisible(False)
+            self.label_current_sweep_load_limit_warning.setText("")
+            self.label_current_sweep_load_limit_warning.setToolTip("")
+            mode = str(self.combo_recipe_mode.currentData() or "")
+            if self._is_current_sweep_mode(mode):
+                plan = self._current_sweep_load_limit_plan()
+                if plan.clipped or plan.blocked_reason:
+                    message = self._current_sweep_load_limit_message(plan, compact=True)
+                    detail = self._current_sweep_load_limit_message(plan, compact=False)
+                    self.label_current_target_end_equiv.setStyleSheet(
+                        "color: #d97706; font-weight: 600;"
+                    )
+                    self.label_current_target_end_equiv.setToolTip(detail)
+                    self.label_current_sweep_load_limit_warning.setText(message)
+                    self.label_current_sweep_load_limit_warning.setToolTip(detail)
+                    self.label_current_sweep_load_limit_warning.setVisible(True)
         self.label_current_target_ramp_equiv.setText(
             self._target_equivalent_text(
                 current_basis,
@@ -24361,9 +24428,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ELASTOCALORIC_EFFECT: 6,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
-        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self.strain_setup_box.setVisible(True)
         self._refresh_equivalent_labels()
+        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self._update_setup_summary()
         fatigue_mode = mode == CURRENT_SWEEP_FATIGUE
         current_sweep_mode = self._is_current_sweep_mode(mode)
@@ -24745,6 +24812,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.recipe_progress.setRange(0, 100)
                 self.recipe_progress.setValue(0)
                 self.recipe_progress.setFormat(self._recipe_idle_progress_text)
+        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self._update_recipe_file_status()
         if hasattr(self, "button_apply_current_sweep_edits"):
             self._refresh_current_sweep_pending_update_ui()
@@ -26102,6 +26170,191 @@ class MainWindow(QtWidgets.QMainWindow):
         if zero_load_limit_g > 0.0:
             return zero_load_limit_g
         return None
+
+    def _target_value_as_load_g(self, basis: str, value: float) -> float | None:
+        if basis == HSW_BASIS_LOAD_G:
+            return float(value)
+        if basis == HSW_BASIS_STRESS_MPA:
+            return load_g_from_stress_mpa(float(value), float(self.spin_diameter.value()))
+        return None
+
+    def _current_sweep_load_limit_plan(
+        self,
+        *,
+        basis: str | None = None,
+        target_start: float | None = None,
+        target_end: float | None = None,
+        target_step: float | None = None,
+        fatigue: bool | None = None,
+    ) -> CurrentSweepLoadLimitPlan:
+        resolved_basis = self._current_sweep_basis() if basis is None else str(basis)
+        resolved_start = (
+            float(self.spin_current_sweep_target_start.value())
+            if target_start is None
+            else float(target_start)
+        )
+        resolved_end = (
+            float(self.spin_current_sweep_target_end.value())
+            if target_end is None
+            else float(target_end)
+        )
+        resolved_step = abs(
+            float(self.spin_current_sweep_target_step.value())
+            if target_step is None
+            else float(target_step)
+        )
+        if fatigue is None:
+            fatigue = str(self.combo_recipe_mode.currentData() or "") == CURRENT_SWEEP_FATIGUE
+        requested_targets = (
+            [resolved_start]
+            if fatigue
+            else self._build_numeric_targets(resolved_start, resolved_end, resolved_step)
+        )
+        limit_g = self._effective_max_load_limit_g()
+        requested_end_load_g = self._target_value_as_load_g(resolved_basis, resolved_end)
+        theoretical_limit_target: float | None = None
+        if limit_g is not None:
+            if resolved_basis == HSW_BASIS_LOAD_G:
+                theoretical_limit_target = float(limit_g)
+            elif resolved_basis == HSW_BASIS_STRESS_MPA:
+                theoretical_limit_target = stress_mpa_from_load_g(
+                    float(limit_g),
+                    float(self.spin_diameter.value()),
+                )
+        if limit_g is None or resolved_basis == HSW_BASIS_STRAIN_PCT:
+            effective_targets = tuple(float(value) for value in requested_targets)
+            return CurrentSweepLoadLimitPlan(
+                basis=resolved_basis,
+                requested_targets=tuple(float(value) for value in requested_targets),
+                effective_targets=effective_targets,
+                limit_g=limit_g,
+                planning_limit_g=limit_g,
+                reserve_g=0.0,
+                requested_end=resolved_end,
+                requested_end_load_g=requested_end_load_g,
+                effective_end=(effective_targets[-1] if effective_targets else None),
+                effective_end_load_g=(
+                    None
+                    if not effective_targets
+                    else self._target_value_as_load_g(resolved_basis, effective_targets[-1])
+                ),
+                theoretical_limit_target=theoretical_limit_target,
+                clipped=False,
+            )
+
+        reserve_g = min(
+            TMA_RECIPE_LOAD_LIMIT_RESERVE_G,
+            max(0.0, float(limit_g) * 0.25),
+        )
+        planning_limit_g = max(0.0, float(limit_g) - reserve_g)
+        safe_targets: list[float] = []
+        first_unsafe: float | None = None
+        for target in requested_targets:
+            target_load_g = self._target_value_as_load_g(resolved_basis, float(target))
+            if target_load_g is not None and float(target_load_g) > planning_limit_g + 1e-12:
+                first_unsafe = float(target)
+                break
+            safe_targets.append(float(target))
+        blocked_reason: str | None = None
+        if not safe_targets and requested_targets:
+            first_target = float(requested_targets[0])
+            first_load_g = self._target_value_as_load_g(resolved_basis, first_target)
+            suffix, _ = self._distribution_units(resolved_basis)
+            load_text = (
+                "an unknown load"
+                if first_load_g is None
+                else _format_compact_unit(first_load_g, "g", decimals=3)
+            )
+            blocked_reason = (
+                f"The first target {first_target:.4f}{suffix} requires {load_text}, "
+                f"above the {_format_compact_unit(planning_limit_g, 'g', decimals=3)} "
+                "recipe planning ceiling. Lower the start target or raise the applied-load "
+                "limit only after checking the rig."
+            )
+        effective_targets = tuple(safe_targets)
+        clipped = first_unsafe is not None
+        effective_end = effective_targets[-1] if effective_targets else None
+        effective_end_load_g = (
+            None
+            if effective_end is None
+            else self._target_value_as_load_g(resolved_basis, effective_end)
+        )
+        return CurrentSweepLoadLimitPlan(
+            basis=resolved_basis,
+            requested_targets=tuple(float(value) for value in requested_targets),
+            effective_targets=effective_targets,
+            limit_g=float(limit_g),
+            planning_limit_g=planning_limit_g,
+            reserve_g=reserve_g,
+            requested_end=resolved_end,
+            requested_end_load_g=requested_end_load_g,
+            effective_end=effective_end,
+            effective_end_load_g=effective_end_load_g,
+            theoretical_limit_target=theoretical_limit_target,
+            clipped=clipped,
+            blocked_reason=blocked_reason,
+        )
+
+    def _current_sweep_load_limit_message(
+        self,
+        plan: CurrentSweepLoadLimitPlan,
+        *,
+        compact: bool,
+    ) -> str:
+        suffix, _ = self._distribution_units(plan.basis)
+        requested_load = (
+            "unknown load"
+            if plan.requested_end_load_g is None
+            else _format_compact_unit(plan.requested_end_load_g, "g", decimals=3)
+        )
+        limit_text = _format_compact_unit(plan.limit_g or 0.0, "g", decimals=3)
+        if plan.blocked_reason:
+            return plan.blocked_reason
+        effective_end = float(plan.effective_end or 0.0)
+        effective_load = (
+            "unknown load"
+            if plan.effective_end_load_g is None
+            else _format_compact_unit(plan.effective_end_load_g, "g", decimals=3)
+        )
+        if compact:
+            return (
+                f"Load limit {limit_text}: run ends at {effective_end:.4f}{suffix} "
+                f"({effective_load}), not {plan.requested_end:.4f}{suffix}."
+            )
+        theoretical = (
+            "unknown"
+            if plan.theoretical_limit_target is None
+            else f"{plan.theoretical_limit_target:.4f}{suffix}"
+        )
+        return (
+            f"The requested endpoint {plan.requested_end:.4f}{suffix} requires {requested_load}.\n\n"
+            f"The active applied-load limit is {limit_text}, corresponding to a theoretical "
+            f"maximum of {theoretical}. A {plan.reserve_g:.3f} g control reserve is retained.\n\n"
+            f"With the configured target sequence, this run will end at "
+            f"{effective_end:.4f}{suffix} ({effective_load}). The requested value remains saved, "
+            "and both requested and executed endpoints will be recorded."
+        )
+
+    def _confirm_current_sweep_load_limit_plan(self) -> bool:
+        if self._controller_process_mode:
+            return True
+        plan = self._current_sweep_load_limit_plan_snapshot
+        if plan is None or not plan.clipped:
+            return True
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText("Recipe endpoint will be capped by the applied-load limit.")
+        box.setInformativeText(self._current_sweep_load_limit_message(plan, compact=False))
+        suffix, _ = self._distribution_units(plan.basis)
+        continue_button = box.addButton(
+            f"Continue to {float(plan.effective_end or 0.0):.4g}{suffix}",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        back_button = box.addButton("Go back", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(back_button)
+        box.exec()
+        return box.clickedButton() == continue_button
 
     def _is_max_load_exceeded(self) -> bool:
         limit_g = self._effective_max_load_limit_g()
@@ -27496,6 +27749,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if skip_first_overheating_current_end and value_key == "first_overheating_current_end_mA":
                     continue
                 sweep[metadata_key] = values[value_key]
+            plan = self._current_sweep_load_limit_plan_snapshot
+            if plan is not None:
+                sweep["target_end_requested"] = plan.requested_end
+                sweep["target_end_effective"] = plan.effective_end
+                sweep["load_limit_plan"] = plan.metadata()
             self._run_metadata_snapshot = replace(
                 snapshot,
                 effective_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -27819,6 +28077,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_ramp_skipped": self._setup_preload_ramp_skipped,
                 "target_start": float(self.spin_current_sweep_target_start.value()),
                 "target_end": float(self.spin_current_sweep_target_end.value()),
+                "target_end_requested": float(self.spin_current_sweep_target_end.value()),
+                "target_end_effective": (
+                    None
+                    if self._current_sweep_load_limit_plan_snapshot is None
+                    else self._current_sweep_load_limit_plan_snapshot.effective_end
+                ),
+                "load_limit_plan": (
+                    None
+                    if self._current_sweep_load_limit_plan_snapshot is None
+                    else self._current_sweep_load_limit_plan_snapshot.metadata()
+                ),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
                 "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
                 "fatigue_cycles": int(self.spin_current_sweep_fatigue_cycles.value()),
@@ -31325,11 +31594,16 @@ class MainWindow(QtWidgets.QMainWindow):
         values: Mapping[str, float | bool],
         active_target: float,
     ) -> list[float] | None:
-        targets = self._build_numeric_targets(
-            float(values["target_start"]),
-            float(values["target_end"]),
-            float(values["target_step"]),
+        plan = self._current_sweep_load_limit_plan(
+            basis=self._current_sweep_basis(),
+            target_start=float(values["target_start"]),
+            target_end=float(values["target_end"]),
+            target_step=float(values["target_step"]),
+            fatigue=False,
         )
+        if plan.blocked_reason:
+            return None
+        targets = list(plan.effective_targets)
         for index, target in enumerate(targets):
             if self._target_values_close(float(target), active_target):
                 return [float(value) for value in targets[index + 1 :]]
@@ -31726,6 +32000,23 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         show_message: bool = True,
     ) -> bool:
+        values = self._current_sweep_override_values_from_controls()
+        load_limit_plan = self._current_sweep_load_limit_plan(
+            basis=self._current_sweep_basis(),
+            target_start=float(values["target_start"]),
+            target_end=float(values["target_end"]),
+            target_step=float(values["target_step"]),
+            fatigue=False,
+        )
+        self._current_sweep_load_limit_plan_snapshot = load_limit_plan
+        if load_limit_plan.blocked_reason:
+            self._log(f"Runtime recipe update rejected: {load_limit_plan.blocked_reason}")
+            if show_message:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, load_limit_plan.blocked_reason)
+            return False
+        if load_limit_plan.clipped and show_message and not self._confirm_current_sweep_load_limit_plan():
+            self._log("Runtime recipe update cancelled at the applied-load cap confirmation.")
+            return False
         if self._isolated_recipe_active and not self._controller_process_mode:
             process = self._production_control_process
             identity = self._production_control_identity
@@ -31735,7 +32026,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 or self._isolated_command_pending is not None
             ):
                 return False
-            values = self._current_sweep_override_values_from_controls()
             try:
                 sequence = process.update_config(
                     identity,
@@ -31775,7 +32065,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_steps:
             return False
 
-        values = self._current_sweep_override_values_from_controls()
         preview = self._current_sweep_pending_update_preview(values)
         active_index = int(preview["active_index"])
         active_step_message = str(preview["active_step_message"])
@@ -32780,6 +33069,9 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        if not self._confirm_current_sweep_load_limit_plan():
+            self._log("Recipe start cancelled at the applied-load cap confirmation.")
+            return
         if not self._using_shared_broker_supply():
             shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
             if shared_index < 0:
@@ -33344,6 +33636,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._production_control_process = None
         self._production_control_identity = None
         if process is not None:
+            if offer_recovery:
+                self.label_control_process_status.setStyleSheet("color: #2563eb;")
+                self.label_control_process_status.setText(
+                    "Controller: recipe stopped safely; releasing hardware for recovery..."
+                )
+                self.label_control_process_status.setVisible(True)
+                self.label_control_process_status.repaint()
             closed = process.close(timeout_s=2.0)
             if not closed:
                 self._log(
@@ -33378,7 +33677,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._update_recipe_buttons()
         if offer_recovery:
-            QtCore.QTimer.singleShot(0, self._ask_recovery_after_stop)
+            self._schedule_recovery_after_stop()
 
     def _consume_isolated_log_snapshot(
         self,
@@ -33535,6 +33834,9 @@ class MainWindow(QtWidgets.QMainWindow):
             steps, summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if not self._confirm_current_sweep_load_limit_plan():
+            self._log("Recipe start cancelled at the applied-load cap confirmation.")
             return
         if self._resume_recipe_state is not None:
             if self._resume_recipe_state.summary == summary:
@@ -33943,6 +34245,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
 
+    def _schedule_recovery_after_stop(self) -> None:
+        if (
+            self._window_closing
+            or self._recovery_prompt_pending
+            or self._recovery_prompt_visible
+            or self._recovery_action_pending
+        ):
+            return
+        self._recovery_prompt_generation += 1
+        generation = self._recovery_prompt_generation
+        self._recovery_prompt_pending = True
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: self._show_scheduled_recovery_prompt(generation),
+        )
+
+    def _show_scheduled_recovery_prompt(self, generation: int) -> None:
+        if generation != self._recovery_prompt_generation:
+            return
+        self._recovery_prompt_pending = False
+        self._ask_recovery_after_stop()
+
+    def _dispatch_recovery_choice(self, generation: int, action: str) -> None:
+        if generation != self._recovery_prompt_generation:
+            return
+        self._recovery_action_pending = False
+        if self._window_closing or self._automation_active:
+            return
+        if action == "position_zero":
+            self._start_recovery_displacement_zero()
+        elif action == "load_zero":
+            self._start_recovery_load_zero()
+
+    def _queue_recovery_choice(self, action: str) -> None:
+        if self._window_closing or self._recovery_action_pending:
+            return
+        self._recovery_action_pending = True
+        generation = self._recovery_prompt_generation
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: self._dispatch_recovery_choice(generation, action),
+        )
+
     def _ask_recovery_after_stop(self) -> None:
         if self._controller_process_mode:
             return
@@ -33953,6 +34298,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._tic_motor_power_ok is False:
             return
+        if self._recovery_prompt_visible or self._recovery_action_pending:
+            return
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = True
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
@@ -33962,12 +34311,19 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_load_button = box.addButton("Return load to 0", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         leave_button = box.addButton("Leave as is", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(leave_button)
-        box.exec()
-        clicked = box.clickedButton()
+        clicked: QtWidgets.QAbstractButton | None = None
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+        finally:
+            self._recovery_prompt_visible = False
+        action: str | None = None
         if clicked == return_position_button:
-            self._start_recovery_displacement_zero()
+            action = "position_zero"
         elif clicked == zero_load_button:
-            self._start_recovery_load_zero()
+            action = "load_zero"
+        if action is not None:
+            self._queue_recovery_choice(action)
 
     def _show_recovery_plot_dialog(self, title: str) -> None:
         if pg is None:
@@ -34185,6 +34541,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._close_transient_child_windows)
             return
+        self._recovery_prompt_generation += 1
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = False
+        self._recovery_action_pending = False
         app = QtWidgets.QApplication.instance()
         active_modal = app.activeModalWidget() if app is not None else None
         if active_modal is not None and active_modal is not self:
@@ -35797,14 +36157,55 @@ class MainWindow(QtWidgets.QMainWindow):
             current_hold_resume_stable_s = float(self.spin_current_sweep_hold_resume_stable_s.value())
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
+            load_limit_plan = self._current_sweep_load_limit_plan(
+                basis=basis,
+                target_start=target_start,
+                target_end=target_end,
+                target_step=target_step,
+                fatigue=is_fatigue_recipe,
+            )
+            self._current_sweep_load_limit_plan_snapshot = load_limit_plan
+            if load_limit_plan.blocked_reason:
+                raise ValueError(load_limit_plan.blocked_reason)
+            if first_overheating_enabled:
+                first_overheating_load_g = self._target_value_as_load_g(
+                    HSW_BASIS_STRESS_MPA,
+                    first_overheating_target_mpa,
+                )
+                active_limit_g = self._effective_max_load_limit_g()
+                first_overheating_reserve_g = (
+                    0.0
+                    if active_limit_g is None
+                    else min(
+                        TMA_RECIPE_LOAD_LIMIT_RESERVE_G,
+                        max(0.0, float(active_limit_g) * 0.25),
+                    )
+                )
+                planning_limit_g = (
+                    None
+                    if active_limit_g is None
+                    else max(0.0, float(active_limit_g) - first_overheating_reserve_g)
+                )
+                if (
+                    planning_limit_g is not None
+                    and first_overheating_load_g is not None
+                    and first_overheating_load_g > planning_limit_g + 1e-12
+                ):
+                    raise ValueError(
+                        "The first-overheating stress target requires "
+                        f"{_format_compact_unit(first_overheating_load_g, 'g', decimals=3)}, "
+                        "above the recipe planning ceiling of "
+                        f"{_format_compact_unit(planning_limit_g, 'g', decimals=3)}. "
+                        "Lower the first-overheating stress target before starting."
+                    )
             if is_fatigue_recipe:
                 basis = HSW_BASIS_STRESS_MPA
                 target_end = target_start
                 target_step = max(1e-9, target_step)
-                targets = [target_start]
+                targets = list(load_limit_plan.effective_targets)
                 fatigue_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
             else:
-                targets = self._build_numeric_targets(target_start, target_end, target_step)
+                targets = list(load_limit_plan.effective_targets)
                 fatigue_cycles = 0
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_target: float | None = 0.0
@@ -35985,6 +36386,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"current {current_start:.2f} to {current_end:.2f} mA "
                 f"at {current_ramp_rate:.2f} mA/s; {clock_summary}."
             )
+            if load_limit_plan.clipped:
+                summary += (
+                    " Applied-load cap: requested endpoint "
+                    f"{target_end:.4f}{suffix}; executed endpoint "
+                    f"{float(load_limit_plan.effective_end or 0.0):.4f}{suffix} "
+                    f"under the {_format_compact_unit(load_limit_plan.limit_g or 0.0, 'g', decimals=3)} limit."
+                )
             if current_hold_enabled:
                 summary += (
                     f" Current ramp hold enabled: pause on absolute target error above "

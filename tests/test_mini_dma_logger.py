@@ -4328,6 +4328,214 @@ def test_load_g_from_stress_mpa_inverts_stress_conversion() -> None:
     assert mini_dma_mod.stress_mpa_from_load_g(load_g, 0.03) == pytest.approx(10.0)
 
 
+def test_iso_stress_recipe_caps_target_grid_below_applied_load_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._update_recipe_mode_ui()
+
+        plan = window._current_sweep_load_limit_plan()
+        steps, summary, _interval_ms = window._build_automation_recipe()
+        sweep_targets = [
+            float(step.target_value)
+            for step in steps
+            if step.action == "sweep_current" and step.target_value is not None
+        ]
+        metadata = window._session_metadata_from_ui()["controlled_current_sweep"]
+
+        assert plan.clipped is True
+        assert plan.limit_g == pytest.approx(21.0)
+        assert plan.planning_limit_g == pytest.approx(20.75)
+        assert plan.theoretical_limit_target == pytest.approx(734.1, rel=2e-3)
+        assert plan.effective_end == pytest.approx(700.0)
+        assert max(sweep_targets) == pytest.approx(700.0)
+        assert 750.0 not in sweep_targets
+        assert "requested endpoint 1000.0000 MPa" in summary
+        assert "executed endpoint 700.0000 MPa" in summary
+        assert window.label_current_sweep_load_limit_warning.isHidden() is False
+        assert "run ends at 700.0000 MPa" in window.label_current_sweep_load_limit_warning.text()
+        assert "color" in window.label_current_target_end_equiv.styleSheet()
+        assert metadata["target_end_requested"] == pytest.approx(1000.0)
+        assert metadata["target_end_effective"] == pytest.approx(700.0)
+        assert metadata["load_limit_plan"]["clipped"] is True
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_user_stop_schedules_one_recovery_prompt_after_process_close(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    recovery_schedules: list[bool] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_user_stop_requested = True
+    window._schedule_recovery_after_stop = (  # type: ignore[method-assign]
+        lambda: recovery_schedules.append(True)
+    )
+
+    try:
+        window._finish_isolated_recipe(state=mini_dma_mod.ControlState.STOPPED)
+
+        assert process.closed is True
+        assert recovery_schedules == [True]
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_iso_stress_recipe_blocks_when_first_target_exceeds_planning_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(800.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+
+        with pytest.raises(ValueError, match="first target 800.0000 MPa"):
+            window._build_automation_recipe()
+    finally:
+        _close_test_window(window)
+
+
+def test_capped_recipe_requires_confirmation_before_hardware_preflight(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+    confirmations: list[bool] = []
+    preflights: list[bool] = []
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._confirm_current_sweep_load_limit_plan = (  # type: ignore[method-assign]
+            lambda: confirmations.append(True) or False
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda _steps, **_kwargs: preflights.append(True) or True
+        )
+
+        window._start_auto_ramp()
+
+        assert confirmations == [True]
+        assert preflights == []
+        assert window._automation_active is False
+        assert "applied-load cap confirmation" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_prompt_and_choice_are_one_shot(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    prompts: list[bool] = []
+    recoveries: list[str] = []
+    window._ask_recovery_after_stop = lambda: prompts.append(True)  # type: ignore[method-assign]
+    window._start_recovery_load_zero = lambda: recoveries.append("load")  # type: ignore[method-assign]
+
+    try:
+        window._schedule_recovery_after_stop()
+        window._schedule_recovery_after_stop()
+        _ensure_app().processEvents()
+
+        assert prompts == [True]
+
+        window._queue_recovery_choice("load_zero")
+        window._queue_recovery_choice("load_zero")
+        _ensure_app().processEvents()
+
+        assert recoveries == ["load"]
+        assert window._recovery_action_pending is False
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_choice_dispatches_after_modal_dialog_unwinds(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recoveries: list[str] = []
+    inside_exec = False
+
+    def fake_exec(box: QtWidgets.QMessageBox) -> int:
+        nonlocal inside_exec
+        inside_exec = True
+        load_button = next(
+            button for button in box.buttons() if button.text() == "Return load to 0"
+        )
+        load_button.click()
+        inside_exec = False
+        return 0
+
+    def start_load_recovery() -> None:
+        assert inside_exec is False
+        recoveries.append("load")
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", fake_exec)
+    window._start_recovery_load_zero = start_load_recovery  # type: ignore[method-assign]
+
+    try:
+        window._ask_recovery_after_stop()
+
+        assert recoveries == []
+        assert window._recovery_action_pending is True
+
+        _ensure_app().processEvents()
+
+        assert recoveries == ["load"]
+        assert window._recovery_action_pending is False
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
