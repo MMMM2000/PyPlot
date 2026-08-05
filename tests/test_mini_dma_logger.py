@@ -613,6 +613,9 @@ def test_automation_controller_executes_exact_finite_fatigue_cycles(
             ("sweep_current", 2, "up"),
             ("sweep_current", 2, "down"),
         ]
+        assert window._fatigue_cycles_completed == 2
+        assert "Completed fatigue cycle 1/2." in window.log_output.toPlainText()
+        assert "Completed fatigue cycle 2/2." in window.log_output.toPlainText()
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -663,6 +666,7 @@ def test_automation_controller_forever_fatigue_remains_bounded_until_stopped(
                 break
 
         assert observed_cycles == [1, 2, 3, 4, 5]
+        assert window._fatigue_cycles_completed == 4
         assert window._automation_active is True
         window._automation_active = False
         window._automation_controller.tick()
@@ -8145,6 +8149,9 @@ def test_iso_stress_fatigue_supports_forever_without_expanding_recipe(
             mini_dma_mod.MAX_FINITE_FATIGUE_CYCLES
         )
         assert window.spin_current_sweep_fatigue_cycles.specialValueText() == "Forever"
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 0 completed | not started (Forever)"
+        )
         tooltip = window.spin_current_sweep_fatigue_cycles.toolTip()
         assert "until the operator stops" in tooltip
         steps, summary, _interval_ms = window._build_automation_recipe()
@@ -8195,14 +8202,62 @@ def test_forever_fatigue_progress_reports_cycle_without_eta(tmp_path: Path, qtbo
         window._automation_active = True
         window._fatigue_cycle_limit = None
         window._fatigue_cycle_index = 37
+        window._fatigue_cycles_completed = 36
+        window._automation_fatigue_leg = "down"
 
         window._update_recipe_progress()
 
         assert window.recipe_progress.minimum() == 0
         assert window.recipe_progress.maximum() == 0
-        assert "Fatigue cycle 37" in window.recipe_progress.format()
+        assert "36 complete" in window.recipe_progress.format()
+        assert "cycle 37" in window.recipe_progress.format()
         assert "until stopped" in window.recipe_progress.format()
         assert "ETA" not in window.recipe_progress.format()
+        assert window._fatigue_progress_text() == (
+            "Progress: 36 completed | cycle 37 down"
+        )
+        window.label_current_sweep_fatigue_progress.setText(
+            window._fatigue_progress_text()
+        )
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 36 completed | cycle 37 down"
+        )
+        assert "cycles" not in window._dashboard_value_labels
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_fatigue_progress_distinguishes_paused_incomplete_and_complete(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._fatigue_cycle_limit = 10
+        window._fatigue_cycle_index = 8
+        window._fatigue_cycles_completed = 7
+        window._automation_fatigue_leg = "up"
+        window._automation_active = True
+        window._automation_paused = True
+
+        assert window._fatigue_progress_text() == (
+            "Progress: 7/10 completed | cycle 8 paused"
+        )
+        assert window._fatigue_progress_snapshot()["state"] == "paused"
+
+        window._automation_active = False
+        window._automation_paused = False
+        assert window._fatigue_progress_text() == (
+            "Progress: 7/10 completed | cycle 8 incomplete"
+        )
+        assert window._fatigue_progress_snapshot()["state"] == "incomplete"
+
+        window._fatigue_cycle_index = 10
+        window._fatigue_cycles_completed = 10
+        assert window._fatigue_progress_text() == "Progress: 10/10 completed | complete"
+        assert window._fatigue_progress_snapshot()["state"] == "complete"
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -8337,6 +8392,10 @@ def test_iso_stress_fatigue_ui_hides_ladder_and_keeps_preheat_controls(tmp_path:
         assert window.label_current_sweep_target_step.isHidden() is True
         assert window.label_current_sweep_fatigue_section.isHidden() is False
         assert window.spin_current_sweep_fatigue_cycles.isHidden() is False
+        assert window.label_current_sweep_fatigue_progress.isHidden() is False
+        assert window.label_current_sweep_fatigue_progress.text() == (
+            "Progress: 0/100 completed | not started"
+        )
         assert window.check_current_sweep_first_overheating.isHidden() is False
         assert window.label_current_sweep_first_overheating_section.isHidden() is False
         assert window.row_current_sweep_first_overheating_target.isHidden() is True
@@ -8351,6 +8410,7 @@ def test_iso_stress_fatigue_ui_hides_ladder_and_keeps_preheat_controls(tmp_path:
         assert window.row_current_sweep_target_end.isHidden() is False
         assert window.row_current_sweep_target_step.isHidden() is False
         assert window.label_current_sweep_fatigue_section.isHidden() is True
+        assert window.label_current_sweep_fatigue_progress.isHidden() is True
     finally:
         _close_test_window(window)
 
@@ -21982,6 +22042,11 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
 def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("ui_telemetry_session")
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._fatigue_cycle_limit = None
+    window._fatigue_cycle_index = 38
+    window._fatigue_cycles_completed = 37
+    window._automation_fatigue_leg = "down"
 
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
@@ -22012,10 +22077,21 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         assert rows[0]["handler_duration_ms"] == "12.000"
         assert rows[0]["graph_refresh_interval_ms"] == "500"
         assert rows[0]["task_text"] == "Manual mode"
+        assert rows[0]["fatigue_cycles_completed"] == "37"
+        assert rows[0]["fatigue_cycle_active"] == "38"
+        assert rows[0]["fatigue_cycle_limit"] == ""
+        assert rows[0]["fatigue_cycle_leg"] == "down"
         assert rows[0]["scale_sample_changed"] == "1"
         assert rows[0]["live_plot_sample_recorded"] == "1"
         assert rows[0]["dashboard_plot_refreshed"] == "1"
         assert metadata["logging"]["ui_telemetry_sample_count"] == 1
+        assert metadata["fatigue_progress"] == {
+            "cycle_limit": None,
+            "completed_cycles": 37,
+            "active_cycle": 38,
+            "active_leg": "down",
+            "state": "incomplete",
+        }
     finally:
         _close_test_window(window)
 
@@ -29970,6 +30046,8 @@ def test_stopped_current_sweep_resumes_in_new_session_from_saved_current(
         summary="fatigue resume test",
         current_setpoint_mA=23.4,
         source_run_path=str(tmp_path / "stopped-run"),
+        fatigue_cycle_index=4,
+        fatigue_cycles_completed=3,
     )
     starts: list[tuple[bool, bool]] = []
     setpoints: list[float] = []
@@ -29991,6 +30069,8 @@ def test_stopped_current_sweep_resumes_in_new_session_from_saved_current(
         assert starts == [(True, False)]
         assert window._automation_active is True
         assert window._automation_steps[0].current_start_mA == pytest.approx(23.4)
+        assert window._fatigue_cycle_index == 4
+        assert window._fatigue_cycles_completed == 3
         assert setpoints == [pytest.approx(23.4)]
         assert "finalized run" in window.log_output.toPlainText()
     finally:
@@ -31899,6 +31979,13 @@ def test_session_metadata_records_manual_recipe_stop_reason(tmp_path: Path, qtbo
         assert payload["stop"]["reason"] == "manual_recipe_stop"
         assert payload["stop"]["category"] == "operator"
         assert "Manual" in payload["stop"]["label"]
+        transition = payload["stop"]["transition"]
+        assert transition["reason"] == "manual_recipe_stop"
+        assert transition["origin"].startswith(
+            "test_session_metadata_records_manual_recipe_stop_reason:"
+        )
+        assert transition["stages"][0]["stage"] == "requested"
+        assert transition["stages"][-1]["stage"] == "completed"
         assert "Manual recipe stop" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -32019,11 +32106,126 @@ def test_worker_thread_stop_auto_ramp_marshals_to_ui_thread(tmp_path: Path, qtbo
         assert payload["session_state"] == "finished"
         assert payload["stop"]["reason"] == "recipe_control_stop"
         assert payload["stop"]["detail"] == "Scale feedback was stale during current hold."
+        assert payload["stop"]["transition"]["origin"].startswith(
+            "test_worker_thread_stop_auto_ramp_marshals_to_ui_thread:"
+        )
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, False)]
     finally:
         window._ui_thread_id = original_ui_thread_id
         window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_stop_transition_is_durable_before_abrupt_teardown_interruption(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_abrupt_stop_transition")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    original_disable_supply = window._disable_supply_output
+
+    try:
+        window._start_session()
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("sweep_current", note="test")]
+        window._automation_index = 0
+        window._fatigue_cycle_index = 178
+        window._fatigue_cycles_completed = 177
+        window._automation_fatigue_leg = "down"
+        window._supply_output_enabled = True
+
+        def _interrupt_supply_shutdown() -> None:
+            raise KeyboardInterrupt("synthetic process interruption")
+
+        window._disable_supply_output = _interrupt_supply_shutdown  # type: ignore[method-assign]
+
+        with pytest.raises(KeyboardInterrupt, match="synthetic process interruption"):
+            window._stop_auto_ramp(
+                log_completion=False,
+                stop_reason="recipe_control_stop",
+                stop_detail="Synthetic automatic stop for interruption testing.",
+            )
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        transition = payload["stop"]["transition"]
+        assert payload["session_state"] == "running"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert transition["state"] == "automation_fenced"
+        assert [stage["stage"] for stage in transition["stages"]] == [
+            "requested",
+            "automation_fenced",
+        ]
+        assert transition["fatigue_progress"] == {
+            "cycle_limit": None,
+            "completed_cycles": 177,
+            "active_cycle": 178,
+            "active_leg": "down",
+            "state": "incomplete",
+        }
+    finally:
+        window._disable_supply_output = original_disable_supply  # type: ignore[method-assign]
+        window._supply_output_enabled = False
+        window._automation_active = False
+        if window._session_active:
+            window._stop_session(
+                reason="recipe_control_stop",
+                detail="Synthetic interruption test cleanup.",
+            )
+        _close_test_window(window)
+
+
+def test_stop_transition_records_teardown_error_and_completes_session(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_stop_teardown_error")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    original_stop_control_loop = window._stop_automation_control_loop
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="test")]
+        window._automation_index = 0
+
+        def _fail_control_loop_stop() -> None:
+            raise RuntimeError("synthetic control-loop stop failure")
+
+        window._stop_automation_control_loop = _fail_control_loop_stop  # type: ignore[method-assign]
+        window._log("Synthetic automatic condition requested a stop.")
+        window._stop_auto_ramp(log_completion=False, offer_recovery=True)
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        transition = payload["stop"]["transition"]
+        failed_stage = next(
+            stage
+            for stage in transition["stages"]
+            if stage["stage"] == "control_loop_stop_failed"
+        )
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert payload["stop"]["detail"] == (
+            "Automatic stop followed: Synthetic automatic condition requested a stop."
+        )
+        assert transition["trigger_log_message"] == (
+            "Synthetic automatic condition requested a stop."
+        )
+        assert transition["origin"].startswith(
+            "test_stop_transition_records_teardown_error_and_completes_session:"
+        )
+        assert failed_stage["error_type"] == "RuntimeError"
+        assert failed_stage["error"] == "synthetic control-loop stop failure"
+        assert transition["stages"][-1]["stage"] == "completed"
+    finally:
+        window._stop_automation_control_loop = original_stop_control_loop  # type: ignore[method-assign]
         window._automation_active = False
         _close_test_window(window)
 
@@ -32203,6 +32405,7 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
     append_started = threading.Event()
     release_failure = threading.Event()
     accepted_session_lines = 0
+    attempted_session_lines = 0
 
     class _FakeSleepGuard:
         def acquire(self) -> None:
@@ -32237,10 +32440,13 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
         *,
         generation: int | None = None,
     ) -> bool:
-        nonlocal accepted_session_lines
+        nonlocal accepted_session_lines, attempted_session_lines
         accepted = original_enqueue(channel, path, text, generation=generation)
-        if accepted and channel == "session":
-            accepted_session_lines += writer._text_line_count(text)
+        if channel == "session":
+            line_count = writer._text_line_count(text)
+            attempted_session_lines += line_count
+            if accepted:
+                accepted_session_lines += line_count
         return accepted
 
     writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
@@ -32263,12 +32469,13 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
         assert stop_elapsed_s < 1.0
         assert payload["logging"]["run_log_complete"] is False
         assert payload["logging"]["run_log_incomplete_reason"] == "write_failed"
-        assert payload["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert payload["logging"]["run_log_incomplete_lines"] == attempted_session_lines
         assert accepted_session_lines > 1
+        assert attempted_session_lines >= accepted_session_lines
 
         _ensure_app().processEvents()
         payload_after_callback = json.loads(metadata_path.read_text(encoding="utf-8"))
-        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == attempted_session_lines
     finally:
         release_failure.set()
         if timer is not None:
@@ -32564,12 +32771,10 @@ def test_session_stop_recovers_metadata_when_checkpoint_store_write_fails(
                 plateau_label="Stress 50 MPa",
             )
         )
+        window._session_json_path = tmp_path / "missing_output" / "metadata.json"
         assert window._session_metadata_store is not None
-
-        def _raise_metadata_write_error(*_args: object, **_kwargs: object) -> None:
-            raise OSError("canonical output and local checkpoint are unavailable")
-
-        monkeypatch.setattr(window._session_metadata_store, "write", _raise_metadata_write_error)
+        window._session_metadata_store.canonical_path = window._session_json_path
+        window._session_metadata_store._canonical_parent_established = True
 
         window._stop_session(reason="recipe_control_stop", detail="metadata write failed")
 
