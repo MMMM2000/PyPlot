@@ -13,6 +13,7 @@ import json
 import math
 import os
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+from matplotlib.colors import Colormap, Normalize
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
@@ -73,8 +76,8 @@ def _read_csv_frame(path: Path, *, usecols: list[str] | None = None) -> pd.DataF
 
 def _read_control_error_frame(path: Path, *, max_rows: int = 5000) -> pd.DataFrame:
     columns = _csv_header(path)
-    wanted = [name for name in ("elapsed_s", "error_value") if name in columns]
-    if len(wanted) != 2:
+    wanted = [name for name in ("elapsed_s", "error_value", "tolerance") if name in columns]
+    if not {"elapsed_s", "error_value"}.issubset(wanted):
         return pd.DataFrame()
     try:
         size = path.stat().st_size
@@ -211,6 +214,22 @@ def _decimate(x: np.ndarray, y: np.ndarray, limit: int = 4500) -> tuple[np.ndarr
         return x, y
     index = np.linspace(0, len(x) - 1, limit).astype(int)
     return x[index], y[index]
+
+
+def _time_axis(df: pd.DataFrame) -> tuple[float, str]:
+    elapsed = _series(df, "elapsed_s").dropna()
+    maximum = float(elapsed.max()) if not elapsed.empty else 0.0
+    if maximum >= 7200.0:
+        return 3600.0, "Time (h)"
+    if maximum >= 120.0:
+        return 60.0, "Time (min)"
+    return 1.0, "Time (s)"
+
+
+def _clean_time_y(df: pd.DataFrame, y_name: str) -> tuple[np.ndarray, np.ndarray, float, str]:
+    x, y = _clean_xy(df, "elapsed_s", y_name)
+    scale, label = _time_axis(df)
+    return x / scale, y, scale, label
 
 
 def _metadata_float(metadata: dict[str, Any], key: str) -> float | None:
@@ -400,13 +419,14 @@ def _add_banner(fig: plt.Figure, run_dir: Path, metadata: dict[str, Any], qualit
         fig.text(0.015, 0.022, detail[:230], fontsize=8.5, color="#374151", ha="left", va="bottom")
 
 
-def _shade_holds(ax: Axes, df: pd.DataFrame) -> None:
+def _shade_holds(ax: Axes, df: pd.DataFrame, *, time_scale: float = 1.0) -> None:
     if "automation_phase" not in df or "elapsed_s" not in df:
         return
     elapsed = _series(df, "elapsed_s")
     is_hold = df["automation_phase"].astype(str).eq("current_hold")
     start = None
     previous = None
+    labelled = False
     for t_value, is_active in zip(elapsed, is_hold):
         if pd.isna(t_value):
             continue
@@ -415,11 +435,26 @@ def _shade_holds(ax: Axes, df: pd.DataFrame) -> None:
                 start = float(t_value)
             previous = float(t_value)
         elif start is not None:
-            ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+            ax.axvspan(
+                start / time_scale,
+                (previous if previous is not None else start) / time_scale,
+                color="#f59e0b",
+                alpha=0.08,
+                lw=0,
+                label=None if labelled else "current hold",
+            )
+            labelled = True
             start = None
             previous = None
     if start is not None:
-        ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+        ax.axvspan(
+            start / time_scale,
+            (previous if previous is not None else start) / time_scale,
+            color="#f59e0b",
+            alpha=0.08,
+            lw=0,
+            label=None if labelled else "current hold",
+        )
 
 
 def _style_axis(ax: Axes, title: str, xlabel: str, ylabel: str) -> None:
@@ -457,11 +492,22 @@ def _add_power_per_cm_axis(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any])
     top_ax.tick_params(axis="x", labelsize=8)
 
 
+def _set_current_axis_limits(ax: Axes, df: pd.DataFrame, current_name: str) -> None:
+    current = _series(df, current_name).replace([np.inf, -np.inf], np.nan).dropna()
+    if current.empty:
+        return
+    minimum = float(current.min())
+    maximum = float(current.max())
+    span = maximum - minimum
+    padding = max(0.25, span * 0.025)
+    ax.set_xlim(minimum - padding, maximum + padding)
+
+
 def _plot_stress_time(ax: Axes, df: pd.DataFrame) -> None:
-    x, y = _clean_xy(df, "elapsed_s", "stress_mpa")
+    x, y, time_scale, time_label = _clean_time_y(df, "stress_mpa")
     x, y = _decimate(x, y)
     ax.plot(x, y, color="#2563eb", lw=1.25, label="stress")
-    _shade_holds(ax, df)
+    _shade_holds(ax, df, time_scale=time_scale)
     mode = ""
     if "recipe_mode" in df and not df["recipe_mode"].dropna().empty:
         mode = str(df["recipe_mode"].dropna().mode().iloc[0])
@@ -470,11 +516,11 @@ def _plot_stress_time(ax: Axes, df: pd.DataFrame) -> None:
         target = _series(df, "automation_target_value")
         elapsed = _series(df, "elapsed_s")
         mask = phase.eq("stress_mpa") & elapsed.notna() & target.notna()
-        tx, ty = elapsed[mask].to_numpy(), target[mask].to_numpy()
+        tx, ty = elapsed[mask].to_numpy() / time_scale, target[mask].to_numpy()
         tx, ty = _decimate(tx, ty)
         if len(tx):
             ax.plot(tx, ty, color="#111827", lw=1.0, ls="--", alpha=0.7, label="target")
-    _style_axis(ax, "Stress vs time", "Time (s)", "Stress (MPa)")
+    _style_axis(ax, "Stress vs time", time_label, "Stress (MPa)")
     if ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8, loc="best")
 
@@ -502,67 +548,259 @@ def _plateau_legend_label(part: pd.DataFrame, fallback: str, metadata: dict[str,
     return fallback
 
 
-def _plot_strain_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any], *, grouped: bool) -> None:
+@dataclass
+class _PlateauGroup:
+    label: str
+    target_stress_mpa: float
+    rows: pd.DataFrame
+
+
+@dataclass
+class _PlateauPlotContext:
+    groups: list[_PlateauGroup]
+    norm: Normalize
+    cmap: Colormap
+
+
+def _plateau_target_stress(part: pd.DataFrame) -> float | None:
+    if "automation_basis" in part and "automation_target_value" in part:
+        basis = part["automation_basis"].astype(str)
+        target = _series(part, "automation_target_value")
+        values = target[basis.eq("stress_mpa") & target.notna()]
+        if not values.empty:
+            return float(values.median())
+    target = _series(part, "automation_target_value").dropna()
+    if not target.empty:
+        return float(target.median())
+    stress = _series(part, "stress_mpa").dropna()
+    return float(stress.median()) if not stress.empty else None
+
+
+def _plateau_plot_context(
+    df: pd.DataFrame,
+    metadata: dict[str, Any],
+) -> _PlateauPlotContext | None:
+    df = _plot_rows(df)
+    if df.empty:
+        return None
+    plateau = _series(df, "plateau_index")
+    grouped_parts: list[tuple[str, pd.DataFrame]] = []
+    if not plateau.empty and plateau.notna().any():
+        # Normal stress-ladder rows have numbered plateaus. First overheating is
+        # deliberately unindexed, so this keeps conditioning out of comparison
+        # panels without truncating the first normal 1 mA stress ramp.
+        normal = df.loc[plateau.notna()].copy()
+        normal["_plot_plateau_index"] = plateau.loc[plateau.notna()].to_numpy()
+        grouped_parts = [
+            (str(label), part.drop(columns="_plot_plateau_index"))
+            for label, part in normal.groupby("_plot_plateau_index", sort=True)
+        ]
+    else:
+        # Older result files can predate numeric plateau indices. Preserve a
+        # useful fallback rather than returning an empty plot.
+        keys = pd.Series("unindexed", index=df.index, dtype=object)
+        if "automation_basis" in df and "automation_target_value" in df:
+            basis = df["automation_basis"].astype(str)
+            target = _series(df, "automation_target_value")
+            valid = target.notna() & basis.str.len().gt(0)
+            keys.loc[valid] = [
+                f"{basis_value}:{target_value:.9g}"
+                for basis_value, target_value in zip(basis.loc[valid], target.loc[valid])
+            ]
+        grouped_parts = [(str(label), part) for label, part in df.groupby(keys, sort=True)]
+
+    groups: list[_PlateauGroup] = []
+    for fallback, part in grouped_parts:
+        target = _plateau_target_stress(part)
+        if target is None:
+            continue
+        groups.append(
+            _PlateauGroup(
+                label=_plateau_legend_label(part, fallback, metadata),
+                target_stress_mpa=target,
+                rows=part,
+            )
+        )
+    if not groups:
+        return None
+    targets = np.asarray([group.target_stress_mpa for group in groups], dtype=float)
+    minimum = float(np.nanmin(targets))
+    maximum = float(np.nanmax(targets))
+    if math.isclose(minimum, maximum):
+        padding = max(1.0, abs(minimum) * 0.02)
+        minimum -= padding
+        maximum += padding
+    return _PlateauPlotContext(groups, Normalize(minimum, maximum), plt.get_cmap("viridis"))
+
+
+def _current_direction_parts(part: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    if part.empty:
+        return []
+    ordered = part.sort_values("elapsed_s", kind="stable") if "elapsed_s" in part else part.copy()
+    control_name = "current_set_mA" if "current_set_mA" in ordered else "current_measured_mA"
+    current = _series(ordered, control_name)
+    if current.empty or not current.notna().any():
+        return [("increasing", ordered)]
+    maximum = float(current.max())
+    peak = np.isclose(current.to_numpy(dtype=float), maximum, atol=max(0.05, abs(maximum) * 0.002))
+    peak_positions = np.flatnonzero(peak)
+    if not len(peak_positions):
+        return [("increasing", ordered)]
+    split = int(peak_positions[-1]) + 1
+    parts = [("increasing", ordered.iloc[:split])]
+    if split < len(ordered):
+        parts.append(("decreasing", ordered.iloc[split:]))
+    return [(direction, rows) for direction, rows in parts if len(rows) >= 2]
+
+
+_DIRECTION_STYLE = {
+    "increasing": {"linestyle": "-", "marker": "o", "label": "current increasing"},
+    "decreasing": {"linestyle": "--", "marker": "x", "label": "current decreasing"},
+}
+
+
+def _plot_grouped_current_response(
+    ax: Axes,
+    context: _PlateauPlotContext,
+    *,
+    x_name: str,
+    y_name: str,
+) -> None:
+    for group in context.groups:
+        color = context.cmap(context.norm(group.target_stress_mpa))
+        for direction, part in _current_direction_parts(group.rows):
+            x, y = _clean_xy(part, x_name, y_name)
+            if len(x) < 2:
+                continue
+            x, y = _decimate(x, y, 1400)
+            style = _DIRECTION_STYLE[direction]
+            ax.plot(
+                x,
+                y,
+                color=color,
+                lw=1.05,
+                linestyle=style["linestyle"],
+                marker=style["marker"],
+                markersize=2.5 if direction == "increasing" else 2.9,
+                markevery=max(1, len(x) // 14),
+                markeredgewidth=0.65,
+            )
+
+
+def _direction_legend_handles() -> list[Line2D]:
+    return [
+        Line2D(
+            [0],
+            [0],
+            color="#334155",
+            linewidth=1.1,
+            linestyle=style["linestyle"],
+            marker=style["marker"],
+            markersize=4.0,
+            label=style["label"],
+        )
+        for style in _DIRECTION_STYLE.values()
+    ]
+
+
+def _add_plateau_colorbar(
+    fig: plt.Figure,
+    axes: Axes | list[Axes],
+    context: _PlateauPlotContext,
+) -> None:
+    mappable = plt.cm.ScalarMappable(norm=context.norm, cmap=context.cmap)
+    colorbar = fig.colorbar(mappable, ax=axes, fraction=0.035, pad=0.025, aspect=32)
+    targets = sorted({group.target_stress_mpa for group in context.groups})
+    if len(targets) > 6:
+        indices = np.linspace(0, len(targets) - 1, 5).round().astype(int)
+        targets = [targets[index] for index in sorted(set(indices))]
+    colorbar.set_ticks(targets)
+    colorbar.set_label("Target stress (MPa)", fontsize=8.5)
+    colorbar.ax.tick_params(labelsize=8)
+
+
+def _plateau_context_frame(context: _PlateauPlotContext) -> pd.DataFrame:
+    return pd.concat([group.rows for group in context.groups], ignore_index=True)
+
+
+def _plot_strain_current(
+    ax: Axes,
+    df: pd.DataFrame,
+    metadata: dict[str, Any],
+    *,
+    grouped: bool,
+    context: _PlateauPlotContext | None = None,
+) -> _PlateauPlotContext | None:
     df = _plot_rows(df)
     current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
-    if grouped and "plateau_index" in df:
-        grouped_rows: list[tuple[str, np.ndarray, np.ndarray]] = []
-        plateau_keys = df["plateau_index"].astype(object).copy()
-        if plateau_keys.isna().any():
-            fallback_labels = []
-            for row_index, row in df.loc[plateau_keys.isna()].iterrows():
-                target = _float_or_none(row.get("automation_target_value"))
-                basis = str(row.get("automation_basis") or "")
-                if target is not None and basis:
-                    fallback_labels.append(f"{basis}:{target:.9g}")
-                else:
-                    fallback_labels.append("unindexed")
-            plateau_keys.loc[plateau_keys.isna()] = fallback_labels
-        for label, part in df.groupby(plateau_keys, sort=True):
-            x, y = _clean_xy(part, current_name, "strain_pct")
-            if len(x) < 4:
-                continue
-            grouped_rows.append((_plateau_legend_label(part, str(label), metadata), x, y))
-        color_count = max(1, len(grouped_rows))
-        color_map = plt.get_cmap("viridis", color_count)
-        for index, (label, x, y) in enumerate(grouped_rows):
-            x, y = _decimate(x, y, 1400)
-            ax.plot(x, y, lw=1.15, color=color_map(index), label=label)
-        if 1 < len(grouped_rows) <= 8:
-            ax.legend(fontsize=7.5, loc="best", title="Stress / load", title_fontsize=8)
+    if grouped:
+        context = context or _plateau_plot_context(df, metadata)
+        if context is not None:
+            _plot_grouped_current_response(
+                ax,
+                context,
+                x_name=current_name,
+                y_name="strain_pct",
+            )
     else:
         x, y = _clean_xy(df, current_name, "strain_pct")
         x, y = _decimate(x, y)
         ax.plot(x, y, color="#047857", lw=1.35)
     _style_axis(ax, "Strain vs current", "Measured current (mA)", "Strain (%)")
-    _add_power_per_cm_axis(ax, df, metadata)
+    axis_frame = _plateau_context_frame(context) if context is not None else df
+    _set_current_axis_limits(ax, axis_frame, current_name)
+    _add_power_per_cm_axis(ax, axis_frame, metadata)
+    return context
 
 
 def _plot_current_resistance(ax: Axes, df: pd.DataFrame) -> None:
     df = _plot_rows(df)
-    x, current = _clean_xy(df, "elapsed_s", "current_measured_mA")
+    x, current, _time_scale, time_label = _clean_time_y(df, "current_measured_mA")
     x, current = _decimate(x, current)
-    ax.plot(x, current, color="#e11d48", lw=1.2, label="current")
-    _style_axis(ax, "Current + resistance vs time", "Time (s)", "Current (mA)")
+    current_color = "#e11d48"
+    resistance_color = "#0d9488"
+    ax.plot(x, current, color=current_color, lw=1.2, label="current")
+    _style_axis(ax, "Current + resistance vs time", time_label, "Current (mA)")
+    ax.yaxis.label.set_color(current_color)
+    ax.tick_params(axis="y", labelcolor=current_color)
     ax2 = ax.twinx()
-    rx, resistance = _clean_xy(df, "elapsed_s", "resistance_ohm")
+    rx, resistance, _time_scale, _time_label = _clean_time_y(df, "resistance_ohm")
     rx, resistance = _decimate(rx, resistance)
-    ax2.plot(rx, resistance, color="#0d9488", lw=1.0, alpha=0.9, label="resistance")
+    ax2.plot(rx, resistance, color=resistance_color, lw=1.0, alpha=0.9, label="resistance")
     ax2.set_ylabel("Resistance (ohm)")
-    ax2.tick_params(labelsize=9)
+    ax2.yaxis.label.set_color(resistance_color)
+    ax2.tick_params(axis="y", labelsize=9, labelcolor=resistance_color)
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines + lines2, labels + labels2, fontsize=8, loc="best")
 
 
-def _plot_resistance_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any]) -> None:
+def _plot_resistance_current(
+    ax: Axes,
+    df: pd.DataFrame,
+    metadata: dict[str, Any],
+    *,
+    context: _PlateauPlotContext | None = None,
+) -> _PlateauPlotContext | None:
     df = _plot_rows(df)
     current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
-    x, y = _clean_xy(df, current_name, "resistance_ohm")
-    x, y = _decimate(x, y)
-    ax.plot(x, y, color="#0d9488", lw=1.15)
+    context = context or _plateau_plot_context(df, metadata)
+    if context is not None:
+        _plot_grouped_current_response(
+            ax,
+            context,
+            x_name=current_name,
+            y_name="resistance_ohm",
+        )
+    else:
+        x, y = _clean_xy(df, current_name, "resistance_ohm")
+        x, y = _decimate(x, y)
+        ax.plot(x, y, color="#0d9488", lw=1.15)
     _style_axis(ax, "Resistance vs current", "Measured current (mA)", "Resistance (ohm)")
-    _add_power_per_cm_axis(ax, df, metadata)
+    axis_frame = _plateau_context_frame(context) if context is not None else df
+    _set_current_axis_limits(ax, axis_frame, current_name)
+    _add_power_per_cm_axis(ax, axis_frame, metadata)
+    return context
 
 
 def _plot_temperature(ax: Axes, df: pd.DataFrame, sidecar_df: pd.DataFrame | None = None) -> bool:
@@ -579,33 +817,166 @@ def _plot_temperature(ax: Axes, df: pd.DataFrame, sidecar_df: pd.DataFrame | Non
     if not mask.any():
         return False
     smooth = _rolling_median(temp[mask], 121)
-    x = elapsed[mask].to_numpy()
+    time_scale, time_label = _time_axis(source)
+    x = elapsed[mask].to_numpy() / time_scale
     y = temp[mask].to_numpy()
     xs, ys = _decimate(x, y)
     ax.plot(xs, ys, color="#94a3b8", lw=0.8, alpha=0.34, label="raw")
     xs, ys = _decimate(x, smooth.to_numpy())
     ax.plot(xs, ys, color="#dc2626", lw=1.8, label="processed")
-    _style_axis(ax, "Temperature max vs time", "Time (s)", "Temperature (C)")
+    _style_axis(ax, "Temperature max vs time", time_label, "Temperature (C)")
     ax.legend(fontsize=8, loc="best")
     return True
 
 
-def _plot_strain_stress(ax: Axes, df: pd.DataFrame) -> None:
+def _selected_current_levels(context: _PlateauPlotContext) -> list[float]:
+    maxima = [
+        float(_series(group.rows, "current_set_mA").max())
+        for group in context.groups
+        if _series(group.rows, "current_set_mA").notna().any()
+    ]
+    if not maxima:
+        return [1.0]
+    maximum = max(maxima)
+    return [1.0, *[float(value) for value in range(10, int(maximum // 10) * 10 + 1, 10)]]
+
+
+def _plot_strain_stress(
+    ax: Axes,
+    df: pd.DataFrame,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     df = _plot_rows(df)
-    x, y = _clean_xy(df, "strain_pct", "stress_mpa")
-    x, y = _decimate(x, y)
-    ax.plot(x, y, color="#7c3aed", lw=1.2)
-    _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
+    mode = ""
+    if "recipe_mode" in df and not df["recipe_mode"].dropna().empty:
+        mode = str(df["recipe_mode"].dropna().mode().iloc[0])
+    if mode and mode != "current_sweep_stress":
+        x, y = _clean_xy(df, "strain_pct", "stress_mpa")
+        x, y = _decimate(x, y)
+        ax.plot(x, y, color="#7c3aed", lw=1.2)
+        _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
+        return
+    context = _plateau_plot_context(df, metadata or {})
+    if context is None:
+        x, y = _clean_xy(df, "strain_pct", "stress_mpa")
+        x, y = _decimate(x, y)
+        ax.plot(x, y, color="#7c3aed", lw=1.2)
+        _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
+        return
+
+    levels = _selected_current_levels(context)
+    colors = {
+        current: plt.get_cmap("plasma")(index / max(1, len(levels) - 1))
+        for index, current in enumerate(levels)
+    }
+    current_window = 0.35
+    plotted_levels: set[float] = set()
+
+    # Retain the dense stress-ramp evidence at 1 mA, but keep the reader-facing
+    # legend focused on current rather than acquisition details or point counts.
+    ramp_parts: list[pd.DataFrame] = []
+    for group in context.groups:
+        phase = group.rows.get("automation_phase", pd.Series("", index=group.rows.index)).astype(str)
+        current = _series(group.rows, "current_set_mA")
+        mask = phase.eq("target_ramp") & current.sub(1.0).abs().le(current_window)
+        if mask.any():
+            ramp_parts.append(group.rows.loc[mask])
+    if ramp_parts:
+        ramp = pd.concat(ramp_parts).sort_values("elapsed_s", kind="stable")
+        x, y = _clean_xy(ramp, "strain_pct", "stress_mpa")
+        if len(x):
+            x, y = _decimate(x, y, 2200)
+            ax.plot(
+                x,
+                y,
+                color=colors[1.0],
+                linewidth=0.8,
+                marker=".",
+                markersize=2.2,
+                alpha=0.8,
+                zorder=2,
+            )
+            plotted_levels.add(1.0)
+
+    for current_level in levels:
+        color = colors[current_level]
+        for direction in _DIRECTION_STYLE:
+            records: list[tuple[float, float, float]] = []
+            for group in context.groups:
+                part_for_direction = dict(_current_direction_parts(group.rows)).get(direction)
+                if part_for_direction is None:
+                    continue
+                current = _series(part_for_direction, "current_set_mA")
+                stress = _series(part_for_direction, "stress_mpa")
+                strain = _series(part_for_direction, "strain_pct")
+                mask = current.sub(current_level).abs().le(current_window) & stress.notna() & strain.notna()
+                if not mask.any():
+                    continue
+                records.append(
+                    (
+                        group.target_stress_mpa,
+                        float(strain.loc[mask].median()),
+                        float(stress.loc[mask].median()),
+                    )
+                )
+            if not records:
+                continue
+            if current_level == 1.0 and direction == "increasing" and ramp_parts:
+                continue
+            records.sort(key=lambda row: row[0])
+            style = _DIRECTION_STYLE[direction]
+            ax.plot(
+                [row[1] for row in records],
+                [row[2] for row in records],
+                color=color,
+                linestyle=style["linestyle"],
+                linewidth=1.15,
+                marker=style["marker"],
+                markersize=3.0 if direction == "increasing" else 3.4,
+                markeredgewidth=0.7,
+                zorder=3,
+            )
+            plotted_levels.add(current_level)
+
+    _style_axis(ax, "Stress vs strain at selected current", "Strain (%)", "Stress (MPa)")
+    current_handles = [
+        Line2D([0], [0], color=colors[current], linewidth=2.0, label=f"{current:g} mA")
+        for current in levels
+        if current in plotted_levels
+    ]
+    if current_handles:
+        ax.legend(
+            handles=[*current_handles, *_direction_legend_handles()],
+            fontsize=6.4,
+            ncol=2,
+            loc="best",
+            framealpha=0.88,
+            borderpad=0.35,
+            labelspacing=0.25,
+            handlelength=1.8,
+            columnspacing=0.8,
+        )
 
 
 def _plot_error_trace(ax: Axes, df: pd.DataFrame, trace: pd.DataFrame) -> None:
     source = trace if not trace.empty and {"elapsed_s", "error_value"}.issubset(trace.columns) else df
     y_name = "error_value" if "error_value" in source else "stress_mpa"
-    x, y = _clean_xy(source, "elapsed_s", y_name)
+    x, y, time_scale, time_label = _clean_time_y(source, y_name)
     x, y = _decimate(x, y)
     ax.axhline(0, color="#111827", lw=0.8, alpha=0.6)
+    if y_name == "error_value" and "tolerance" in source:
+        elapsed = _series(source, "elapsed_s")
+        tolerance = _series(source, "tolerance").abs()
+        mask = elapsed.notna() & tolerance.notna()
+        if mask.any():
+            tx = elapsed.loc[mask].to_numpy() / time_scale
+            ty = tolerance.loc[mask].to_numpy()
+            tx, ty = _decimate(tx, ty)
+            ax.fill_between(tx, -ty, ty, color="#94a3b8", alpha=0.18, linewidth=0, label="tolerance")
     ax.plot(x, y, color="#db2777", lw=0.9)
-    _style_axis(ax, "Control error vs time", "Time (s)", "Stress error (MPa)" if y_name == "error_value" else "Stress (MPa)")
+    _style_axis(ax, "Control error vs time", time_label, "Stress error (MPa)" if y_name == "error_value" else "Stress (MPa)")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=7.5, loc="best")
 
 
 def _plot_phone_summary(
@@ -624,11 +995,14 @@ def _plot_phone_summary(
     ax_main = fig.add_subplot(grid[:, :2])
     mode = str(df["recipe_mode"].dropna().mode().iloc[0]) if "recipe_mode" in df and not df["recipe_mode"].dropna().empty else ""
     if "constant_current" in mode:
-        _plot_strain_stress(ax_main, df)
+        _plot_strain_stress(ax_main, df, metadata)
         ax_main.set_title("Main result: stress-strain loop", fontsize=13, fontweight="bold")
     else:
-        _plot_strain_current(ax_main, df, metadata, grouped=True)
+        context = _plot_strain_current(ax_main, df, metadata, grouped=True)
         ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold")
+        if context is not None:
+            ax_main.legend(handles=_direction_legend_handles(), fontsize=7.5, loc="best")
+            _add_plateau_colorbar(fig, ax_main, context)
     _plot_stress_time(fig.add_subplot(grid[0, 2]), df)
     lower_right = fig.add_subplot(grid[1, 2])
     if not _plot_temperature(lower_right, df, temperature):
@@ -653,12 +1027,25 @@ def _plot_detail_summary(
     fig.patch.set_facecolor("white")
     _add_banner(fig, run_dir, metadata, quality, df)
     _plot_stress_time(axes[0, 0], df)
-    _plot_strain_current(axes[0, 1], df, metadata, grouped=True)
+    context = _plateau_plot_context(df, metadata)
+    _plot_strain_current(axes[0, 1], df, metadata, grouped=True, context=context)
     _plot_current_resistance(axes[1, 0], df)
-    if not _plot_temperature(axes[1, 1], df, temperature):
-        _plot_resistance_current(axes[1, 1], df, metadata)
+    resistance_shown = not _plot_temperature(axes[1, 1], df, temperature)
+    if resistance_shown:
+        _plot_resistance_current(axes[1, 1], df, metadata, context=context)
     _plot_error_trace(axes[2, 0], df, trace)
-    _plot_strain_stress(axes[2, 1], df)
+    _plot_strain_stress(axes[2, 1], df, metadata)
+    if context is not None:
+        comparison_axes = [axes[0, 1], axes[1, 1]] if resistance_shown else axes[0, 1]
+        _add_plateau_colorbar(fig, comparison_axes, context)
+        fig.legend(
+            handles=_direction_legend_handles(),
+            fontsize=7.5,
+            loc="upper right",
+            bbox_to_anchor=(0.90, 0.915),
+            ncol=2,
+            framealpha=0.88,
+        )
     try:
         _atomic_save_figure(fig, out, dpi=150)
     finally:
