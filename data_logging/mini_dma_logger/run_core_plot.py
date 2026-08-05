@@ -496,6 +496,7 @@ def _plot_stress_time(
     ax: Axes,
     df: pd.DataFrame,
     time_axis: TimeAxisDisplay,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     x, y = _clean_xy(df, "elapsed_s", "stress_mpa")
     x, y = _decimate(x, y)
@@ -522,6 +523,18 @@ def _plot_stress_time(
                 label="target",
             )
     _style_axis(ax, "Stress vs time", time_axis.label, "Stress (MPa)")
+    diameter_mm = _metadata_float(metadata or {}, "wire_diameter_mm")
+    if diameter_mm is not None:
+        stress_to_load = math.pi * diameter_mm * diameter_mm / 4.0 / 9.80665 * 1000.0
+        load_axis = ax.secondary_yaxis(
+            "right",
+            functions=(
+                lambda stress: stress * stress_to_load,
+                lambda load: load / stress_to_load,
+            ),
+        )
+        load_axis.set_ylabel("Load (g)", color="#d97706", labelpad=3)
+        load_axis.tick_params(axis="y", labelsize=9, labelcolor="#d97706")
     if ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8, loc="best")
 
@@ -788,14 +801,10 @@ def _plot_current_resistance(
         color=resistance_color,
         lw=1.0,
         alpha=0.9,
-        label="resistance",
     )
-    ax2.set_ylabel("Resistance (ohm)")
+    ax2.set_ylabel("Resistance (ohm)", labelpad=3)
     ax2.yaxis.label.set_color(resistance_color)
     ax2.tick_params(axis="y", labelsize=9, labelcolor=resistance_color)
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines + lines2, labels + labels2, fontsize=8, loc="best")
 
 
 def _plot_resistance_current(
@@ -1041,7 +1050,7 @@ def _plot_phone_summary(
     time_axis = time_axis_display(_max_or_none(_series(df, "elapsed_s")) or 0.0)
     fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor("white")
-    grid = fig.add_gridspec(2, 3, left=0.055, right=0.97, top=0.78, bottom=0.10, wspace=0.32, hspace=0.42)
+    grid = fig.add_gridspec(2, 3, left=0.055, right=0.95, top=0.78, bottom=0.10, wspace=0.32, hspace=0.42)
     _add_banner(fig, run_dir, metadata, quality, df)
     ax_main = fig.add_subplot(grid[:, :2])
     mode = str(df["recipe_mode"].dropna().mode().iloc[0]) if "recipe_mode" in df and not df["recipe_mode"].dropna().empty else ""
@@ -1050,18 +1059,19 @@ def _plot_phone_summary(
         ax_main.set_title("Main result: stress-strain loop", fontsize=13, fontweight="bold")
     else:
         context = _plot_strain_current(ax_main, df, metadata, grouped=True)
-        ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold")
+        ax_main.set_title("")
+        ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold", loc="left")
         if context is not None:
             fig.legend(
                 handles=_direction_legend_handles(),
                 fontsize=7.5,
-                loc="lower center",
-                bbox_to_anchor=(0.43, 0.865),
+                loc="center right",
+                bbox_to_anchor=(0.64, 0.825),
                 ncol=2,
-                framealpha=0.88,
+                frameon=False,
             )
             _add_plateau_colorbar(fig, ax_main, context)
-    _plot_stress_time(fig.add_subplot(grid[0, 2]), df, time_axis)
+    _plot_stress_time(fig.add_subplot(grid[0, 2]), df, time_axis, metadata)
     lower_right = fig.add_subplot(grid[1, 2])
     if not _plot_temperature(lower_right, df, time_axis, temperature):
         _plot_current_resistance(lower_right, df, time_axis)
@@ -1085,7 +1095,7 @@ def _plot_detail_summary(
     fig.subplots_adjust(left=0.07, right=0.96, top=0.82, bottom=0.07, hspace=0.48, wspace=0.30)
     fig.patch.set_facecolor("white")
     _add_banner(fig, run_dir, metadata, quality, df)
-    _plot_stress_time(axes[0, 0], df, time_axis)
+    _plot_stress_time(axes[0, 0], df, time_axis, metadata)
     context = _plateau_plot_context(df, metadata)
     _plot_strain_current(axes[0, 1], df, metadata, grouped=True, context=context)
     _plot_current_resistance(axes[1, 0], df, time_axis)

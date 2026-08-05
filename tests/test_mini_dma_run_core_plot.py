@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 
 from data_logging.mini_dma_logger.run_core_plot import (
     _plateau_plot_context,
+    _plot_current_resistance,
     _plot_error_trace,
     _plot_resistance_current,
     _plot_strain_current,
@@ -214,6 +215,48 @@ def test_stress_summary_scales_time_data_and_hold_shading_to_minutes() -> None:
         hold_patch = ax.patches[0]
         assert hold_patch.get_x() == pytest.approx(1.0)
         assert hold_patch.get_x() + hold_patch.get_width() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_stress_summary_adds_load_scale_when_wire_diameter_is_known() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0],
+            "stress_mpa": [0.0, 100.0],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_stress_time(
+            ax,
+            frame,
+            time_axis_display(60.0),
+            {"wire_diameter_mm": 0.0153},
+        )
+
+        assert len(ax.child_axes) == 1
+        assert ax.child_axes[0].get_ylabel() == "Load (g)"
+    finally:
+        plt.close(fig)
+
+
+def test_current_resistance_time_uses_colored_axes_without_redundant_legend() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0],
+            "current_set_mA": [1.0, 10.0],
+            "current_measured_mA": [1.0, 10.0],
+            "resistance_ohm": [100.0, 110.0],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_current_resistance(ax, frame, time_axis_display(60.0))
+
+        assert ax.get_legend() is None
+        assert len(fig.axes) == 2
+        assert fig.axes[1].get_ylabel() == "Resistance (ohm)"
     finally:
         plt.close(fig)
 
