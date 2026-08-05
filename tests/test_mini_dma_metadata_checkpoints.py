@@ -168,25 +168,28 @@ def test_destination_failure_keeps_current_local_recovery_checkpoint(
     assert not canonical.exists()
 
 
-def test_established_destination_directory_is_not_recreated_if_it_disappears(
+def test_established_destination_directory_is_not_recreated_after_disappearing(
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "remote" / "run"
-    destination.mkdir(parents=True)
-    canonical = destination / "metadata.json"
+    clock = _Clock()
+    canonical = tmp_path / "remote" / "run" / "metadata.json"
     store = metadata_checkpoints.SessionMetadataCheckpointStore(
         canonical,
-        session_identity="session-moved-destination",
+        session_identity="session-missing-destination",
         checkpoint_root=tmp_path / "local",
+        canonical_write_interval_s=0.0,
+        monotonic=clock,
     )
-    destination.rename(tmp_path / "moved-run")
+    store.write(_payload("session-missing-destination", 1))
+    canonical.unlink()
+    canonical.parent.rmdir()
 
-    with pytest.raises(OSError, match="directory disappeared"):
-        store.write(_payload("session-moved-destination", 9))
+    with pytest.raises(FileNotFoundError, match="directory disappeared"):
+        store.write(_payload("session-missing-destination", 2), force_canonical=True)
 
+    assert not canonical.parent.exists()
     _, recovered = metadata_checkpoints.load_metadata_checkpoint(store.checkpoint_path)
-    assert recovered["point_count"] == 9
-    assert not destination.exists()
+    assert recovered["point_count"] == 2
 
 
 def test_atomic_replace_failure_preserves_previous_valid_checkpoint(

@@ -494,6 +494,22 @@ class ProductionTmaBackend:
                     )
                 ),
             ),
+            (
+                "fatigue_cycle_index",
+                int(getattr(window, "_fatigue_cycle_index", 0)),
+            ),
+            (
+                "fatigue_cycles_completed",
+                int(getattr(window, "_fatigue_cycles_completed", 0)),
+            ),
+            (
+                "fatigue_cycle_limit",
+                getattr(window, "_fatigue_cycle_limit", None),
+            ),
+            (
+                "fatigue_cycle_leg",
+                str(getattr(window, "_automation_fatigue_leg", "") or ""),
+            ),
             ("task", str(window._current_task_summary())),
             ("position_mm", float(window._current_position_mm)),
             ("load_g", effective_load),

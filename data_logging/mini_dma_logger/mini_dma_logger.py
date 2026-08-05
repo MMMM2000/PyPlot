@@ -236,6 +236,8 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
     "current_sweep_reverse_current_recipe_flag",
+    "fatigue_completed_cycle_tracking",
+    "durable_stop_transition_tracking",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -357,6 +359,10 @@ UI_TELEMETRY_FIELDNAMES = [
     "graph_refresh_interval_ms",
     "task_text",
     "automation_active",
+    "fatigue_cycles_completed",
+    "fatigue_cycle_active",
+    "fatigue_cycle_limit",
+    "fatigue_cycle_leg",
     "session_active",
     "session_logging_enabled",
     "length_setup_dialog_visible",
@@ -520,6 +526,7 @@ SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_MOTOR_POWER_STALE_GRACE_S = 30.0
+TIC_MOTOR_POWER_RECIPE_PAUSE_S = 1.0
 MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 MANUAL_JOG_MAX_TIMER_ELAPSED_S = 0.075
 TIC_USB_VENDOR_ID = 0x1FFB
@@ -1969,6 +1976,7 @@ class AutomationResumeState:
     current_setpoint_mA: float | None = None
     source_run_path: str | None = None
     fatigue_cycle_index: int = 0
+    fatigue_cycles_completed: int = 0
     fatigue_loop_anchor_index: int | None = None
 
 
@@ -5333,6 +5341,9 @@ class MiniDmaAutomationController:
 
     def execute_next_tick(self) -> None:
         host = self._host
+        if host._recipe_motor_power_interlock_active():
+            host._request_recipe_pause_for_motor_power_loss()
+            return
         if host._automation_index >= len(host._automation_steps):
             if not host._is_ui_thread():
                 host._call_on_ui_thread_sync(
@@ -5349,7 +5360,14 @@ class MiniDmaAutomationController:
             if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
             host._update_recipe_progress(complete=True)
-            host._stop_auto_ramp(log_completion=False, keep_progress=True)
+            completion_reason = "recovery_completed" if is_recovery else "recipe_completed"
+            completion_detail = "Recovery completed." if is_recovery else "Recipe completed."
+            host._stop_auto_ramp(
+                log_completion=False,
+                keep_progress=True,
+                stop_reason=completion_reason,
+                stop_detail=completion_detail,
+            )
             host._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and host._session_active:
                 host._stop_session(reason="recipe_completed", detail="Recipe completed.")
@@ -8147,6 +8165,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_tic_status_monotonic_s: float | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
+        self._recipe_motor_power_loss_since_s: float | None = None
+        self._recipe_motor_power_pause_pending = False
         self._tic_keepalive_warning_active = False
         self._manual_jog_uses_last_target = False
         self._last_auto_sample_name = ""
@@ -8254,6 +8274,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason: str | None = None
         self._session_stop_detail: str | None = None
         self._session_stop_recorded_utc: str | None = None
+        self._session_stop_transition: dict[str, Any] | None = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s: float | None = None
         self._session_raw_scale_max_gap_s = 0.0
@@ -8394,6 +8416,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_fatigue_cycle_index: int | None = None
         self._automation_fatigue_leg: str | None = None
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit: int | None = None
         self._fatigue_loop_anchor_index: int | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
@@ -8494,6 +8517,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
         self._run_log_mirror_generation: int | None = None
         self._pending_run_log_lines: list[str] = []
+        self._last_log_message: str | None = None
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
@@ -10949,6 +10973,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_sweep_fatigue_cycles = current_sweep_form.labelForField(
             self.spin_current_sweep_fatigue_cycles
         )
+        self.label_current_sweep_fatigue_progress = QtWidgets.QLabel(
+            "Progress: 0/100 completed | not started",
+            automation_box,
+        )
+        self.label_current_sweep_fatigue_progress.setWordWrap(True)
+        self.label_current_sweep_fatigue_progress.setToolTip(
+            "Completed cycles are counted only after both the up and down current-sweep legs finish."
+        )
+        current_sweep_form.addRow("", self.label_current_sweep_fatigue_progress)
         self.current_sweep_advanced_panel = QtWidgets.QWidget(self)
         current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
         current_sweep_advanced_form.setContentsMargins(0, 0, 0, 0)
@@ -12979,6 +13012,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(WeakOwnerCallback(self, "_log", message))
             return
+        self._last_log_message = str(message)
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         log_sink = self._control_process_log_sink
@@ -24397,6 +24431,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
         if hasattr(self, "label_current_sweep_fatigue_cycles") and self.label_current_sweep_fatigue_cycles is not None:
             self.label_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setVisible(fatigue_mode)
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         if mode == "cycle":
             summary = (
@@ -27250,6 +27287,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _session_stop_label(self, reason: str | None) -> tuple[str, str]:
         labels = {
             "recipe_completed": ("normal", "Recipe completed normally"),
+            "recovery_completed": ("normal", "Recovery completed normally"),
             "manual_recipe_stop": ("operator", "Manual recipe stop"),
             "manual_session_stop": ("operator", "Manual session stop"),
             "emergency_stop": ("operator", "Emergency stop"),
@@ -27265,12 +27303,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _session_stop_metadata(self) -> dict[str, Any]:
         category, label = self._session_stop_label(self._session_stop_reason)
+        transition = None
+        if self._session_stop_transition is not None:
+            transition = dict(self._session_stop_transition)
+            transition["stages"] = [
+                dict(stage)
+                for stage in self._session_stop_transition.get("stages", [])
+                if isinstance(stage, dict)
+            ]
         return {
             "reason": self._session_stop_reason,
             "category": category,
             "label": label,
             "detail": self._session_stop_detail,
             "recorded_utc": self._session_stop_recorded_utc,
+            "transition": transition,
         }
 
     def _mark_session_stop_reason(
@@ -27285,6 +27332,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = str(reason)
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
+
+    def _stop_origin_from_caller(self) -> str:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back.f_back if frame is not None and frame.f_back is not None else None
+            if caller is None:
+                return "unknown"
+            return f"{caller.f_code.co_name}:{caller.f_lineno}"
+        finally:
+            del frame
+
+    def _begin_session_stop_transition(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        origin: str,
+        force_reason: bool = False,
+    ) -> None:
+        self._mark_session_stop_reason(reason, detail=detail, force=force_reason)
+        transition_created = self._session_stop_transition is None
+        if transition_created:
+            self._session_stop_transition = {
+                "transition_id": uuid4().hex,
+                "state": "requested",
+                "reason": self._session_stop_reason,
+                "detail": self._session_stop_detail,
+                "origin": str(origin or "unknown"),
+                "trigger_log_message": self._last_log_message,
+                "requested_utc": self._session_stop_recorded_utc,
+                "last_stage_utc": self._session_stop_recorded_utc,
+                "automation_name": self._automation_name,
+                "automation_phase": self._automation_phase,
+                "automation_index": int(self._automation_index),
+                "task": self._current_task_summary(),
+                "fatigue_progress": self._fatigue_progress_snapshot(),
+                "stages": [],
+            }
+        else:
+            self._session_stop_transition["reason"] = self._session_stop_reason
+            self._session_stop_transition["detail"] = self._session_stop_detail
+        if transition_created:
+            self._record_session_stop_stage("requested", detail=detail, force_canonical=True)
+
+    def _record_session_stop_stage(
+        self,
+        stage: str,
+        *,
+        detail: str | None = None,
+        error: BaseException | None = None,
+        force_canonical: bool = True,
+    ) -> None:
+        transition = self._session_stop_transition
+        if transition is None:
+            return
+        recorded_utc = _utc_timestamp()
+        stage_record: dict[str, Any] = {
+            "stage": str(stage),
+            "recorded_utc": recorded_utc,
+        }
+        if detail:
+            stage_record["detail"] = str(detail)
+        if error is not None:
+            stage_record["error_type"] = error.__class__.__name__
+            stage_record["error"] = str(error) or error.__class__.__name__
+        stages = transition.setdefault("stages", [])
+        if isinstance(stages, list):
+            stages.append(stage_record)
+        transition["state"] = str(stage)
+        transition["last_stage_utc"] = recorded_utc
+        transition["fatigue_progress"] = self._fatigue_progress_snapshot()
+        if error is not None:
+            transition["failure_stage"] = str(stage)
+            transition["failure_type"] = error.__class__.__name__
+            transition["failure_detail"] = str(error) or error.__class__.__name__
+        if (
+            not force_canonical
+            or self._session_json_path is None
+            or self._session_metadata_store is None
+            or self._stop_transition_metadata_write_in_progress
+        ):
+            return
+        self._stop_transition_metadata_write_in_progress = True
+        try:
+            self._write_session_metadata(force_canonical=True)
+        except Exception as exc:
+            # Stop diagnostics must never prevent the physical stop sequence.
+            self._queue_run_log_display_line(
+                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"Stop-transition metadata write failed at {stage}: {exc}"
+            )
+        finally:
+            self._stop_transition_metadata_write_in_progress = False
 
     def _freeze_run_metadata_snapshot(self) -> MiniDmaRunMetadataSnapshot:
         if not self._is_ui_thread():
@@ -27432,6 +27572,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         payload["recipe_summary"] = self._last_recipe_summary
         payload["recipe_estimated_points"] = int(self._recipe_estimated_points)
+        payload["fatigue_progress"] = self._fatigue_progress_snapshot()
         payload["first_overheating_preflight"] = self._first_overheating_preflight_decision
         payload["stop"] = self._session_stop_metadata()
         payload["source_control"] = self._source_control_metadata()
@@ -28020,6 +28161,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = None
         self._session_stop_detail = None
         self._session_stop_recorded_utc = None
+        self._session_stop_transition = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_recovery_path = None
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s = None
@@ -28266,19 +28409,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._session_active:
             return
-        self._finalize_calibration_report_if_needed()
+        resolved_reason = reason or self._session_stop_reason or "manual_session_stop"
+        resolved_detail = detail or self._session_stop_detail
+        if resolved_detail is None:
+            resolved_detail = (
+                "Session stopped without completing an active recipe."
+                if resolved_reason == "manual_session_stop"
+                else self._session_stop_label(resolved_reason)[1]
+            )
+        stop_origin = self._stop_origin_from_caller()
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=stop_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
+        self._record_session_stop_stage("session_finalization_started")
+        try:
+            self._finalize_calibration_report_if_needed()
+        except Exception as exc:
+            self._record_session_stop_stage("calibration_report_finalize_failed", error=exc)
+            self._log(f"Session stop could not finalize the calibration report: {exc}")
         self._stop_auto_ramp(
             log_completion=False,
-            stop_reason=reason,
-            stop_detail=detail,
+            stop_reason=resolved_reason,
+            stop_detail=resolved_detail,
+            stop_origin=stop_origin,
         )
-        if reason is not None:
-            self._mark_session_stop_reason(reason, detail=detail, force=reason != "app_closed")
-        elif self._session_stop_reason is None:
-            self._mark_session_stop_reason(
-                "manual_session_stop",
-                detail="Session stopped without completing an active recipe.",
-            )
         if (
             self._session_csv_writer is not None
             and self._session_stop_reason == "recipe_completed"
@@ -28304,6 +28461,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
+        self._record_session_stop_stage("session_logging_fenced")
         timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
         if self._session_txt_handle is not None:
@@ -28331,6 +28489,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_setup_csv_handle.close()
             self._session_setup_csv_handle = None
         self._session_setup_csv_writer = None
+        self._record_session_stop_stage("session_files_closed")
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = self._session_point_count()
@@ -28374,6 +28533,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 reconcile_run_log = True
         self._session_run_log_accepting = False
         if self._session_json_path is not None:
+            self._record_session_stop_stage(
+                "completed",
+                detail="Recipe and session teardown completed.",
+                force_canonical=False,
+            )
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
             if (
@@ -30727,6 +30891,56 @@ class MainWindow(QtWidgets.QMainWindow):
         direction = "up" if direction_value >= 0.0 else "down"
         return f"{target_text}, current {direction} {current_text}/{end_text}{sweep_text}"
 
+    def _fatigue_progress_snapshot(self) -> dict[str, object] | None:
+        if self._automation_name != CURRENT_SWEEP_FATIGUE:
+            return None
+        completed_cycles = max(0, int(self._fatigue_cycles_completed))
+        cycle_index = max(0, int(self._fatigue_cycle_index))
+        cycle_limit = self._fatigue_cycle_limit
+        active_cycle = cycle_index if cycle_index > completed_cycles else None
+        if cycle_limit is not None and completed_cycles >= int(cycle_limit):
+            state = "complete"
+        elif self._automation_active:
+            if self._automation_paused:
+                state = "paused"
+            elif active_cycle is None:
+                state = "preparing"
+            else:
+                state = "running"
+        elif active_cycle is not None:
+            state = "incomplete"
+        else:
+            state = "stopped"
+        return {
+            "cycle_limit": None if cycle_limit is None else int(cycle_limit),
+            "completed_cycles": completed_cycles,
+            "active_cycle": active_cycle,
+            "active_leg": self._automation_fatigue_leg if active_cycle is not None else None,
+            "state": state,
+        }
+
+    def _fatigue_progress_text(self) -> str:
+        progress = self._fatigue_progress_snapshot()
+        if progress is None:
+            configured_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            if configured_cycles == 0:
+                return "Progress: 0 completed | not started (Forever)"
+            return f"Progress: 0/{configured_cycles} completed | not started"
+        completed = int(progress["completed_cycles"])
+        cycle_limit = progress["cycle_limit"]
+        active_cycle = progress["active_cycle"]
+        state = str(progress["state"])
+        completed_text = (
+            f"{completed} completed"
+            if cycle_limit is None
+            else f"{completed}/{int(cycle_limit)} completed"
+        )
+        if active_cycle is None:
+            return f"Progress: {completed_text} | {state}"
+        if state == "running" and progress["active_leg"]:
+            state = str(progress["active_leg"])
+        return f"Progress: {completed_text} | cycle {int(active_cycle)} {state}"
+
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if self._controller_process_mode:
             return
@@ -30749,13 +30963,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recipe_progress_pending_complete = False
         if self._automation_name == CURRENT_SWEEP_FATIGUE:
             cycle_index = max(0, int(self._fatigue_cycle_index))
+            completed_cycles = max(0, int(self._fatigue_cycles_completed))
             cycle_limit = self._fatigue_cycle_limit
             current_sweep_text = self._active_current_sweep_progress_text()
             if complete:
                 completed_cycles = (
-                    cycle_index
+                    completed_cycles
                     if cycle_limit is None
-                    else max(cycle_index, int(cycle_limit))
+                    else max(completed_cycles, int(cycle_limit))
                 )
                 self.recipe_progress.setRange(0, max(1, completed_cycles))
                 self.recipe_progress.setValue(max(1, completed_cycles))
@@ -30771,14 +30986,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     progress_text = (
                         "Fatigue: preparing forever"
                         if cycle_index <= 0
-                        else f"Fatigue cycle {cycle_index} | running until stopped"
+                        else (
+                            f"Fatigue: {completed_cycles} complete | "
+                            f"cycle {cycle_index} | until stopped"
+                        )
                     )
-                    progress_value = cycle_index
-                    progress_total = max(1, cycle_index + 1)
+                    progress_value = completed_cycles
+                    progress_total = max(1, completed_cycles + 1)
                     percent = 0
                 else:
                     finite_limit = max(1, int(cycle_limit))
-                    completed_cycles = max(0, cycle_index - 1)
                     self.recipe_progress.setRange(0, finite_limit)
                     self.recipe_progress.setValue(min(completed_cycles, finite_limit))
                     progress_text = (
@@ -32094,6 +32311,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None if self._session_base_path is None else str(self._session_base_path.parent)
             ),
             fatigue_cycle_index=int(self._fatigue_cycle_index),
+            fatigue_cycles_completed=int(self._fatigue_cycles_completed),
             fatigue_loop_anchor_index=self._fatigue_loop_anchor_index,
         )
 
@@ -32150,6 +32368,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = int(state.interval_ms)
         self._automation_name = str(state.name)
         self._fatigue_cycle_index = int(state.fatigue_cycle_index)
+        self._fatigue_cycles_completed = int(state.fatigue_cycles_completed)
         self._fatigue_loop_anchor_index = state.fatigue_loop_anchor_index
         fatigue_loop_step = next(
             (step for step in reversed(self._automation_steps) if step.action == "fatigue_loop"),
@@ -33027,6 +33246,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if state in {ControlState.RUNNING, ControlState.PAUSED}:
             self.label_control_process_status.setVisible(False)
 
+        if str(readback.get("automation_name") or "") == CURRENT_SWEEP_FATIGUE:
+            completed_cycles = max(
+                0,
+                int(readback.get("fatigue_cycles_completed") or 0),
+            )
+            cycle_index = max(0, int(readback.get("fatigue_cycle_index") or 0))
+            raw_cycle_limit = readback.get("fatigue_cycle_limit")
+            cycle_limit = (
+                None
+                if raw_cycle_limit is None
+                else max(1, int(raw_cycle_limit))
+            )
+            active_leg = str(readback.get("fatigue_cycle_leg") or "").strip()
+            if cycle_limit is None:
+                self.recipe_progress.setRange(0, 0)
+                progress_text = (
+                    "Fatigue: preparing forever"
+                    if cycle_index <= 0
+                    else (
+                        f"Fatigue: {completed_cycles} complete | cycle {cycle_index}"
+                        " | until stopped"
+                    )
+                )
+            else:
+                self.recipe_progress.setRange(0, cycle_limit)
+                self.recipe_progress.setValue(min(completed_cycles, cycle_limit))
+                progress_text = (
+                    f"Fatigue: preparing {cycle_limit} cycle(s)"
+                    if cycle_index <= 0
+                    else f"Fatigue cycle {cycle_index}/{cycle_limit}"
+                )
+            if active_leg:
+                progress_text += f" | {active_leg}"
+            self.recipe_progress.setFormat(progress_text)
+            return
+
         total = max(0, int(readback.get("automation_total") or 0))
         completed = max(0, int(readback.get("automation_completed") or 0))
         if total <= 0:
@@ -33404,6 +33659,7 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
         )
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit = (
             None
             if fatigue_loop_step is None
@@ -33455,6 +33711,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
 
     def _pause_recipe(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._pause_recipe)
+            return
         if self._isolated_recipe_active:
             process = self._production_control_process
             identity = self._production_control_identity
@@ -33517,6 +33776,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_buttons()
         self._refresh_live_labels()
 
+    def _recipe_motor_power_interlock_active(self) -> bool:
+        if not self._recipe_requires_tic(self._automation_steps):
+            self._recipe_motor_power_loss_since_s = None
+            return False
+        if self._tic_motor_power_ok is not False:
+            self._recipe_motor_power_loss_since_s = None
+            return False
+        now_s = time.monotonic()
+        if self._recipe_motor_power_loss_since_s is None:
+            self._recipe_motor_power_loss_since_s = now_s
+        return now_s - self._recipe_motor_power_loss_since_s >= TIC_MOTOR_POWER_RECIPE_PAUSE_S
+
+    def _request_recipe_pause_for_motor_power_loss(self) -> None:
+        if self._recipe_motor_power_pause_pending or self._automation_paused:
+            return
+        self._recipe_motor_power_pause_pending = True
+
+        def _pause_on_ui_thread() -> None:
+            self._recipe_motor_power_pause_pending = False
+            if not self._automation_active or self._automation_paused:
+                return
+            vin_text = self._tic_vin_text()
+            self._log(
+                "Recipe paused by the motor-power interlock because Tic VIN remained "
+                f"below {TIC_MOTOR_POWER_MIN_V:.1f} V for at least "
+                f"{TIC_MOTOR_POWER_RECIPE_PAUSE_S:.1f} s (VIN {vin_text}). "
+                "The heating/current output is being turned off; motor power is not "
+                "automatically re-enabled."
+            )
+            self._pause_recipe()
+
+        if self._is_ui_thread():
+            _pause_on_ui_thread()
+        else:
+            self._run_on_ui_thread(_pause_on_ui_thread)
+
     def _resume_paused_recipe(self) -> None:
         if self._isolated_recipe_active:
             process = self._production_control_process
@@ -33547,6 +33842,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._automation_active or not self._automation_paused:
             return
+        if self._recipe_requires_tic(self._automation_steps):
+            try:
+                self._refresh_tic_status()
+            except Exception:
+                pass
+            if self._tic_motor_power_ok is not True:
+                self._log(
+                    "Recipe resume refused because motor power is not confirmed ready "
+                    f"(VIN {self._tic_vin_text()}; expected at least "
+                    f"{TIC_MOTOR_POWER_MIN_V:.1f} V)."
+                )
+                return
+        self._recipe_motor_power_loss_since_s = None
         if self._paused_current_setpoint_mA is not None and self._is_current_sweep_mode(self._automation_name):
             if not self._set_recipe_current_mA(float(self._paused_current_setpoint_mA)):
                 return
@@ -34443,7 +34751,9 @@ class MainWindow(QtWidgets.QMainWindow):
         offer_recovery: bool = False,
         stop_reason: str | None = None,
         stop_detail: str | None = None,
+        stop_origin: str | None = None,
     ) -> None:
+        resolved_origin = stop_origin or self._stop_origin_from_caller()
         if not self._is_ui_thread():
             self._automation_paused = True
             self._run_on_ui_thread(
@@ -34456,32 +34766,66 @@ class MainWindow(QtWidgets.QMainWindow):
                     offer_recovery=offer_recovery,
                     stop_reason=stop_reason,
                     stop_detail=stop_detail,
+                    stop_origin=resolved_origin,
                 )
             )
             return
         if not self._automation_active:
             return
-        if stop_reason is not None:
-            self._mark_session_stop_reason(stop_reason, detail=stop_detail, force=stop_reason != "app_closed")
-        elif user_initiated:
-            self._mark_session_stop_reason(
-                "manual_recipe_stop",
-                detail="Recipe stop was requested by the operator.",
-            )
-        elif offer_recovery:
-            self._mark_session_stop_reason(
-                "recipe_control_stop",
-                detail="Recipe stopped before completion and recovery was offered.",
-            )
+        resolved_reason = stop_reason
+        resolved_detail = stop_detail
+        if resolved_reason is None and user_initiated:
+            resolved_reason = "manual_recipe_stop"
+            resolved_detail = resolved_detail or "Recipe stop was requested by the operator."
+        elif resolved_reason is None:
+            resolved_reason = "recipe_control_stop"
+            if resolved_detail is None and self._last_log_message:
+                resolved_detail = f"Automatic stop followed: {self._last_log_message}"
+            elif resolved_detail is None and offer_recovery:
+                resolved_detail = "Recipe stopped before completion and recovery was offered."
+            elif resolved_detail is None:
+                resolved_detail = "An automatic safety/control path requested a recipe stop."
+        if resolved_detail is None:
+            resolved_detail = self._session_stop_label(resolved_reason)[1]
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=resolved_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
         should_store_resume = user_initiated and self._automation_index < len(self._automation_steps)
         if should_store_resume:
-            self._store_resume_state()
+            try:
+                self._store_resume_state()
+                self._record_session_stop_stage("resume_state_saved")
+            except Exception as exc:
+                self._record_session_stop_stage("resume_state_save_failed", error=exc)
+                self._log(f"Recipe stop could not preserve resume state: {exc}")
         self._automation_active = False
         self._automation_paused = True
+        self._record_session_stop_stage("automation_fenced")
         if self._supply_output_enabled:
-            self._disable_supply_output()
-        self._stop_automation_control_loop()
-        self._stop_tic_keepalive()
+            try:
+                self._disable_supply_output()
+                self._record_session_stop_stage("supply_disabled")
+            except Exception as exc:
+                self._supply_output_enabled = False
+                self._record_session_stop_stage("supply_disable_failed", error=exc)
+                self._log(f"Recipe stop could not disable supply output: {exc}")
+        else:
+            self._record_session_stop_stage("supply_already_disabled")
+        try:
+            self._stop_automation_control_loop()
+            self._record_session_stop_stage("control_loop_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("control_loop_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop the control loop cleanly: {exc}")
+        try:
+            self._stop_tic_keepalive()
+            self._record_session_stop_stage("tic_keepalive_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("tic_keepalive_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop Tic keepalive cleanly: {exc}")
         motion_halted = False
         try:
             dispatcher = self._build_tic_dispatcher()
@@ -34493,6 +34837,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 timeout_s=2.0,
             )
         except Exception as exc:
+            self._record_session_stop_stage("tic_halt_failed", error=exc)
             self._log(f"Recipe stop could not halt Tic: {exc}")
         if motion_halted:
             try:
@@ -34500,8 +34845,18 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._release_motion_tracking_after_halt(reason="recipe stop")
+            self._record_session_stop_stage("tic_motion_halted")
         else:
             self._tic_motor_power_ok = False
+            if not any(
+                stage.get("stage") == "tic_halt_failed"
+                for stage in (self._session_stop_transition or {}).get("stages", [])
+                if isinstance(stage, dict)
+            ):
+                self._record_session_stop_stage(
+                    "tic_halt_unconfirmed",
+                    detail="Tic halt was not confirmed within the bounded stop wait.",
+                )
             self._log(
                 "Recipe stopped, but Tic halt was not confirmed; automatic and manual motion "
                 "remain blocked until motor status is checked."
@@ -34512,8 +34867,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._kosice_force_control = None
         self._automation_steps = []
         self._automation_index = 0
-        self._fatigue_cycle_index = 0
-        self._fatigue_cycle_limit = None
         self._fatigue_loop_anchor_index = None
         if not keep_progress:
             self._automation_completed_ticks = 0
@@ -34579,12 +34932,20 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self._run_on_ui_thread(self._sync_manual_motion_base_from_current_position)
         self._set_automation_context(phase="idle")
+        self._record_session_stop_stage("recipe_state_cleared")
         if log_completion:
             self._log("Recipe stopped.")
         self._close_length_setup_dialog()
         if (user_initiated or offer_recovery) and self._session_active:
-            self._stop_session()
+            self._record_session_stop_stage("session_finalization_requested")
+            self._stop_session(reason=resolved_reason, detail=resolved_detail)
+        elif self._session_active:
+            self._record_session_stop_stage(
+                "automation_stopped_session_open",
+                detail="Automation stopped while session logging remained active.",
+            )
         elif not self._session_active:
+            self._record_session_stop_stage("automation_stop_completed", force_canonical=False)
             self._clear_recovery_tic_command_context(retain_capture=False)
         if not keep_progress:
             self._update_recipe_progress()
@@ -37018,8 +37379,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._fatigue_loop_anchor_index is None:
             self._fatigue_loop_anchor_index = int(step_index)
         anchor_index = int(self._fatigue_loop_anchor_index)
-        next_cycle_index = int(self._fatigue_cycle_index) + 1
+        completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
+        if completed_cycle > int(self._fatigue_cycles_completed):
+            self._fatigue_cycles_completed = completed_cycle
+            limit_text = "forever" if cycle_limit is None else str(cycle_limit)
+            self._log(f"Completed fatigue cycle {completed_cycle}/{limit_text}.")
+            if self._session_active:
+                self._write_session_metadata()
+        next_cycle_index = int(self._fatigue_cycle_index) + 1
         if cycle_limit is not None and next_cycle_index > int(cycle_limit):
             del self._automation_steps[anchor_index:]
             self._automation_index = anchor_index
@@ -37773,6 +38141,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
+                "fatigue_cycles_completed": int(self._fatigue_cycles_completed),
+                "fatigue_cycle_active": (
+                    int(self._fatigue_cycle_index)
+                    if int(self._fatigue_cycle_index) > int(self._fatigue_cycles_completed)
+                    else ""
+                ),
+                "fatigue_cycle_limit": (
+                    "" if self._fatigue_cycle_limit is None else int(self._fatigue_cycle_limit)
+                ),
+                "fatigue_cycle_leg": self._automation_fatigue_leg or "",
                 "session_active": int(bool(self._session_active)),
                 "session_logging_enabled": int(bool(self._session_logging_enabled)),
                 "length_setup_dialog_visible": int(self._setup_dialog_visible()),
@@ -38082,6 +38460,8 @@ class MainWindow(QtWidgets.QMainWindow):
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
         self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm")
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"

@@ -32,6 +32,7 @@ VALID_ROLES = {
 GLOBAL_GUARDED_COMMANDS = {"*RST", "OUTP:GEN 0", "SYST:LOC", "ALL_OUTPUTS_OFF"}
 MAX_TOTAL_READBACK_HZ = 2.0
 MAX_CADENCE_EVENTS = 64
+MAX_OUTPUT_EVENTS = 128
 
 
 @dataclass
@@ -182,6 +183,7 @@ class SharedPowerSupplyBroker:
         self._setpoint_currents_mA: dict[int, float] = {}
         self._cadence_generation = 0
         self._cadence_events: deque[dict[str, object]] = deque(maxlen=MAX_CADENCE_EVENTS)
+        self._output_events: deque[dict[str, object]] = deque(maxlen=MAX_OUTPUT_EVENTS)
         self._scheduler_stop = Event()
         self._scheduler_thread: Thread | None = None
         self._scheduler_error: str | None = None
@@ -335,6 +337,12 @@ class SharedPowerSupplyBroker:
                 current_a=current_a,
                 output_on=output_on,
             )
+            self._record_output_event_locked(
+                channel=channel,
+                lease_id=lease_id,
+                output_on=output_on,
+                source="configure_channel",
+            )
 
     def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         with self._lock:
@@ -351,6 +359,36 @@ class SharedPowerSupplyBroker:
         with self._lock:
             self._require_lease(channel=channel, lease_id=lease_id)
             self.driver.set_output(channel=channel, output_on=output_on)
+            self._record_output_event_locked(
+                channel=channel,
+                lease_id=lease_id,
+                output_on=output_on,
+                source="set_output",
+            )
+
+    def _record_output_event_locked(
+        self,
+        *,
+        channel: int,
+        output_on: bool,
+        source: str,
+        lease_id: str | None = None,
+        owner: str | None = None,
+        role: str | None = None,
+    ) -> None:
+        lease = self._leases.get(int(channel))
+        self._output_events.append(
+            {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "timestamp_s": time.monotonic(),
+                "channel": int(channel),
+                "output_on": bool(output_on),
+                "source": str(source),
+                "owner": str(owner if owner is not None else (lease.owner if lease else "")),
+                "role": str(role if role is not None else (lease.role if lease else "")),
+                "lease_id": str(lease_id or ""),
+            }
+        )
 
     def output_state(self, *, channel: int) -> bool | None:
         with self._lock:
@@ -706,6 +744,13 @@ class SharedPowerSupplyBroker:
                 raise PermissionError("Emergency all-output stop requires explicit emergency_stop_all intent.")
             for channel in range(1, self.profile.channel_count + 1):
                 self.driver.set_output(channel=channel, output_on=False)
+                self._record_output_event_locked(
+                    channel=channel,
+                    output_on=False,
+                    source="emergency_all_outputs_off",
+                    owner="shared_hmp_broker",
+                    role="emergency",
+                )
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -715,6 +760,7 @@ class SharedPowerSupplyBroker:
                 "bench_profile": self.bench_profile.to_dict(),
                 "leases": {str(channel): lease.to_dict() for channel, lease in self._leases.items()},
                 "readbacks": {str(channel): dict(readback) for channel, readback in self._readbacks.items()},
+                "output_events": list(self._output_events),
                 "scheduler": {
                     "running": self._scheduler_thread is not None and self._scheduler_thread.is_alive(),
                     "capacity_hz": MAX_TOTAL_READBACK_HZ,

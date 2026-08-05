@@ -62,11 +62,6 @@ class SessionMetadataCheckpointStore:
         if not identity:
             raise ValueError("session_identity must not be empty")
         self.canonical_path = Path(canonical_path)
-        # A run directory created by the logger must not be silently recreated if
-        # it is moved, unmounted, or otherwise disappears mid-run.  Treat that as
-        # a destination failure so the logger can write its complete emergency
-        # recovery bundle (metadata plus retained measurements) locally.
-        self._canonical_parent_must_remain = self.canonical_path.parent.exists()
         self.session_identity = identity
         self.checkpoint_root = (
             default_checkpoint_root() if checkpoint_root is None else Path(checkpoint_root)
@@ -75,6 +70,7 @@ class SessionMetadataCheckpointStore:
         self.canonical_write_interval_s = max(0.0, float(canonical_write_interval_s))
         self._monotonic = monotonic
         self._last_canonical_write_s = 0.0
+        self._canonical_parent_established = self.canonical_path.parent.is_dir()
 
     def _checkpoint_text(self, payload: Mapping[str, Any]) -> str:
         envelope = {
@@ -117,16 +113,14 @@ class SessionMetadataCheckpointStore:
         )
         canonical_written = False
         if write_canonical:
-            if (
-                self._canonical_parent_must_remain
-                and not self.canonical_path.parent.exists()
-            ):
-                raise OSError(
-                    "canonical metadata directory disappeared during the session: "
+            if self._canonical_parent_established and not self.canonical_path.parent.is_dir():
+                raise FileNotFoundError(
+                    f"established canonical metadata directory disappeared: "
                     f"{self.canonical_path.parent}"
                 )
             _atomic_replace_text(self.canonical_path, canonical_text)
             self._last_canonical_write_s = now_s
+            self._canonical_parent_established = True
             canonical_written = True
 
         if checkpoint_error is not None:
