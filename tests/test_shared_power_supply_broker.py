@@ -341,3 +341,173 @@ def test_broker_failure_diagnostic_classifies_common_operator_failures(
 
     assert diagnostic.startswith("Test broker:")
     assert expected in diagnostic
+
+
+def _leased_broker() -> tuple[SharedPowerSupplyBroker, object, object]:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    broker.assign_role(channel=3, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    broker.confirm_profile()
+    annealing = broker.lease(
+        channel=1,
+        owner="current-annealing",
+        role=ROLE_CURRENT_ANNEALING,
+    )
+    mini_dma = broker.lease(
+        channel=3,
+        owner="mini-dma",
+        role=ROLE_MINI_DMA_CURRENT,
+    )
+    return broker, annealing, mini_dma
+
+
+def test_broker_previews_and_applies_fair_two_hz_readback_sharing() -> None:
+    broker, annealing, mini_dma = _leased_broker()
+    first = broker.configure_polling(
+        channel=1,
+        lease_id=annealing.lease_id,
+        requested_hz=2.0,
+    )
+
+    preview = broker.preview_polling(
+        channel=3,
+        requested_hz=2.0,
+        owner="mini-dma",
+        role=ROLE_MINI_DMA_CURRENT,
+    )
+
+    assert first["polling"]["effective_hz"] == pytest.approx(2.0)
+    assert preview["candidate"]["effective_hz"] == pytest.approx(1.0)
+    assert preview["requires_confirmation"] is True
+    assert preview["downgrades"] == [
+        {
+            "channel": 1,
+            "owner": "current-annealing",
+            "role": ROLE_CURRENT_ANNEALING,
+            "before_hz": 2.0,
+            "after_hz": 1.0,
+        }
+    ]
+
+    second = broker.configure_polling(
+        channel=3,
+        lease_id=mini_dma.lease_id,
+        requested_hz=2.0,
+    )
+
+    assert second["polling"]["effective_hz"] == pytest.approx(1.0)
+    assert broker.polling_status(channel=1)["polling"]["effective_hz"] == pytest.approx(1.0)
+
+    broker.release(channel=3, lease_id=mini_dma.lease_id)
+
+    assert broker.polling_status(channel=1)["polling"]["effective_hz"] == pytest.approx(2.0)
+
+
+def test_broker_one_hz_request_does_not_require_confirmation() -> None:
+    broker, annealing, _mini_dma = _leased_broker()
+    broker.configure_polling(
+        channel=1,
+        lease_id=annealing.lease_id,
+        requested_hz=1.0,
+    )
+
+    preview = broker.preview_polling(
+        channel=3,
+        requested_hz=1.0,
+        owner="mini-dma",
+        role=ROLE_MINI_DMA_CURRENT,
+    )
+
+    assert preview["candidate"]["effective_hz"] == pytest.approx(1.0)
+    assert preview["requires_confirmation"] is False
+    assert preview["downgrades"] == []
+
+
+def test_broker_warns_when_new_two_hz_request_is_itself_capacity_limited() -> None:
+    broker, annealing, _mini_dma = _leased_broker()
+    broker.configure_polling(
+        channel=1,
+        lease_id=annealing.lease_id,
+        requested_hz=1.0,
+    )
+
+    preview = broker.preview_polling(
+        channel=3,
+        requested_hz=2.0,
+        owner="mini-dma",
+        role=ROLE_MINI_DMA_CURRENT,
+    )
+
+    assert preview["candidate"]["effective_hz"] == pytest.approx(1.0)
+    assert preview["requires_confirmation"] is True
+    assert preview["downgrades"] == []
+
+
+def test_broker_polling_requires_valid_lease_and_supported_rate() -> None:
+    broker, annealing, _mini_dma = _leased_broker()
+
+    with pytest.raises(PermissionError, match="valid lease"):
+        broker.configure_polling(channel=1, lease_id="stale", requested_hz=2.0)
+    with pytest.raises(ValueError, match="1 Hz or 2 Hz"):
+        broker.configure_polling(
+            channel=1,
+            lease_id=annealing.lease_id,
+            requested_hz=4.0,
+        )
+
+
+def test_broker_scheduler_coalesces_current_and_caches_readback() -> None:
+    broker, annealing, _mini_dma = _leased_broker()
+    broker.configure_polling(
+        channel=1,
+        lease_id=annealing.lease_id,
+        requested_hz=2.0,
+    )
+    broker.schedule_current(channel=1, lease_id=annealing.lease_id, current_mA=4.0)
+    broker.schedule_current(channel=1, lease_id=annealing.lease_id, current_mA=7.0)
+
+    broker.process_scheduler_once(now_s=100.0)
+    readback = broker.latest_readback(
+        channel=1,
+        max_age_s=1.0,
+        fallback_to_measure=False,
+        now_s=100.25,
+    )
+
+    assert readback["cached"] is True
+    assert readback["age_s"] == pytest.approx(0.25)
+    assert readback["current_mA"] == pytest.approx(7.0)
+    assert readback["setpoint_current_mA"] == pytest.approx(7.0)
+    assert readback["pending_current_mA"] is None
+    assert readback["cadence"]["polling"]["effective_hz"] == pytest.approx(2.0)
+    assert broker.driver.command_log().count("CURR 0.0070") == 1
+    assert "CURR 0.0040" not in broker.driver.command_log()
+
+
+def test_broker_protocol_exposes_cadence_preview_and_status() -> None:
+    broker, annealing, _mini_dma = _leased_broker()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+
+        preview = client.preview_polling(
+            channel=1,
+            requested_hz=2.0,
+            owner="current-annealing",
+            role=ROLE_CURRENT_ANNEALING,
+        )
+        status = client.configure_polling(
+            channel=1,
+            lease_id=annealing.lease_id,
+            requested_hz=2.0,
+        )
+        client.start_scheduler(tick_s=0.01)
+
+        assert preview["candidate"]["effective_hz"] == pytest.approx(2.0)
+        assert status["polling"]["effective_hz"] == pytest.approx(2.0)
+        assert client.polling_status(channel=1)["polling"]["requested_hz"] == pytest.approx(2.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)

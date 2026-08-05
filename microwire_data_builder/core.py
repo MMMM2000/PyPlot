@@ -18,7 +18,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, Hashable, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -26,6 +26,11 @@ import numpy as np
 import pandas as pd
 
 from plotting.shared.transition_analysis import estimate_temperature_transition_points
+
+try:
+    from plotting.plugins.mini_dma import core as mini_dma_core
+except Exception:  # pragma: no cover - TMA support is optional in minimal installs.
+    mini_dma_core = None  # type: ignore[assignment]
 
 try:
     from .video import extract_video_metrics
@@ -85,6 +90,14 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Mf2 (mA)",
     "As current density (A/mm^2)",
     "Ms current density (A/mm^2)",
+    "J_As1 (A/mm^2)",
+    "J_Af1 (A/mm^2)",
+    "J_Ms1 (A/mm^2)",
+    "J_Mf1 (A/mm^2)",
+    "J_As2 (A/mm^2)",
+    "J_Af2 (A/mm^2)",
+    "J_Ms2 (A/mm^2)",
+    "J_Mf2 (A/mm^2)",
     "As2-As1 (mA)",
     "Af2-Af1 (mA)",
     "Ms2-Ms1 (mA)",
@@ -93,6 +106,8 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Mf2-Af2 (mA)",
     "Setpoints (mA)",
     "Sources",
+    "Current annealing transition status",
+    "Current annealing transition review counts",
 ]
 
 SHAPE_MEMORY_VALUE_COLUMNS = [
@@ -187,6 +202,20 @@ ESTIMATED_TRANSITION_COLUMN = "Tt est (°C)"
 GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
 VIDEO_MW_LENGTH_COLUMN = "Video wire range (m)"
+ANNEALING_TRANSITION_COLUMN = "Current annealing transition currents"
+CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN = "Current annealing transition status"
+CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN = "Current annealing transition review counts"
+VSM_TRANSITION_TEMP_STATUS_COLUMN = "VSM transition temp status"
+VSM_TRANSITION_TEMP_COUNTS_COLUMN = "VSM transition temp review counts"
+LEGACY_MINI_DMA_COLUMN = "Mini DMA graphs"
+LEGACY_MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
+LEGACY_MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
+LEGACY_MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
+LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN = "Mini DMA transition status"
+LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN = "Mini DMA transition review counts"
+LEGACY_MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
+MINI_DMA_TRANSITION_STATUS_COLUMN = "TMA transition status"
+MINI_DMA_TRANSITION_COUNTS_COLUMN = "TMA transition review counts"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -222,6 +251,7 @@ OUTPUT_COLUMNS = [
     "Data source",
     "File 1000 mA",
     "Other annealing files",
+    ANNEALING_TRANSITION_COLUMN,
     "Figure — 1000 mA",
     "Figure — other annealing",
     "Figure — 1000 mA (Origin)",
@@ -259,11 +289,13 @@ MINI_DMA_STRAIN_COLUMN = "TMA strain by stress/load"
 MINI_DMA_TRANSITION_COLUMN = "TMA transition currents by stress/load"
 MINI_DMA_BREAK_COLUMN = "TMA break point"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
+LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
 MINI_DMA_ORIGIN_COLUMN = "TMA graphs (Origin)"
 SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
+LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
@@ -294,6 +326,162 @@ TRANSITION_TEMP_COLUMNS = (
 
 STRAIN_COLUMN = "Legacy strain"
 
+_REVIEW_COUNT_KEYS = (
+    "total",
+    "accepted",
+    "manual",
+    "no_transition",
+    "excluded",
+    "needs_attention",
+    "unreviewed",
+    "auto_candidates",
+)
+
+
+def _empty_transition_review_counts() -> Dict[str, int]:
+    return {key: 0 for key in _REVIEW_COUNT_KEYS}
+
+
+def _coerce_review_count(value: object) -> int:
+    try:
+        numeric = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(numeric, 0)
+
+
+def _normalise_transition_status(raw_status: object) -> str:
+    text = str(raw_status or "").strip()
+    folded = text.casefold().replace("-", "_").replace(" ", "_")
+    mapping = {
+        "accepted": "Accepted auto",
+        "accepted_auto": "Accepted auto",
+        "auto_accepted": "Accepted auto",
+        "manual": "Manual adjusted",
+        "manual_adjusted": "Manual adjusted",
+        "no_transition": "No transition",
+        "excluded": "Excluded",
+        "needs_attention": "Needs attention",
+        "partly_reviewed": "Partly reviewed",
+        "partial": "Partly reviewed",
+        "auto_candidate": "Auto candidate",
+        "auto_candidates": "Auto candidate",
+        "unreviewed": "Unreviewed",
+        "not_measured": "Not measured",
+        "no_scans": "Not measured",
+    }
+    return mapping.get(folded, text or "Unreviewed")
+
+
+def _review_counts_from_payload(payload: object) -> Dict[str, int]:
+    counts = _empty_transition_review_counts()
+    if not isinstance(payload, Mapping):
+        return counts
+    aliases = {
+        "accepted_auto": "accepted",
+        "accepted": "accepted",
+        "manual_adjusted": "manual",
+        "manual": "manual",
+        "no-transition": "no_transition",
+        "no transition": "no_transition",
+        "excluded": "excluded",
+        "needs attention": "needs_attention",
+        "needs_attention": "needs_attention",
+        "unreviewed": "unreviewed",
+        "auto": "auto_candidates",
+        "auto_candidates": "auto_candidates",
+        "total": "total",
+    }
+    for raw_key, value in payload.items():
+        key = aliases.get(str(raw_key).strip().casefold())
+        if key in counts:
+            counts[key] += _coerce_review_count(value)
+    if counts["total"] <= 0:
+        counts["total"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+            + counts["needs_attention"]
+            + counts["unreviewed"]
+        )
+    return counts
+
+
+def _format_transition_review_counts(counts: Mapping[str, int]) -> str:
+    total = int(counts.get("total", 0) or 0)
+    if total <= 0:
+        return ""
+    return "; ".join(
+        f"{key}={int(counts.get(key, 0) or 0)}"
+        for key in _REVIEW_COUNT_KEYS
+    )
+
+
+def _aggregate_transition_review_status(counts: Mapping[str, int]) -> str:
+    total = int(counts.get("total", 0) or 0)
+    if total <= 0:
+        return "Not measured"
+    manual = int(counts.get("manual", 0) or 0)
+    accepted = int(counts.get("accepted", 0) or 0)
+    no_transition = int(counts.get("no_transition", 0) or 0)
+    excluded = int(counts.get("excluded", 0) or 0)
+    needs_attention = int(counts.get("needs_attention", 0) or 0)
+    unreviewed = int(counts.get("unreviewed", 0) or 0)
+    negative = no_transition + excluded
+    reviewed = manual + accepted + negative
+    if needs_attention and needs_attention == total:
+        return "Needs attention"
+    if manual == total:
+        return "Manual adjusted"
+    if accepted == total:
+        return "Accepted auto"
+    if negative == total:
+        return "No transition" if no_transition else "Excluded"
+    if reviewed or needs_attention:
+        return "Partly reviewed"
+    if int(counts.get("auto_candidates", 0) or 0):
+        return "Auto candidate"
+    if unreviewed or total:
+        return "Unreviewed"
+    return "Not measured"
+
+
+def _increment_review_count_for_status(
+    counts: Dict[str, int],
+    status: object,
+    *,
+    has_manual_values: bool = False,
+    has_auto_values: bool = False,
+) -> None:
+    normalised = _normalise_transition_status(status)
+    counts["total"] += 1
+    if normalised == "Manual adjusted" or has_manual_values:
+        counts["manual"] += 1
+    elif normalised == "Accepted auto":
+        counts["accepted"] += 1
+    elif normalised == "No transition":
+        counts["no_transition"] += 1
+    elif normalised == "Excluded":
+        counts["excluded"] += 1
+    elif normalised == "Needs attention":
+        counts["needs_attention"] += 1
+    else:
+        counts["unreviewed"] += 1
+        if has_auto_values:
+            counts["auto_candidates"] += 1
+
+
+def _clean_review_values(values: object) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in ("As", "Af", "Ms", "Mf", "As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2"):
+        value = values.get(label)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            cleaned[label] = float(value)
+    return cleaned
+
 for _graph_column, _origin_column in (
     (VSM_HYSTERESIS_COLUMN, VSM_HYSTERESIS_ORIGIN_COLUMN),
     (VSM_TEMPERATURE_SCAN_COLUMN, VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN),
@@ -306,10 +494,25 @@ for _graph_column, _origin_column in (
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
 
 for _mini_dma_extra_column in reversed(
-    (MINI_DMA_STRAIN_COLUMN, MINI_DMA_TRANSITION_COLUMN, MINI_DMA_BREAK_COLUMN)
+    (
+        MINI_DMA_STRAIN_COLUMN,
+        MINI_DMA_TRANSITION_COLUMN,
+        MINI_DMA_TRANSITION_STATUS_COLUMN,
+        MINI_DMA_TRANSITION_COUNTS_COLUMN,
+        MINI_DMA_BREAK_COLUMN,
+    )
 ):
     if _mini_dma_extra_column not in OUTPUT_COLUMNS:
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(MINI_DMA_ORIGIN_COLUMN) + 1, _mini_dma_extra_column)
+
+for _transition_temp_status_column in reversed(
+    (VSM_TRANSITION_TEMP_STATUS_COLUMN, VSM_TRANSITION_TEMP_COUNTS_COLUMN)
+):
+    if _transition_temp_status_column not in OUTPUT_COLUMNS:
+        OUTPUT_COLUMNS.insert(
+            OUTPUT_COLUMNS.index(TRANSITION_TEMP_MF_COLUMN) + 1,
+            _transition_temp_status_column,
+        )
 
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
@@ -387,6 +590,24 @@ MICROWIRE_TOKEN_RE = re.compile(
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
+
+def _normalise_microwire_identity_suffix(suffix: object) -> Optional[str]:
+    """Return only suffixes that should create separate sample identities.
+
+    Filename notes such as ``No1`` and ``noload`` describe a measurement, not
+    a separate microwire.  ``oe`` (other end) remains distinct so it can be
+    reviewed or hidden independently.
+    """
+
+    if suffix is None or _is_nan(suffix):
+        return None
+    text = str(suffix).strip()
+    if not text:
+        return None
+    if text.casefold() == "oe":
+        return "oe"
+    return None
+
 DRAW_NUMERIC_FIELDS = {
     "mass_g",
     "fabrication_resistance_ohm",
@@ -417,13 +638,13 @@ HEADER_HINTS: Dict[str, str] = {
     "dtum": "piece_date",
     "Poet otok": "piece_turns",
     "P.": "piece_y",
-    "zloÅ¾enie": "composition_label",
+    "zloženie": "composition_label",
     "zlozenie": "composition_label",
     "composition": "composition_label",
-    "dÃ¡tum a Äas vÃ½roby": "production_datetime",
+    "dátum a čas výroby": "production_datetime",
     "datum a cas vyroby": "production_datetime",
     "datumacasvyroby": "production_datetime",
-    "hmotnosÅ¥": "mass_g",
+    "hmotnosť": "mass_g",
     "hmotnost": "mass_g",
     "mass": "mass_g",
     "odpor": "fabrication_resistance_ohm",
@@ -438,53 +659,57 @@ HEADER_HINTS: Dict[str, str] = {
     "glass pull-away": "glass_pull_off",
     "glass pull away": "glass_pull_off",
     "bistabilny/nebistabilny": "bistable_status",
-    "poznÃ¡mka": "notes",
-    "PoznÃ¡mka": "notes",
+    "poznámka": "notes",
+    "Poznámka": "notes",
     "poznamka": "notes",
     "Poznamka": "notes",
     "pozn.": "notes",
     "pozn": "notes",
-    "poznÃ¡mky": "notes",
+    "poznámky": "notes",
     "p.Ä": "piece_y",
     "p.c": "piece_y",
     "p.Ä.": "piece_y",
-    "poÄet otÃ¡Äok": "piece_turns",
+    "počet otáčok": "piece_turns",
     "pocet otacok": "piece_turns",
-    "dÄºÅ¾ka (m)": "length_m",
+    "dĺžka (m)": "length_m",
     "dlzka (m)": "length_m",
-    "d (Âµm)": "d_um",
+    "d (µm)": "d_um",
     "d (um)": "d_um",
-    "d (Î¼m)": "d_um",
+    "d (μm)": "d_um",
     "d (μm)": "d_um",
     "d (�m)": "d_um",
     "d (µm)": "d_um",
-    "d(Âµm)": "d_um",
+    "d(µm)": "d_um",
     "d(um)": "d_um",
-    "d(Î¼m)": "d_um",
+    "d(μm)": "d_um",
     "d": "d_um",
-    "D (Âµm)": "D_um",
+    "D (µm)": "D_um",
     "D (um)": "D_um",
-    "D (Î¼m)": "D_um",
+    "D (μm)": "D_um",
     "D (μm)": "D_um",
     "D (�m)": "D_um",
     "D (µm)": "D_um",
-    "D(Âµm)": "D_um",
+    "D(µm)": "D_um",
     "D(um)": "D_um",
-    "D(Î¼m)": "D_um",
+    "D(μm)": "D_um",
     "D": "D_um",
     "d/D": "d_over_D",
     "d/d": "d_over_D",
     "Datum": "piece_date",
-    "DÃ¡tum": "piece_date",
+    "Dátum": "piece_date",
     "datum": "piece_date",
-    "dÃ¡tum": "piece_date",
+    "dátum": "piece_date",
 }
 
 ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
 
+COMPOSITION_TOKEN_PATTERN = re.compile(r"^(?P<composition>(?:[A-Z][a-z]?\d+)+)")
 DRAW_PATTERN = re.compile(r"^(?P<draw>\d+)")
 PIECE_PATTERN = re.compile(r"^(?P<piece>\d+)")
 XY_PATTERN = re.compile(r"(\d+)_+(\d+)")
+DRAW_PIECE_AFTER_COMPOSITION_PATTERN = re.compile(
+    r"(?:^|[\s_-])(?P<draw>\d{1,3})[_-](?P<piece>\d{1,3})(?=$|[\s_-])"
+)
 MICROSCOPE_PAIR_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"(\d+)_+(\d+)"),
     re.compile(r"(\d+)[/-](\d+)")
@@ -508,7 +733,7 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
 )
 MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
 MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
-MICROSCOPE_UNIT_HINTS = ("Âµm", "um", "Î¼m")
+MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
 
 KNOWN_TIMEZONE_TOKENS = {
     "UTC",
@@ -703,6 +928,227 @@ class BuilderConfig:
     sort_spec: Optional[Tuple[Tuple[str, bool], ...]] = None
 
 
+ASSEMBLE_PROJECTION_IDENTITY_COLUMNS: Tuple[str, ...] = (
+    "Composition",
+    "Microwire",
+)
+ASSEMBLE_PROJECTION_FAMILIES: Tuple[str, ...] = (
+    "current_annealing",
+    "vsm",
+    "tma",
+)
+
+
+@dataclass(frozen=True)
+class AssembleProjection:
+    """Resolved safe public-table projection and enabled measurement families."""
+
+    columns: Tuple[str, ...]
+    enabled_families: frozenset[str]
+    explicit: bool
+
+
+def _assemble_projection_column_key(column: object) -> str:
+    """Return a comparison key shared by current and legacy saved labels."""
+
+    text = str(column or "").strip()
+    for _attempt in range(2):
+        try:
+            repaired = text.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            break
+        if repaired == text:
+            break
+        text = repaired
+    text = (
+        text.replace("Mini DMA", "TMA")
+        .replace("mini DMA", "TMA")
+        .replace("Âµ", "µ")
+        .replace("Î¼", "µ")
+        .replace("μ", "µ")
+        .replace("Â²", "²")
+        .replace("^2", "²")
+        .replace("Ω", "ohm")
+        .replace("Ω", "ohm")
+    )
+    dimension_role = ""
+    if re.match(r"^d\s*\(", text):
+        dimension_role = "core diameter "
+    elif re.match(r"^D\s*\(", text):
+        dimension_role = "glass diameter "
+    elif re.match(r"^d\s*/\s*D$", text):
+        dimension_role = "diameter ratio "
+    text = text.casefold().replace("µ", "u").replace("²", "2")
+    return dimension_role + re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def assemble_projection_column_is_public_safe(column: object) -> bool:
+    """Return whether a column may appear in a projected public data table."""
+
+    text = str(column or "").strip()
+    if not text:
+        return False
+    key = _assemble_projection_column_key(text)
+    always_omit = globals().get("_WORD_ALWAYS_OMIT_COLUMNS", ())
+    if any(key == _assemble_projection_column_key(item) for item in always_omit):
+        return False
+    tokens = set(key.split())
+    if text.endswith("(Origin)") or text.startswith("Figure"):
+        return False
+    denied_tokens = {
+        "audit",
+        "file",
+        "files",
+        "filename",
+        "filenames",
+        "graph",
+        "graphs",
+        "image",
+        "images",
+        "internal",
+        "origin",
+        "path",
+        "paths",
+        "plot",
+        "plots",
+        "provenance",
+        "source",
+        "sources",
+    }
+    return not bool(tokens & denied_tokens)
+
+
+def _assemble_projection_family(column: object) -> Optional[str]:
+    text = str(column or "").strip()
+    compact = _assemble_projection_column_key(text)
+    if not compact:
+        return None
+    if "tma" in compact or "mini dma" in compact:
+        return "tma"
+    vsm_keys = {
+        _assemble_projection_column_key(item)
+        for item in (
+            TRANSITION_TEMP_AS_COLUMN,
+            TRANSITION_TEMP_AF_COLUMN,
+            TRANSITION_TEMP_MS_COLUMN,
+            TRANSITION_TEMP_MF_COLUMN,
+            VSM_TRANSITION_TEMP_STATUS_COLUMN,
+            VSM_TRANSITION_TEMP_COUNTS_COLUMN,
+        )
+    }
+    if "vsm" in compact or compact in vsm_keys:
+        return "vsm"
+    if (
+        "current annealing" in compact
+        or compact.startswith("annealing ")
+        or compact.startswith("ca ")
+        or compact
+        in {
+            _assemble_projection_column_key(item)
+            for item in set(FIGURE_COLUMNS[:2]) | set(ORIGIN_FIGURE_COLUMNS[:2])
+        }
+        or re.match(r"^(?:j )?(?:as|af|ms|mf)[12](?:\s|$)", compact)
+        or compact in {"as current density a mm2", "ms current density a mm2"}
+    ):
+        return "current_annealing"
+    return None
+
+
+def resolve_assemble_projection(
+    available_columns: Sequence[object],
+    *,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
+    structural_columns_by_family: Optional[Mapping[str, Sequence[object]]] = None,
+) -> AssembleProjection:
+    """Resolve one safe Assemble projection for UI, CLI, XLSX, and DOCX tables.
+
+    Missing or empty saved selection metadata intentionally preserves the
+    legacy/default schema.  A non-empty selection is explicit: identity is
+    always retained, while structural columns are forced only for measurement
+    families represented by that selection.
+    """
+
+    available = tuple(dict.fromkeys(str(column) for column in available_columns))
+    available_by_key = {
+        _assemble_projection_column_key(column): column for column in available
+    }
+
+    def _resolve_columns(columns: Optional[Sequence[object]]) -> Tuple[str, ...]:
+        resolved: List[str] = []
+        for raw_column in columns or ():
+            key = _assemble_projection_column_key(raw_column)
+            column = available_by_key.get(key)
+            if column and column not in resolved:
+                resolved.append(column)
+        return tuple(resolved)
+
+    raw_selected = tuple(
+        dict.fromkeys(
+            str(column)
+            for column in (selected_columns or ())
+            if str(column or "").strip()
+        )
+    )
+    explicit = bool(raw_selected)
+    selected = tuple(
+        column
+        for column in _resolve_columns(raw_selected)
+        if assemble_projection_column_is_public_safe(column)
+    )
+    enabled_families = frozenset(
+        family
+        for family in (_assemble_projection_family(column) for column in raw_selected)
+        if family is not None
+    )
+    if not explicit:
+        return AssembleProjection(
+            columns=available,
+            enabled_families=frozenset(ASSEMBLE_PROJECTION_FAMILIES),
+            explicit=False,
+        )
+
+    included = set(selected)
+    included.update(_resolve_columns(ASSEMBLE_PROJECTION_IDENTITY_COLUMNS))
+    for family in enabled_families:
+        included.update(
+            column
+            for column in _resolve_columns(
+                (structural_columns_by_family or {}).get(family, ())
+            )
+            if assemble_projection_column_is_public_safe(column)
+        )
+
+    requested_order = _resolve_columns(column_order)
+    ordered = [
+        column
+        for column in requested_order
+        if column in included and column in available
+    ]
+    identity_columns = _resolve_columns(ASSEMBLE_PROJECTION_IDENTITY_COLUMNS)
+    missing_identity = [column for column in identity_columns if column not in ordered]
+    if missing_identity:
+        first_nonidentity = next(
+            (
+                index
+                for index, column in enumerate(ordered)
+                if column not in identity_columns
+            ),
+            len(ordered),
+        )
+        ordered[first_nonidentity:first_nonidentity] = missing_identity
+    ordered.extend(
+        column
+        for column in available
+        if column in included and column not in ordered
+    )
+    return AssembleProjection(
+        columns=tuple(ordered),
+        enabled_families=enabled_families,
+        explicit=True,
+    )
+
+
 @dataclass
 class BuildStats:
     """Accumulates processing statistics."""
@@ -739,6 +1185,21 @@ class WordOleInsertion:
     label: str
     clipboard_fallback: bool = False
     graph_name: Optional[str] = None
+    descriptor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WordOleEmbeddingResult:
+    """Auditable result for one attempted Word Origin OLE insertion."""
+
+    bookmark_name: str
+    descriptor: str
+    label: str
+    object_path: str
+    attempted: bool
+    inserted: bool
+    status: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -826,6 +1287,61 @@ class MiniDmaRecord:
     strain_summary: Tuple[str, ...] = ()
     transition_summary: Tuple[str, ...] = ()
     break_summary: str = ""
+
+
+def _mini_dma_core_module() -> Any:
+    global mini_dma_core
+    if mini_dma_core is not None:
+        return mini_dma_core
+    try:
+        from plotting.plugins.mini_dma import core as module
+    except Exception:
+        return None
+    mini_dma_core = module  # type: ignore[assignment]
+    return module
+
+
+def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
+    """Return current TMA peak-strain summary, falling back to cached text."""
+    cached = tuple(str(line) for line in getattr(record, "strain_summary", ()) or ())
+    module = _mini_dma_core_module()
+    if module is None:
+        return cached
+
+    run = None
+    path_value = getattr(record, "path", None)
+    if isinstance(path_value, (str, Path)):
+        try:
+            path = Path(path_value)
+            if path.exists():
+                run = module.load_run(path)
+        except Exception:
+            run = None
+
+    if run is None:
+        data = getattr(record, "data", None)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return cached
+        sample_name = str(getattr(record, "sample", "") or getattr(record, "label", "") or "TMA")
+        path = Path(path_value) if isinstance(path_value, (str, Path)) else Path(sample_name)
+        try:
+            run = module.MiniDmaRun(
+                path=path,
+                measurement_path=path / module.MEASUREMENT_FILE,
+                frame=data.copy(),
+                sample_name=sample_name,
+            )
+        except Exception:
+            return cached
+
+    try:
+        if module.is_iso_current_run(run):
+            return cached
+        summary = module.summarize_current_sweep(run)
+        lines = tuple(module.format_current_sweep_strain_summary(summary))
+        return lines or cached
+    except Exception:
+        return cached
 
 
 @dataclass
@@ -1468,7 +1984,7 @@ def _header_key(value: object) -> Optional[str]:
         return "piece_turns"
     if "poet" in lowered and "otok" in lowered:
         return "piece_turns"
-    if "dlzk" in lowered or "dlÅ¾k" in lowered:
+    if "dlzk" in lowered or "dlžk" in lowered:
         return "length_m"
     micron_hint = any(token in lowered for token in ("Âµm", "µm", "um", "Î¼m", "mikro", "micro"))
     ascii_simple = ascii_text.replace("\u00a0", " ")
@@ -1501,7 +2017,7 @@ def _header_key(value: object) -> Optional[str]:
         return "d_um"
     if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")) and re.search(r"\bD\d*\b", ascii_text):
         return "D_um"
-    if ("datum" in lowered or "dÃ¡tum" in lowered) and "cas" not in lowered:
+    if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
         return "piece_date"
     return None
 
@@ -1875,7 +2391,7 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
     if cleaned in {"D", "D.", "D:"}:
         return "D_um"
 
-    has_micron_hint = any(token in lowered for token in ("_um", " um", "Âµm", "Î¼m", "mic"))
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
     context_hint = any(
         token in lowered
         for token in (
@@ -1973,6 +2489,8 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
     def _suffix_from_text(text: str, start_idx: int) -> Optional[str]:
         if start_idx >= len(text):
             return None
+        while start_idx < len(text) and text[start_idx] in "-_":
+            start_idx += 1
         suffix_chars: List[str] = []
         started = False
         for ch in text[start_idx:]:
@@ -1993,6 +2511,12 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
         composition = _extract_composition_token(text)
         if not composition or not any(ch.isdigit() for ch in composition):
             return None
+        composition_start = text.find(composition)
+        if composition_start < 0:
+            return None
+        pair_text = text[composition_start + len(composition):]
+        if not pair_text:
+            return None
 
         def _to_pair(
             match: re.Match[str], source_text: str
@@ -2003,10 +2527,11 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
             except (TypeError, ValueError):
                 return None
             suffix = _suffix_from_text(source_text, match.end())
+            suffix = _normalise_microwire_identity_suffix(suffix)
             return composition, draw_x, piece_y, suffix
 
         for pattern in MICROSCOPE_PAIR_PATTERNS:
-            normalised = text
+            normalised = pair_text
             if pattern is MICROSCOPE_PAIR_PATTERNS[1]:
                 normalised = normalised.replace("-", "/")
             match = pattern.search(normalised)
@@ -2019,12 +2544,12 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
                 if pair is not None:
                     return pair
 
-        for match in MICROSCOPE_WHITESPACE_PAIR.finditer(text):
-            pair = _to_pair(match, text)
+        for match in MICROSCOPE_WHITESPACE_PAIR.finditer(pair_text):
+            pair = _to_pair(match, pair_text)
             if pair is not None:
                 return pair
 
-        tokens = re.split(r"\s+", text)
+        tokens = re.split(r"\s+", pair_text)
         for token in tokens:
             if not token:
                 continue
@@ -2194,7 +2719,7 @@ def _auto_discover_microscope_paths(
 
 def _normalise_microscope_text(text: str) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
-    cleaned = cleaned.replace("Î¼", MICRO_SIGN)
+    cleaned = cleaned.replace("μ", MICRO_SIGN)
     cleaned = cleaned.replace("|", "1")
     cleaned = re.sub(r"(^|\s)(?:1|I|l){1,2}\]", lambda m: f"{m.group(1)}[1]", cleaned)
     cleaned = re.sub(r"(^|\s)(?:2|Z)\]", lambda m: f"{m.group(1)}[2]", cleaned)
@@ -2221,7 +2746,7 @@ def _has_primary_marker(prefix: str) -> bool:
     snippet = unicodedata.normalize("NFKC", prefix[-8:] if prefix else "")
     if not snippet:
         return False
-    snippet = snippet.replace("Î¼", MICRO_SIGN)
+    snippet = snippet.replace("μ", MICRO_SIGN)
     snippet = snippet.replace("|", "1").replace("I", "1").replace("l", "1")
     snippet = snippet.replace("{", "[").replace("(", "[")
     snippet = snippet.replace("}", "]").replace(")", "]")
@@ -2477,7 +3002,7 @@ def _extract_microscope_diameters(
         scale_ref_y = ref_h / float(vh)
         offset_x, offset_y = offset
         normalised_words = [_normalise_microscope_text(word.text) for word in words]
-        lowered_words = [text.lower().replace("Î¼", "Âµ") for text in normalised_words]
+        lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
             normalised = normalised_words[idx]
             marker_match = re.match(r"^\[\s*([12Il])\s*\]\s*", normalised)
@@ -2520,7 +3045,7 @@ def _extract_microscope_diameters(
             if unit_idx is None and marker is not None:
                 unit_idx = idx
             if marker is None:
-                context_normalised = context_prefix.replace("Î¼", MICRO_SIGN)
+                context_normalised = context_prefix.replace("μ", MICRO_SIGN)
                 if any(hint in context_normalised for hint in ("[1", "1]", "[1]")):
                     marker = 1
                 elif any(hint in context_normalised for hint in ("[2", "2]", "[2]")):
@@ -3494,6 +4019,7 @@ class MeasurementRecord:
     dataframe: pd.DataFrame
     sanity_ok: bool
     sanity_error: Optional[float]
+    transition_summary: Tuple[str, ...] = ()
 
 
 def _hash_file(path: Path) -> str:
@@ -3509,8 +4035,18 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
     parts = base.split()
-    composition = parts[0] if parts else base
-    xy_match = XY_PATTERN.search(base)
+    composition_match = COMPOSITION_TOKEN_PATTERN.search(base)
+    composition = (
+        composition_match.group("composition")
+        if composition_match
+        else parts[0]
+        if parts
+        else base
+    )
+    identity_tail = base[composition_match.end():] if composition_match else base
+    xy_match = DRAW_PIECE_AFTER_COMPOSITION_PATTERN.search(identity_tail)
+    if xy_match is None:
+        xy_match = XY_PATTERN.search(base)
     draw_x: Optional[int] = int(xy_match.group(1)) if xy_match else None
     piece_y: Optional[int] = int(xy_match.group(2)) if xy_match else None
     setpoint_match = SETPOINT_PATTERN.search(base)
@@ -3530,11 +4066,126 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     )
 
 
+def _numeric_text_series(series: pd.Series) -> pd.Series:
+    cleaned = (
+        series.astype(str)
+        .str.replace("\u2212", "-", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _normalise_annealing_columns(
+    *,
+    current_mA: pd.Series,
+    voltage_v: pd.Series,
+    resistance_ohm: pd.Series,
+    cycle: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    df = pd.DataFrame(
+        {
+            "I_mA": _numeric_text_series(current_mA),
+            "V_V": _numeric_text_series(voltage_v),
+            "R_ohm": _numeric_text_series(resistance_ohm),
+        }
+    )
+    if cycle is not None:
+        df["Cycle"] = _numeric_text_series(cycle)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=["I_mA", "R_ohm"]).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("no valid samples after parsing")
+    df["I_A"] = df["I_mA"] / 1_000.0
+    columns = ["I_A", "V_V", "R_ohm", "I_mA"]
+    if "Cycle" in df.columns:
+        columns.append("Cycle")
+    return df.loc[:, columns]
+
+
+def _load_annealing_dat(path: Path) -> pd.DataFrame:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty:
+        raise ValueError(f"{path}: no valid samples after parsing")
+    first_line = non_empty[0]
+    if "Cycle" in first_line and "Iset_mA" in first_line:
+        df = pd.read_csv(path, sep=r"\s+", engine="python")
+        required = {"Cycle", "Ireal_mA", "Voltage_V", "Resistance_Ohm"}
+        missing = required.difference(df.columns)
+        if missing:
+            raise ValueError(f"{path}: missing Kosice cycle .dat columns {sorted(missing)}")
+        return _normalise_annealing_columns(
+            current_mA=df["Ireal_mA"],
+            voltage_v=df["Voltage_V"],
+            resistance_ohm=df["Resistance_Ohm"],
+            cycle=df["Cycle"],
+        )
+
+    rows: List[List[float]] = []
+    for line in non_empty:
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        try:
+            rows.append([float(part.replace(",", ".")) for part in parts])
+        except ValueError:
+            continue
+    if not rows:
+        raise ValueError(f"{path}: no valid four-column Kosice .dat samples after parsing")
+    df = pd.DataFrame(rows, columns=["Iset_A", "Ireal_A", "Voltage_V", "Resistance_Ohm"])
+    return _normalise_annealing_columns(
+        current_mA=df["Ireal_A"] * 1_000.0,
+        voltage_v=df["Voltage_V"],
+        resistance_ohm=df["Resistance_Ohm"],
+    )
+
+
+def _annealing_text_current_unit(path: Path) -> Optional[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines[:10]:
+        text = line.strip().lstrip("#").strip().casefold()
+        if not text:
+            continue
+        if "current" not in text and "ireal" not in text and "iset" not in text:
+            continue
+        if re.search(r"(?:^|[^a-z])m\s*a(?:[^a-z]|$)", text) or "_ma" in text:
+            return "mA"
+        if re.search(r"(?:^|[^a-z])a(?:[^a-z]|$)", text):
+            return "A"
+    return None
+
+
+def _trim_annealing_burnthrough(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
+    except ImportError:
+        return df
+
+    currents_mA = df["I_mA"].to_numpy(dtype=float)
+    resistances = df["R_ohm"].to_numpy(dtype=float)
+    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
+    trimmed_count = int(trimmed_currents.shape[0])
+    if trimmed_count < currents_mA.shape[0]:
+        df = df.iloc[:trimmed_count].copy()
+        df.loc[:, "I_mA"] = trimmed_currents
+        df.loc[:, "I_A"] = trimmed_currents / 1e3
+        df.loc[:, "R_ohm"] = trimmed_resistances
+        df = df.reset_index(drop=True)
+    return df
+
+
 def _load_annealing(
     path: Path,
     *,
     expected_setpoint_mA: Optional[float] = None,
 ) -> pd.DataFrame:
+    if path.suffix.lower() == ".dat":
+        return _trim_annealing_burnthrough(_load_annealing_dat(path))
+
     try:
         df = pd.read_csv(path, sep=None, engine="python", names=ANNEALING_COLUMNS, header=None)
     except (csv.Error, pd.errors.ParserError):
@@ -3552,10 +4203,13 @@ def _load_annealing(
     currents = df["I_A"].to_numpy(dtype=float)
     finite = currents[np.isfinite(currents)]
     scale = 1.0
+    current_unit = _annealing_text_current_unit(path)
+    if current_unit == "mA":
+        scale = 1e-3
     if finite.size:
         max_abs = float(np.nanmax(np.abs(finite)))
         median_abs = float(np.nanmedian(np.abs(finite)))
-        if expected_setpoint_mA and expected_setpoint_mA > 0:
+        if scale == 1.0 and expected_setpoint_mA and expected_setpoint_mA > 0:
             expected_amp = expected_setpoint_mA / 1000.0
             if expected_amp > 0 and max_abs > expected_amp * 5:
                 scale = 1e-3
@@ -3567,26 +4221,18 @@ def _load_annealing(
     scaled_currents = currents * scale
     df.loc[:, "I_A"] = scaled_currents
     df.loc[:, "I_mA"] = scaled_currents * 1_000.0
+    return _trim_annealing_burnthrough(df)
 
+
+def _annealing_transition_summary(df: pd.DataFrame, *, label: str | None = None) -> Tuple[str, ...]:
     try:
-        from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
-    except ImportError:
-        return df
+        from plotting.plugins.current_annealing import core as annealing_core
 
-    currents_source = "I_mA" if "I_mA" in df.columns else "I_A"
-    currents_mA = df[currents_source].to_numpy(dtype=float)
-    if currents_source == "I_A":
-        currents_mA = currents_mA * 1e3
-    resistances = df["R_ohm"].to_numpy(dtype=float)
-    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
-    trimmed_count = int(trimmed_currents.shape[0])
-    if trimmed_count < currents_mA.shape[0]:
-        df = df.iloc[:trimmed_count].copy()
-        df.loc[:, "I_mA"] = trimmed_currents
-        df.loc[:, "I_A"] = trimmed_currents / 1e3
-        df.loc[:, "R_ohm"] = trimmed_resistances
-        df = df.reset_index(drop=True)
-    return df
+        summaries = annealing_core.summarize_transition_loops(df)
+        lines = annealing_core.format_transition_summaries(summaries, label=label)
+    except Exception:
+        return ()
+    return tuple(str(line) for line in lines if str(line).strip())
 
 
 def _series_to_mA(series: pd.Series) -> pd.Series:
@@ -4606,6 +5252,46 @@ def export_pyplot_origin_artifacts_for_paths(
                     for token in ("derivative", "smoothed", "overlay")
                 )
             ]
+        requested_paths: List[Path] = []
+        for path in filtered:
+            try:
+                requested_paths.append(path.resolve())
+            except OSError:
+                requested_paths.append(path)
+
+        def _source_matches_requested(source: object) -> bool:
+            if not source:
+                return False
+            try:
+                source_path = Path(str(source)).resolve()
+            except OSError:
+                source_path = Path(str(source))
+            candidates = [source_path]
+            candidates.extend(source_path.parents)
+            return any(candidate in requested_paths for candidate in candidates)
+
+        matching_workbook_keys: Set[Hashable] = set()
+        source_tagged_workbook_keys: Set[Hashable] = set()
+        shared_by_tab = getattr(window, "_shared_plot_workbook_by_tab", {})
+        tab_descriptors = getattr(window, "_tab_descriptors", {})
+        if isinstance(shared_by_tab, Mapping) and isinstance(tab_descriptors, Mapping):
+            for tab, key in shared_by_tab.items():
+                descriptor = tab_descriptors.get(tab)
+                metadata = getattr(descriptor, "metadata", None)
+                if not isinstance(metadata, Mapping):
+                    continue
+                source_file = metadata.get("source_file")
+                if not source_file:
+                    continue
+                source_tagged_workbook_keys.add(key)
+                if _source_matches_requested(source_file):
+                    matching_workbook_keys.add(key)
+        if source_tagged_workbook_keys:
+            workbooks = [
+                workbook
+                for workbook in workbooks
+                if getattr(workbook, "key", None) in matching_workbook_keys
+            ]
         if not workbooks:
             if log is not None:
                 log.warning("No PyPlot workbooks were available for %s Origin export.", plugin_name)
@@ -4703,8 +5389,6 @@ def _asset_references(value: Any) -> List[str]:
 
 
 _WORD_REPORT_LABELS: Dict[str, str] = {
-    DIAMETER_COLUMN: "d (um)",
-    GLASS_DIAMETER_COLUMN: "D (um)",
     DIAMETER_RATIO_COLUMN: "d/D",
     RVT_FILE_COLUMN: "R vs T source files",
     RVT_GRAPH_COLUMN: "R vs T graphs",
@@ -4721,15 +5405,6 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     RVT_RESISTANCE_RANGE_COLUMN: "R vs T resistance range (Ohm)",
     CORE_TEMPERATURE_COLUMN: "Core temperature (deg C)",
     GLASS_TEMPERATURE_COLUMN: "Glass temperature (deg C)",
-    "Resistance (Î©)": "Resistance (Ohm)",
-    "As (Â°C)": "As (deg C)",
-    "Af (Â°C)": "Af (deg C)",
-    "Ms (Â°C)": "Ms (deg C)",
-    "Mf (Â°C)": "Mf (deg C)",
-    "Figure â€” 1000 mA": "Figure - 1000 mA",
-    "Figure â€” other annealing": "Figure - other annealing",
-    "Figure â€” 1000 mA (Origin)": "Figure - 1000 mA (Origin)",
-    "Figure â€” other annealing (Origin)": "Figure - other annealing (Origin)",
 }
 
 _WORD_IDENTITY_COLUMNS: Tuple[str, ...] = (
@@ -4749,7 +5424,7 @@ _WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
     "Length (m)",
     "Production datetime",
     "Mass (g)",
-    "Resistance (Î©)",
+    "Resistance (Ω)",
     CORE_TEMPERATURE_COLUMN,
     GLASS_TEMPERATURE_COLUMN,
     "Winding speed (m/min)",
@@ -4767,6 +5442,7 @@ _WORD_FUNCTIONAL_COLUMNS: Tuple[str, ...] = (
     "Ms (mA)",
     *CURRENT_DENSITY_EXTRA_COLUMNS,
     *TRANSITION_TEMP_COLUMNS,
+    ANNEALING_TRANSITION_COLUMN,
     *STRAIN_EXTRA_COLUMNS,
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -4794,8 +5470,12 @@ _WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
     DMA_ISOSTRESS_ORIGIN_COLUMN,
     MINI_DMA_COLUMN,
     MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+    LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     FMR_COLUMN,
     FMR_ORIGIN_COLUMN,
 )
@@ -4811,14 +5491,34 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
     ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
-    ("TMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
+    ("TMA", (MINI_DMA_ORIGIN_COLUMN, LEGACY_MINI_DMA_ORIGIN_COLUMN), (MINI_DMA_COLUMN, LEGACY_MINI_DMA_COLUMN)),
     (
         "Manual stress/strain",
-        (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
-        (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
+        (
+            SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+            LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        ),
+        (
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+            LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+        ),
     ),
     ("FMR", (FMR_ORIGIN_COLUMN,), (FMR_COLUMN,)),
 )
+
+
+@dataclass(frozen=True)
+class WordGraphSectionEvaluation:
+    title: str
+    included: bool
+    status: str
+    reason: str
+    accepted_origin_descriptors: Tuple[str, ...] = ()
+    accepted_references: Tuple[str, ...] = ()
+    invalid_origin_descriptors: Tuple[str, ...] = ()
+    missing_origin_descriptors: Tuple[str, ...] = ()
+    invalid_references: Tuple[str, ...] = ()
+
 
 _WORD_ALWAYS_OMIT_COLUMNS: Tuple[str, ...] = (
     *_WORD_PROVENANCE_COLUMNS,
@@ -4930,6 +5630,17 @@ def _word_run(text: str, *, bold: bool = False, size: int | None = None) -> str:
     return f"<w:r>{prop_xml}<w:t>{_word_xml_escape(text)}</w:t></w:r>"
 
 
+def _word_field_run(field_name: str) -> str:
+    safe_field = re.sub(r"[^A-Z0-9_ ]", "", str(field_name or "").upper()).strip()
+    return (
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+        f"<w:r><w:instrText xml:space=\"preserve\"> {safe_field} </w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>"
+        "<w:r><w:t>1</w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+    )
+
+
 def _word_paragraph(
     text: str = "",
     *,
@@ -4953,6 +5664,33 @@ def _word_paragraph(
 
 def _word_page_break() -> str:
     return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def _word_header_xml(title: str) -> str:
+    paragraph = (
+        '<w:p><w:pPr><w:pStyle w:val="Header"/>'
+        '<w:jc w:val="right"/></w:pPr>'
+        f'{_word_run(title, size=18)}</w:p>'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"{paragraph}</w:hdr>"
+    )
+
+
+def _word_footer_xml() -> str:
+    paragraph = (
+        '<w:p><w:pPr><w:pStyle w:val="Footer"/>'
+        '<w:jc w:val="center"/></w:pPr>'
+        f'{_word_run("Page ", size=18)}{_word_field_run("PAGE")}'
+        f'{_word_run(" of ", size=18)}{_word_field_run("NUMPAGES")}</w:p>'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"{paragraph}</w:ftr>"
+    )
 
 
 def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
@@ -5084,9 +5822,13 @@ def _word_section(
     return "".join(parts)
 
 
-def _word_microwire_data_section(row: pd.Series) -> str:
+def _word_microwire_data_section(
+    row: pd.Series,
+    table_columns: Optional[Sequence[str]] = None,
+) -> str:
     rows: List[Tuple[str, List[str]]] = []
-    for column in WORD_MICROWIRE_DATA_COLUMNS:
+    columns = WORD_MICROWIRE_DATA_COLUMNS if table_columns is None else table_columns
+    for column in columns:
         column_text = str(column)
         lowered = column_text.casefold()
         if (
@@ -5191,9 +5933,22 @@ def _word_additional_values(row: pd.Series, used_columns: Sequence[str]) -> List
     return values
 
 
-def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
+def _word_assemble_values(
+    row: pd.Series,
+    *,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
+) -> List[Tuple[str, str]]:
     values: List[Tuple[str, str]] = []
-    for column in WORD_MICROWIRE_DATA_COLUMNS:
+    available_columns: Sequence[object] = (
+        tuple(row.index) if selected_columns else WORD_MICROWIRE_DATA_COLUMNS
+    )
+    projection = resolve_assemble_projection(
+        available_columns,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    for column in projection.columns:
         column_text = str(column)
         lowered = column_text.casefold()
         if (
@@ -5210,6 +5965,270 @@ def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
     return values
 
 
+def _word_normalise_sample_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _word_row_composition_token(row: pd.Series) -> str:
+    return _word_normalise_sample_text(row.get("Composition"))
+
+
+def _word_row_microwire_pair(row: pd.Series) -> Tuple[str, str] | None:
+    text = str(row.get("Microwire") or "").strip()
+    match = re.search(r"(\d+)\s*[/_\-]\s*(\d+)", text)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _word_reference_conflicts_with_sample(row: pd.Series, *values: object) -> bool:
+    text = " ".join(str(value or "") for value in values if value not in (None, ""))
+    if not text:
+        return False
+    lowered = text.casefold()
+    row_composition = _word_row_composition_token(row)
+    compositions = [
+        _word_normalise_sample_text(match.group(0))
+        for match in re.finditer(r"Ni\d+(?:[A-Za-z]{1,2}\d+)+", text)
+    ]
+    if row_composition and compositions:
+        if all(composition != row_composition for composition in compositions):
+            return True
+    pair = _word_row_microwire_pair(row)
+    if pair is not None:
+        microwire_matches = re.findall(r"(?<!\d)(\d+)\s*[/_\-]\s*(\d+)(?!\d)", lowered)
+        if microwire_matches and all(match != pair for match in microwire_matches):
+            return True
+    return False
+
+
+def _word_origin_artifact_is_usable(artifact: OriginArtifact | None) -> bool:
+    if artifact is None:
+        return False
+    if bool(getattr(artifact, "clipboard_fallback", False)):
+        return True
+    object_path = getattr(artifact, "object_path", None)
+    return object_path is not None
+
+
+def _word_origin_artifact_conflicts_with_sample(
+    row: pd.Series,
+    descriptor: str,
+    artifact: OriginArtifact | None,
+) -> bool:
+    values: List[object] = [descriptor]
+    if artifact is not None:
+        object_path = getattr(artifact, "object_path", None)
+        object_name = Path(object_path).name if object_path not in (None, "") else None
+        values.extend(
+            [
+                artifact.display_text,
+                object_name,
+                artifact.graph_name,
+                artifact.workbook_name,
+                artifact.worksheet_name,
+            ]
+        )
+    return _word_reference_conflicts_with_sample(row, *values)
+
+
+def _word_evaluate_graph_sections(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact],
+) -> List[WordGraphSectionEvaluation]:
+    evaluations: List[WordGraphSectionEvaluation] = []
+    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+        accepted_origin: List[str] = []
+        invalid_origin: List[str] = []
+        missing_origin: List[str] = []
+        accepted_references: List[str] = []
+        invalid_references: List[str] = []
+
+        for column in origin_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                artifact = origin_artifacts.get(descriptor)
+                if _word_origin_artifact_conflicts_with_sample(row, descriptor, artifact):
+                    invalid_origin.append(descriptor)
+                    continue
+                if _word_origin_artifact_is_usable(artifact):
+                    if descriptor not in accepted_origin:
+                        accepted_origin.append(descriptor)
+                else:
+                    missing_origin.append(descriptor)
+
+        for column in reference_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                if _word_reference_conflicts_with_sample(row, descriptor):
+                    invalid_references.append(descriptor)
+                    continue
+                if descriptor not in accepted_references:
+                    accepted_references.append(descriptor)
+
+        included = bool(accepted_origin or accepted_references)
+        if accepted_origin:
+            status = "included"
+            reason = "accepted_origin_object"
+        elif accepted_references:
+            status = "included"
+            reason = "reference_content"
+        elif invalid_origin or invalid_references:
+            status = "invalid"
+            reason = "content_failed_sample_validation"
+        elif missing_origin:
+            status = "invalid"
+            reason = "origin_descriptor_missing_artifact"
+        else:
+            status = "skipped"
+            reason = "no_section_content"
+
+        evaluations.append(
+            WordGraphSectionEvaluation(
+                title=title,
+                included=included,
+                status=status,
+                reason=reason,
+                accepted_origin_descriptors=tuple(accepted_origin),
+                accepted_references=tuple(accepted_references),
+                invalid_origin_descriptors=tuple(dict.fromkeys(invalid_origin)),
+                missing_origin_descriptors=tuple(dict.fromkeys(missing_origin)),
+                invalid_references=tuple(dict.fromkeys(invalid_references)),
+            )
+        )
+    return evaluations
+
+
+def _word_iter_ole_embedding_results(ole_embedding_results: Any) -> List[Any]:
+    if ole_embedding_results is None:
+        return []
+    if isinstance(ole_embedding_results, Mapping):
+        items: List[Any] = []
+        for value in ole_embedding_results.values():
+            if isinstance(value, (list, tuple, set)):
+                items.extend(value)
+            else:
+                items.append(value)
+        return items
+    if isinstance(ole_embedding_results, (list, tuple, set)):
+        return list(ole_embedding_results)
+    return [ole_embedding_results]
+
+
+def _word_result_value(result: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(result, Mapping):
+        return result.get(field_name, default)
+    return getattr(result, field_name, default)
+
+
+def _word_ole_result_manifest(result: Any) -> Dict[str, object]:
+    attempted = bool(_word_result_value(result, "attempted", False))
+    inserted = bool(_word_result_value(result, "inserted", False))
+    status = str(_word_result_value(result, "status", "") or "").strip()
+    if not status:
+        status = "succeeded" if inserted else ("failed" if attempted else "skipped")
+    return {
+        "descriptor": str(_word_result_value(result, "descriptor", "") or ""),
+        "bookmark": str(_word_result_value(result, "bookmark_name", "") or ""),
+        "label": str(_word_result_value(result, "label", "") or ""),
+        "object_path": str(_word_result_value(result, "object_path", "") or ""),
+        "attempted": attempted,
+        "inserted": inserted,
+        "status": status,
+        "reason": str(_word_result_value(result, "reason", "") or ""),
+    }
+
+
+def _word_ole_results_by_descriptor(ole_embedding_results: Any) -> Dict[str, Dict[str, object]]:
+    results: Dict[str, Dict[str, object]] = {}
+    for result in _word_iter_ole_embedding_results(ole_embedding_results):
+        manifest = _word_ole_result_manifest(result)
+        descriptor = str(manifest.get("descriptor") or "").strip()
+        if descriptor:
+            results[descriptor] = manifest
+    return results
+
+
+def word_report_section_manifest_for_row(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+    ole_embedding_results: Sequence[Any] | Mapping[str, Any] | None = None,
+) -> List[Dict[str, object]]:
+    """Return data-driven Word measurement-section decisions for one report row."""
+
+    summaries: List[Dict[str, object]] = []
+    ole_results_provided = ole_embedding_results is not None
+    ole_results_by_descriptor = _word_ole_results_by_descriptor(ole_embedding_results)
+    for evaluation in _word_evaluate_graph_sections(row, origin_artifacts or {}):
+        accepted_origin_descriptors = list(evaluation.accepted_origin_descriptors)
+        missing_origin_descriptors = list(evaluation.missing_origin_descriptors)
+        ole_insertions: List[Dict[str, object]] = []
+        ole_insertions_attempted: List[str] = []
+        ole_insertions_succeeded: List[str] = []
+        ole_insertions_failed: List[str] = []
+        ole_insertions_skipped: List[str] = []
+        ole_insertions_missing_artifact: List[str] = list(missing_origin_descriptors)
+
+        for descriptor in accepted_origin_descriptors:
+            result = ole_results_by_descriptor.get(descriptor)
+            if result is None:
+                if ole_results_provided:
+                    ole_insertions_skipped.append(descriptor)
+                    ole_insertions.append(
+                        {
+                            "descriptor": descriptor,
+                            "bookmark": "",
+                            "label": descriptor,
+                            "object_path": "",
+                            "attempted": False,
+                            "inserted": False,
+                            "status": "skipped",
+                            "reason": "ole_embedding_result_not_recorded",
+                        }
+                    )
+                continue
+            ole_insertions.append(result)
+            status = str(result.get("status") or "").strip()
+            attempted = bool(result.get("attempted"))
+            inserted = bool(result.get("inserted"))
+            if attempted and descriptor not in ole_insertions_attempted:
+                ole_insertions_attempted.append(descriptor)
+            if status == "succeeded" or inserted:
+                ole_insertions_succeeded.append(descriptor)
+            elif status == "missing_artifact":
+                if descriptor not in ole_insertions_missing_artifact:
+                    ole_insertions_missing_artifact.append(descriptor)
+            elif status == "skipped":
+                ole_insertions_skipped.append(descriptor)
+            else:
+                ole_insertions_failed.append(descriptor)
+
+        summaries.append(
+            {
+                "title": evaluation.title,
+                "included": bool(evaluation.included),
+                "status": evaluation.status,
+                "reason": evaluation.reason,
+                "origin_descriptors": accepted_origin_descriptors,
+                "origin_artifacts_accepted": accepted_origin_descriptors,
+                "origin_artifacts_attempted": ole_insertions_attempted,
+                "ole_insertions": ole_insertions,
+                "ole_insertions_attempted": ole_insertions_attempted,
+                "ole_insertions_succeeded": ole_insertions_succeeded,
+                "ole_insertions_failed": ole_insertions_failed,
+                "ole_insertions_skipped": ole_insertions_skipped,
+                "ole_insertions_missing_artifact": ole_insertions_missing_artifact,
+                "references": list(evaluation.accepted_references),
+                "invalid_origin_descriptors": list(evaluation.invalid_origin_descriptors),
+                "missing_origin_descriptors": missing_origin_descriptors,
+                "invalid_references": list(evaluation.invalid_references),
+            }
+        )
+    return summaries
+
+
 def _word_graph_sections(
     row: pd.Series,
     origin_artifacts: Mapping[str, OriginArtifact],
@@ -5218,76 +6237,47 @@ def _word_graph_sections(
     parts: List[str] = []
     insertions: List[WordOleInsertion] = []
     bookmark_id = bookmark_start
-    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+    for section in _word_evaluate_graph_sections(row, origin_artifacts):
+        if not section.included:
+            continue
         parts.append(_word_page_break())
-        parts.append(_word_paragraph(title, bold=True, size=28, spacing_after=120, style="Heading1"))
-        section_has_content = False
-        section_has_origin_descriptors = False
-        missing_origin_object = False
-        for column in origin_columns:
-            if column not in row.index:
+        parts.append(_word_paragraph(section.title, bold=True, size=28, spacing_after=120, style="Heading1"))
+        for descriptor in section.accepted_origin_descriptors:
+            artifact = origin_artifacts.get(descriptor)
+            if artifact is None:
                 continue
-            for descriptor in _asset_references(row.get(column)):
-                artifact = origin_artifacts.get(descriptor)
-                display = artifact.display_text if artifact and artifact.display_text else descriptor
-                section_has_origin_descriptors = True
-                bookmark_name = f"OriginGraph{bookmark_id}"
-                parts.append(
-                    _word_paragraph(
-                        f"[Origin object placeholder: {descriptor}]",
-                        spacing_after=220,
-                        bookmark_name=bookmark_name,
-                        bookmark_id=bookmark_id,
-                    )
+            display = artifact.display_text if artifact.display_text else descriptor
+            bookmark_name = f"OriginGraph{bookmark_id}"
+            parts.append(
+                _word_paragraph(
+                    f"[Origin object placeholder: {descriptor}]",
+                    spacing_after=220,
+                    bookmark_name=bookmark_name,
+                    bookmark_id=bookmark_id,
                 )
-                if artifact is not None and (
-                    artifact.object_path is not None
-                    or bool(getattr(artifact, "clipboard_fallback", False))
-                ):
-                    insertions.append(
-                        WordOleInsertion(
-                            bookmark_name=bookmark_name,
-                            object_path=(
-                                Path(artifact.object_path)
-                                if artifact.object_path is not None
-                                else Path(artifact.descriptor)
-                            ),
-                            label=str(display or descriptor),
-                            clipboard_fallback=bool(
-                                getattr(artifact, "clipboard_fallback", False)
-                            ),
-                            graph_name=artifact.graph_name,
-                        )
-                    )
-                else:
-                    missing_origin_object = True
-                bookmark_id += 1
-                section_has_content = True
-        reference_values: List[str] = []
-        for column in reference_columns:
-            if column not in row.index:
-                continue
-            for descriptor in _asset_references(row.get(column)):
-                if descriptor not in reference_values:
-                    reference_values.append(descriptor)
-        if reference_values and not section_has_origin_descriptors:
-            section_has_content = True
-            parts.append(_word_table([("Graphs in Assemble", ", ".join(reference_values))]))
+            )
+            insertions.append(
+                WordOleInsertion(
+                    bookmark_name=bookmark_name,
+                    object_path=(
+                        Path(artifact.object_path)
+                        if artifact.object_path is not None
+                        else Path(artifact.descriptor)
+                    ),
+                    label=str(display or descriptor),
+                    clipboard_fallback=bool(getattr(artifact, "clipboard_fallback", False)),
+                    graph_name=artifact.graph_name,
+                    descriptor=descriptor,
+                )
+            )
+            bookmark_id += 1
+        if section.accepted_references and not section.accepted_origin_descriptors:
+            parts.append(_word_table([("Graphs in Assemble", ", ".join(section.accepted_references))]))
             parts.append(
                 _word_paragraph(
                     "Editable Origin object was not generated for this graph yet."
-                    if origin_columns
-                    else "Editable Origin object export is not available for this graph type yet."
                 )
             )
-        if missing_origin_object:
-            parts.append(
-                _word_paragraph(
-                    "Editable Origin object export is not available for this graph type yet."
-                )
-            )
-        if not section_has_content:
-            parts.append(_word_paragraph("Not measured yet."))
     return "".join(parts), insertions, bookmark_id
 
 
@@ -5296,11 +6286,12 @@ def _word_document_xml(
     fallback_index: int,
     origin_artifacts: Mapping[str, OriginArtifact],
     microscope_crops: Mapping[str, Path],
+    table_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[str, List[WordOleInsertion], List[WordPictureInsertion]]:
     title = _word_sample_title(row, fallback_index)
     body: List[str] = [
         _word_paragraph(title, bold=True, size=40, spacing_after=220, style="Title"),
-        _word_microwire_data_section(row),
+        _word_microwire_data_section(row, table_columns),
     ]
     microscope_xml, picture_insertions, bookmark_id = _word_microscope_section(
         row,
@@ -5311,19 +6302,22 @@ def _word_document_xml(
     origin_xml, origin_insertions, _ = _word_graph_sections(row, origin_artifacts, bookmark_id)
     body.append(origin_xml)
     body.append(
-        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:sectPr><w:headerReference w:type="default" r:id="rId3"/>'
+        '<w:footerReference w:type="default" r:id="rId4"/>'
+        '<w:pgSz w:w="11906" w:h="16838"/>'
         '<w:pgMar w:top="900" w:right="900" w:bottom="900" w:left="900" '
         'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
     )
     xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"<w:body>{''.join(body)}</w:body></w:document>"
     )
     return xml, origin_insertions, picture_insertions
 
 
-def _write_word_docx(path: Path, document_xml: str) -> None:
+def _write_word_docx(path: Path, document_xml: str, *, sample_title: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -5336,6 +6330,10 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
         '<Override PartName="/word/settings.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+        '<Override PartName="/word/header1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+        '<Override PartName="/word/footer1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
         '<Override PartName="/docProps/core.xml" '
         'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
         '<Override PartName="/docProps/app.xml" '
@@ -5365,6 +6363,12 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         '<Relationship Id="rId2" '
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" '
         'Target="settings.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" '
+        'Target="header1.xml"/>'
+        '<Relationship Id="rId4" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" '
+        'Target="footer1.xml"/>'
         "</Relationships>"
     )
     styles = (
@@ -5372,6 +6376,14 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
         '<w:name w:val="Normal"/><w:qFormat/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Header">'
+        '<w:name w:val="header"/><w:basedOn w:val="Normal"/>'
+        '<w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs>'
+        '<w:spacing w:after="0"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Footer">'
+        '<w:name w:val="footer"/><w:basedOn w:val="Normal"/>'
+        '<w:pPr><w:tabs><w:tab w:val="center" w:pos="4680"/></w:tabs>'
+        '<w:spacing w:after="0"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Title">'
         '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
         '<w:qFormat/><w:pPr><w:spacing w:after="220"/></w:pPr>'
@@ -5420,6 +6432,8 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         archive.writestr("word/_rels/document.xml.rels", document_rels)
         archive.writestr("word/styles.xml", styles)
         archive.writestr("word/settings.xml", settings)
+        archive.writestr("word/header1.xml", _word_header_xml(sample_title))
+        archive.writestr("word/footer1.xml", _word_footer_xml())
         archive.writestr("docProps/core.xml", core_props)
         archive.writestr("docProps/app.xml", app_props)
 
@@ -5538,17 +6552,42 @@ def _embed_origin_objects_with_word(
     docx_path: Path,
     insertions: Sequence[WordOleInsertion],
     log: logging.Logger,
-) -> None:
+) -> List[WordOleEmbeddingResult]:
     if not insertions:
-        return
+        return []
     docx_path = docx_path.resolve()
+    results: List[WordOleEmbeddingResult] = []
     if os.name != "nt":
         log.warning("Word OLE embedding is only available on Windows; left placeholders in %s", docx_path)
-        return
+        return [
+            WordOleEmbeddingResult(
+                bookmark_name=insertion.bookmark_name,
+                descriptor=str(insertion.descriptor or insertion.object_path.name),
+                label=insertion.label,
+                object_path=str(insertion.object_path),
+                attempted=False,
+                inserted=False,
+                status="skipped",
+                reason="word_ole_windows_only",
+            )
+            for insertion in insertions
+        ]
     powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
     if not powershell:
         log.warning("PowerShell is unavailable; left Origin placeholders in %s", docx_path)
-        return
+        return [
+            WordOleEmbeddingResult(
+                bookmark_name=insertion.bookmark_name,
+                descriptor=str(insertion.descriptor or insertion.object_path.name),
+                label=insertion.label,
+                object_path=str(insertion.object_path),
+                attempted=False,
+                inserted=False,
+                status="skipped",
+                reason="powershell_unavailable",
+            )
+            for insertion in insertions
+        ]
     script = r"""
 param(
     [Parameter(Mandatory=$true)][string]$DocxPath,
@@ -5709,6 +6748,18 @@ $result | ConvertTo-Json -Compress
                     insertion.label,
                     docx_path,
                 )
+                results.append(
+                    WordOleEmbeddingResult(
+                        bookmark_name=insertion.bookmark_name,
+                        descriptor=str(insertion.descriptor or insertion.object_path.name),
+                        label=insertion.label,
+                        object_path=str(object_path),
+                        attempted=False,
+                        inserted=False,
+                        status="missing_artifact",
+                        reason="origin_object_unavailable",
+                    )
+                )
                 continue
             attempted_count += 1
             payload = [
@@ -5747,15 +6798,41 @@ $result | ConvertTo-Json -Compress
                     docx_path,
                     detail or completed.returncode,
                 )
+                results.append(
+                    WordOleEmbeddingResult(
+                        bookmark_name=insertion.bookmark_name,
+                        descriptor=str(insertion.descriptor or insertion.object_path.name),
+                        label=insertion.label,
+                        object_path=str(object_path),
+                        attempted=True,
+                        inserted=False,
+                        status="failed",
+                        reason=detail or str(completed.returncode),
+                    )
+                )
                 continue
             result: Dict[str, Any] = {}
             try:
                 result = json.loads(completed.stdout or "{}")
             except Exception:
                 result = {}
-            inserted_count += int(result.get("inserted") or 0)
-            for warning in result.get("warnings") or []:
+            item_inserted = int(result.get("inserted") or 0) > 0
+            inserted_count += 1 if item_inserted else 0
+            warnings = [str(warning) for warning in (result.get("warnings") or [])]
+            for warning in warnings:
                 log.warning("Origin object embedding warning for %s: %s", docx_path, warning)
+            results.append(
+                WordOleEmbeddingResult(
+                    bookmark_name=insertion.bookmark_name,
+                    descriptor=str(insertion.descriptor or insertion.object_path.name),
+                    label=insertion.label,
+                    object_path=str(object_path),
+                    attempted=True,
+                    inserted=item_inserted,
+                    status="succeeded" if item_inserted else "failed",
+                    reason="; ".join(warnings),
+                )
+            )
     if attempted_count and inserted_count != attempted_count:
         log.warning(
             "Embedded %s of %s Origin object(s) into %s",
@@ -5763,6 +6840,30 @@ $result | ConvertTo-Json -Compress
             attempted_count,
             docx_path,
         )
+    return results
+
+
+def _synthetic_word_ole_results(
+    insertions: Sequence[WordOleInsertion],
+    *,
+    status: str,
+    attempted: bool,
+    inserted: bool,
+    reason: str = "",
+) -> List[WordOleEmbeddingResult]:
+    return [
+        WordOleEmbeddingResult(
+            bookmark_name=insertion.bookmark_name,
+            descriptor=str(insertion.descriptor or insertion.object_path.name),
+            label=insertion.label,
+            object_path=str(insertion.object_path),
+            attempted=attempted,
+            inserted=inserted,
+            status=status,
+            reason=reason,
+        )
+        for insertion in insertions
+    ]
 
 
 def _embed_pictures_with_word(
@@ -5868,6 +6969,8 @@ def _export_word_reports(
     origin_artifacts: Mapping[str, OriginArtifact],
     log: logging.Logger,
     microscope_crops: Mapping[str, Path] | None = None,
+    ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
+    table_columns: Optional[Sequence[str]] = None,
 ) -> List[Path]:
     if dataframe.empty:
         return []
@@ -5892,19 +6995,43 @@ def _export_word_reports(
                 index,
                 origin_artifacts,
                 microscope_crops or {},
+                table_columns,
             )
             used_live_origin_clipboard = used_live_origin_clipboard or any(
                 insertion.clipboard_fallback for insertion in origin_insertions
             )
-            _write_word_docx(report_path, document_xml)
+            _write_word_docx(
+                report_path,
+                document_xml,
+                sample_title=_word_sample_title(row, index),
+            )
             try:
                 _embed_pictures_with_word(report_path, picture_insertions, log)
             except Exception:
                 log.exception("Failed to run Word image embedding for %s", report_path)
             try:
-                _embed_origin_objects_with_word(report_path, origin_insertions, log)
-            except Exception:
+                result_payload = _embed_origin_objects_with_word(report_path, origin_insertions, log)
+            except Exception as exc:
                 log.exception("Failed to run Word OLE embedding for %s", report_path)
+                result_payload = _synthetic_word_ole_results(
+                    origin_insertions,
+                    status="failed",
+                    attempted=True,
+                    inserted=False,
+                    reason=str(exc) or exc.__class__.__name__,
+                )
+            if result_payload is None:
+                # Older tests and downstream callers monkeypatch this helper as
+                # side-effect-only. Preserve that behavior while still letting
+                # manifests record a successful attempted insertion.
+                result_payload = _synthetic_word_ole_results(
+                    origin_insertions,
+                    status="succeeded",
+                    attempted=True,
+                    inserted=True,
+                )
+            if ole_embedding_results is not None:
+                ole_embedding_results[report_path] = list(result_payload)
             reports.append(report_path)
     finally:
         if used_live_origin_clipboard:
@@ -5923,17 +7050,30 @@ def export_word_reports(
     *,
     origin_artifacts: Mapping[str, OriginArtifact] | None = None,
     microscope_crops: Mapping[str, Path] | None = None,
+    ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
     logger: logging.Logger | None = None,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
 ) -> List[Path]:
     """Write one Word sample report per row without requiring the Builder UI."""
 
     log = logger if logger is not None else logging.getLogger(LOGGER_NAME)
+    available_columns: Sequence[object] = (
+        tuple(dataframe.columns) if selected_columns else WORD_MICROWIRE_DATA_COLUMNS
+    )
+    table_projection = resolve_assemble_projection(
+        available_columns,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
     return _export_word_reports(
         dataframe,
         Path(output_dir),
         origin_artifacts or {},
         log,
         microscope_crops=microscope_crops,
+        ole_embedding_results=ole_embedding_results,
+        table_columns=table_projection.columns,
     )
 
 
@@ -6470,8 +7610,9 @@ def build_database(
     shape_memory_entries: Optional[Dict[str, Dict[str, object]]] = None,
     fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
-    transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
+    transition_temps: Optional[Dict[str, Dict[str, object]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
+    mini_dma_transition_reviews: Optional[Dict[str, Dict[str, object]]] = None,
     video_overrides: Optional[Dict[str, Dict[str, object]]] = None,
     include_fabrication_draw_siblings: bool = False,
 ) -> BuildResult:
@@ -6812,6 +7953,9 @@ def build_database(
     phase_points_map = dict(phase_points_map)
 
     transition_temps_map: Dict[str, Dict[str, float]] = {}
+    transition_temps_blocked_keys: Set[str] = set()
+    transition_temps_status_map: Dict[str, str] = {}
+    transition_temps_counts_map: Dict[str, Dict[str, int]] = {}
     if transition_temps:
         for key, payload in transition_temps.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
@@ -6819,17 +7963,56 @@ def build_database(
             key_parts = _microwire_key_from_string(key)
             if key_parts is None:
                 continue
+            key_str = _microwire_key_to_str(key_parts)
+            status = str(
+                payload.get("__review_status__")
+                or payload.get("__status__")
+                or payload.get("Review status")
+                or payload.get("status")
+                or ""
+            ).strip()
+            counts = _review_counts_from_payload(
+                payload.get("__review_counts__")
+                or payload.get("__counts__")
+                or payload.get("Review counts")
+            )
+            status_label = _normalise_transition_status(status)
+            if status:
+                transition_temps_status_map[key_str] = status_label
+            if counts.get("total", 0):
+                transition_temps_counts_map[key_str] = counts
+            included = payload.get("__included__", payload.get("included", None))
+            blocked = status_label in {"No transition", "Excluded"} or included is False
             cleaned = {
                 label: float(value)
                 for label, value in payload.items()
-                if isinstance(value, (int, float))
+                if label in ("As", "Af", "Ms", "Mf")
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
             }
             if cleaned:
-                transition_temps_map[_microwire_key_to_str(key_parts)] = cleaned
+                transition_temps_map[key_str] = cleaned
+                transition_temps_status_map.setdefault(key_str, "Manual adjusted")
+            elif blocked:
+                transition_temps_blocked_keys.add(key_str)
+                transition_temps_status_map.setdefault(
+                    key_str,
+                    "Excluded" if status_label == "Excluded" else "No transition",
+                )
+                if key_str not in transition_temps_counts_map:
+                    counts = _empty_transition_review_counts()
+                    counts["total"] = 1
+                    if transition_temps_status_map[key_str] == "Excluded":
+                        counts["excluded"] = 1
+                    else:
+                        counts["no_transition"] = 1
+                    transition_temps_counts_map[key_str] = counts
     transition_temps_map = dict(transition_temps_map)
     if vsm_temperature_groups:
         for key, records in vsm_temperature_groups.items():
             key_str = _microwire_key_to_str(key)
+            if key_str in transition_temps_blocked_keys and key_str not in transition_temps_map:
+                continue
             entry = transition_temps_map.setdefault(key_str, {})
             for record in records:
                 data = getattr(record, "data", None)
@@ -6866,6 +8049,113 @@ def build_database(
             if entry:
                 current_density_map[_microwire_key_to_str(key_parts)] = entry
     current_density_map = dict(current_density_map)
+    current_density_phase_columns = {
+        "As1 (mA)": "J_As1 (A/mm^2)",
+        "Af1 (mA)": "J_Af1 (A/mm^2)",
+        "Ms1 (mA)": "J_Ms1 (A/mm^2)",
+        "Mf1 (mA)": "J_Mf1 (A/mm^2)",
+        "As2 (mA)": "J_As2 (A/mm^2)",
+        "Af2 (mA)": "J_Af2 (A/mm^2)",
+        "Ms2 (mA)": "J_Ms2 (A/mm^2)",
+        "Mf2 (mA)": "J_Mf2 (A/mm^2)",
+    }
+
+    mini_dma_review_map: Dict[str, Dict[str, object]] = {}
+    if mini_dma_transition_reviews:
+        for record_id, payload in mini_dma_transition_reviews.items():
+            if isinstance(record_id, str) and record_id.strip() and isinstance(payload, dict):
+                mini_dma_review_map[record_id] = dict(payload)
+
+    def _mini_dma_review_record_prefix(record: MiniDmaRecord) -> str:
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            try:
+                path_text = str(path.resolve())
+            except Exception:
+                path_text = str(path)
+        else:
+            path_text = repr(record)
+        return f"{path_text}::"
+
+    def _mini_dma_transition_status_for_records(
+        records: Sequence[MiniDmaRecord],
+    ) -> Tuple[str, str]:
+        if not records:
+            return "Not measured", ""
+        counts = _empty_transition_review_counts()
+        saw_targets = False
+        for record in records:
+            prefix = _mini_dma_review_record_prefix(record)
+            target_labels: List[str] = []
+            for line in getattr(record, "transition_summary", ()) or ():
+                target = str(line).split(":", 1)[0].strip()
+                if target and target not in target_labels:
+                    target_labels.append(target)
+            matching_reviews: Dict[str, Mapping[str, object]] = {}
+            for record_id, payload in mini_dma_review_map.items():
+                if not record_id.startswith(prefix):
+                    continue
+                target = str(payload.get("target_label") or record_id[len(prefix) :]).strip()
+                if not target:
+                    continue
+                if target not in target_labels:
+                    target_labels.append(target)
+                matching_reviews[target] = payload
+            for target in target_labels:
+                saw_targets = True
+                review = matching_reviews.get(target)
+                if review is None:
+                    counts["total"] += 1
+                    counts["unreviewed"] += 1
+                    counts["auto_candidates"] += 1
+                    continue
+                status = review.get("status")
+                manual = _clean_review_values(review.get("manual_values_mA"))
+                auto = _clean_review_values(review.get("auto_values_mA"))
+                cleared = review.get("cleared_labels")
+                has_cleared = isinstance(cleared, (list, tuple, set)) and bool(cleared)
+                _increment_review_count_for_status(
+                    counts,
+                    status,
+                    has_manual_values=bool(manual) or has_cleared,
+                    has_auto_values=bool(auto),
+                )
+        if not saw_targets:
+            return "Not measured", ""
+        return _aggregate_transition_review_status(counts), _format_transition_review_counts(counts)
+
+    def _backfill_current_densities(row: Dict[str, object]) -> None:
+        diameter_um = _parse_numeric(row.get(d_column))
+        if diameter_um is None or diameter_um <= 0:
+            return
+        diameter_mm = diameter_um / 1000.0
+        area_mm2 = math.pi * (diameter_mm / 2.0) ** 2
+        if area_mm2 <= 0 or not math.isfinite(area_mm2):
+            return
+        for current_column, density_column in current_density_phase_columns.items():
+            if density_column not in output_columns:
+                continue
+            existing = row.get(density_column)
+            if existing not in (None, "") and not _is_nan(existing):
+                continue
+            current_mA = _parse_numeric(row.get(current_column))
+            if current_mA is None or not math.isfinite(current_mA):
+                continue
+            row[density_column] = (current_mA / 1000.0) / area_mm2
+        if (
+            "As current density (A/mm^2)" in output_columns
+            and (row.get("As current density (A/mm^2)") in (None, "") or _is_nan(row.get("As current density (A/mm^2)")))
+            and row.get("J_As1 (A/mm^2)") not in (None, "")
+            and not _is_nan(row.get("J_As1 (A/mm^2)"))
+        ):
+            row["As current density (A/mm^2)"] = row.get("J_As1 (A/mm^2)")
+        if (
+            "Ms current density (A/mm^2)" in output_columns
+            and (row.get("Ms current density (A/mm^2)") in (None, "") or _is_nan(row.get("Ms current density (A/mm^2)")))
+            and row.get("J_Ms1 (A/mm^2)") not in (None, "")
+            and not _is_nan(row.get("J_Ms1 (A/mm^2)"))
+        ):
+            row["Ms current density (A/mm^2)"] = row.get("J_Ms1 (A/mm^2)")
 
     shape_memory_entry_map: Dict[str, Dict[str, object]] = {}
     if shape_memory_entries:
@@ -7030,10 +8320,10 @@ def build_database(
             if not ok:
                 stats.resistance_checks_failed += 1
                 if mean_error is None:
-                    log.warning("Râ‰ˆV/I sanity check failed for %s", path)
+                    log.warning("R≈V/I sanity check failed for %s", path)
                 else:
                     log.warning(
-                        "Râ‰ˆV/I sanity check failed for %s (mean error %.2f%%)",
+                        "R≈V/I sanity check failed for %s (mean error %.2f%%)",
                         path,
                         mean_error * 100,
                     )
@@ -7055,6 +8345,7 @@ def build_database(
                 dataframe=df,
                 sanity_ok=ok,
                 sanity_error=mean_error,
+                transition_summary=_annealing_transition_summary(df, label=metadata.file_name),
             )
             grouped.setdefault(key, []).append(record)
             stats.parsed += 1
@@ -7277,6 +8568,25 @@ def build_database(
                     row["Ms (mA)"] = float(ms1_value)
             if (not row.get("Notes")) and current_density_entry.get("Notes"):
                 row["Notes"] = current_density_entry.get("Notes")
+        current_status_value = row.get(CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN)
+        if current_status_value in (None, ""):
+            current_counts = _empty_transition_review_counts()
+            if records:
+                current_counts["total"] = len(records)
+                if current_density_entry:
+                    current_counts["manual"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Manual adjusted"
+                elif phase_entry:
+                    current_counts["auto_candidates"] = len(records)
+                    current_counts["unreviewed"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Auto candidate"
+                else:
+                    current_counts["unreviewed"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Unreviewed"
+                if row.get(CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN) in (None, ""):
+                    row[CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN] = _format_transition_review_counts(current_counts)
+            else:
+                row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Not measured"
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
@@ -7468,6 +8778,31 @@ def build_database(
                 display_prefix="VSM temperature scan Origin graph",
                 section_token="vsm_temperature_scan",
             )
+        vsm_status = transition_temps_status_map.get(key_str)
+        vsm_counts = transition_temps_counts_map.get(key_str)
+        if vsm_counts is None:
+            vsm_counts = _empty_transition_review_counts()
+            if vsm_scan_records:
+                vsm_counts["total"] = len(vsm_scan_records)
+                if transition_entry:
+                    vsm_counts["accepted"] = len(vsm_scan_records)
+                else:
+                    vsm_counts["unreviewed"] = len(vsm_scan_records)
+                    if vsm_status == "Auto candidate":
+                        vsm_counts["auto_candidates"] = len(vsm_scan_records)
+        if vsm_status is None:
+            if not vsm_scan_records:
+                vsm_status = "Not measured"
+            elif transition_entry:
+                vsm_status = "Auto candidate"
+                if vsm_counts.get("total", 0):
+                    vsm_counts["accepted"] = 0
+                    vsm_counts["unreviewed"] = int(vsm_counts.get("total", 0))
+                    vsm_counts["auto_candidates"] = int(vsm_counts.get("total", 0))
+            else:
+                vsm_status = "Unreviewed"
+        row[VSM_TRANSITION_TEMP_STATUS_COLUMN] = vsm_status
+        row[VSM_TRANSITION_TEMP_COUNTS_COLUMN] = _format_transition_review_counts(vsm_counts)
         dma_records = dma_isostress_groups.get(key, [])
         if not dma_records:
             dma_records = dma_isostress_groups.get((composition, draw_x, piece_y, None), [])
@@ -7498,7 +8833,7 @@ def build_database(
             transition_lines: List[str] = []
             break_lines: List[str] = []
             for record in mini_dma_entries:
-                for line in getattr(record, "strain_summary", ()) or ():
+                for line in _mini_dma_peak_strain_summary(record):
                     if line and line not in strain_lines:
                         strain_lines.append(str(line))
                 for line in getattr(record, "transition_summary", ()) or ():
@@ -7511,6 +8846,10 @@ def build_database(
                 row[MINI_DMA_STRAIN_COLUMN] = strain_lines
             if transition_lines:
                 row[MINI_DMA_TRANSITION_COLUMN] = transition_lines
+            (
+                row[MINI_DMA_TRANSITION_STATUS_COLUMN],
+                row[MINI_DMA_TRANSITION_COUNTS_COLUMN],
+            ) = _mini_dma_transition_status_for_records(mini_dma_entries)
             if break_lines:
                 row[MINI_DMA_BREAK_COLUMN] = list(dict.fromkeys(break_lines))
             _assign_pyplot_origin_artifacts(
@@ -7521,6 +8860,8 @@ def build_database(
                 display_prefix="TMA Origin graph",
                 section_token="mini_dma",
             )
+        else:
+            row[MINI_DMA_TRANSITION_STATUS_COLUMN] = "Not measured"
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
         if not shape_memory_records:
             shape_memory_records = shape_memory_stress_strain_groups.get(
@@ -7594,6 +8935,28 @@ def build_database(
                 for record in other_records
                 if getattr(record.metadata, "file_name", None)
             ]
+        transition_lines: List[str] = []
+        for record in [high_record, *other_records]:
+            if record is None:
+                continue
+            lines = getattr(record, "transition_summary", ()) or ()
+            if not lines:
+                lines = _annealing_transition_summary(
+                    record.dataframe,
+                    label=getattr(record.metadata, "file_name", None),
+                )
+            for line in lines:
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
+        if transition_lines:
+            row[ANNEALING_TRANSITION_COLUMN] = transition_lines
+            if row.get(CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN) == "Unreviewed":
+                row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Auto candidate"
+                current_counts = _empty_transition_review_counts()
+                current_counts["total"] = len([record for record in [high_record, *other_records] if record is not None])
+                current_counts["unreviewed"] = current_counts["total"]
+                current_counts["auto_candidates"] = current_counts["total"]
+                row[CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN] = _format_transition_review_counts(current_counts)
         if wants_matplotlib:
             if high_record:
                 high_cache_key = _measurement_cache_key(high_record)
@@ -7708,6 +9071,7 @@ def build_database(
                         other_descriptors.append(cached_origin.descriptor)
                 if other_descriptors:
                     row["Figure — other annealing (Origin)"] = _collapse_asset_references(other_descriptors)
+        _backfill_current_densities(row)
         row_index = len(rows)
         rows.append(row)
         if row_highlights:
@@ -7866,19 +9230,25 @@ def build_database(
             exports["excel"] = excel_path
         elif fmt_lower in {"word", "docx", "word_reports"}:
             report_dir = output_dir / f"{output_name}_{WORD_REPORT_DIR_NAME}"
+            table_projection = resolve_assemble_projection(
+                tuple(df_word.columns) if column_filter else WORD_MICROWIRE_DATA_COLUMNS,
+                selected_columns=column_filter,
+                column_order=column_order,
+            )
             word_reports = _export_word_reports(
                 df_word,
                 report_dir,
                 origin_artifacts,
                 log,
                 microscope_crops=microscope_crop_map if include_crops else None,
+                table_columns=table_projection.columns,
             )
             if word_reports:
                 exports["word"] = report_dir
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
-        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Râ‰ˆV/I failures: %s",
+        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | R≈V/I failures: %s",
         stats.parsed,
         stats.skipped,
         stats.rows_built,
@@ -7907,11 +9277,16 @@ def build_database(
 
 
 __all__ = [
+    "ASSEMBLE_PROJECTION_FAMILIES",
+    "ASSEMBLE_PROJECTION_IDENTITY_COLUMNS",
+    "AssembleProjection",
     "BuilderConfig",
     "BuildResult",
     "BuildStats",
     "OriginArtifact",
+    "WordGraphSectionEvaluation",
     "WordOleInsertion",
+    "WordOleEmbeddingResult",
     "WordPictureInsertion",
     "export_origin_graph_artifact",
     "export_pyplot_origin_artifacts_for_paths",
@@ -7954,7 +9329,10 @@ __all__ = [
     "RVT_RESISTANCE_RANGE_COLUMN",
     "build_database",
     "build_fabrication_index",
+    "assemble_projection_column_is_public_safe",
     "export_word_reports",
+    "resolve_assemble_projection",
+    "word_report_section_manifest_for_row",
     "_compute_ea_from_composition",
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",

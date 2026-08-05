@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import datetime
 import hashlib
@@ -14684,7 +14684,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             level_name = "ERROR" if level == "error" else "INFO"
-            timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
             append_text_with_rotation(path, f"{timestamp} [{level_name}] {message}\n")
         except Exception as exc:
             self._log_capture_faulted = True
