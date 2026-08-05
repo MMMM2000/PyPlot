@@ -1055,7 +1055,7 @@ def _plot_phone_summary(
             fig.legend(
                 handles=_direction_legend_handles(),
                 fontsize=7.5,
-                loc="upper center",
+                loc="lower center",
                 bbox_to_anchor=(0.43, 0.865),
                 ncol=2,
                 framealpha=0.88,
