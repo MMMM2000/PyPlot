@@ -441,6 +441,38 @@ def test_adaptive_workspace_uses_full_width_header_and_action_dock(
     ] == ["Active sweep", "Remaining recipe"]
     assert window._adaptive_return_to_active_button.text() == "Following active"
     assert not window.recipe_progress.isVisible()
+    assert not window._control_view_tabs.usesScrollButtons()
+    assert window._control_view_tabs.minimumWidth() >= 250
+
+
+def test_configure_plots_button_is_managed_by_header_layout(window: object) -> None:
+    app = _ensure_app()
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._set_control_view("review")
+    app.processEvents()
+
+    header_layout = window.dashboard_header.layout()
+    assert header_layout is not None
+    assert header_layout.indexOf(window.button_plot_setup) >= 0
+    assert window.button_plot_setup.isVisible()
+    assert window.button_plot_setup.geometry().left() > 0
+
+
+def test_footer_buttons_fit_full_prepare_labels(window: object) -> None:
+    window._set_control_view("prepare")
+    window._automation_active = False
+    window._automation_paused = False
+    window._update_recipe_buttons()
+
+    for button in (
+        window.button_start_recipe,
+        window.button_pause_recipe,
+        window.button_stop_recipe,
+    ):
+        required_width = button.fontMetrics().horizontalAdvance(button.text()) + 34
+        assert button.minimumWidth() >= required_width
 
 
 def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:

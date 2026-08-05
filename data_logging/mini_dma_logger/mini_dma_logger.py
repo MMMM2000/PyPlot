@@ -9436,6 +9436,13 @@ class MainWindow(QtWidgets.QMainWindow):
         control_view_tabs.addTab("Review")
         control_view_tabs.setExpanding(False)
         control_view_tabs.setDrawBase(False)
+        control_view_tabs.setUsesScrollButtons(False)
+        control_view_tabs.setElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        control_view_tabs.setMinimumWidth(250)
+        control_view_tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
 
         control_view_stack = QtWidgets.QStackedWidget(control_column)
         self._control_view_stack = control_view_stack
@@ -12052,6 +12059,11 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_layout.addWidget(product)
         hero_layout.addWidget(control_view_tabs)
 
+        self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
+        self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
+        self.button_plot_setup.setVisible(False)
+        hero_layout.addWidget(self.button_plot_setup)
+
         self._dashboard_view_tabs = QtWidgets.QTabBar(hero_box)
         self._dashboard_view_tabs.setObjectName("dashboardViewTabs")
         self._dashboard_view_tabs.addTab("Target workspace")
@@ -12088,9 +12100,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.button_emergency_stop.clicked.connect(self._emergency_stop)
         hero_layout.addWidget(self.button_emergency_stop)
-        self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
-        self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
-        self.button_plot_setup.setVisible(False)
 
         self.dashboard_status_box = QtWidgets.QFrame(hero_box)
         status_layout = QtWidgets.QGridLayout(self.dashboard_status_box)
@@ -32296,9 +32305,21 @@ class MainWindow(QtWidgets.QMainWindow):
             else "Resume recipe" if self._automation_paused
             else "Pause recipe"
         )
+        self._fit_recipe_action_button(self.button_start_recipe, minimum_width=82)
+        self._fit_recipe_action_button(self.button_pause_recipe, minimum_width=82)
+        self._fit_recipe_action_button(self.button_stop_recipe, minimum_width=82)
         self.button_stop_recipe.setEnabled(self._automation_active)
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
+
+    @staticmethod
+    def _fit_recipe_action_button(
+        button: QtWidgets.QPushButton,
+        *,
+        minimum_width: int,
+    ) -> None:
+        text_width = button.fontMetrics().horizontalAdvance(button.text())
+        button.setMinimumWidth(max(int(minimum_width), int(text_width) + 34))
 
     def _current_sweep_runtime_editable_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
         return (
@@ -37579,12 +37600,9 @@ class MainWindow(QtWidgets.QMainWindow):
             column.setMinimumWidth(210)
             column.setMaximumWidth(280)
             self.button_start_recipe.setText("Start")
-            self.button_start_recipe.setMinimumWidth(0)
             self.button_pause_recipe.setText(
                 "Resume" if self._automation_paused else "Pause"
             )
-            self.button_pause_recipe.setMinimumWidth(0)
-            self.button_stop_recipe.setMinimumWidth(0)
             if splitter is not None:
                 splitter.setSizes([230, max(720, splitter.width() - 230)])
             if review_view:
@@ -37593,14 +37611,14 @@ class MainWindow(QtWidgets.QMainWindow):
             column.setMinimumWidth(560)
             column.setMaximumWidth(720)
             self.button_start_recipe.setText("Start recipe")
-            self.button_start_recipe.setMinimumWidth(110)
             self.button_pause_recipe.setText(
                 "Resume recipe" if self._automation_paused else "Pause recipe"
             )
-            self.button_pause_recipe.setMinimumWidth(82)
-            self.button_stop_recipe.setMinimumWidth(82)
             if splitter is not None:
                 splitter.setSizes([600, max(720, splitter.width() - 600)])
+        self._fit_recipe_action_button(self.button_start_recipe, minimum_width=82)
+        self._fit_recipe_action_button(self.button_pause_recipe, minimum_width=82)
+        self._fit_recipe_action_button(self.button_stop_recipe, minimum_width=82)
         if review_view:
             self._adaptive_workspace_user_prefers_custom = True
         elif run_view and self._adaptive_workspace_supported():
@@ -38239,7 +38257,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_key="elapsed_s",
             left_key="stress_mpa",
             right_key="load_g",
-            title="Stress / load progress",
+            title="Stress / load",
         )
         self._refresh_adaptive_progress_plot(
             "strain_progress",
@@ -38247,7 +38265,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_key="elapsed_s",
             left_key="strain_pct",
             right_key="position_mm",
-            title="Strain / displacement progress",
+            title="Strain / displacement",
         )
         self._refresh_adaptive_progress_plot(
             "current",
@@ -38255,7 +38273,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_key="elapsed_s",
             left_key="current_measured_mA",
             right_key="current_set_mA",
-            title="Current progress",
+            title="Current",
         )
 
     def _refresh_plots(self) -> None:
