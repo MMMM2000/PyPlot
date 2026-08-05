@@ -26311,6 +26311,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if plan.blocked_reason:
             return plan.blocked_reason
         effective_end = float(plan.effective_end or 0.0)
+        requested_target_text = (
+            f"{_format_compact_number(plan.requested_end, decimals=4)}{suffix}"
+        )
+        effective_target_text = (
+            f"{_format_compact_number(effective_end, decimals=4)}{suffix}"
+        )
         effective_load = (
             "unknown load"
             if plan.effective_end_load_g is None
@@ -26318,20 +26324,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if compact:
             return (
-                f"Load limit {limit_text}: run ends at {effective_end:.4f}{suffix} "
-                f"({effective_load}), not {plan.requested_end:.4f}{suffix}."
+                f"Load limit {limit_text}: run ends at {effective_target_text} "
+                f"({effective_load}), not {requested_target_text}."
             )
         theoretical = (
             "unknown"
             if plan.theoretical_limit_target is None
-            else f"{plan.theoretical_limit_target:.4f}{suffix}"
+            else f"{_format_compact_number(plan.theoretical_limit_target, decimals=4)}{suffix}"
         )
         return (
-            f"The requested endpoint {plan.requested_end:.4f}{suffix} requires {requested_load}.\n\n"
+            f"The requested endpoint {requested_target_text} requires {requested_load}.\n\n"
             f"The active applied-load limit is {limit_text}, corresponding to a theoretical "
             f"maximum of {theoretical}. A {plan.reserve_g:.3f} g control reserve is retained.\n\n"
             f"With the configured target sequence, this run will end at "
-            f"{effective_end:.4f}{suffix} ({effective_load}). The requested value remains saved, "
+            f"{effective_target_text} ({effective_load}). The requested value remains saved, "
             "and both requested and executed endpoints will be recorded."
         )
 
@@ -26348,7 +26354,8 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setInformativeText(self._current_sweep_load_limit_message(plan, compact=False))
         suffix, _ = self._distribution_units(plan.basis)
         continue_button = box.addButton(
-            f"Continue to {float(plan.effective_end or 0.0):.4g}{suffix}",
+            "Continue to "
+            f"{_format_compact_number(float(plan.effective_end or 0.0), decimals=4)}{suffix}",
             QtWidgets.QMessageBox.ButtonRole.AcceptRole,
         )
         back_button = box.addButton("Go back", QtWidgets.QMessageBox.ButtonRole.RejectRole)
@@ -28836,7 +28843,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_tic_settings_snapshot = None
             self._automatic_tic_settings_snapshot = None
         self._first_overheating_preflight_decision = None
-        if self._session_base_path is not None:
+        if self._session_base_path is not None and not self._controller_process_mode:
             self._start_run_summary_generation(
                 self._session_base_path.parent,
                 offer_cleanup=self._session_stop_reason == "recipe_completed",
@@ -33609,6 +33616,7 @@ class MainWindow(QtWidgets.QMainWindow):
             state is ControlState.STOPPED
             and self._isolated_user_stop_requested
         )
+        summary_run_dir: Path | None = None
         if readback is not None:
             position_mm = readback.get("position_mm")
             if position_mm is not None:
@@ -33617,6 +33625,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_move_target_mm = float(position_mm)
                 self._last_effective_move_target_mm = float(position_mm)
             self._tic_motor_power_ok = None
+            session_path = readback.get("session_path")
+            if isinstance(session_path, str) and session_path.strip():
+                summary_run_dir = Path(session_path).parent
         self._control_process_poll_timer.stop()
         self._isolated_recipe_active = False
         self._isolated_recipe_paused = False
@@ -33653,6 +33664,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     process.close(timeout_s=1.0, force=True)
                 except TypeError:
                     process.close(timeout_s=1.0)
+        if summary_run_dir is not None:
+            self._start_run_summary_generation(
+                summary_run_dir,
+                offer_cleanup=(state is ControlState.STOPPED and not offer_recovery),
+            )
         if self._isolated_supply_handoff_leases:
             if state in {ControlState.FAULTED, ControlState.EMERGENCY}:
                 try:

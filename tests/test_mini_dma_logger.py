@@ -4367,7 +4367,8 @@ def test_iso_stress_recipe_caps_target_grid_below_applied_load_limit(
         assert "requested endpoint 1000.0000 MPa" in summary
         assert "executed endpoint 700.0000 MPa" in summary
         assert window.label_current_sweep_load_limit_warning.isHidden() is False
-        assert "run ends at 700.0000 MPa" in window.label_current_sweep_load_limit_warning.text()
+        assert "run ends at 700 MPa" in window.label_current_sweep_load_limit_warning.text()
+        assert ".0000" not in window.label_current_sweep_load_limit_warning.text()
         assert "color" in window.label_current_target_end_equiv.styleSheet()
         assert metadata["target_end_requested"] == pytest.approx(1000.0)
         assert metadata["target_end_effective"] == pytest.approx(700.0)
@@ -4404,6 +4405,42 @@ def test_isolated_user_stop_schedules_one_recovery_prompt_after_process_close(
         assert recovery_schedules == [True]
         assert window._isolated_recipe_active is False
         assert window._automation_active is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_finish_generates_summary_in_visible_parent_after_child_close(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-run"
+    requested: list[tuple[Path, bool, bool]] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={"session_path": str(run_dir / "measurement.csv")},
+        )
+
+        assert requested == [(run_dir, True, True)]
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
@@ -34249,6 +34286,30 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
 
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, True)]
+    finally:
+        _close_test_window(window)
+
+
+def test_controller_process_defers_run_summary_to_visible_parent(tmp_path: Path, qtbot) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    window.edit_log_name.setText("controller_summary_deferred")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
+
+    try:
+        window._start_session()
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert requested == []
     finally:
         _close_test_window(window)
 

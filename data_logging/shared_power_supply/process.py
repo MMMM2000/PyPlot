@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import importlib
 import multiprocessing
 import os
-from queue import Empty
 import time
 import traceback
 from typing import Any
@@ -51,23 +50,30 @@ class BrokerProcessReady:
     port_name: str
 
 
-def _publish_ready_payload(ready_queue: Any, payload: object) -> None:
-    """Publish one startup result and synchronously flush the child feeder.
+def _publish_ready_payload(ready_sender: Any, payload: object) -> None:
+    """Publish the broker's single startup result without a feeder thread."""
 
-    ``multiprocessing.Queue.put`` returns before its feeder thread necessarily
-    writes the payload to the parent-side pipe. A fast startup failure can
-    therefore exit first and make the supervisor report only exit code 1. The
-    broker publishes exactly one startup result, so it is safe to close and
-    join the child-side feeder immediately after that result is queued.
-    """
-
-    ready_queue.put(payload)
     try:
-        ready_queue.close()
-        ready_queue.join_thread()
-    except (AttributeError, OSError, ValueError):
-        # Test doubles and interpreter shutdown may not expose a live feeder.
-        pass
+        ready_sender.send(payload)
+    finally:
+        try:
+            ready_sender.close()
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def _connect_driver_with_bounded_handoff_retry(driver: Any) -> None:
+    """Allow Windows a short interval to release the just-probed COM handle."""
+
+    deadline_s = time.monotonic() + 2.0
+    while True:
+        try:
+            driver.connect()
+            return
+        except (OSError, PermissionError):
+            if time.monotonic() >= deadline_s:
+                raise
+            time.sleep(0.10)
 
 
 def _pid_exists(pid: int) -> bool:
@@ -102,7 +108,7 @@ def _pid_exists(pid: int) -> bool:
 
 def _run_broker_process(
     config: BrokerProcessConfig,
-    ready_queue: Any,
+    ready_sender: Any,
     stop_event: Any,
 ) -> None:
     # Keep all hardware imports inside the spawned process.
@@ -126,7 +132,7 @@ def _run_broker_process(
                 baudrate=config.baudrate,
                 timeout_s=config.driver_timeout_s,
             )
-        driver.connect()
+        _connect_driver_with_bounded_handoff_retry(driver)
         idn_text = identify_hmp_with_blank_retry(driver)
         if driver.profile is None:
             raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
@@ -147,7 +153,7 @@ def _run_broker_process(
         )
         actual_host, actual_port = server.server_address
         _publish_ready_payload(
-            ready_queue,
+            ready_sender,
             BrokerProcessReady(
                 host=str(actual_host),
                 port=int(actual_port),
@@ -175,7 +181,7 @@ def _run_broker_process(
     except BaseException as exc:
         try:
             _publish_ready_payload(
-                ready_queue,
+                ready_sender,
                 {
                     "error": str(exc) or exc.__class__.__name__,
                     "traceback": traceback.format_exc(),
@@ -220,7 +226,7 @@ class SharedPowerSupplyBrokerProcess:
     def __init__(self, config: BrokerProcessConfig) -> None:
         self.config = config
         self._context = multiprocessing.get_context("spawn")
-        self._ready_queue = self._context.Queue(maxsize=1)
+        self._ready_receiver, self._ready_sender = self._context.Pipe(duplex=False)
         self._stop_event = self._context.Event()
         self._process: multiprocessing.Process | None = None
         self._ready: BrokerProcessReady | None = None
@@ -242,10 +248,11 @@ class SharedPowerSupplyBrokerProcess:
             raise RuntimeError("shared power-supply broker process already started")
         self._process = self._context.Process(
             target=_run_broker_process,
-            args=(self.config, self._ready_queue, self._stop_event),
+            args=(self.config, self._ready_sender, self._stop_event),
             name="TmaPowerSupplyBroker",
         )
         self._process.start()
+        self._ready_sender.close()
 
     def wait_until_ready(self, *, timeout_s: float = 10.0) -> BrokerProcessReady:
         process = self._process
@@ -253,10 +260,7 @@ class SharedPowerSupplyBrokerProcess:
             raise RuntimeError("shared power-supply broker process is not started")
         deadline_s = time.monotonic() + max(0.0, float(timeout_s))
         while True:
-            try:
-                payload = self._ready_queue.get_nowait()
-            except Empty:
-                payload = None
+            payload = self._receive_startup_payload(timeout_s=0.0)
             if isinstance(payload, BrokerProcessReady):
                 self._ready = payload
                 return payload
@@ -264,12 +268,9 @@ class SharedPowerSupplyBrokerProcess:
                 raise RuntimeError(str(payload["error"]))
             if not process.is_alive():
                 # The child may have exited immediately after publishing its
-                # failure. Give the queue pipe one short bounded drain before
+                # failure. Give the startup pipe one short bounded drain before
                 # falling back to an otherwise opaque exit-code message.
-                try:
-                    payload = self._ready_queue.get(timeout=0.25)
-                except Empty:
-                    payload = None
+                payload = self._receive_startup_payload(timeout_s=0.25)
                 if isinstance(payload, BrokerProcessReady):
                     self._ready = payload
                     return payload
@@ -290,6 +291,14 @@ class SharedPowerSupplyBrokerProcess:
                 )
             time.sleep(min(0.01, remaining_s))
 
+    def _receive_startup_payload(self, *, timeout_s: float) -> object | None:
+        try:
+            if not self._ready_receiver.poll(max(0.0, float(timeout_s))):
+                return None
+            return self._ready_receiver.recv()
+        except (EOFError, OSError):
+            return None
+
     def is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
@@ -302,6 +311,11 @@ class SharedPowerSupplyBrokerProcess:
         if process.is_alive() and force:
             process.terminate()
             process.join(timeout=max(0.0, timeout_s))
+        if not process.is_alive():
+            try:
+                self._ready_receiver.close()
+            except OSError:
+                pass
         return not process.is_alive()
 
 

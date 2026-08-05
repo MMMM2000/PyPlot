@@ -16,6 +16,7 @@ from data_logging.shared_power_supply.process import (
     BrokerChannelConfig,
     BrokerProcessConfig,
     SharedPowerSupplyBrokerProcess,
+    _connect_driver_with_bounded_handoff_retry,
 )
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
 
@@ -124,3 +125,19 @@ def test_fast_spawn_failure_never_degrades_to_opaque_exit_code(attempt: int) -> 
         assert "exited with code" not in message
     finally:
         assert process.close(timeout_s=2.0, force=True)
+
+
+def test_driver_connect_retries_transient_windows_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts: list[int] = []
+
+    class _Driver:
+        def connect(self) -> None:
+            attempts.append(len(attempts) + 1)
+            if len(attempts) < 3:
+                raise PermissionError(5, "port still closing")
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    _connect_driver_with_bounded_handoff_retry(_Driver())
+
+    assert attempts == [1, 2, 3]
