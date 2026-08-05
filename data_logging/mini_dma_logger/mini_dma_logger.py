@@ -30655,12 +30655,24 @@ class MainWindow(QtWidgets.QMainWindow):
         return str(self.combo_recipe_mode.currentText())
 
     def _update_current_task_display(self) -> None:
-        task_text = self._current_task_summary()
+        isolated_snapshot = self._production_control_snapshot
+        if self._isolated_recipe_active and isolated_snapshot is not None:
+            isolated_readback = dict(getattr(isolated_snapshot, "readback", {}))
+            task_text = str(
+                isolated_readback.get("task")
+                or isolated_readback.get("automation_phase")
+                or self._automation_phase
+            )
+        else:
+            task_text = self._current_task_summary()
         if hasattr(self, "label_current_task"):
             self.label_current_task.setText(f"Current task: {task_text}")
+            self.label_current_task.setVisible(False)
         if hasattr(self, "label_recipe_banner"):
             self.label_recipe_banner.setText(task_text)
-            self.label_recipe_banner.setVisible(self._automation_active)
+            self.label_recipe_banner.setVisible(
+                self._automation_active and not self._isolated_recipe_active
+            )
         self._set_dashboard_value("task", task_text)
 
     def _active_current_sweep_progress_text(self) -> str | None:
@@ -32901,10 +32913,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             total = int(readback.get("automation_total") or 0)
             self._automation_total_steps = max(0, total)
-            self.label_current_task.setText(
-                f"Current task: {readback.get('task') or self._automation_phase}"
-            )
-            self.label_current_task.setVisible(True)
+            self._automation_completed_ticks = max(0, completed)
+            self._apply_isolated_recipe_status(snapshot, readback)
             self.label_control_process_status.setText(
                 "Controller: dedicated process "
                 f"PID {snapshot.owner_pid} | {snapshot.state.value} | "
@@ -32923,10 +32933,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"PSU {'-' if supply_current is None else f'{float(supply_current):.2f} mA'} "
                 f"{'-' if supply_voltage is None else f'{float(supply_voltage):.3f} V'}"
             )
-            if total > 0:
-                self.recipe_progress.setValue(
-                    min(100, max(0, round(100.0 * completed / total)))
-                )
             if snapshot.state in {
                 ControlState.STOPPED,
                 ControlState.EMERGENCY,
@@ -32969,6 +32975,80 @@ class MainWindow(QtWidgets.QMainWindow):
                     or f"control process exited with code {process.exitcode}"
                 ),
             )
+
+    def _apply_isolated_recipe_status(
+        self,
+        snapshot: object,
+        readback: Mapping[str, object],
+    ) -> None:
+        """Publish process-owned state through the current dashboard widgets."""
+        task_text = str(readback.get("task") or self._automation_phase)
+        self.label_current_task.setText(f"Current task: {task_text}")
+        self.label_current_task.setVisible(False)
+        self.label_recipe_banner.setVisible(False)
+        self._set_dashboard_value("task", task_text)
+
+        load_g = readback.get("load_g")
+        stress_mpa = readback.get("stress_mpa")
+        strain_pct = readback.get("plot_strain_pct")
+        display_position_mm = readback.get("plot_position_mm")
+        if display_position_mm is None:
+            display_position_mm = readback.get("position_mm")
+        speed_mm_s = readback.get("speed_mm_s")
+        supply_current = readback.get("supply_current_mA")
+        supply_voltage = readback.get("supply_voltage_V")
+        self._set_dashboard_value(
+            "load_g",
+            "-" if load_g is None else f"{float(load_g):.3f} g",
+        )
+        self._set_dashboard_value(
+            "stress_mpa",
+            "-" if stress_mpa is None else f"{float(stress_mpa):.1f} MPa",
+        )
+        self._set_dashboard_value(
+            "strain_pct",
+            "-" if strain_pct is None else f"{float(strain_pct):.3f} %",
+        )
+        self._set_dashboard_value(
+            "speed_mm_s",
+            self._live_linear_speed_text(
+                None if speed_mm_s is None else float(speed_mm_s)
+            ),
+        )
+        self._set_dashboard_value(
+            "motor",
+            "-" if display_position_mm is None else f"{float(display_position_mm):.4f} mm",
+        )
+        current_text = "-" if supply_current is None else f"{float(supply_current):.2f}mA"
+        voltage_text = "-" if supply_voltage is None else f"{float(supply_voltage):.2f}V"
+        self._set_dashboard_value("supply", f"{current_text} {voltage_text}")
+
+        state = getattr(snapshot, "state", None)
+        if state in {ControlState.RUNNING, ControlState.PAUSED}:
+            self.label_control_process_status.setVisible(False)
+
+        total = max(0, int(readback.get("automation_total") or 0))
+        completed = max(0, int(readback.get("automation_completed") or 0))
+        if total <= 0:
+            self.recipe_progress.setRange(0, 0)
+            self.recipe_progress.setFormat(task_text)
+            return
+        value = min(completed, max(0, total - 1))
+        percent = min(99, int(math.floor(100.0 * value / total)))
+        self.recipe_progress.setRange(0, total)
+        self.recipe_progress.setValue(value)
+        progress_text = f"Overall {percent:3d}% | {task_text}"
+        now_s = time.monotonic()
+        if self._automation_progress_started_s <= 0.0:
+            self._automation_progress_started_s = now_s
+        remaining_s = self._estimated_recipe_remaining_s(
+            value=value,
+            total=total,
+            elapsed_s=max(0.0, now_s - self._automation_progress_started_s),
+        )
+        if remaining_s is not None and remaining_s > 0.0:
+            progress_text += f" | ETA {_format_duration(remaining_s)}"
+        self.recipe_progress.setFormat(progress_text)
 
     def _finish_isolated_recipe(
         self,
@@ -37846,6 +37926,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_on_ui_thread(_apply)
             return
         self._live_label_refresh_queued = False
+        isolated_snapshot = self._production_control_snapshot
+        if self._isolated_recipe_active and isolated_snapshot is not None:
+            self._apply_isolated_recipe_status(
+                isolated_snapshot,
+                dict(getattr(isolated_snapshot, "readback", {})),
+            )
+            return
         scale_age_s = self._scale_reading_age_s()
         scale_missing = self._latest_scale_timestamp is None
         scale_stale = scale_age_s is not None and scale_age_s > STALE_SCALE_AFTER_S

@@ -1823,9 +1823,15 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
                 },
                 "automation_phase": state.value,
                 "automation_index": 0,
-                "automation_total": 1,
+                "automation_completed": 4,
+                "automation_total": 10,
                 "task": "synthetic",
                 "position_mm": 1.25,
+                "load_g": 0.5,
+                "stress_mpa": 25.0,
+                "speed_mm_s": 0.002,
+                "supply_current_mA": 2.0,
+                "supply_voltage_V": 0.4,
             }
             readback.update(
                 {
@@ -1852,6 +1858,18 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         _confirm(mini_dma_mod.ControlState.RUNNING)
         assert len(window._live_plot_points) == 1
         assert window._live_plot_points[0].stress_mpa == pytest.approx(25.0)
+        assert window._dashboard_value_labels["task"].text() == "synthetic"
+        assert window._dashboard_value_labels["load_g"].text() == "0.500 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "25.0 MPa"
+        assert window._dashboard_value_labels["strain_pct"].text() == "0.250 %"
+        assert window._dashboard_value_labels["speed_mm_s"].text() == "2 um/s"
+        assert window._dashboard_value_labels["motor"].text() == "1.2500 mm"
+        assert window._dashboard_value_labels["supply"].text() == "2.00mA 0.40V"
+        assert window.label_current_task.isVisible() is False
+        assert window.label_control_process_status.isVisible() is False
+        assert window.recipe_progress.maximum() == 10
+        assert window.recipe_progress.value() == 4
+        assert "Overall  40% | synthetic" in window.recipe_progress.format()
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window.spin_current_sweep_step_mA.setValue(
             window.spin_current_sweep_step_mA.value() + 0.25

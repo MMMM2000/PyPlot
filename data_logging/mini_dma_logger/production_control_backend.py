@@ -460,6 +460,10 @@ class ProductionTmaBackend:
             stress = window._current_distribution_value("stress_mpa")
         except Exception:
             stress = None
+        try:
+            speed_mm_s = window._live_speed_values().get("speed_mm_s")
+        except Exception:
+            speed_mm_s = None
         snapshot = getattr(window, "_supply_snapshot", {})
         session_path = getattr(window, "_session_base_path", None)
         base_readback: tuple[tuple[str, ReadbackValue], ...] = (
@@ -494,6 +498,10 @@ class ProductionTmaBackend:
             ("position_mm", float(window._current_position_mm)),
             ("load_g", effective_load),
             ("stress_mpa", None if stress is None else float(stress)),
+            (
+                "speed_mm_s",
+                None if speed_mm_s is None else float(speed_mm_s),
+            ),
             ("scale_age_s", window._scale_reading_age_s()),
             ("supply_output_enabled", bool(window._supply_output_enabled)),
             (
