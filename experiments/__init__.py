@@ -80,6 +80,16 @@ EXPERIMENTS: Dict[str, ExperimentFactory] = {
         "launch_adaptive_v4",
         label="TMA UI Design Lab - Adaptive Workspace v4",
     ),
+    "TMA UI Design Lab - Adaptive Iso-load": _lazy(
+        "experiments.tma_recipe_workspace_lab",
+        "launch_iso_load",
+        label="TMA UI Design Lab - Adaptive Iso-load",
+    ),
+    "TMA UI Design Lab - Adaptive Iso-strain": _lazy(
+        "experiments.tma_recipe_workspace_lab",
+        "launch_iso_strain",
+        label="TMA UI Design Lab - Adaptive Iso-strain",
+    ),
     "TMA UI Design Lab - Plot-First Control Room": _lazy(
         "experiments.tma_ui_design_lab",
         "launch_plot_first",
