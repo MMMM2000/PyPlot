@@ -499,12 +499,22 @@ def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
     assert "MPa" in window._adaptive_summary_labels["error"].text()
     assert window._adaptive_remaining_recipe_labels["targets"].text()
     assert window._adaptive_remaining_recipe_labels["current"].text().endswith("mA")
-    assert (
+    plot_background = (
         window._adaptive_plot_bundles["strain"]
         .widget.backgroundBrush()
         .color()
         .name()
-        == "#191c20"
+    )
+    expected_background = window._qcolor_from_rgb(
+        window._plot_theme()["axes_rgb"]
+    ).name()
+    assert plot_background == expected_background
+    assert (
+        window._dashboard_plot_bundles[0]
+        .widget.backgroundBrush()
+        .color()
+        .name()
+        == plot_background
     )
 
 

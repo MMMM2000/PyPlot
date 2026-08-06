@@ -1,0 +1,2 @@
+- Added a Python-native TMA hardware workspace design study with bench readiness states, compact device status rows, reduced manual motion controls, and separate safety and service settings.
+- Unified adaptive and configurable TMA live plots on the same palette-derived plot background across Prepare, Run, and Review.

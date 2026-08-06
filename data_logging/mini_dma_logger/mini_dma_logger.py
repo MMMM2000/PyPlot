@@ -38174,8 +38174,6 @@ class MainWindow(QtWidgets.QMainWindow):
             left_label=y_channel.label,
             right_label=None,
             left_color=y_channel.color,
-            text_color_override="#d7dce2",
-            background_color_override="#191c20",
         )
         if not targets:
             for curve in curves:
@@ -38215,8 +38213,6 @@ class MainWindow(QtWidgets.QMainWindow):
             right_label=right_channel.label,
             left_color=left_channel.color,
             right_color=right_channel.color,
-            text_color_override="#d7dce2",
-            background_color_override="#191c20",
         )
         self._set_pyqtgraph_curve_style(
             bundle.left_curve,
