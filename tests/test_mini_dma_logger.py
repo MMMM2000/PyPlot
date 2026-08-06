@@ -25757,6 +25757,57 @@ def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
         _close_test_window(window)
 
 
+def test_isolated_current_sweep_shows_runtime_update_for_hold_edit_without_ui_steps(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+
+    try:
+        process.start_process()
+        window._production_control_process = process
+        window._production_control_identity = object()
+        window._automation_active = True
+        window._isolated_recipe_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = []
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window._current_sweep_runtime_applied_values = (
+            window._current_sweep_visible_runtime_values_from_controls()
+        )
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.check_current_sweep_hold_on_error.property(
+            "_mini_dma_runtime_pending"
+        ) is False
+
+        window.check_current_sweep_hold_on_error.setChecked(False)
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.button_apply_current_sweep_edits.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.property(
+            "_mini_dma_runtime_pending"
+        ) is True
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        assert [kind for kind, _identity in process.commands] == ["update_config"]
+        runtime_payload = json.loads(process.update_payloads[0])
+        assert runtime_payload["runtime_update"] is True
+        assert runtime_payload["widgets"][
+            "check_current_sweep_hold_on_error"
+        ]["checked"] is False
+    finally:
+        window._production_control_process = None
+        window._production_control_identity = None
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_editability_marks_locked_controls(
     tmp_path: Path,
     qtbot,

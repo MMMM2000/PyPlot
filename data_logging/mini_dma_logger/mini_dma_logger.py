@@ -32591,22 +32591,35 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return left == right
 
+    def _current_sweep_runtime_active(self) -> bool:
+        return bool(
+            (self._automation_active or self._isolated_recipe_active)
+            and self._is_current_sweep_mode(self._automation_name)
+        )
+
     def _current_sweep_pending_value_keys(self) -> set[str]:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
-        if not runtime_active or not self._automation_steps:
+        if not self._current_sweep_runtime_active():
             return set()
         if self._current_sweep_runtime_applied_values is None:
             self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
             return set()
-        preview = self._current_sweep_pending_update_preview()
-        if not preview["changed_steps"]:
-            return set()
+        if not self._isolated_recipe_active:
+            if not self._automation_steps:
+                return set()
+            preview = self._current_sweep_pending_update_preview()
+            if not preview["changed_steps"]:
+                return set()
         visible_values = self._current_sweep_visible_runtime_values_from_controls()
-        pending_keys: set[str] = set()
-        for key, value in visible_values.items():
-            applied_value = self._current_sweep_runtime_applied_values.get(key)
-            if not self._runtime_values_equal(value, applied_value):
-                pending_keys.add(key)
+        pending_keys = {
+            key
+            for key, value in visible_values.items()
+            if not self._runtime_values_equal(
+                value,
+                self._current_sweep_runtime_applied_values.get(key),
+            )
+        }
+        if not pending_keys:
+            return set()
         return pending_keys
 
     def _set_current_sweep_runtime_pending(self, widget: QtWidgets.QWidget, pending: bool) -> None:
@@ -32622,7 +32635,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.style().polish(widget)
 
     def _refresh_current_sweep_pending_update_ui(self) -> None:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        runtime_active = self._current_sweep_runtime_active()
         has_update_current_sweep = False
         if not runtime_active:
             self._current_sweep_runtime_applied_values = None
@@ -32631,10 +32644,13 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             if self._current_sweep_runtime_applied_values is None:
                 self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
-            preview = self._current_sweep_pending_update_preview()
-            has_update_current_sweep = bool(preview["changed_steps"])
-            can_update_current_sweep = has_update_current_sweep and not self._automation_paused
             pending_keys = self._current_sweep_pending_value_keys()
+            if self._isolated_recipe_active:
+                has_update_current_sweep = bool(pending_keys)
+            else:
+                preview = self._current_sweep_pending_update_preview()
+                has_update_current_sweep = bool(preview["changed_steps"])
+            can_update_current_sweep = has_update_current_sweep and not self._automation_paused
 
         for widget, keys in self._current_sweep_runtime_widget_value_keys().items():
             self._set_current_sweep_runtime_pending(widget, any(key in pending_keys for key in keys))
@@ -32681,7 +32697,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.style().polish(widget)
 
     def _update_current_sweep_runtime_edit_state(self) -> None:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        runtime_active = self._current_sweep_runtime_active()
         editable_widgets = set(self._current_sweep_runtime_editable_widgets())
         for widget in editable_widgets:
             self._set_current_sweep_runtime_locked(widget, False)
