@@ -33275,21 +33275,36 @@ class MainWindow(QtWidgets.QMainWindow):
             process.start_process()
             process.wait_until_ready(timeout_s=10.0)
         except Exception as exc:
+            poll_fault_detail = getattr(process, "poll_fault_detail", None)
+            fault_detail, fault_traceback = (
+                poll_fault_detail()
+                if callable(poll_fault_detail)
+                else ("", "")
+            )
             process.close()
+            detail = str(fault_detail or exc)
             self._log(
                 "Dedicated-process startup failed before hardware ownership "
-                f"transfer: {exc}"
+                f"transfer: {detail}"
             )
-            self._update_length_setup_dialog(
-                "Controller startup failed; hardware remains connected to the UI."
-            )
+            if fault_traceback:
+                self._log(
+                    "Dedicated-process bootstrap traceback:\n"
+                    f"{fault_traceback.rstrip()}"
+                )
+            # Setup never became child-owned. Leaving its modal-looking graph
+            # open with disabled pause/stop buttons traps the operator in a
+            # dead idle state, so roll the pre-run view back completely.
+            self._close_length_setup_dialog()
             QtWidgets.QMessageBox.critical(
                 self,
                 APP_NAME,
                 "The dedicated controller did not become ready. No hardware "
-                f"ownership was transferred and PSU outputs were not changed.\n\n{exc}",
+                "ownership was transferred and PSU outputs were not changed.\n\n"
+                f"{detail}",
             )
             self._first_overheating_preflight_decision = None
+            self._update_recipe_buttons()
             return
         self._log(
             "Dedicated controller process reported ready; beginning hardware "

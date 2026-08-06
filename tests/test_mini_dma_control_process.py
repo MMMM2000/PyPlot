@@ -263,6 +263,27 @@ def test_wait_until_ready_reports_child_exit_detail() -> None:
         process._command_queue.join_thread()
 
 
+def test_spawned_backend_bootstrap_failure_reports_original_detail() -> None:
+    process = MiniDmaControlProcess(
+        heartbeat_interval_s=0.02,
+        backend_factory_spec=BackendFactorySpec(
+            module="data_logging.tma_logger.missing_backend_for_test",
+            factory="create_backend",
+        ),
+    )
+    try:
+        process.start_process()
+
+        with pytest.raises(RuntimeError, match="missing_backend_for_test"):
+            process.wait_until_ready(timeout_s=3.0)
+
+        detail, fault_traceback = process.poll_fault_detail()
+        assert "missing_backend_for_test" in detail
+        assert "ModuleNotFoundError" in fault_traceback
+    finally:
+        assert process.close(timeout_s=2.0, force=True)
+
+
 def test_out_of_band_emergency_bypasses_a_full_command_channel() -> None:
     class _UnstartedAliveProcess:
         @staticmethod

@@ -617,17 +617,33 @@ def _run_control_process(
     backend_config: SimulatedBackendConfig,
     backend_factory_spec: BackendFactorySpec | None,
 ) -> None:
-    runtime = _ControlProcessRuntime(
-        command_queue=command_queue,
-        heartbeat_queue=heartbeat_queue,
-        snapshot_queue=snapshot_queue,
-        event_queue=event_queue,
-        fault_connection=fault_connection,
-        emergency_event=emergency_event,
-        shutdown_event=shutdown_event,
-        backend_config=backend_config,
-        backend_factory_spec=backend_factory_spec,
-    )
+    try:
+        runtime = _ControlProcessRuntime(
+            command_queue=command_queue,
+            heartbeat_queue=heartbeat_queue,
+            snapshot_queue=snapshot_queue,
+            event_queue=event_queue,
+            fault_connection=fault_connection,
+            emergency_event=emergency_event,
+            shutdown_event=shutdown_event,
+            backend_config=backend_config,
+            backend_factory_spec=backend_factory_spec,
+        )
+    except BaseException as exc:
+        # Backend imports and construction happen before ``runtime.run()`` so
+        # the runtime's normal fault handler cannot report bootstrap failures.
+        # This pipe is feeder-free specifically so a fast Windows child exit
+        # still leaves the real exception available to the visible UI.
+        try:
+            fault_connection.send(
+                {
+                    "detail": str(exc) or exc.__class__.__name__,
+                    "traceback": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            pass
+        raise
     runtime.run()
 
 

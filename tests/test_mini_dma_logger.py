@@ -2902,7 +2902,7 @@ def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
     )
     window._create_production_control_process = lambda: process  # type: ignore[method-assign]
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
-        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
         "Synthetic isolated recipe",
         50,
     )
@@ -2926,6 +2926,11 @@ def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
         "critical",
         lambda _parent, _title, message: critical_messages.append(str(message)),
     )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (52.4, True),
+    )
 
     try:
         window._start_auto_ramp()
@@ -2939,6 +2944,7 @@ def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
         assert window._tic_command_dispatcher is tic_dispatcher
         assert window._isolated_recipe_active is False
         assert window._automation_active is False
+        assert window._length_setup_dialog is None
         assert critical_messages
         assert "No hardware ownership was transferred" in critical_messages[0]
         assert "PSU outputs were not changed" in critical_messages[0]
