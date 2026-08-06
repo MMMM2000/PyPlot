@@ -98,6 +98,11 @@ from data_logging.mini_dma_logger.time_axis import (
 from data_logging.mini_dma_logger.metadata_checkpoints import (
     SessionMetadataCheckpointStore,
 )
+from data_logging.mini_dma_logger.bench_workspace import (
+    BenchDeviceState,
+    BenchWorkspaceState,
+    TmaBenchWorkspace,
+)
 
 try:
     import serial
@@ -9339,6 +9344,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #292e35;
                 border-radius: 4px;
             }
+            QFrame#tmaBenchReadiness,
+            QFrame#tmaBenchDeviceRow,
+            QFrame#tmaBenchSummary {
+                background: #191c20;
+                border: 1px solid #292e35;
+                border-radius: 4px;
+            }
+            QLabel[role="benchHeadline"] {
+                color: #edf0f3;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel[role="benchDeviceName"],
+            QLabel[role="benchDeviceSummary"] {
+                color: #edf0f3;
+                font-weight: 600;
+            }
+            QWidget#tmaBenchWorkspace QToolButton {
+                background: #20242a;
+                border: 1px solid #343a42;
+                border-radius: 3px;
+                padding: 4px;
+            }
             QLabel[role="inspectorTitle"] {
                 color: #edf0f3;
                 font-size: 13px;
@@ -9642,17 +9670,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_motion_speed_mm_s.setValue(1.0)
         self.spin_motion_speed_mm_s.setSuffix(" mm/s")
         self.spin_motion_speed_mm_s.setToolTip("Linear stage speed for held manual movement.")
+        motion_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
 
         jog_buttons = QtWidgets.QHBoxLayout()
-        jog_negative = QtWidgets.QPushButton("▲ Move up / increase tension", motion_box)
+        jog_negative = QtWidgets.QPushButton("Move up", motion_box)
         jog_negative.setObjectName("hardware_jog_tension_button")
         self._configure_manual_jog_button(jog_negative, lambda: self._tension_motion_sign())
         jog_buttons.addWidget(jog_negative)
-        jog_positive = QtWidgets.QPushButton("▼ Move down / relax", motion_box)
+        jog_positive = QtWidgets.QPushButton("Move down", motion_box)
         jog_positive.setObjectName("hardware_jog_relax_button")
         self._configure_manual_jog_button(jog_positive, lambda: -self._tension_motion_sign())
         jog_buttons.addWidget(jog_positive)
         motion_form.addRow("", jog_buttons)
+        restore_motion_defaults_button = QtWidgets.QPushButton(
+            "Restore motion defaults",
+            motion_box,
+        )
+        restore_motion_defaults_button.clicked.connect(self._restore_manual_action_defaults)
+        motion_form.addRow("", restore_motion_defaults_button)
 
         self.label_tic_position = QtWidgets.QLabel("Position: 0.0000 mm", motion_box)
         self.label_tic_summary = QtWidgets.QLabel("Motor status not queried yet.", motion_box)
@@ -10063,7 +10098,7 @@ class MainWindow(QtWidgets.QMainWindow):
         heating_layout.setContentsMargins(0, 0, 0, 0)
         heating_layout.setSpacing(10)
 
-        supply_box = self._group_box("Current Annealing")
+        supply_box = self._group_box("Power supply")
         supply_form = QtWidgets.QFormLayout(supply_box)
         self.combo_supply_port = QtWidgets.QComboBox(supply_box)
         refresh_supply_button = QtWidgets.QPushButton("Refresh ports", supply_box)
@@ -10315,7 +10350,75 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         hardware_layout.addWidget(ir_box)
 
-        hardware_layout.addStretch(1)
+        # Keep the complete existing hardware surface available without making
+        # routine bench readiness compete with low-frequency configuration.
+        self._hardware_settings_dialog = QtWidgets.QDialog(self)
+        self._hardware_settings_dialog.setObjectName("tmaWorkspaceRoot")
+        self._hardware_settings_dialog.setWindowTitle("TMA hardware settings")
+        self._hardware_settings_dialog.setModal(False)
+        self._hardware_settings_dialog.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_DeleteOnClose,
+            False,
+        )
+        self._hardware_settings_dialog.resize(760, 720)
+        settings_layout = QtWidgets.QVBoxLayout(self._hardware_settings_dialog)
+        self._hardware_settings_tabs = QtWidgets.QTabWidget(self._hardware_settings_dialog)
+        settings_layout.addWidget(self._hardware_settings_tabs)
+
+        def _hardware_settings_page(
+            title: str,
+            widgets: tuple[QtWidgets.QWidget, ...],
+        ) -> QtWidgets.QWidget:
+            scroll = QtWidgets.QScrollArea(self._hardware_settings_tabs)
+            scroll.setWidgetResizable(True)
+            page = QtWidgets.QWidget(scroll)
+            page_layout = QtWidgets.QVBoxLayout(page)
+            page_layout.setContentsMargins(10, 10, 10, 10)
+            page_layout.setSpacing(10)
+            for widget in widgets:
+                widget.setParent(page)
+                widget.setVisible(True)
+                page_layout.addWidget(widget)
+            page_layout.addStretch(1)
+            scroll.setWidget(page)
+            self._hardware_settings_tabs.addTab(scroll, title)
+            return page
+
+        advanced_toggle.hide()
+        jog_negative.hide()
+        jog_positive.hide()
+        self.advanced_hardware_panel.setVisible(True)
+        _hardware_settings_page(
+            "Connections",
+            (scale_box, motion_box, self.advanced_hardware_panel),
+        )
+        self._hardware_safety_page = _hardware_settings_page(
+            "Safety and references",
+            (safety_box,),
+        )
+        self._hardware_supply_page = _hardware_settings_page(
+            "Power supply",
+            (supply_box,),
+        )
+        self._hardware_ir_page = _hardware_settings_page(
+            "IR temperature",
+            (ir_box,),
+        )
+
+        self.tma_bench_workspace = TmaBenchWorkspace(hardware_tab)
+        self.tma_bench_workspace.connect_all_requested.connect(
+            self._auto_connect_manual_hardware
+        )
+        self.tma_bench_workspace.settings_requested.connect(
+            self._show_hardware_settings_dialog
+        )
+        self.tma_bench_workspace.safety_requested.connect(
+            lambda: self._show_hardware_settings_dialog("safety")
+        )
+        self.tma_bench_workspace.device_action_requested.connect(
+            self._handle_bench_device_action
+        )
+        hardware_layout.addWidget(self.tma_bench_workspace)
 
         specimen_tab = QtWidgets.QWidget(tabs)
         specimen_layout = QtWidgets.QVBoxLayout(specimen_tab)
@@ -11975,6 +12078,7 @@ class MainWindow(QtWidgets.QMainWindow):
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
+        self.manual_actions_box = manual_box
         manual_layout = QtWidgets.QVBoxLayout(manual_box)
         manual_hint = QtWidgets.QLabel(
             "Use manual controls for setup, preloading, or quick checks before launching a recipe."
@@ -11988,62 +12092,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_manual_auto_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
         self.button_manual_auto_connect.clicked.connect(self._auto_connect_manual_hardware)
         manual_motion_row.addWidget(self.button_manual_auto_connect)
-        manual_up = QtWidgets.QPushButton("▲ Move up", manual_box)
+        manual_up = QtWidgets.QPushButton("Move up", manual_box)
         manual_up.setObjectName("manual_jog_tension_button")
         manual_up.setToolTip("Move the stage in the tension-increasing direction by the jog step.")
         manual_up.setMinimumHeight(42)
         self._configure_manual_jog_button(manual_up, lambda: self._tension_motion_sign())
         manual_motion_row.addWidget(manual_up)
-        manual_down = QtWidgets.QPushButton("▼ Move down", manual_box)
+        manual_down = QtWidgets.QPushButton("Move down", manual_box)
         manual_down.setObjectName("manual_jog_relax_button")
         manual_down.setToolTip("Move the stage in the relaxing direction by the jog step.")
         manual_down.setMinimumHeight(42)
         self._configure_manual_jog_button(manual_down, lambda: -self._tension_motion_sign())
         manual_motion_row.addWidget(manual_down)
-        recovery_buttons = QtWidgets.QHBoxLayout()
-        manual_zero_displacement = QtWidgets.QPushButton("Move displacement to 0", manual_box)
-        manual_zero_displacement.clicked.connect(self._start_recovery_displacement_zero)
-        recovery_buttons.addWidget(manual_zero_displacement)
-        manual_zero_load = QtWidgets.QPushButton("Move load to 0", manual_box)
-        manual_zero_load.clicked.connect(self._start_recovery_load_zero)
-        recovery_buttons.addWidget(manual_zero_load)
-        manual_motion_row.addLayout(recovery_buttons)
-        manual_halt = QtWidgets.QPushButton("Halt motor", manual_box)
-        manual_halt.clicked.connect(self._halt_tic)
-        manual_motion_row.addWidget(manual_halt)
         manual_layout.addLayout(manual_motion_row)
-        manual_record = QtWidgets.QPushButton("Record point now", manual_box)
-        manual_record.clicked.connect(self._record_current_point)
-        manual_layout.addWidget(manual_record)
-        manual_hardware_tare = QtWidgets.QPushButton("Capture zero-load", manual_box)
-        manual_hardware_tare.setToolTip("Use the current real scale reading as the 0 g applied-load reference.")
-        manual_hardware_tare.clicked.connect(self._capture_zero_load_scale_reference)
-        manual_layout.addWidget(manual_hardware_tare)
-        manual_refresh = QtWidgets.QPushButton("Refresh Tic status", manual_box)
-        manual_refresh.clicked.connect(self._refresh_tic_status)
-        manual_layout.addWidget(manual_refresh)
-        self.button_manual_action_settings = QtWidgets.QToolButton(manual_box)
-        self.button_manual_action_settings.setText("Manual action settings")
-        self.button_manual_action_settings.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.button_manual_action_settings.setCheckable(True)
-        self.button_manual_action_settings.setChecked(False)
-        self.button_manual_action_settings.setArrowType(QtCore.Qt.ArrowType.RightArrow)
-        manual_layout.addWidget(self.button_manual_action_settings)
-        self.manual_action_settings_panel = QtWidgets.QWidget(manual_box)
-        manual_form = QtWidgets.QFormLayout(self.manual_action_settings_panel)
-        manual_form.setContentsMargins(0, 4, 0, 0)
-        manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
-        manual_form.addRow("Single-click step", self.spin_jog_mm)
-        manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
-        self.button_restore_manual_action_defaults = QtWidgets.QPushButton(
-            "Restore manual defaults",
-            self.manual_action_settings_panel,
-        )
-        self.button_restore_manual_action_defaults.clicked.connect(self._restore_manual_action_defaults)
-        manual_form.addRow("", self.button_restore_manual_action_defaults)
-        manual_layout.addWidget(self.manual_action_settings_panel)
-        self.manual_action_settings_panel.setVisible(False)
-        self.button_manual_action_settings.toggled.connect(self._toggle_manual_action_settings)
         experiment_layout.addWidget(manual_box)
         experiment_layout.addStretch(1)
         tabs.addTab(experiment_tab, "Recipe")
@@ -20850,14 +20911,6 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self._update_recipe_mode_ui()
 
-    def _toggle_manual_action_settings(self, checked: bool) -> None:
-        if hasattr(self, "manual_action_settings_panel"):
-            self.manual_action_settings_panel.setVisible(bool(checked))
-        if hasattr(self, "button_manual_action_settings"):
-            self.button_manual_action_settings.setArrowType(
-                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
-            )
-
     def _set_recipe_file_controls_visible(self, visible: bool) -> None:
         for widget_name in ("recipe_file_controls_widget", "label_recipe_file_status"):
             widget = getattr(self, widget_name, None)
@@ -26049,6 +26102,235 @@ class MainWindow(QtWidgets.QMainWindow):
             progress.close()
             progress.deleteLater()
 
+    def _show_hardware_settings_dialog(self, tab_key: str = "connections") -> None:
+        dialog = getattr(self, "_hardware_settings_dialog", None)
+        tabs = getattr(self, "_hardware_settings_tabs", None)
+        if dialog is None or tabs is None:
+            return
+        self._apply_adaptive_workspace_style(dialog)
+        tab_index = {
+            "connections": 0,
+            "safety": 1,
+            "supply": 2,
+            "ir": 3,
+        }.get(str(tab_key), 0)
+        tabs.setCurrentIndex(tab_index)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _handle_bench_device_action(self, device_key: str) -> None:
+        if self._automation_active or self._session_active:
+            return
+        action = {
+            "scale": self._toggle_scale_connection,
+            "motor": self._refresh_tic_status,
+            "supply": self._connect_supply,
+            "ir": self._toggle_ir_connection,
+        }.get(str(device_key))
+        if action is not None:
+            action()
+
+    def _bench_workspace_state(self) -> BenchWorkspaceState:
+        active = bool(self._automation_active or self._session_active)
+        auto_connecting = bool(getattr(self, "_manual_auto_connect_active", False))
+        scale_age_s = self._scale_reading_age_s()
+        scale_connected = self._scale_thread is not None
+        scale_live = (
+            scale_connected
+            and self._latest_scale_timestamp is not None
+            and (scale_age_s is None or scale_age_s <= STALE_SCALE_AFTER_S)
+        )
+        if scale_live:
+            scale_status = "Ready"
+            scale_color = "#35c77a"
+            scale_summary = f"{self._current_effective_load_g():.4f} g applied"
+            scale_detail = self.label_scale_value.text()
+        elif scale_connected:
+            scale_status = "Waiting for data"
+            scale_color = "#f0b23b"
+            scale_summary = "Connected"
+            scale_detail = "The scale connection is open, but no fresh reading is available."
+        else:
+            scale_status = "Disconnected"
+            scale_color = "#69727d"
+            scale_summary = "No live load"
+            scale_detail = "Connect the balance before setup or measurement."
+
+        motor_connected = bool(self._tic_status_text)
+        motor_ready = motor_connected and self._tic_motor_power_ok is not False
+        motor_status = (
+            "Ready"
+            if motor_ready
+            else "Power unavailable"
+            if motor_connected and self._tic_motor_power_ok is False
+            else "Not checked"
+        )
+        motor_color = "#35c77a" if motor_ready else "#d86b61" if motor_connected else "#69727d"
+        motor_summary = (
+            f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm"
+            if motor_connected
+            else "No live position"
+        )
+        motor_detail = self.label_tic_summary.text()
+
+        supply_connected = False
+        if self._supply_controller is not None:
+            try:
+                supply_connected = bool(self._supply_controller.is_connected())
+            except Exception:
+                supply_connected = False
+        supply_status = "Ready" if supply_connected else "Disconnected"
+        supply_color = "#35c77a" if supply_connected else "#69727d"
+        supply_current = self._supply_snapshot.get("current_mA")
+        supply_voltage = self._supply_snapshot.get("voltage_V")
+        supply_summary = (
+            "No readback"
+            if supply_current is None and supply_voltage is None
+            else f"{float(supply_current or 0.0):.2f} mA | {float(supply_voltage or 0.0):.2f} V"
+        )
+        supply_detail = self.label_supply_status.text()
+
+        ir_enabled = self._ir_enabled()
+        ir_snapshot = self._latest_ir_snapshot()
+        ir_connected = self._ir_thread is not None
+        ir_temperature = ir_snapshot.get("object_c_apparent")
+        ir_ready = (not ir_enabled) or (ir_connected and ir_temperature is not None)
+        if not ir_enabled:
+            ir_status = "Optional, disabled"
+            ir_summary = "Not required"
+            ir_color = "#69727d"
+            ir_detail = "IR temperature is excluded from this experiment."
+        elif ir_ready:
+            ir_status = "Ready"
+            ir_summary = f"{float(ir_temperature):.2f} C"
+            ir_color = "#35c77a"
+            ir_detail = self.label_ir_live.text()
+        elif ir_connected:
+            ir_status = "Waiting for data"
+            ir_summary = "Connected"
+            ir_color = "#f0b23b"
+            ir_detail = self.label_ir_status.text()
+        else:
+            ir_status = "Disconnected"
+            ir_summary = "Optional"
+            ir_color = "#69727d"
+            ir_detail = self.label_ir_status.text()
+
+        required_ready = (scale_live, motor_ready, supply_connected)
+        ready_count = sum(bool(value) for value in required_ready)
+        required_count = len(required_ready)
+        if active:
+            mode = "active"
+            color = "#f0b23b"
+            headline = "Bench in use"
+            detail = "Hardware settings are locked while the current session owns the bench."
+            primary_action = ""
+        elif all(required_ready):
+            mode = "ready"
+            color = "#35c77a"
+            headline = "Bench ready"
+            detail = f"All {required_count} required devices are ready."
+            primary_action = ""
+        elif ready_count:
+            mode = "partial"
+            color = "#f0b23b"
+            headline = "Bench needs attention"
+            detail = f"{ready_count} of {required_count} required devices are ready."
+            primary_action = "Retry connections"
+        else:
+            mode = "disconnected"
+            color = "#69727d"
+            headline = "Bench disconnected"
+            detail = "Connect the scale, motor controller, and power supply."
+            primary_action = "Auto-connect hardware"
+
+        soft_limits = (
+            f"{min(self.spin_soft_min_mm.value(), self.spin_soft_max_mm.value()):.2f} to "
+            f"{max(self.spin_soft_min_mm.value(), self.spin_soft_max_mm.value()):.2f} mm"
+            if self.check_soft_limits.isChecked()
+            else "Disabled"
+        )
+        load_guard = (
+            f"{self.spin_max_load_g.value():.3f} g applied"
+            if self.check_max_load.isChecked()
+            else f"{self.spin_raw_scale_limit_g.value():.3f} g raw display"
+        )
+        channel = int(self.combo_current_sweep_supply_channel.currentData() or 0)
+        owner = (
+            self._automation_name or "Active TMA session"
+            if active
+            else "No active recipe"
+        )
+        owner_detail = (
+            f"Current-sweep CH{channel} | "
+            + ("shared broker" if self._using_shared_broker_supply() else "direct supply")
+            if active and channel > 0
+            else "Connections are available for manual setup."
+        )
+        action_enabled = not active and not auto_connecting
+        devices = {
+            "scale": BenchDeviceState(
+                scale_status,
+                scale_summary,
+                scale_detail,
+                scale_color,
+                "" if scale_live or active else "Connect",
+                action_enabled,
+            ),
+            "motor": BenchDeviceState(
+                motor_status,
+                motor_summary,
+                motor_detail,
+                motor_color,
+                "" if motor_ready or active else "Check",
+                action_enabled,
+            ),
+            "supply": BenchDeviceState(
+                supply_status,
+                supply_summary,
+                supply_detail,
+                supply_color,
+                "" if supply_connected or active else "Connect",
+                action_enabled,
+            ),
+            "ir": BenchDeviceState(
+                ir_status,
+                ir_summary,
+                ir_detail,
+                ir_color,
+                "" if ir_ready or active else "Connect",
+                action_enabled,
+            ),
+        }
+        return BenchWorkspaceState(
+            mode=mode,
+            headline=headline,
+            detail=detail,
+            color=color,
+            primary_action=primary_action,
+            primary_enabled=action_enabled,
+            settings_enabled=True,
+            settings_editable=not active,
+            position_reference=f"{self._position_reference_mm:.4f} mm",
+            load_reference=f"{self._zero_load_scale_reference_g():.4f} g raw",
+            travel_limits=soft_limits,
+            load_guard=load_guard,
+            owner=owner,
+            owner_detail=owner_detail,
+            devices=devices,
+        )
+
+    def _refresh_bench_workspace(self) -> None:
+        workspace = getattr(self, "tma_bench_workspace", None)
+        if workspace is None:
+            return
+        state = self._bench_workspace_state()
+        workspace.apply_state(state)
+        tabs = getattr(self, "_hardware_settings_tabs", None)
+        if tabs is not None:
+            tabs.setEnabled(state.settings_editable)
+
     def _auto_connect_manual_hardware(self) -> bool:
         if getattr(self, "_manual_auto_connect_active", False):
             return False
@@ -26135,6 +26417,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "button_manual_auto_connect"):
                 self.button_manual_auto_connect.setEnabled(True)
                 self.button_manual_auto_connect.setText("Auto-connect hardware")
+            self._refresh_bench_workspace()
 
     def _apply_manual_auto_connect_tic_settings(self) -> tuple[bool, list[str]]:
         if not self._tic_status_text:
@@ -32522,6 +32805,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_recipe.setEnabled(self._automation_active)
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
+        self._refresh_bench_workspace()
 
     @staticmethod
     def _fit_recipe_action_button(
@@ -37844,6 +38128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._set_header_metric("current", current_text, current_density_text)
         self._refresh_supply_live_label()
+        self._refresh_bench_workspace()
 
     def _set_run_log_visible(self, visible: bool) -> None:
         container = getattr(self, "_dashboard_log_container", None)

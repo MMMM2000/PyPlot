@@ -1,2 +1,2 @@
-- Added a Python-native TMA hardware workspace design study with bench readiness states, compact device status rows, reduced manual motion controls, and separate safety and service settings.
+- Added the Python-native TMA hardware workspace to the production logger with bench readiness states, compact device status rows, exactly three routine manual controls, and complete low-frequency hardware settings in a separate dialog.
 - Unified adaptive and configurable TMA live plots on the same palette-derived plot background across Prepare, Run, and Review.

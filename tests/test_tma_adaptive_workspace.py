@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -586,3 +587,93 @@ def test_adaptive_tab_bars_do_not_draw_overlapping_base_lines(
 ) -> None:
     assert not window._adaptive_result_tabs.tabBar().drawBase()
     assert not window._adaptive_inspector_tabs.tabBar().drawBase()
+
+
+def test_manual_actions_expose_only_autoconnect_and_press_hold_motion(
+    window: object,
+) -> None:
+    buttons = window.manual_actions_box.findChildren(
+        QtWidgets.QPushButton,
+        options=QtCore.Qt.FindChildOption.FindDirectChildrenOnly,
+    )
+
+    assert [button.text() for button in buttons] == [
+        "Auto-connect hardware",
+        "Move up",
+        "Move down",
+    ]
+    assert window.findChild(QtWidgets.QPushButton, "manual_jog_tension_button") is not None
+    assert window.findChild(QtWidgets.QPushButton, "manual_jog_relax_button") is not None
+    assert all("Stop motion" not in button.text() for button in buttons)
+
+
+def test_hardware_tab_uses_readiness_workspace_and_retains_full_settings(
+    window: object,
+) -> None:
+    hardware_tab = window.control_tabs.widget(2)
+
+    assert window.tma_bench_workspace.parent() is hardware_tab
+    assert hardware_tab.findChildren(QtWidgets.QGroupBox) == []
+    assert window._hardware_settings_dialog.windowTitle() == "TMA hardware settings"
+    assert [
+        window._hardware_settings_tabs.tabText(index)
+        for index in range(window._hardware_settings_tabs.count())
+    ] == [
+        "Connections",
+        "Safety and references",
+        "Power supply",
+        "IR temperature",
+    ]
+    window._show_hardware_settings_dialog("safety")
+    assert window._hardware_settings_tabs.currentIndex() == 1
+    assert window.spin_motion_speed_mm_s.isHidden() is False
+    assert window.spin_jog_mm.isHidden() is False
+    window._hardware_settings_dialog.hide()
+
+
+def test_hardware_workspace_reports_ready_and_locks_edits_during_session(
+    window: object,
+) -> None:
+    class _ConnectedSupply:
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    window.check_ir_enabled.blockSignals(True)
+    window.check_ir_enabled.setChecked(False)
+    window.check_ir_enabled.blockSignals(False)
+    window._scale_thread = object()
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = window._zero_load_scale_reference_g()
+    window._tic_status_text = "Motor ready"
+    window._tic_motor_power_ok = True
+    window._supply_controller = _ConnectedSupply()
+    try:
+        window._refresh_bench_workspace()
+        assert window.tma_bench_workspace.headline_label.text() == "Bench ready"
+        assert not window.tma_bench_workspace.primary_button.isVisible()
+        assert window.tma_bench_workspace.settings_button.isEnabled()
+        assert window._hardware_settings_tabs.isEnabled()
+
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._refresh_bench_workspace()
+        assert window.tma_bench_workspace.headline_label.text() == "Bench in use"
+        assert window.tma_bench_workspace.settings_button.isEnabled()
+        assert not window.tma_bench_workspace.safety_button.isEnabled()
+        assert not window._hardware_settings_tabs.isEnabled()
+        assert all(
+            not row.action_button.isVisible()
+            for row in window.tma_bench_workspace.device_rows.values()
+        )
+    finally:
+        window._automation_active = False
+        window._automation_name = ""
+        window._scale_thread = None
+        window._latest_scale_timestamp = None
+        window._tic_status_text = ""
+        window._tic_motor_power_ok = None
+        window._supply_controller = None
+        window.check_ir_enabled.blockSignals(True)
+        window.check_ir_enabled.setChecked(True)
+        window.check_ir_enabled.blockSignals(False)
