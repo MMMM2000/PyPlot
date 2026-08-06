@@ -9344,12 +9344,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #292e35;
                 border-radius: 4px;
             }
-            QFrame#tmaBenchReadiness,
-            QFrame#tmaBenchDeviceRow,
-            QFrame#tmaBenchSummary {
-                background: #191c20;
-                border: 1px solid #292e35;
-                border-radius: 4px;
+            QWidget#tmaBenchReadiness {
+                background: transparent;
+                border: 0;
+                border-bottom: 1px solid #292e35;
+            }
+            QFrame#tmaBenchDeviceRow {
+                background: transparent;
+                border: 0;
+                border-bottom: 1px solid #292e35;
+            }
+            QFrame#tmaBenchDeviceRow:hover,
+            QFrame#tmaBenchDeviceRow:focus {
+                background: #171a1f;
+            }
+            QLabel#tmaBenchSafetyLine {
+                border-top: 1px solid #292e35;
+                padding: 7px 9px 2px 9px;
             }
             QLabel[role="benchHeadline"] {
                 color: #edf0f3;
@@ -9360,12 +9371,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel[role="benchDeviceSummary"] {
                 color: #edf0f3;
                 font-weight: 600;
-            }
-            QWidget#tmaBenchWorkspace QToolButton {
-                background: #20242a;
-                border: 1px solid #343a42;
-                border-radius: 3px;
-                padding: 4px;
             }
             QLabel[role="inspectorTitle"] {
                 color: #edf0f3;
@@ -9432,8 +9437,8 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QLabel#adaptiveSweepProgressLabel {
                 background: transparent;
-                color: #f7f8fa;
-                font-size: 9pt;
+                color: #aeb5bd;
+                font-size: 8pt;
                 font-weight: 600;
             }
             QFrame#tmaBottomDock QPushButton {
@@ -10412,11 +10417,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tma_bench_workspace.settings_requested.connect(
             self._show_hardware_settings_dialog
         )
-        self.tma_bench_workspace.safety_requested.connect(
-            lambda: self._show_hardware_settings_dialog("safety")
-        )
-        self.tma_bench_workspace.device_action_requested.connect(
-            self._handle_bench_device_action
+        self.tma_bench_workspace.device_selected.connect(
+            self._show_bench_device_settings
         )
         hardware_layout.addWidget(self.tma_bench_workspace)
 
@@ -12765,16 +12767,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_summary_labels["sweep_context"].setProperty("role", "metricSecondary")
         self._adaptive_summary_labels["sweep_context"].setWordWrap(True)
         active_layout.addWidget(self._adaptive_summary_labels["sweep_context"])
-        self._adaptive_sweep_progress = QtWidgets.QProgressBar(active_card)
-        self._adaptive_sweep_progress.setObjectName("adaptiveSweepProgress")
-        self._adaptive_sweep_progress.setRange(0, 100)
-        self._adaptive_sweep_progress.setValue(0)
-        self._adaptive_sweep_progress.setTextVisible(False)
         progress_container = QtWidgets.QWidget(active_card)
-        progress_stack = QtWidgets.QStackedLayout(progress_container)
-        progress_stack.setContentsMargins(0, 0, 0, 0)
-        progress_stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
-        progress_stack.addWidget(self._adaptive_sweep_progress)
+        progress_layout = QtWidgets.QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(3)
         self._adaptive_sweep_progress_label = QtWidgets.QLabel(
             "Idle",
             progress_container,
@@ -12783,13 +12779,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "adaptiveSweepProgressLabel"
         )
         self._adaptive_sweep_progress_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignCenter
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        self._adaptive_sweep_progress_label.setAttribute(
-            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            True,
-        )
-        progress_stack.addWidget(self._adaptive_sweep_progress_label)
+        progress_layout.addWidget(self._adaptive_sweep_progress_label)
+        self._adaptive_sweep_progress = QtWidgets.QProgressBar(progress_container)
+        self._adaptive_sweep_progress.setObjectName("adaptiveSweepProgress")
+        self._adaptive_sweep_progress.setRange(0, 100)
+        self._adaptive_sweep_progress.setValue(0)
+        self._adaptive_sweep_progress.setTextVisible(False)
+        progress_layout.addWidget(self._adaptive_sweep_progress)
         active_layout.addWidget(progress_container)
 
         values = QtWidgets.QGridLayout()
@@ -13470,18 +13468,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._persist_settings_if_enabled(immediate=True)
 
     def _plot_theme(self) -> dict[str, Any]:
-        palette = self.palette()
-        app = QtWidgets.QApplication.instance()
-        style_hints = app.styleHints() if isinstance(app, QtWidgets.QApplication) else None
-        color_scheme = style_hints.colorScheme() if style_hints is not None else QtCore.Qt.ColorScheme.Light
-        window = palette.color(QtGui.QPalette.ColorRole.Window)
-        base = palette.color(QtGui.QPalette.ColorRole.Base)
-        text = palette.color(QtGui.QPalette.ColorRole.Text)
-        mid = palette.color(QtGui.QPalette.ColorRole.Mid)
-        grid = QtGui.QColor(mid)
-        grid.setAlpha(160 if color_scheme == QtCore.Qt.ColorScheme.Dark else 120)
+        # The TMA workspace is intentionally dark regardless of the operating
+        # system palette. Deriving these colors from Windows could otherwise
+        # place bright white plot canvases inside the dark application shell.
+        window = QtGui.QColor("#111316")
+        base = QtGui.QColor("#171a1f")
+        text = QtGui.QColor("#edf0f3")
+        grid = QtGui.QColor("#343a42")
+        grid.setAlpha(150)
         return {
-            "dark": color_scheme == QtCore.Qt.ColorScheme.Dark,
+            "dark": True,
             "figure_rgb": window.getRgbF()[:3],
             "axes_rgb": base.getRgbF()[:3],
             "text_rgb": text.getRgbF()[:3],
@@ -26119,17 +26115,14 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _handle_bench_device_action(self, device_key: str) -> None:
-        if self._automation_active or self._session_active:
-            return
-        action = {
-            "scale": self._toggle_scale_connection,
-            "motor": self._refresh_tic_status,
-            "supply": self._connect_supply,
-            "ir": self._toggle_ir_connection,
-        }.get(str(device_key))
-        if action is not None:
-            action()
+    def _show_bench_device_settings(self, device_key: str) -> None:
+        tab_key = {
+            "scale": "connections",
+            "motor": "connections",
+            "supply": "supply",
+            "ir": "ir",
+        }.get(str(device_key), "connections")
+        self._show_hardware_settings_dialog(tab_key)
 
     def _bench_workspace_state(self) -> BenchWorkspaceState:
         active = bool(self._automation_active or self._session_active)
@@ -26268,56 +26261,50 @@ class MainWindow(QtWidgets.QMainWindow):
             if active and channel > 0
             else "Connections are available for manual setup."
         )
-        action_enabled = not active and not auto_connecting
         devices = {
             "scale": BenchDeviceState(
                 scale_status,
                 scale_summary,
                 scale_detail,
                 scale_color,
-                "" if scale_live or active else "Connect",
-                action_enabled,
             ),
             "motor": BenchDeviceState(
                 motor_status,
                 motor_summary,
                 motor_detail,
                 motor_color,
-                "" if motor_ready or active else "Check",
-                action_enabled,
             ),
             "supply": BenchDeviceState(
                 supply_status,
                 supply_summary,
                 supply_detail,
                 supply_color,
-                "" if supply_connected or active else "Connect",
-                action_enabled,
             ),
             "ir": BenchDeviceState(
                 ir_status,
                 ir_summary,
                 ir_detail,
                 ir_color,
-                "" if ir_ready or active else "Connect",
-                action_enabled,
             ),
         }
+        safety_summary = (
+            f"Safety: zero {self._position_reference_mm:.4f} mm | "
+            f"load reference {self._zero_load_scale_reference_g():.4f} g raw | "
+            f"limits {soft_limits.lower()} | guard {load_guard}"
+        )
         return BenchWorkspaceState(
             mode=mode,
             headline=headline,
             detail=detail,
             color=color,
             primary_action=primary_action,
-            primary_enabled=action_enabled,
+            primary_enabled=not active and not auto_connecting,
             settings_enabled=True,
             settings_editable=not active,
-            position_reference=f"{self._position_reference_mm:.4f} mm",
-            load_reference=f"{self._zero_load_scale_reference_g():.4f} g raw",
-            travel_limits=soft_limits,
-            load_guard=load_guard,
+            safety_summary=safety_summary,
             owner=owner,
             owner_detail=owner_detail,
+            owner_visible=active,
             devices=devices,
         )
 

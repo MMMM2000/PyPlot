@@ -509,13 +509,16 @@ def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
     expected_background = window._qcolor_from_rgb(
         window._plot_theme()["axes_rgb"]
     ).name()
+    assert expected_background == "#171a1f"
+    assert expected_background != "#ffffff"
     assert plot_background == expected_background
-    assert (
-        window._dashboard_plot_bundles[0]
-        .widget.backgroundBrush()
-        .color()
-        .name()
-        == plot_background
+    assert all(
+        bundle.widget.backgroundBrush().color().name() == plot_background
+        for bundle in window._dashboard_plot_bundles
+    )
+    assert all(
+        bundle.widget.backgroundBrush().color().name() == plot_background
+        for bundle in window._adaptive_plot_bundles.values()
     )
 
 
@@ -579,6 +582,9 @@ def test_adaptive_progress_uses_stable_overlay_text(window: object) -> None:
 
     assert not window._adaptive_sweep_progress.isTextVisible()
     assert window._adaptive_sweep_progress_label.text() == "48%  |  ETA 54 min"
+    progress_layout = window._adaptive_sweep_progress_label.parentWidget().layout()
+    assert progress_layout.indexOf(window._adaptive_sweep_progress_label) == 0
+    assert progress_layout.indexOf(window._adaptive_sweep_progress) == 1
     window._automation_active = False
 
 
@@ -630,6 +636,15 @@ def test_hardware_tab_uses_readiness_workspace_and_retains_full_settings(
     assert window.spin_jog_mm.isHidden() is False
     window._hardware_settings_dialog.hide()
 
+    window.tma_bench_workspace.device_selected.emit("supply")
+    assert window._hardware_settings_tabs.currentIndex() == 2
+    window._hardware_settings_dialog.hide()
+
+    assert all(
+        row.findChildren(QtWidgets.QAbstractButton) == []
+        for row in window.tma_bench_workspace.device_rows.values()
+    )
+
 
 def test_hardware_workspace_reports_ready_and_locks_edits_during_session(
     window: object,
@@ -654,18 +669,15 @@ def test_hardware_workspace_reports_ready_and_locks_edits_during_session(
         assert not window.tma_bench_workspace.primary_button.isVisible()
         assert window.tma_bench_workspace.settings_button.isEnabled()
         assert window._hardware_settings_tabs.isEnabled()
+        assert window.tma_bench_workspace.owner_widget.isHidden()
 
         window._automation_active = True
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window._refresh_bench_workspace()
         assert window.tma_bench_workspace.headline_label.text() == "Bench in use"
         assert window.tma_bench_workspace.settings_button.isEnabled()
-        assert not window.tma_bench_workspace.safety_button.isEnabled()
         assert not window._hardware_settings_tabs.isEnabled()
-        assert all(
-            not row.action_button.isVisible()
-            for row in window.tma_bench_workspace.device_rows.values()
-        )
+        assert not window.tma_bench_workspace.owner_widget.isHidden()
     finally:
         window._automation_active = False
         window._automation_name = ""

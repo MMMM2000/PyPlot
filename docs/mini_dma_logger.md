@@ -54,7 +54,7 @@ Current intended hardware stack:
 - an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
 - the dashboard header shows fixed-width live cells for session state, load/stress/strain, command speed in `mm/s`, `g/s`, `MPa/s`, `%/s`, and hardware status, so changing numbers no longer shift the layout
 - recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
-- the Hardware tab is a bench-readiness workspace with compact Scale, Motor, Power supply, and optional IR status rows plus safety/reference and ownership summaries. Its separate Hardware Settings dialog retains the full connection, provisioning, motor, scale, supply, IR, and safety configuration surface without keeping those controls permanently visible.
+- the Hardware tab is a quiet bench-status workspace: one readiness line, four compact clickable Scale/Motor/Power supply/IR rows, one safety/reference summary, and ownership only while a run is active. Device rows open the relevant page of the separate Hardware Settings dialog, which retains the full connection, provisioning, motor, scale, supply, IR, and safety configuration surface without keeping those controls permanently visible.
 - Hardware Settings includes a `Provision bench hardware` action for Košice-style setup: it verifies/connects the scale, configures the HMP motor-supply channel separately from the current-sweep channel, applies the Tic step mode, winding-current limit, and motion limits, and reports pass/fail status lines before a recipe is run
 - current recipes can be saved and loaded as `.recipe.json` files from an optional Settings-menu recipe file row; the filename is descriptive for humans, but the JSON file carries the schema version, recipe mode, setup, timing, current-sweep targets, hold/correction caps, first-overheating preheat target/current limit, and return settings
 - the Recipe tab shows the current sample name and wire diameter in `um` at the top so the operator can catch stale sample identity or geometry before starting a run
@@ -204,7 +204,7 @@ Current intended hardware stack:
 
 ### Plotting / UI
 
-- dark-theme-aware Matplotlib styling
+- consistent dark plotting surfaces across Prepare, Run, and Review: the plot canvas is subtly lighter than the application shell for separation, without introducing white or theme-dependent graph backgrounds
 - configurable 4-tile dashboard instead of a fixed graph trio
 - selectable plot channels with left/right axis support
 - recovery actions open a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start and update that graph from fresh scale replies; they remain available from the recipe stop/completion workflow without cluttering routine Manual Actions
