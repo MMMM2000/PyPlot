@@ -512,7 +512,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 GNG_SCALE_PREFERRED_BAUD = 9600
 GNG_SCALE_REQUEST = "\\x1bp"
 GNG_SCALE_TERMINATOR = ""
-GNG_SCALE_INTERVAL_MS = 250
+GNG_SCALE_INTERVAL_MS = 200
 GNG_SCALE_READABILITY_G = 0.005
 KERN_KCP_SUPPORTED_BAUDS = (256000, 128000, 115200, 57600, 38400, 19200, 9600)
 KERN_KCP_SCALE_PREFERRED_BAUD = 256000
@@ -39583,8 +39583,8 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_request = KERN_KCP_SCALE_REQUEST
             scale_terminator = KERN_KCP_SCALE_TERMINATOR
             saved_scale_interval_ms = KERN_KCP_SCALE_INTERVAL_MS
-        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < DEFAULT_SCALE_REQUEST_INTERVAL_MS:
-            saved_scale_interval_ms = DEFAULT_SCALE_REQUEST_INTERVAL_MS
+        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < GNG_SCALE_INTERVAL_MS:
+            saved_scale_interval_ms = GNG_SCALE_INTERVAL_MS
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)

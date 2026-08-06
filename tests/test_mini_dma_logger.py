@@ -15509,7 +15509,7 @@ def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, q
     qtbot.addWidget(window)
 
     try:
-        assert window.spin_scale_interval.value() == mini_dma_mod.DEFAULT_SCALE_REQUEST_INTERVAL_MS
+        assert window.spin_scale_interval.value() == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     finally:
         _close_test_window(window)
 
@@ -15636,7 +15636,7 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
     assert window.edit_scale_request.text_value == "\\x1bp"
     assert window.edit_scale_terminator.text_value == ""
     assert spinners["control"].value_set == 250
-    assert spinners["scale"].value_set == 250
+    assert spinners["scale"].value_set == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     assert "Prague G&G" in messages[-1]
 
 
@@ -35824,7 +35824,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
         assert window.combo_scale_baud.currentText() == "9600"
         assert window.edit_scale_request.text() == "\\x1bp"
         assert window.edit_scale_terminator.text() == ""
-        assert window.spin_scale_interval.value() == 250
+        assert window.spin_scale_interval.value() == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     finally:
         _close_test_window(window)
 
