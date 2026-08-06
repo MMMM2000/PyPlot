@@ -207,6 +207,67 @@ def test_automation_control_loop_ticks_without_qt_event_processing() -> None:
         loop.stop()
 
 
+def test_automation_control_loop_wakes_promptly_before_periodic_fallback() -> None:
+    ticks: list[float] = []
+    wake_flags: list[bool] = []
+    loop: mini_dma_mod.AutomationControlLoop
+
+    def record_tick() -> None:
+        ticks.append(time.monotonic())
+        wake_flags.append(loop.callback_triggered_by_wake())
+
+    loop = mini_dma_mod.AutomationControlLoop(record_tick)
+
+    try:
+        loop.start(1000)
+        deadline = time.monotonic() + 0.3
+        while len(ticks) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(ticks) == 1
+
+        requested_s = time.monotonic()
+        assert loop.wake() is True
+        deadline = requested_s + 0.3
+        while len(ticks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        assert len(ticks) == 2
+        assert ticks[1] - requested_s < 0.2
+        assert wake_flags == [False, True]
+    finally:
+        loop.stop()
+
+
+def test_automation_control_loop_coalesces_repeated_wakes() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    ticks: list[float] = []
+
+    def blocked_first_tick() -> None:
+        ticks.append(time.monotonic())
+        if len(ticks) == 1:
+            entered.set()
+            release.wait(timeout=1.0)
+
+    loop = mini_dma_mod.AutomationControlLoop(blocked_first_tick)
+    try:
+        loop.start(1000)
+        assert entered.wait(timeout=0.3)
+        for _ in range(20):
+            assert loop.wake() is True
+        release.set()
+
+        deadline = time.monotonic() + 0.3
+        while len(ticks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(ticks) == 2
+        time.sleep(0.08)
+        assert len(ticks) == 2
+    finally:
+        release.set()
+        loop.stop()
+
+
 def test_automation_control_loop_pause_resume_and_stop() -> None:
     ticks: list[float] = []
     loop = mini_dma_mod.AutomationControlLoop(lambda: ticks.append(time.monotonic()))
@@ -546,6 +607,44 @@ def test_automation_controller_dispatches_steps_outside_main_window(tmp_path: Pa
         assert window._automation_tick_running is False
     finally:
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_sample_driven_retry_does_not_inflate_progress_until_step_completes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    finished = False
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_tick_sample_driven = True
+        window._automation_phase = "seek"
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("sweep_current", note="sample-driven"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = 10
+        window._automation_completed_ticks = 3
+        window._handle_current_sweep_step = lambda _step, _index: finished  # type: ignore[method-assign]
+        window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        window._automation_controller.tick()
+
+        assert window._automation_index == 0
+        assert window._automation_completed_ticks == 3
+
+        finished = True
+        window._automation_controller.tick()
+
+        assert window._automation_index == 1
+        assert window._automation_completed_ticks == 4
+    finally:
+        window._automation_active = False
+        window._automation_tick_sample_driven = False
         _close_test_window(window)
 
 
@@ -6366,6 +6465,53 @@ def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot
         assert window._latest_scale_timestamp == pytest.approx(timestamp_s)
         assert window._scale_signal_buffer.latest() is not None
     finally:
+        _close_test_window(window)
+
+
+def test_accepted_scale_sample_wakes_control_loop_once(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    wake_count = 0
+
+    class _WakeProbe:
+        def wake(self) -> bool:
+            nonlocal wake_count
+            wake_count += 1
+            return True
+
+    try:
+        window._automation_control_loop = _WakeProbe()  # type: ignore[assignment]
+        window._record_scale_measurement_state(12.5, "12.5 g", time.time())
+
+        assert wake_count == 1
+    finally:
+        window._automation_control_loop = None
+        _close_test_window(window)
+
+
+def test_rejected_stale_scale_callback_does_not_wake_control_loop(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    wake_count = 0
+
+    class _WakeProbe:
+        def wake(self) -> bool:
+            nonlocal wake_count
+            wake_count += 1
+            return True
+
+    try:
+        window._automation_control_loop = _WakeProbe()  # type: ignore[assignment]
+        window._scale_connection_token = object()
+        write = window._record_scale_measurement_state(
+            12.5,
+            "stale 12.5 g",
+            time.time(),
+            token=object(),
+        )
+
+        assert write is None
+        assert wake_count == 0
+    finally:
+        window._automation_control_loop = None
         _close_test_window(window)
 
 

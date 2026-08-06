@@ -5253,6 +5253,8 @@ class AutomationControlLoop:
         self._running = False
         self._paused = False
         self._in_callback = False
+        self._wake_pending = False
+        self._callback_triggered_by_wake = False
         self._interval_s = DEFAULT_CONTROL_INTERVAL_MS / 1000.0
 
     def start(self, interval_ms: int) -> None:
@@ -5261,19 +5263,31 @@ class AutomationControlLoop:
             self._interval_s = interval_s
             if self._running:
                 self._paused = False
+                self._wake_pending = True
                 self._condition.notify_all()
                 return
             self._running = True
             self._paused = False
+            self._wake_pending = False
             self._thread = Thread(target=self._run, name="TmaAutomationControlLoop", daemon=True)
             self._thread.start()
             self._condition.notify_all()
+
+    def wake(self) -> bool:
+        """Request one prompt control evaluation, coalescing repeated requests."""
+        with self._condition:
+            if not self._running or self._paused:
+                return False
+            self._wake_pending = True
+            self._condition.notify_all()
+            return True
 
     def pause(self, *, timeout_s: float = 2.0) -> bool:
         deadline_s = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             if self._running:
                 self._paused = True
+                self._wake_pending = False
                 self._condition.notify_all()
             while self._in_callback:
                 remaining_s = deadline_s - time.monotonic()
@@ -5286,12 +5300,14 @@ class AutomationControlLoop:
         with self._condition:
             if self._running:
                 self._paused = False
+                self._wake_pending = True
                 self._condition.notify_all()
 
     def stop(self) -> bool:
         with self._condition:
             self._running = False
             self._paused = False
+            self._wake_pending = False
             thread = self._thread
             self._condition.notify_all()
         if thread is not None and thread is not current_thread():
@@ -5314,23 +5330,34 @@ class AutomationControlLoop:
         with self._condition:
             return self._paused
 
+    def callback_triggered_by_wake(self) -> bool:
+        with self._condition:
+            return self._in_callback and self._callback_triggered_by_wake
+
     def _run(self) -> None:
-        next_tick_s = time.monotonic()
+        next_fallback_s = time.monotonic()
         while True:
             with self._condition:
                 while self._running and self._paused:
                     self._condition.wait()
-                    next_tick_s = time.monotonic()
+                    next_fallback_s = time.monotonic()
                 if not self._running:
                     return
                 interval_s = self._interval_s
-                delay_s = max(0.0, next_tick_s - time.monotonic())
-                if delay_s > 0.0:
+                while self._running and not self._paused and not self._wake_pending:
+                    delay_s = max(0.0, next_fallback_s - time.monotonic())
+                    if delay_s <= 0.0:
+                        break
                     self._condition.wait(timeout=delay_s)
+                if not self._running:
+                    return
+                if self._paused:
                     continue
+                triggered_by_wake = self._wake_pending
+                self._wake_pending = False
+                self._callback_triggered_by_wake = triggered_by_wake
+                self._in_callback = True
             try:
-                with self._condition:
-                    self._in_callback = True
                 self._tick_callback()
             except BaseException as exc:
                 with self._condition:
@@ -5342,8 +5369,9 @@ class AutomationControlLoop:
             finally:
                 with self._condition:
                     self._in_callback = False
+                    self._callback_triggered_by_wake = False
                     self._condition.notify_all()
-            next_tick_s = max(next_tick_s + interval_s, time.monotonic())
+            next_fallback_s = time.monotonic() + interval_s
 
 
 class MiniDmaAutomationController:
@@ -5535,7 +5563,12 @@ class MiniDmaAutomationController:
             finished = host._handle_timed_record_step(step, step_index)
             if not finished and host._automation_active:
                 host._automation_index -= 1
-        if host._automation_active and host._automation_phase != "current_hold":
+        completed_step = host._automation_index > step_index
+        if (
+            host._automation_active
+            and host._automation_phase != "current_hold"
+            and (not host._automation_tick_sample_driven or completed_step)
+        ):
             host._automation_completed_ticks = min(
                 max(1, host._automation_total_steps or len(host._automation_steps)),
                 host._automation_completed_ticks + 1,
@@ -8450,6 +8483,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_controller = MiniDmaAutomationController(self)
         self._automation_active = False
         self._automation_tick_running = False
+        self._automation_tick_sample_driven = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = DEFAULT_CONTROL_INTERVAL_MS
@@ -17049,6 +17083,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             write = self._reserve_raw_scale_sample_locked(sample)
             self._scale_no_data_hint_emitted = True
+        control_loop = self._automation_control_loop
+        if control_loop is not None:
+            control_loop.wake()
         return write
 
     def _record_scale_measurement_from_worker(
@@ -32808,8 +32845,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_automation_control_tick(self) -> None:
         self._control_worker_thread_id = get_ident()
-        with self._automation_control_lock:
-            self._handle_auto_ramp_tick()
+        control_loop = self._automation_control_loop
+        self._automation_tick_sample_driven = bool(
+            control_loop is not None and control_loop.callback_triggered_by_wake()
+        )
+        try:
+            with self._automation_control_lock:
+                self._handle_auto_ramp_tick()
+        finally:
+            self._automation_tick_sample_driven = False
 
     def _handle_automation_control_loop_error(self, exc: BaseException) -> None:
         self._automation_control_error = str(exc) or exc.__class__.__name__
