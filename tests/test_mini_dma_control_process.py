@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, FrozenInstanceError
 import json
+import inspect
+import multiprocessing
 import os
 from pathlib import Path
 import time
@@ -29,6 +31,69 @@ from data_logging.mini_dma_logger.production_control_backend import (
     _apply_window_configuration,
     capture_window_configuration,
 )
+
+
+def test_control_process_spawn_entrypoint_preserves_legacy_positional_abi() -> None:
+    """A running Windows parent may spawn after source files are updated."""
+
+    from data_logging.mini_dma_logger import control_process as module
+
+    parameters = tuple(inspect.signature(module._run_control_process).parameters.values())
+    assert tuple(parameter.name for parameter in parameters[:9]) == (
+        "command_queue",
+        "heartbeat_queue",
+        "snapshot_queue",
+        "event_queue",
+        "fault_connection",
+        "emergency_event",
+        "shutdown_event",
+        "backend_config",
+        "backend_factory_spec",
+    )
+    assert parameters[9].name == "hold_bypass_queue"
+    assert parameters[9].default is None
+
+
+def test_legacy_nine_argument_windows_parent_can_spawn_updated_child() -> None:
+    """Exercise the exact old-parent/new-child boundary that failed live."""
+
+    from data_logging.mini_dma_logger import control_process as module
+
+    context = multiprocessing.get_context("spawn")
+    command_queue = context.Queue(maxsize=2)
+    heartbeat_queue = context.Queue(maxsize=1)
+    snapshot_queue = context.Queue(maxsize=1)
+    event_queue = context.Queue(maxsize=2)
+    fault_parent, fault_child = context.Pipe(duplex=False)
+    emergency_event = context.Event()
+    shutdown_event = context.Event()
+    process = context.Process(
+        target=module._run_control_process,
+        args=(
+            command_queue,
+            heartbeat_queue,
+            snapshot_queue,
+            event_queue,
+            fault_child,
+            emergency_event,
+            shutdown_event,
+            SimulatedBackendConfig(),
+            None,
+        ),
+    )
+    process.start()
+    try:
+        snapshot = snapshot_queue.get(timeout=5.0)
+        assert snapshot.state is ControlState.IDLE
+        assert process.is_alive()
+        assert not fault_parent.poll()
+    finally:
+        shutdown_event.set()
+        process.join(timeout=5.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+    assert process.exitcode == 0
 
 
 def _wait_for_snapshot(

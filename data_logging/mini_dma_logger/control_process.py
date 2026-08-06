@@ -471,6 +471,10 @@ class _ControlProcessRuntime:
             self._last_parent_heartbeat_s = latest_s
 
     def _drain_hold_bypass(self) -> None:
+        if self._hold_bypass_queue is None:
+            # Backward-compatible Windows spawn path for a parent process
+            # that was already running when this optional IPC lane was added.
+            return
         latest: CurrentHoldBypassRequest | None = None
         while True:
             try:
@@ -667,7 +671,6 @@ class _ControlProcessRuntime:
 
 def _run_control_process(
     command_queue: Any,
-    hold_bypass_queue: Any,
     heartbeat_queue: Any,
     snapshot_queue: Any,
     event_queue: Any,
@@ -676,6 +679,7 @@ def _run_control_process(
     shutdown_event: Any,
     backend_config: SimulatedBackendConfig,
     backend_factory_spec: BackendFactorySpec | None,
+    hold_bypass_queue: Any | None = None,
 ) -> None:
     try:
         runtime = _ControlProcessRuntime(
@@ -767,7 +771,6 @@ class TmaControlProcess:
             name="TmaControlProcess",
             args=(
                 self._command_queue,
-                self._hold_bypass_queue,
                 self._heartbeat_queue,
                 self._snapshot_queue,
                 self._event_queue,
@@ -776,6 +779,7 @@ class TmaControlProcess:
                 self._shutdown_event,
                 self._backend_config,
                 self._backend_factory_spec,
+                self._hold_bypass_queue,
             ),
         )
         self._process.start()
