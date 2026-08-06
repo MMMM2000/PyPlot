@@ -442,6 +442,15 @@ class ProductionTmaBackend:
             ),
         )
 
+    def set_current_hold_bypass(self, enabled: bool) -> tuple[bool, str]:
+        window = self._window
+        if window is None:
+            return (not enabled), "controller is not running"
+        setter = getattr(window, "_set_current_hold_bypass_active", None)
+        if not callable(setter):
+            return False, "controller does not support current-hold bypass"
+        return setter(bool(enabled))
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]:
         window = self._window
         if window is None:
@@ -482,6 +491,20 @@ class ProductionTmaBackend:
             ("hardware_preflight_complete", bool(self._started)),
             ("automation_active", bool(window._automation_active)),
             ("automation_paused", bool(window._automation_paused)),
+            (
+                "current_hold_bypass_active",
+                bool(getattr(window, "_current_hold_bypass_active", False)),
+            ),
+            (
+                "current_hold_fluctuation_classification",
+                str(
+                    getattr(
+                        window,
+                        "_current_hold_fluctuation_classification",
+                        "inactive",
+                    )
+                ),
+            ),
             ("automation_phase", str(window._automation_phase)),
             ("automation_name", str(window._automation_name)),
             ("automation_index", int(window._automation_index)),
@@ -586,6 +609,7 @@ class ProductionTmaBackend:
             and self._window is not None
             and not self._window._automation_active
         ):
+            self.set_current_hold_bypass(False)
             # Normal recipe completion has the same motor-supply policy as an
             # operator Stop: preserve the separately configured motor channel.
             self._window._preserve_motor_supply_on_close = True
@@ -597,6 +621,7 @@ class ProductionTmaBackend:
         window = self._window
         if window is not None:
             try:
+                self.set_current_hold_bypass(False)
                 if window._automation_active:
                     self.emergency_stop("control process closing")
             finally:

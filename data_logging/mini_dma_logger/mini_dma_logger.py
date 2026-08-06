@@ -162,10 +162,10 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "tma_control"
-CONTROL_LOGIC_VERSION = "2026-08-05.1"
+CONTROL_LOGIC_VERSION = "2026-08-06.1"
 CONTROL_LOGIC_PROFILE = (
     "scale-routed-prague-legacy-kosice-adaptive-"
-    "cycle-centered-resume-response-gated-volatile-observer"
+    "balanced-cycle-centered-resume-response-gated-volatile-observer"
 )
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -177,6 +177,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_scale_signal",
     "current_hold_cycle_center_motor_suppression",
     "current_hold_cycle_center_resume_confirmation",
+    "current_hold_cycle_center_requires_balanced_crossings",
+    "current_hold_momentary_operator_bypass",
     "current_hold_cycle_center_resume_uses_active_hold_state",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
@@ -300,6 +302,12 @@ CONTROL_TRACE_FIELDNAMES = [
     "cycle_center_ready",
     "cycle_center_stationary",
     "cycle_center_fast_veto",
+    "cycle_center_crossing_count",
+    "cycle_center_above_fraction",
+    "cycle_center_below_fraction",
+    "cycle_center_balanced_crossings",
+    "current_hold_fluctuation_classification",
+    "current_hold_bypass_active",
     "cycle_center_suppression_allowed",
     "latest_scale_age_s",
     "scale_recent_rate_hz",
@@ -913,6 +921,8 @@ SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA = 35.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA = 20.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA = 12.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S = 2.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS = 3
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT = 3
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_WINDOW_S = 15.0
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_RESPONSE_S = 10.0
@@ -1686,7 +1696,12 @@ class CurrentHoldCycleCenterState:
     ready: bool
     stationary: bool
     fast_veto: bool
-    suppression_allowed: bool
+    crossing_count: int = 0
+    above_fraction: float = 0.0
+    below_fraction: float = 0.0
+    balanced_crossings: bool = False
+    classification: str = "inactive"
+    suppression_allowed: bool = False
 
 
 class ScaleSignalBuffer:
@@ -8169,6 +8184,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
+        self._current_hold_bypass_dialog: QtWidgets.QDialog | None = None
+        self._current_hold_bypass_button: QtWidgets.QPushButton | None = None
+        self._current_hold_bypass_status: QtWidgets.QLabel | None = None
         self._isolated_supply_handoff_leases: dict[int, str] = {}
         self._recovery_prompt_pending = False
         self._recovery_prompt_visible = False
@@ -8532,6 +8552,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
         self._current_sweep_ramp_hold_cycle_center_since_s: float | None = None
+        self._current_hold_bypass_active = False
+        self._current_hold_bypass_events: list[dict[str, object]] = []
+        self._current_hold_fluctuation_classification = "inactive"
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
         self._current_sweep_endpoint_seek_accepted_step_index: int | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
@@ -8794,6 +8817,95 @@ class MainWindow(QtWidgets.QMainWindow):
         benchmark_action = developer_menu.addAction("Benchmark Tic Transports")
         if benchmark_action is not None:
             benchmark_action.triggered.connect(self._benchmark_tic_transports)
+        self.action_current_hold_bypass = developer_menu.addAction(
+            "Momentary Current-Hold Bypass..."
+        )
+        if self.action_current_hold_bypass is not None:
+            self.action_current_hold_bypass.triggered.connect(
+                self._show_current_hold_bypass_dialog
+            )
+
+    def _show_current_hold_bypass_dialog(self) -> None:
+        dialog = self._current_hold_bypass_dialog
+        if dialog is None:
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("TMA Developer Control")
+            dialog.setModal(False)
+            dialog.installEventFilter(self)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            explanation = QtWidgets.QLabel(
+                "Press and hold to bypass only the current-ramp stress hold. "
+                "Release restores normal hold logic immediately. All motor, "
+                "load, current, voltage, continuity, stale-data, and emergency "
+                "limits remain active."
+            )
+            explanation.setWordWrap(True)
+            layout.addWidget(explanation)
+            button = QtWidgets.QPushButton("Hold to bypass current hold")
+            button.setMinimumHeight(54)
+            button.pressed.connect(
+                lambda: self._request_current_hold_bypass(True)
+            )
+            button.released.connect(
+                lambda: self._request_current_hold_bypass(False)
+            )
+            layout.addWidget(button)
+            status = QtWidgets.QLabel("Normal current-hold logic active.")
+            status.setWordWrap(True)
+            layout.addWidget(status)
+            self._current_hold_bypass_dialog = dialog
+            self._current_hold_bypass_button = button
+            self._current_hold_bypass_status = status
+        self._update_current_hold_bypass_dialog()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _request_current_hold_bypass(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled and (
+            not self._isolated_recipe_active
+            or self._isolated_recipe_paused
+            or self._production_control_process is None
+            or self._production_control_identity is None
+        ):
+            self._current_hold_bypass_requested = False
+            self._update_current_hold_bypass_dialog(
+                detail="Bypass is available only during a running isolated recipe."
+            )
+            return
+        self._current_hold_bypass_requested = enabled
+        process = self._production_control_process
+        identity = self._production_control_identity
+        if process is not None and identity is not None:
+            try:
+                process.set_current_hold_bypass(identity, enabled)
+            except Exception as exc:
+                self._current_hold_bypass_requested = False
+                self._update_current_hold_bypass_dialog(detail=str(exc))
+                return
+        self._update_current_hold_bypass_dialog()
+
+    def _update_current_hold_bypass_dialog(self, *, detail: str = "") -> None:
+        button = self._current_hold_bypass_button
+        status = self._current_hold_bypass_status
+        if button is None or status is None:
+            return
+        available = bool(
+            self._isolated_recipe_active
+            and not self._isolated_recipe_paused
+            and self._production_control_process is not None
+        )
+        button.setEnabled(available)
+        if detail:
+            text = detail
+        elif self._current_hold_bypass_confirmed:
+            text = "Bypass active while the button remains held."
+        elif self._current_hold_bypass_requested:
+            text = "Bypass requested; waiting for controller confirmation."
+        else:
+            text = "Normal current-hold logic active."
+        status.setText(text)
 
     def _is_ui_thread(self) -> bool:
         return get_ident() == self._ui_thread_id
@@ -15827,6 +15939,12 @@ class MainWindow(QtWidgets.QMainWindow):
             and event.type() == QtCore.QEvent.Type.ApplicationDeactivate
         ):
             self._hide_fabrication_completer_popups()
+            self._request_current_hold_bypass(False)
+        if (
+            watched is self._current_hold_bypass_dialog
+            and event.type() in {QtCore.QEvent.Type.Close, QtCore.QEvent.Type.Hide}
+        ):
+            self._request_current_hold_bypass(False)
         return super().eventFilter(watched, event)
 
     def _handle_fabrication_composition_activated(self, value: object) -> None:
@@ -22251,6 +22369,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ready=False,
             stationary=False,
             fast_veto=False,
+            crossing_count=0,
+            above_fraction=0.0,
+            below_fraction=0.0,
+            balanced_crossings=False,
+            classification="inactive",
             suppression_allowed=False,
         )
         hold_active = self._current_sweep_ramp_hold_step_index is not None
@@ -22262,6 +22385,7 @@ class MainWindow(QtWidgets.QMainWindow):
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or self._current_sweep_ramp_hold_scale_started_s is None
         ):
+            self._current_hold_fluctuation_classification = "inactive"
             return unavailable
         signal = self._scale_control_signal_for_basis(
             basis,
@@ -22269,6 +22393,7 @@ class MainWindow(QtWidgets.QMainWindow):
             since_s=self._current_sweep_ramp_hold_scale_started_s,
         )
         if signal is None:
+            self._current_hold_fluctuation_classification = "insufficient_evidence"
             return unavailable
         center_band = self._current_sweep_hold_min_band_for_basis(
             basis,
@@ -22310,6 +22435,67 @@ class MainWindow(QtWidgets.QMainWindow):
             or abs(float(target_value) - float(fast_signal.latest_value)) > fast_veto_band
         )
         error_value = float(target_value) - float(signal.value)
+        latest = self._scale_signal_buffer.latest()
+        samples = (
+            []
+            if latest is None
+            else self._scale_signal_buffer.recent_samples(
+                now_s=latest.timestamp_s,
+                window_s=SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S,
+            )
+        )
+        if self._current_sweep_ramp_hold_scale_started_s is not None:
+            samples = [
+                sample
+                for sample in samples
+                if sample.timestamp_s >= self._current_sweep_ramp_hold_scale_started_s
+            ]
+        values: list[float] = []
+        if basis == HSW_BASIS_LOAD_G:
+            values = [float(sample.applied_load_g) for sample in samples]
+        else:
+            config = self._control_config()
+            diameter_mm = (
+                config.diameter_mm
+                if config is not None
+                else float(self.spin_diameter.value())
+            )
+            for sample in samples:
+                stress = stress_mpa_from_load_g(
+                    float(sample.applied_load_g),
+                    diameter_mm,
+                )
+                if stress is not None and math.isfinite(float(stress)):
+                    values.append(float(stress))
+        side_signs = [
+            1 if value > target_value else -1 if value < target_value else 0
+            for value in values
+        ]
+        nonzero_signs = [sign for sign in side_signs if sign]
+        crossing_count = sum(
+            left != right
+            for left, right in zip(nonzero_signs, nonzero_signs[1:])
+        )
+        sample_total = max(1, len(values))
+        above_fraction = sum(value > target_value for value in values) / sample_total
+        below_fraction = sum(value < target_value for value in values) / sample_total
+        balanced_crossings = bool(
+            ready
+            and crossing_count >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS
+            and above_fraction >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+            and below_fraction >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+        )
+        if not ready:
+            classification = "insufficient_evidence"
+        elif fast_veto:
+            classification = "fast_excursion"
+        elif not stationary:
+            classification = "directional_drift"
+        elif balanced_crossings and abs(error_value) <= center_band:
+            classification = "centered_fluctuation"
+        else:
+            classification = "unbalanced_fluctuation"
+        self._current_hold_fluctuation_classification = classification
         suppression_allowed = (
             self._current_sweep_cycle_center_motor_suppression_enabled
             and stationary
@@ -22322,6 +22508,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ready=ready,
             stationary=stationary,
             fast_veto=fast_veto,
+            crossing_count=crossing_count,
+            above_fraction=above_fraction,
+            below_fraction=below_fraction,
+            balanced_crossings=balanced_crossings,
+            classification=classification,
             suppression_allowed=suppression_allowed,
         )
 
@@ -27550,6 +27741,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_cycle_center_resume_evidence_s": (
                     SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S
                 ),
+                "current_hold_cycle_center_min_crossings": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS
+                ),
+                "current_hold_cycle_center_min_side_fraction": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+                ),
                 "current_hold_volatile_observer_burst_count": (
                     SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT
                 ),
@@ -27582,6 +27779,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
                 "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
                 "current_ramp_hold_on_error": self.check_current_sweep_hold_on_error.isChecked(),
+                "current_hold_momentary_bypass_active": bool(
+                    self._current_hold_bypass_active
+                ),
+                "current_hold_momentary_bypass_events": list(
+                    self._current_hold_bypass_events
+                ),
+                "current_hold_fluctuation_classification": (
+                    self._current_hold_fluctuation_classification
+                ),
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
@@ -29162,6 +29368,26 @@ class MainWindow(QtWidgets.QMainWindow):
                         ""
                         if cycle_center_state is None
                         else int(cycle_center_state.fast_veto)
+                    ),
+                    "cycle_center_crossing_count": (
+                        "" if cycle_center_state is None else cycle_center_state.crossing_count
+                    ),
+                    "cycle_center_above_fraction": _number(
+                        None if cycle_center_state is None else cycle_center_state.above_fraction
+                    ),
+                    "cycle_center_below_fraction": _number(
+                        None if cycle_center_state is None else cycle_center_state.below_fraction
+                    ),
+                    "cycle_center_balanced_crossings": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.balanced_crossings)
+                    ),
+                    "current_hold_fluctuation_classification": (
+                        self._current_hold_fluctuation_classification
+                    ),
+                    "current_hold_bypass_active": int(
+                        self._current_hold_bypass_active
                     ),
                     "cycle_center_suppression_allowed": (
                         ""
@@ -33453,6 +33679,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._production_control_identity = identity
         self._isolated_recipe_active = True
         self._isolated_recipe_paused = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
         self._isolated_command_pending = "start"
         self._isolated_pending_sequence = start_sequence
         self._isolated_command_deadline_s = time.monotonic() + TMA_START_ACK_TIMEOUT_S
@@ -33518,6 +33746,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if snapshot is not None:
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
+            self._current_hold_bypass_confirmed = bool(
+                readback.get("current_hold_bypass_active", False)
+            )
+            self._update_current_hold_bypass_dialog()
             self._consume_isolated_log_snapshot(readback)
             self._consume_isolated_plot_snapshot(readback)
             if (
@@ -33850,6 +34082,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_last_plot_elapsed_s = None
         self._isolated_session_logging_enabled = False
         self._isolated_user_stop_requested = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
+        self._update_current_hold_bypass_dialog()
         self._close_length_setup_dialog()
         self._automation_active = False
         self._automation_paused = False
@@ -34258,6 +34493,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 and identity is not None
                 and self._isolated_command_pending is None
             ):
+                # Pause must restore normal policy even if the operator still
+                # physically holds the developer-only momentary button.
+                self._request_current_hold_bypass(False)
                 try:
                     self._isolated_pending_sequence = process.pause(identity)
                 except Exception as exc:
@@ -35387,6 +35625,8 @@ class MainWindow(QtWidgets.QMainWindow):
             origin=resolved_origin,
             force_reason=resolved_reason != "app_closed",
         )
+        if self._current_hold_bypass_active:
+            self._set_current_hold_bypass_active(False)
         should_store_resume = user_initiated and self._automation_index < len(self._automation_steps)
         if should_store_resume:
             try:
@@ -36691,6 +36931,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
+        self._current_hold_fluctuation_classification = "inactive"
 
     def _mark_current_sweep_ramp_hold_scale_start(self) -> None:
         latest = self._scale_signal_buffer.latest()
@@ -36717,6 +36958,57 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
         self._clear_current_sweep_ramp_hold()
         self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
+
+    def _set_current_hold_bypass_active(self, enabled: bool) -> tuple[bool, str]:
+        """Set the process-owned momentary bypass without weakening safety rails."""
+
+        enabled = bool(enabled)
+        if enabled and (
+            not self._automation_active
+            or self._automation_paused
+            or not self._is_current_sweep_mode(self._automation_name)
+        ):
+            return False, "current-hold bypass requires a running current-sweep recipe"
+        if enabled == self._current_hold_bypass_active:
+            return True, (
+                "current-hold bypass active"
+                if enabled
+                else "current-hold bypass released"
+            )
+        self._current_hold_bypass_active = enabled
+        now_s = time.monotonic()
+        if enabled and self._current_sweep_ramp_hold_step_index is not None:
+            self._resume_current_sweep_ramp_from_hold(
+                now_s=now_s,
+                reason="operator is holding the momentary current-hold bypass",
+            )
+        event = {
+            "timestamp_utc": _utc_timestamp(),
+            "elapsed_s": max(0.0, now_s - self._session_start_monotonic),
+            "active": enabled,
+            "automation_phase": self._automation_phase,
+            "task": self._current_task_summary(),
+        }
+        self._current_hold_bypass_events.append(event)
+        if self._session_active:
+            self._session_metadata_dirty = True
+        self._write_control_trace(
+            decision="operator_override",
+            basis=self._automation_basis,
+            target_value=self._automation_target_value,
+            result="current_hold_bypass_enabled" if enabled else "current_hold_bypass_released",
+            reason="momentary_button_pressed" if enabled else "momentary_button_released",
+        )
+        if self._session_active:
+            self._write_session_metadata(throttle=True)
+        self._log(
+            "Momentary current-hold bypass enabled; normal hold logic resumes on release."
+            if enabled
+            else "Momentary current-hold bypass released; normal hold logic restored."
+        )
+        return True, (
+            "current-hold bypass active" if enabled else "current-hold bypass released"
+        )
 
     def _apply_current_sweep_post_hold_ramp_throttle(self, *, now_s: float) -> None:
         if self._current_sweep_post_hold_throttle_until_s <= 0.0:
@@ -37333,6 +37625,14 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         now_s: float,
     ) -> tuple[bool, bool]:
+        if self._current_hold_bypass_active:
+            if self._current_sweep_ramp_hold_step_index == step_index:
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=now_s,
+                    reason="operator is holding the momentary current-hold bypass",
+                )
+            self._reset_current_sweep_ramp_hold_candidate()
+            return False, False
         if self._current_sweep_endpoint_seek_accepted_step_index == int(step_index):
             return False, False
         if not step.current_hold_enabled:
@@ -37504,6 +37804,7 @@ class MainWindow(QtWidgets.QMainWindow):
         eligible = (
             state.ready
             and state.stationary
+            and state.balanced_crossings
             and not state.fast_veto
             and signal is not None
             and state.error_value is not None
@@ -37540,14 +37841,15 @@ class MainWindow(QtWidgets.QMainWindow):
             error_value=state.error_value,
             tolerance=center_band,
             result="cycle_center_resume",
-            reason="mature_stationary_distribution",
+            reason="mature_stationary_balanced_distribution",
         )
         self._resume_current_sweep_ramp_from_hold(
             now_s=now_s,
             reason=(
                 "mature fixed-current distribution is centered on target "
                 f"(center error {_format_compact_number(abs(float(state.error_value)))}, "
-                f"robust noise {_format_compact_number(float(signal.noise))})"
+                f"robust noise {_format_compact_number(float(signal.noise))}, "
+                f"crossings {state.crossing_count})"
             ),
         )
         return True

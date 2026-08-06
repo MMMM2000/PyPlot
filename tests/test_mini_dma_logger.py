@@ -1849,6 +1849,7 @@ class _FakeIsolatedControlProcess:
         self.requests: list[object] = []
         self.commands: list[tuple[str, object | None]] = []
         self.update_payloads: list[str] = []
+        self.hold_bypass_states: list[bool] = []
         self.next_snapshot: object | None = None
         self.next_events: tuple[object, ...] = ()
         self.next_fault_detail: tuple[str, str] = ("", "")
@@ -1883,6 +1884,11 @@ class _FakeIsolatedControlProcess:
         self.update_payloads.append(config_json)
         return 5
 
+    def set_current_hold_bypass(self, identity: object, enabled: bool) -> int:
+        self.commands.append(("hold_bypass", identity))
+        self.hold_bypass_states.append(bool(enabled))
+        return 6
+
     def emergency_stop(self) -> None:
         self.commands.append(("emergency", None))
 
@@ -1908,6 +1914,78 @@ class _FakeIsolatedControlProcess:
         del timeout_s, force
         self.closed = True
         return True
+
+
+def test_momentary_current_hold_bypass_button_tracks_press_and_release(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    identity = mini_dma_mod.ControlSessionIdentity("bypass-ui", 1)
+    try:
+        process.start_process()
+        window._production_control_process = process  # type: ignore[assignment]
+        window._production_control_identity = identity
+        window._isolated_recipe_active = True
+        window._isolated_recipe_paused = False
+        window._show_current_hold_bypass_dialog()
+        assert window._current_hold_bypass_button is not None
+
+        qtbot.mousePress(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        assert process.hold_bypass_states[-1] is True
+        qtbot.mouseRelease(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        assert process.hold_bypass_states[-1] is False
+
+        qtbot.mousePress(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        window.eventFilter(
+            QtWidgets.QApplication.instance(),
+            QtCore.QEvent(QtCore.QEvent.Type.ApplicationDeactivate),
+        )
+        assert process.hold_bypass_states[-1] is False
+    finally:
+        window._production_control_process = None
+        window._production_control_identity = None
+        _close_test_window(window)
+
+
+def test_process_owned_momentary_bypass_resumes_hold_and_restores_logic(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 3
+        window._current_sweep_ramp_hold_started_s = time.monotonic() - 2.0
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        accepted, _detail = window._set_current_hold_bypass_active(True)
+        assert accepted is True
+        assert window._current_hold_bypass_active is True
+        assert resumed and "momentary" in resumed[-1]
+
+        accepted, _detail = window._set_current_hold_bypass_active(False)
+        assert accepted is True
+        assert window._current_hold_bypass_active is False
+        assert [event["active"] for event in window._current_hold_bypass_events] == [True, False]
+    finally:
+        _close_test_window(window)
 
 
 def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
@@ -27976,6 +28054,11 @@ def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence_respo
         ready=True,
         stationary=True,
         fast_veto=False,
+        crossing_count=8,
+        above_fraction=0.45,
+        below_fraction=0.55,
+        balanced_crossings=True,
+        classification="centered_fluctuation",
         suppression_allowed=True,
     )
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -28423,6 +28506,11 @@ def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence(
         ready=True,
         stationary=True,
         fast_veto=False,
+        crossing_count=8,
+        above_fraction=0.45,
+        below_fraction=0.55,
+        balanced_crossings=True,
+        classification="centered_fluctuation",
         suppression_allowed=True,
     )
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -34534,7 +34622,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert first_logic["version"]
         assert (
             first_logic["profile"]
-            == "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume-response-gated-volatile-observer"
+            == "scale-routed-prague-legacy-kosice-adaptive-balanced-cycle-centered-resume-response-gated-volatile-observer"
         )
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
@@ -34638,6 +34726,135 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
 
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, True)]
+    finally:
+        _close_test_window(window)
+
+
+def test_cycle_center_classifier_requires_repeated_balanced_target_crossings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 100.0
+        for index in range(81):
+            value = 0.99 if index % 2 == 0 else 1.01
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=100.0 + index * 0.25,
+                raw_g=value,
+                applied_load_g=value,
+                raw_text=str(value),
+            )
+        fast = mini_dma_mod.ScaleControlSignal(
+            value=1.0,
+            latest_value=1.01,
+            noise=0.01,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=120.0,
+        )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            1.0,
+            fast,
+        )
+
+        assert state.classification == "centered_fluctuation"
+        assert state.balanced_crossings is True
+        assert state.crossing_count >= 3
+        assert state.above_fraction >= 0.15
+        assert state.below_fraction >= 0.15
+    finally:
+        _close_test_window(window)
+
+
+def test_cycle_center_classifier_rejects_one_sided_stationary_noise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 100.0
+        for index in range(81):
+            value = 1.01 + 0.002 * (index % 3)
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=100.0 + index * 0.25,
+                raw_g=value,
+                applied_load_g=value,
+                raw_text=str(value),
+            )
+        fast = mini_dma_mod.ScaleControlSignal(
+            value=1.012,
+            latest_value=1.012,
+            noise=0.002,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=120.0,
+        )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            1.0,
+            fast,
+        )
+
+        assert state.balanced_crossings is False
+        assert state.classification != "centered_fluctuation"
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_centered"),
+    [("target_spanning_cloud", True), ("transformation_bias", False)],
+)
+def test_cycle_center_classifier_distinguishes_simulated_noise_from_transformation(
+    tmp_path: Path,
+    qtbot,
+    scenario_name: str,
+    expected_centered: bool,
+) -> None:
+    from dataclasses import replace
+    from data_logging.mini_dma_logger.wire_simulator import (
+        run_virtual_wire_scenario,
+        scenario_by_name,
+    )
+
+    scenario = scenario_by_name(scenario_name)
+    scenario = replace(
+        scenario,
+        sweep=replace(scenario.sweep, hold_s=24.0),
+    )
+    trace = run_virtual_wire_scenario(scenario)
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_diameter.setValue(scenario.wire.diameter_mm)
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 0.0
+        for sample in trace.samples:
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=sample.elapsed_s,
+                raw_g=sample.raw_load_g,
+                applied_load_g=sample.raw_load_g,
+                raw_text=str(sample.raw_load_g),
+            )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            scenario.controller.target_stress_mpa,
+        )
+
+        assert (state.classification == "centered_fluctuation") is expected_centered
+        assert state.balanced_crossings is expected_centered
     finally:
         _close_test_window(window)
 

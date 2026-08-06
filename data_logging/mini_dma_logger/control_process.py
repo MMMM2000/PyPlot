@@ -124,6 +124,21 @@ class ControlCommand:
             raise ValueError("only config-update commands may carry config JSON")
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentHoldBypassRequest:
+    """Latest-value, session-scoped state for the momentary hold bypass."""
+
+    identity: ControlSessionIdentity
+    sequence: int
+    enabled: bool
+
+    def __post_init__(self) -> None:
+        if self.sequence <= 0:
+            raise ValueError("bypass sequence must be positive")
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled must be a boolean")
+
+
 ReadbackValue = float | int | str | bool | None
 
 
@@ -198,6 +213,8 @@ class ControlBackend(Protocol):
 
     def update_config(self, config_json: str) -> tuple[bool, str]: ...
 
+    def set_current_hold_bypass(self, enabled: bool) -> tuple[bool, str]: ...
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]: ...
 
     def completion_detail(self) -> str | None: ...
@@ -227,12 +244,14 @@ class SimulatedControlBackend:
         self._tick_count = 0
         self._output_enabled = False
         self._emergency_reason = ""
+        self._current_hold_bypass_active = False
 
     def start(self, request: ControlStartRequest) -> None:
         self._policy = request.policy
         self._tick_count = 0
         self._output_enabled = True
         self._emergency_reason = ""
+        self._current_hold_bypass_active = False
 
     def tick(self, now_s: float) -> None:
         del now_s
@@ -242,21 +261,32 @@ class SimulatedControlBackend:
         self._tick_count = next_tick
 
     def pause(self) -> None:
+        self._current_hold_bypass_active = False
         self._output_enabled = False
 
     def resume(self) -> None:
         self._output_enabled = True
 
     def stop(self) -> None:
+        self._current_hold_bypass_active = False
         self._output_enabled = False
 
     def emergency_stop(self, reason: str) -> None:
+        self._current_hold_bypass_active = False
         self._output_enabled = False
         self._emergency_reason = str(reason)
 
     def update_config(self, config_json: str) -> tuple[bool, str]:
         del config_json
         return True, "simulated configuration updated"
+
+    def set_current_hold_bypass(self, enabled: bool) -> tuple[bool, str]:
+        self._current_hold_bypass_active = bool(enabled)
+        return True, (
+            "current-hold bypass active"
+            if self._current_hold_bypass_active
+            else "current-hold bypass released"
+        )
 
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]:
         return (
@@ -265,12 +295,14 @@ class SimulatedControlBackend:
             ("output_enabled", self._output_enabled),
             ("emergency_reason", self._emergency_reason),
             ("policy", None if self._policy is None else self._policy.value),
+            ("current_hold_bypass_active", self._current_hold_bypass_active),
         )
 
     def completion_detail(self) -> str | None:
         return None
 
     def close(self) -> None:
+        self._current_hold_bypass_active = False
         self._output_enabled = False
 
 
@@ -302,6 +334,7 @@ class _ControlProcessRuntime:
         self,
         *,
         command_queue: Any,
+        hold_bypass_queue: Any,
         heartbeat_queue: Any,
         snapshot_queue: Any,
         event_queue: Any,
@@ -312,6 +345,7 @@ class _ControlProcessRuntime:
         backend_factory_spec: BackendFactorySpec | None,
     ) -> None:
         self._command_queue = command_queue
+        self._hold_bypass_queue = hold_bypass_queue
         self._heartbeat_queue = heartbeat_queue
         self._snapshot_queue = snapshot_queue
         self._event_queue = event_queue
@@ -329,6 +363,7 @@ class _ControlProcessRuntime:
         self._last_command_sequence = 0
         self._last_command_result = "none"
         self._last_command_detail = ""
+        self._last_hold_bypass_sequence = 0
         self._snapshot_sequence = 0
         self._event_sequence = 0
         self._dropped_event_count = 0
@@ -344,6 +379,7 @@ class _ControlProcessRuntime:
             while True:
                 now_s = time.monotonic()
                 self._drain_heartbeat()
+                self._drain_hold_bypass()
                 if self._emergency_event.is_set():
                     self._emergency_event.clear()
                     self._enter_emergency("operator emergency request")
@@ -434,6 +470,24 @@ class _ControlProcessRuntime:
         if latest_s is not None:
             self._last_parent_heartbeat_s = latest_s
 
+    def _drain_hold_bypass(self) -> None:
+        latest: CurrentHoldBypassRequest | None = None
+        while True:
+            try:
+                candidate = self._hold_bypass_queue.get_nowait()
+            except Empty:
+                break
+            if isinstance(candidate, CurrentHoldBypassRequest):
+                latest = candidate
+        if latest is None:
+            return
+        if latest.sequence <= self._last_hold_bypass_sequence:
+            return
+        self._last_hold_bypass_sequence = latest.sequence
+        if latest.identity != self._identity or self._state is not ControlState.RUNNING:
+            return
+        self._backend.set_current_hold_bypass(latest.enabled)
+
     def _check_parent_heartbeat(self, now_s: float) -> None:
         request = self._request
         if request is None or self._state not in {ControlState.RUNNING, ControlState.PAUSED}:
@@ -459,6 +513,7 @@ class _ControlProcessRuntime:
             if self._state is not ControlState.RUNNING:
                 self._reject("pause requires a running session", identity=command.identity)
                 return
+            self._backend.set_current_hold_bypass(False)
             self._backend.pause()
             self._state = ControlState.PAUSED
             self._accept_command("recipe paused")
@@ -476,6 +531,7 @@ class _ControlProcessRuntime:
             if self._state not in {ControlState.RUNNING, ControlState.PAUSED}:
                 self._reject("stop requires an active session", identity=command.identity)
                 return
+            self._backend.set_current_hold_bypass(False)
             self._backend.stop()
             self._state = ControlState.STOPPED
             self._accept_command("recipe stopped")
@@ -515,6 +571,7 @@ class _ControlProcessRuntime:
             request.identity.generation
         )
         self._tick_count = 0
+        self._backend.set_current_hold_bypass(False)
         self._backend.start(request)
         self._state = ControlState.RUNNING
         self._accept_command("recipe started")
@@ -528,6 +585,7 @@ class _ControlProcessRuntime:
     def _enter_emergency(self, reason: str) -> None:
         if self._state in {ControlState.EMERGENCY, ControlState.FAULTED}:
             return
+        self._backend.set_current_hold_bypass(False)
         self._backend.emergency_stop(reason)
         self._state = ControlState.EMERGENCY
         self._emit_event(ControlEventKind.EMERGENCY, detail=reason)
@@ -535,6 +593,7 @@ class _ControlProcessRuntime:
 
     def _safe_shutdown(self, reason: str) -> None:
         if self._state in {ControlState.RUNNING, ControlState.PAUSED}:
+            self._backend.set_current_hold_bypass(False)
             self._backend.emergency_stop(reason)
             self._state = ControlState.STOPPED
         self._emit_event(ControlEventKind.SHUTDOWN, detail=reason)
@@ -608,6 +667,7 @@ class _ControlProcessRuntime:
 
 def _run_control_process(
     command_queue: Any,
+    hold_bypass_queue: Any,
     heartbeat_queue: Any,
     snapshot_queue: Any,
     event_queue: Any,
@@ -620,6 +680,7 @@ def _run_control_process(
     try:
         runtime = _ControlProcessRuntime(
             command_queue=command_queue,
+            hold_bypass_queue=hold_bypass_queue,
             heartbeat_queue=heartbeat_queue,
             snapshot_queue=snapshot_queue,
             event_queue=event_queue,
@@ -666,6 +727,7 @@ class TmaControlProcess:
             raise ValueError("heartbeat_interval_s must be positive when provided")
         self._context = multiprocessing.get_context(mp_context)
         self._command_queue = self._context.Queue(maxsize=command_capacity)
+        self._hold_bypass_queue = self._context.Queue(maxsize=1)
         self._heartbeat_queue = self._context.Queue(maxsize=1)
         self._snapshot_queue = self._context.Queue(maxsize=1)
         self._event_queue = self._context.Queue(maxsize=event_capacity)
@@ -681,6 +743,7 @@ class TmaControlProcess:
         self._heartbeat_thread: Thread | None = None
         self._process: multiprocessing.Process | None = None
         self._command_sequence = 0
+        self._hold_bypass_sequence = 0
         self._sequence_lock = Lock()
         self._last_fault_detail = ""
         self._last_fault_traceback = ""
@@ -704,6 +767,7 @@ class TmaControlProcess:
             name="TmaControlProcess",
             args=(
                 self._command_queue,
+                self._hold_bypass_queue,
                 self._heartbeat_queue,
                 self._snapshot_queue,
                 self._event_queue,
@@ -768,6 +832,28 @@ class TmaControlProcess:
             identity,
             config_json=config_json,
         )
+
+    def set_current_hold_bypass(
+        self,
+        identity: ControlSessionIdentity,
+        enabled: bool,
+    ) -> int:
+        """Publish the newest button state without blocking behind commands."""
+
+        if not self.is_alive():
+            raise RuntimeError("control process is not running")
+        with self._sequence_lock:
+            self._hold_bypass_sequence += 1
+            sequence = self._hold_bypass_sequence
+        _replace_latest(
+            self._hold_bypass_queue,
+            CurrentHoldBypassRequest(
+                identity=identity,
+                sequence=sequence,
+                enabled=bool(enabled),
+            ),
+        )
+        return sequence
 
     def emergency_stop(self) -> None:
         """Use the out-of-band safety path; it cannot be blocked by commands."""
@@ -877,6 +963,7 @@ __all__ = [
     "ControlBackpressureError",
     "ControlCommand",
     "ControlCommandKind",
+    "CurrentHoldBypassRequest",
     "ControlEvent",
     "ControlEventKind",
     "ControlPolicy",

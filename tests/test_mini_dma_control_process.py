@@ -124,6 +124,53 @@ def test_spawned_process_reports_ready_before_session_start() -> None:
         assert process.close()
 
 
+def test_momentary_hold_bypass_is_latest_value_and_pause_clears_it() -> None:
+    process = MiniDmaControlProcess(heartbeat_interval_s=0.02)
+    identity = _identity()
+    try:
+        process.start_process()
+        process.wait_until_ready(timeout_s=3.0)
+        process.start_session(
+            ControlStartRequest(
+                identity=identity,
+                policy=ControlPolicy.PRAGUE,
+                snapshot_interval_s=0.02,
+            )
+        )
+        _wait_for_snapshot(
+            process,
+            lambda item: item.state is ControlState.RUNNING,
+        )
+
+        process.set_current_hold_bypass(identity, True)
+        active = _wait_for_snapshot(
+            process,
+            lambda item: item.readback_value("current_hold_bypass_active") is True,
+        )
+        assert active.identity == identity
+
+        process.set_current_hold_bypass(identity, False)
+        released = _wait_for_snapshot(
+            process,
+            lambda item: item.readback_value("current_hold_bypass_active") is False,
+        )
+        assert released.state is ControlState.RUNNING
+
+        process.set_current_hold_bypass(identity, True)
+        _wait_for_snapshot(
+            process,
+            lambda item: item.readback_value("current_hold_bypass_active") is True,
+        )
+        process.pause(identity)
+        paused = _wait_for_snapshot(
+            process,
+            lambda item: item.state is ControlState.PAUSED,
+        )
+        assert paused.readback_value("current_hold_bypass_active") is False
+    finally:
+        assert process.close(timeout_s=2.0, force=True)
+
+
 def test_production_backend_process_reports_ready_without_acquiring_hardware() -> None:
     process = MiniDmaControlProcess(
         heartbeat_interval_s=0.02,
