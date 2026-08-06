@@ -11099,7 +11099,7 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
                 return parts[1]
             return parts[0]
         if len(parts) == 1:
-            return path.stem
+            return root.name if root.is_dir() else path.stem
     parent = path.parent.name
     return parent if parent else path.stem
 
@@ -24953,7 +24953,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                     except Exception:
                         pass
                 continue
-            raw_sample = str(parsed_sample or "").strip() or _sample_from_path(Path(path), self.data.sources)
+            source_sample = _sample_from_path(Path(path), self.data.sources)
+            raw_sample = str(parsed_sample or "").strip() or source_sample
+            parsed_key = _microscope_key(Path(raw_sample))
+            source_key = _microscope_key(Path(source_sample))
+            if source_key is not None and parsed_key != source_key:
+                raw_sample = source_sample
             sample = raw_sample
             key = _microwire_key_from_path(Path(path), sample or raw_sample)
             label = Path(path).stem

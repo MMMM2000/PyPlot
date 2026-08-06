@@ -2348,11 +2348,13 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
         ),
         encoding="utf-8",
     )
-    scan_path = tmp_path / "202602010101-TSCN-a000-example.txt"
+    scan_dir = tmp_path / "Ni50Fe27Ga23 1_5 NG CA"
+    scan_dir.mkdir()
+    scan_path = scan_dir / "202602010101-TSCN-a000-example.txt"
     scan_path.write_text(
         "\n".join(
             [
-                "@Samplename: Ni50Fe27Ga23 5-4",
+                "@Samplename: Ni50Fe27Ga23 15 NG CA",
                 "@@End of Header.",
                 "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
                 "New Section: Section 0:",
@@ -2362,7 +2364,7 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
         ),
         encoding="utf-8",
     )
-    bad_scan_path = tmp_path / "bad-scan.txt"
+    bad_scan_path = scan_dir / "bad-scan.txt"
     bad_scan_path.write_text("not a VSM temperature scan", encoding="utf-8")
     output_project = tmp_path / "out" / "updated.pydpj"
     manifest_path = tmp_path / "out" / "manifest.json"
@@ -2380,7 +2382,7 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
                     {
                         "action": "update_section",
                         "section": "vsm_temperature_scan",
-                        "paths": [str(scan_path), str(bad_scan_path)],
+                        "paths": [str(scan_dir)],
                     }
                 ],
             }
@@ -2417,6 +2419,7 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["vsm_temperature_scan"]
     assert section_payload["rows"]
+    assert section_payload["rows"][0]["_sample"] == "Ni50Fe27Ga23 1_5 NG CA"
     assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == safe_codec.CODEC_ENCODING
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "ok"
@@ -2671,7 +2674,22 @@ def test_builder_automation_recipe_updates_microscope_copy(
                 "version": 1,
                 "kind": "MicrowireDataBuilder",
                 "saved_at": "2026-05-25 10:00",
-                "sections": {},
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni49Fe26Ga25",
+                                "Microwire": "9/9",
+                                "_key": "Ni49Fe26Ga25|9|9",
+                                builder_ui.MICROSCOPE_D_COLUMN: 10.0,
+                                builder_ui.MICROSCOPE_CAP_D_COLUMN: 40.0,
+                                "d/D": 0.25,
+                            }
+                        ],
+                        "payloads": {},
+                        "extra": {},
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -2718,7 +2736,15 @@ def test_builder_automation_recipe_updates_microscope_copy(
     section_payload = output_payload["sections"]["microscope"]
     assert section_payload["payloads"]["microscope_index"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
-    row = section_payload["rows"][0]
+    row = next(
+        item for item in section_payload["rows"]
+        if item["Composition"] == "Ni50Fe27Ga23"
+    )
+    preserved = next(
+        item for item in section_payload["rows"]
+        if item["Composition"] == "Ni49Fe26Ga25"
+    )
+    assert preserved["d/D"] == pytest.approx(0.25)
     assert row["Composition"] == "Ni50Fe27Ga23"
     assert row["Microwire"] == "12/2"
     assert row["_core_image"] == str(core_image)
@@ -2730,7 +2756,10 @@ def test_builder_automation_recipe_updates_microscope_copy(
     assert update_command["updated_count"] == 2
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
-    assemble_row = assemble_rows[0]
+    assemble_row = next(
+        item for item in assemble_rows
+        if item["Composition"] == "Ni50Fe27Ga23"
+    )
     assert assemble_row["Composition"] == "Ni50Fe27Ga23"
     assert assemble_row["Microwire"] == "12/2"
 

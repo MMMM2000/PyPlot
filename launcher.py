@@ -925,6 +925,11 @@ def _run_builder_update_section_command(
             flush=True,
         )
         section.import_project_payload(sections.get(section_name, {}))
+        existing_table = (
+            section.data.table.copy()
+            if isinstance(section.data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
         existing_payload = section.store.load_payload(payload_name)
         print(
             f"[builder-automation] {section_name}: saved section state loaded",
@@ -994,13 +999,30 @@ def _run_builder_update_section_command(
                 str(graph_column),
                 sample_column="_sample",
             )
+        if section_name == "microscope" and not existing_table.empty:
+            merge_rows = getattr(section, "_merge_rows_into_frame", None)
+            if callable(merge_rows):
+                refresh_rows = []
+                for row in section.data.table.to_dict(orient="records"):
+                    refresh_rows.append(
+                        {
+                            column: value
+                            for column, value in row.items()
+                            if column == "_key"
+                            or not (pd.api.types.is_scalar(value) and pd.isna(value))
+                        }
+                    )
+                section.data.table = merge_rows(existing_table, refresh_rows)
         section.data.processed = {**section.data.processed, **result.processed}
         if isinstance(result.extra, dict):
             section.data.extra.update(result.extra)
         payload_refs: dict[str, str] = {payload_name: payload_name}
         for result_payload_name, result_payload in result.payloads.items():
             name = str(result_payload_name)
-            section.store.save_payload(name, result_payload)
+            payload_value = (
+                merged_records if name == payload_name else result_payload
+            )
+            section.store.save_payload(name, payload_value)
             payload_refs[name] = name
         if payload_name not in result.payloads:
             section.store.save_payload(payload_name, merged_records)
