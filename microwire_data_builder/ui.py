@@ -15235,14 +15235,27 @@ class AnnealingSection(MiniDatabaseSection):
                 "No current annealing graphs are available yet.",
             )
             return
-        dialog = _AnnealingTransitionReviewDialog(
-            records,
-            self.logger,
-            self,
-            transition_reviews_provider=self.transition_reviews_snapshot,
-            transition_reviews_setter=self.set_transition_review_for_record,
+        paths = list(
+            dict.fromkeys(
+                path
+                for record in records
+                if isinstance((path := getattr(record, "path", None)), Path)
+                and path.exists()
+            )
         )
-        dialog.exec()
+        if not paths:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "The selected current annealing source files are not accessible.",
+            )
+            return
+        from plotting.shared.transition_review_dialog import review_current_annealing_files
+
+        completed = review_current_annealing_files(self, paths)
+        if completed:
+            self._prune_transition_reviews(store=True)
+            self._schedule_transition_review_dependents_update()
 
     def _load_transition_reviews(self) -> None:
         raw = self.data.extra.get(TRANSITION_REVIEW_EXTRA_KEY)
@@ -16288,6 +16301,8 @@ class AnnealingSection(MiniDatabaseSection):
 
 
 class _MicroscopePreviewLabel(QtWidgets.QLabel):
+    doubleClicked = QtCore.pyqtSignal()
+
     def __init__(self, placeholder: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(placeholder, parent)
         self._placeholder = placeholder
@@ -16298,6 +16313,15 @@ class _MicroscopePreviewLabel(QtWidgets.QLabel):
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setWordWrap(True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Double-click to open the original image at full resolution.")
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - Qt callback
+        if self._pixmap is not None:
+            self.doubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def set_placeholder(self) -> None:
         try:
@@ -16376,6 +16400,9 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pending_state_save_timer.setInterval(350)
         self._pending_state_save_timer.timeout.connect(self._persist_review_state)
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
+        self._show_missing_dimensions_only = bool(
+            self.data.extra.get("show_missing_dimensions_only", False)
+        )
 
         # Removed the missing-items list UI; missing values are visible in the table.
         self._missing_summary_label = None  # type: ignore[assignment]
@@ -16386,6 +16413,17 @@ class MicroscopeSection(MiniDatabaseSection):
                 self.other_end_checkbox.setChecked(self._show_other_ends)
                 self.other_end_checkbox.toggled.connect(self._toggle_other_ends)
                 self.controls_layout.addWidget(self.other_end_checkbox)
+                self.missing_dimensions_checkbox = QtWidgets.QCheckBox("Missing d/D only")
+                self.missing_dimensions_checkbox.setToolTip(
+                    "Show image-backed rows where d or D is missing or invalid."
+                )
+                self.missing_dimensions_checkbox.setChecked(
+                    self._show_missing_dimensions_only
+                )
+                self.missing_dimensions_checkbox.toggled.connect(
+                    self._toggle_missing_dimensions_only
+                )
+                self.controls_layout.addWidget(self.missing_dimensions_checkbox)
             except Exception:
                 pass
 
@@ -16420,8 +16458,15 @@ class MicroscopeSection(MiniDatabaseSection):
         self._normalise_brittle_column()
         self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
+        self._show_missing_dimensions_only = bool(
+            self.data.extra.get("show_missing_dimensions_only", False)
+        )
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
+        if hasattr(self, "missing_dimensions_checkbox"):
+            self.missing_dimensions_checkbox.setChecked(
+                self._show_missing_dimensions_only
+            )
         self._search_proxy.set_row_predicate(self._row_visible)
         self._update_hidden_columns()
         self._update_missing_summary()
@@ -16437,8 +16482,15 @@ class MicroscopeSection(MiniDatabaseSection):
         self._normalise_brittle_column()
         self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
+        self._show_missing_dimensions_only = bool(
+            self.data.extra.get("show_missing_dimensions_only", False)
+        )
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
+        if hasattr(self, "missing_dimensions_checkbox"):
+            self.missing_dimensions_checkbox.setChecked(
+                self._show_missing_dimensions_only
+            )
         self._search_proxy.set_row_predicate(self._row_visible)
         self._connect_selection_model()
         self._ensure_valid_selection()
@@ -16641,6 +16693,12 @@ class MicroscopeSection(MiniDatabaseSection):
 
         self.core_preview_panel, self.core_preview_label = _make_preview_panel("Core image")
         self.glass_preview_panel, self.glass_preview_label = _make_preview_panel("Glass image")
+        self.core_preview_label.doubleClicked.connect(
+            partial(self._open_preview_image, "_core_image")
+        )
+        self.glass_preview_label.doubleClicked.connect(
+            partial(self._open_preview_image, "_glass_image")
+        )
         scroll.setWidget(stack_widget)
 
         form = QtWidgets.QFormLayout()
@@ -16683,8 +16741,11 @@ class MicroscopeSection(MiniDatabaseSection):
         self._expected_key_source_labels.clear()
         self._pixmap_cache.clear()
         self._show_other_ends = True
+        self._show_missing_dimensions_only = False
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(True)
+        if hasattr(self, "missing_dimensions_checkbox"):
+            self.missing_dimensions_checkbox.setChecked(False)
         self._refresh_status_column()
         self._search_proxy.set_row_predicate(self._row_visible)
         self._update_missing_summary()
@@ -16705,15 +16766,29 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
 
+    def _toggle_missing_dimensions_only(self, checked: bool) -> None:
+        self._show_missing_dimensions_only = bool(checked)
+        self.data.extra["show_missing_dimensions_only"] = self._show_missing_dimensions_only
+        self._schedule_review_state_save()
+        self._search_proxy.set_row_predicate(self._row_visible)
+        self._ensure_valid_selection()
+
     def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
-        if self._show_other_ends:
-            return True
-        microwire = str(row.get("Microwire") or "").strip()
-        parsed = _microwire_parts_from_label_safe(microwire)
-        if parsed is None:
-            return True
-        suffix = str(parsed[2] or "").strip().lower()
-        return suffix != "oe"
+        if not self._show_other_ends:
+            microwire = str(row.get("Microwire") or "").strip()
+            parsed = _microwire_parts_from_label_safe(microwire)
+            if parsed is not None:
+                suffix = str(parsed[2] or "").strip().lower()
+                if suffix == "oe":
+                    return False
+        if self._show_missing_dimensions_only:
+            if not self._row_sources(row):
+                return False
+            return not (
+                self._is_valid_diameter(row.get(MICROSCOPE_D_COLUMN))
+                and self._is_valid_diameter(row.get(MICROSCOPE_CAP_D_COLUMN))
+            )
+        return True
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
         return MiniDatabaseSection._collect_candidates(self)
@@ -17118,8 +17193,8 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key,
-                    "_core_image": payload.get("_core_image") or existing_core_image,
-                    "_glass_image": payload.get("_glass_image") or existing_glass_image,
+                    "_core_image": existing_core_image or payload.get("_core_image"),
+                    "_glass_image": existing_glass_image or payload.get("_glass_image"),
                     "_images": merged_images,
                 }
             )
@@ -18174,6 +18249,27 @@ class MicroscopeSection(MiniDatabaseSection):
                     rows.add(source_row)
         return sorted(rows)
 
+    def _open_preview_image(self, column_name: str) -> None:
+        row = self._selected_row()
+        if row is None:
+            return
+        candidate: Path | None = None
+        path_value = row.get(column_name)
+        if path_value:
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                candidate = None
+        if candidate is None or not candidate.exists():
+            category = "core" if column_name == "_core_image" else "glass"
+            for source in self._row_sources(row):
+                if category in source.name.lower() and source.exists():
+                    candidate = source
+                    break
+        if candidate is None or not candidate.exists():
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(candidate)))
+
     def _preview_pixmap_for_row(
         self,
         row: pd.Series,
@@ -18396,10 +18492,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 frame.at[row_idx, MICROSCOPE_CAP_D_COLUMN] = override.get("D")
             self._refresh_row_for_key(selected_key)
         self._schedule_review_state_save()
-        try:
-            self.data_updated.emit()
-        except Exception:
-            pass
         self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
         self._selected_key = selected_key
         columns: set[str] = set()
@@ -18409,6 +18501,11 @@ class MicroscopeSection(MiniDatabaseSection):
             columns.add(MICROSCOPE_CAP_D_COLUMN)
         if columns:
             self._mark_reviewed(auto=True, columns=columns, fast=True)
+        else:
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
         if advance_column:
             self._advance_to_next_pending(advance_column)
 
@@ -18971,6 +19068,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
         self._search_proxy = _TableSearchProxyModel(self)
         self.search_edit: QtWidgets.QLineEdit | None = None
         self.search_clear_button: QtWidgets.QPushButton | None = None
+        self._source_refresh_dirty = False
+        self._source_refresh_queued = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -19053,12 +19152,12 @@ class CurrentDensitySection(QtWidgets.QWidget):
 
         if hasattr(self._annealing_section, "data_updated"):
             try:
-                self._annealing_section.data_updated.connect(self.refresh_data)
+                self._annealing_section.data_updated.connect(self._source_data_changed)
             except Exception:
                 pass
         if hasattr(self._microscope_section, "data_updated"):
             try:
-                self._microscope_section.data_updated.connect(self.refresh_data)
+                self._microscope_section.data_updated.connect(self._source_data_changed)
             except Exception:
                 pass
         QtCore.QTimer.singleShot(0, self.refresh_data)
@@ -19068,6 +19167,27 @@ class CurrentDensitySection(QtWidgets.QWidget):
             self._log_callback(level, message)
         except Exception:
             self.logger.log(level, message)
+
+    def _source_data_changed(self) -> None:
+        self._source_refresh_dirty = True
+        if self.isVisible():
+            self._queue_source_refresh()
+
+    def _queue_source_refresh(self) -> None:
+        if self._source_refresh_queued:
+            return
+        self._source_refresh_queued = True
+        QtCore.QTimer.singleShot(0, self._run_queued_source_refresh)
+
+    def _run_queued_source_refresh(self) -> None:
+        self._source_refresh_queued = False
+        if self._source_refresh_dirty and self.isVisible():
+            self.refresh_data()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # pragma: no cover - Qt callback
+        super().showEvent(event)
+        if self._source_refresh_dirty:
+            self._queue_source_refresh()
 
     def refresh_data(self) -> None:
         previous_order = self._current_column_order()
@@ -19079,6 +19199,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             self.status_label.setText("Failed to calculate annealing transition summary.")
             self.export_button.setEnabled(False)
             return
+        self._source_refresh_dirty = False
         self._current_frame = frame
         self.model.set_frame(frame)
         if previous_order:
@@ -19130,6 +19251,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
             pass
 
     def current_density_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        if self._source_refresh_dirty:
+            self.refresh_data()
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return {}
@@ -26299,14 +26422,31 @@ class MiniDmaSection(MiniDatabaseSection):
                 "No TMA runs are available to review.",
             )
             return
-        dialog = _MiniDmaTransitionReviewDialog(
-            records,
-            self.logger,
-            self,
-            review_provider=self.transition_reviews_snapshot,
-            review_setter=self.set_transition_review_for_target,
+        paths = list(
+            dict.fromkeys(
+                path
+                for record in records
+                if isinstance((path := getattr(record, "path", None)), Path)
+                and path.exists()
+            )
         )
-        dialog.exec()
+        if not paths:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "The selected TMA run folders are not accessible.",
+            )
+            return
+        from plotting.shared.transition_review_dialog import review_tma_runs
+
+        completed = review_tma_runs(self, paths)
+        if completed and self._reconcile_transition_reviews(records):
+            self._schedule_transition_review_store()
+            self._schedule_transition_table_apply()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
 
     def _load_transition_reviews(self) -> None:
         raw = self.data.extra.get(MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY)
@@ -26783,6 +26923,19 @@ class DmaTransitionsSection(QtWidgets.QWidget):
                 if not target_label:
                     continue
                 cached_targets[target_label] = (str(line), _mini_dma_transition_values_from_text(line))
+            try:
+                detected_entries = _mini_dma_transition_review_entries([record], logging.getLogger(__name__))
+            except Exception:
+                detected_entries = []
+            for entry in detected_entries:
+                auto_values = _mini_dma_transition_values_from_summary(entry.target_summary)
+                cached_targets.setdefault(
+                    entry.target_label,
+                    (
+                        _format_mini_dma_transition_review_line(entry.target_label, auto_values),
+                        auto_values,
+                    ),
+                )
             run_id_prefix = f"{_MiniDmaTransitionReviewDialog._run_key(record)}::"
             if isinstance(reviews, Mapping):
                 for record_id, payload in reviews.items():
@@ -26961,43 +27114,166 @@ class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
         self._dialog = dialog
 
 
-class _AnnealingTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
+    """Launch the same portable review editor used by the experiment loggers."""
+
+    def __init__(
+        self,
+        title: str,
+        family: str,
+        paths_provider: Callable[[], Sequence[Path]],
+        review_callback: Callable[[Sequence[Path]], int],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._family = family
+        self._paths_provider = paths_provider
+        self._review_callback = review_callback
+        self._dialog = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        heading = QtWidgets.QLabel(title, self)
+        heading.setStyleSheet("font-size: 16px; font-weight: 600;")
+        layout.addWidget(heading)
+        description = QtWidgets.QLabel(
+            "Uses the same PyQtGraph transition reviewer as the logger. "
+            "Each save writes the portable sidecar beside the measurement and "
+            "mirrors the result into Builder state; save the .pydpj once when your "
+            "review session is finished.",
+            self,
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        controls = QtWidgets.QHBoxLayout()
+        self.review_button = QtWidgets.QPushButton("Review all runs...", self)
+        self.review_button.clicked.connect(self._open_review)
+        controls.addWidget(self.review_button)
+        self.refresh_button = QtWidgets.QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh_workspace)
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self.status_label = QtWidgets.QLabel(self)
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        layout.addStretch(1)
+
+    def _paths(self) -> List[Path]:
+        return list(dict.fromkeys(Path(path) for path in self._paths_provider()))
+
+    def refresh_workspace(self) -> None:
+        from plotting.shared.transition_review import sidecar_path_for_measurement
+
+        paths = self._paths()
+        reviewed = sum(
+            sidecar_path_for_measurement(path, family=self._family).exists()
+            for path in paths
+        )
+        pending = len(paths) - reviewed
+        self.review_button.setEnabled(bool(paths))
+        if not paths:
+            self.status_label.setText("No reviewable measurements are available yet.")
+            return
+        self.status_label.setText(
+            f"{len(paths)} run(s) available | {reviewed} portable review(s) saved | "
+            f"{pending} without a sidecar"
+        )
+
+    def _open_review(self) -> None:
+        paths = self._paths()
+        if not paths:
+            self.refresh_workspace()
+            return
+        self._review_callback(paths)
+        self.refresh_workspace()
+
+
+class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def __init__(
         self,
         current_density_section: CurrentDensitySection,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._current_density_section = current_density_section
-        super().__init__("Annealing transition review", self._create_dialog, parent)
-
-    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
-        annealing_section = getattr(self._current_density_section, "_annealing_section", None)
-        records_getter = getattr(annealing_section, "_transition_review_records", None)
-        records = records_getter() if callable(records_getter) else []
-        snapshot_provider = getattr(annealing_section, "transition_reviews_snapshot", None)
-        review_setter = getattr(annealing_section, "set_transition_review_for_record", None)
-        dialog = _AnnealingTransitionReviewDialog(
-            records,
-            self._current_density_section.logger,
+        super().__init__(
+            "Current annealing transition review",
+            "current_annealing",
+            self._paths,
+            self._review,
             parent,
-            transition_reviews_provider=snapshot_provider,
-            transition_reviews_setter=review_setter,
         )
-        if not records:
-            dialog._summary_label.setText("No current annealing graphs are available yet.")  # noqa: SLF001
-        return dialog
+
+    def _records(self) -> List[MeasurementRecord]:
+        section = getattr(self._current_density_section, "_annealing_section", None)
+        records = list(getattr(section, "_all_records", []) or [])
+        return records
+
+    def _paths(self) -> List[Path]:  # type: ignore[override]
+        return [
+            path
+            for record in self._records()
+            if isinstance((path := getattr(record, "path", None)), Path)
+            and path.exists()
+        ]
+
+    def refresh_workspace(self) -> None:
+        from plotting.shared.transition_review import sidecar_path_for_measurement
+
+        records = self._records()
+        paths = self._paths()
+        section = getattr(self._current_density_section, "_annealing_section", None)
+        snapshot = (
+            section.transition_reviews_snapshot()
+            if isinstance(section, AnnealingSection)
+            else {}
+        )
+        reviewed = sum(
+            str(payload.get("status") or "")
+            not in {"", TRANSITION_REVIEW_STATUS_UNREVIEWED}
+            for payload in snapshot.values()
+            if isinstance(payload, Mapping)
+        )
+        sidecars = sum(
+            sidecar_path_for_measurement(path, family="current_annealing").exists()
+            for path in paths
+        )
+        unavailable = max(len(records) - len(paths), 0)
+        self.review_button.setEnabled(bool(paths))
+        self.status_label.setText(
+            f"{len(records)} run(s) in project | {reviewed} reviewed in project | "
+            f"{sidecars} portable sidecar(s) | {unavailable} source file(s) unavailable"
+        )
+
+    def _review(self, paths: Sequence[Path]) -> int:
+        from plotting.shared.transition_review_dialog import review_current_annealing_files
+
+        completed = review_current_annealing_files(self, paths)
+        section = getattr(self._current_density_section, "_annealing_section", None)
+        if completed and isinstance(section, AnnealingSection):
+            section._prune_transition_reviews(store=True)
+            section._schedule_transition_review_dependents_update()
+        return completed
 
 
-class _MiniDmaTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def __init__(
         self,
         mini_dma_section: MiniDmaSection,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._mini_dma_section = mini_dma_section
-        super().__init__("TMA transition review", self._create_dialog, parent)
+        super().__init__(
+            "TMA transition review",
+            "tma",
+            self._paths,
+            self._review,
+            parent,
+        )
 
-    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+    def _records(self) -> List[MiniDmaRecord]:
         records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
         if not records:
             try:
@@ -27005,14 +27281,52 @@ class _MiniDmaTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
             except Exception:
                 pass
             records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
-        return _MiniDmaTransitionReviewDialog(
-            records,
-            getattr(self._mini_dma_section, "logger", logging.getLogger(__name__)),
-            parent,
-            review_provider=self._mini_dma_section.transition_reviews_snapshot,
-            review_setter=self._mini_dma_section.set_transition_review_for_target,
+        return records
+
+    def _paths(self) -> List[Path]:  # type: ignore[override]
+        return [
+            path
+            for record in self._records()
+            if isinstance((path := getattr(record, "path", None)), Path)
+            and path.exists()
+        ]
+
+    def refresh_workspace(self) -> None:
+        from plotting.shared.transition_review import sidecar_path_for_measurement
+
+        records = self._records()
+        paths = self._paths()
+        snapshot = self._mini_dma_section.transition_reviews_snapshot()
+        reviewed = sum(
+            str(payload.get("status") or "")
+            not in {"", "unreviewed"}
+            for payload in snapshot.values()
+            if isinstance(payload, Mapping)
+        )
+        sidecars = sum(
+            sidecar_path_for_measurement(path, family="tma").exists()
+            for path in paths
+        )
+        unavailable = max(len(records) - len(paths), 0)
+        self.review_button.setEnabled(bool(paths))
+        self.status_label.setText(
+            f"{len(records)} run(s) in project | {reviewed} reviewed target(s) in project | "
+            f"{sidecars} portable sidecar(s) | {unavailable} source folder(s) unavailable"
         )
 
+    def _review(self, paths: Sequence[Path]) -> int:
+        from plotting.shared.transition_review_dialog import review_tma_runs
+
+        completed = review_tma_runs(self, paths)
+        records = self._records()
+        if completed and self._mini_dma_section._reconcile_transition_reviews(records):
+            self._mini_dma_section._schedule_transition_review_store()
+            self._mini_dma_section._schedule_transition_table_apply()
+            try:
+                self._mini_dma_section.data_updated.emit()
+            except Exception:
+                pass
+        return completed
 
 class _VsmTransitionWorkspace(QtWidgets.QWidget):
     def __init__(

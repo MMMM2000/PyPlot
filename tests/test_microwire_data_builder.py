@@ -990,12 +990,14 @@ def test_annealing_transition_review_entries_show_multi_loop_auto_summary(
     )
 
 
-def test_annealing_section_opens_transition_review_for_visible_records(
+def test_annealing_section_opens_shared_transition_review_for_visible_records(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
-    path = Path("Ni50Fe27Ga23 11_1 1000mA.txt")
+    path = tmp_path / "Ni50Fe27Ga23 11_1 1000mA.txt"
+    path.write_text("test", encoding="utf-8")
     record = MeasurementRecord(
         path=path,
         metadata=MeasurementMetadata(
@@ -1014,32 +1016,21 @@ def test_annealing_section_opens_transition_review_for_visible_records(
         sanity_error=None,
         transition_summary=("1000mA: As 11 mA, Af 13 mA",),
     )
-    opened: list[list[MeasurementRecord]] = []
-
-    class _FakeDialog:
-        def __init__(
-            self,
-            records: list[MeasurementRecord],
-            *_args: object,
-            **_kwargs: object,
-        ) -> None:
-            opened.append(list(records))
-
-        def exec(self) -> int:
-            return 0
-
+    opened: list[list[Path]] = []
     try:
         section._all_records = [record]
         section._record_groups = {"Ni50Fe27Ga23|11|1": [record]}
-        monkeypatch.setattr(builder_ui, "_AnnealingTransitionReviewDialog", _FakeDialog)
+        monkeypatch.setattr(
+            "plotting.shared.transition_review_dialog.review_current_annealing_files",
+            lambda _parent, paths: opened.append(list(paths)) or 0,
+        )
 
         section._open_transition_review()
 
-        assert opened == [[record]]
+        assert opened == [[path]]
     finally:
         section._shutdown_background_threads()
         section.close()
-
 
 def test_annealing_section_preview_uses_row_diameter(
     monkeypatch: pytest.MonkeyPatch,
@@ -1528,6 +1519,103 @@ def test_microscope_section_can_hide_other_ends() -> None:
         section._shutdown_background_threads()
         section.close()
 
+
+def test_microscope_section_can_show_only_image_backed_rows_missing_dimensions() -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 10.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "_key": "TestComp|1|1",
+                    "_core_image": "core.jpg",
+                    "_glass_image": "glass.jpg",
+                    "_images": ["core.jpg", "glass.jpg"],
+                },
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 11.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 44.0,
+                    "_key": "TestComp|1|2",
+                    "_core_image": "core.jpg",
+                    "_glass_image": "glass.jpg",
+                    "_images": ["core.jpg", "glass.jpg"],
+                },
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/3",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "_key": "TestComp|1|3",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        assert section.table_view.model().rowCount() == 3
+
+        section._toggle_missing_dimensions_only(True)
+
+        assert section.table_view.model().rowCount() == 1
+        assert section.table_view.model().index(0, 1).data() == "1/1"
+        assert section.data.extra["show_missing_dimensions_only"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_refresh_preserves_displayed_pair_and_collects_repeat_images(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        old_core = tmp_path / "Ni50Fe27Ga23 11_2 core.jpg"
+        old_glass = tmp_path / "Ni50Fe27Ga23 11_2 glass.jpg"
+        new_core = tmp_path / "Ni50Fe27Ga23 11-2 core.jpg"
+        new_glass = tmp_path / "Ni50Fe27Ga23 11-2 glass.jpg"
+        for path in (old_core, old_glass, new_core, new_glass):
+            path.write_bytes(b"image")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 14.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 48.7,
+                    "_key": "Ni50Fe27Ga23|11|2",
+                    "_core_image": str(old_core),
+                    "_glass_image": str(old_glass),
+                    "_images": [str(old_core), str(old_glass)],
+                }
+            ]
+        )
+
+        rows = section._build_image_ref_rows(  # noqa: SLF001
+            [new_core, new_glass],
+            {("Ni50Fe27Ga23", 11, 2, None)},
+            frame,
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["_core_image"] == str(old_core)
+        assert rows[0]["_glass_image"] == str(old_glass)
+        assert rows[0]["_images"] == [
+            str(old_core),
+            str(old_glass),
+            str(new_core),
+            str(new_glass),
+        ]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
 
 def test_microscope_expected_keys_ignore_annealing_filename_notes(tmp_path: Path) -> None:
     _ensure_qapp()
@@ -2901,39 +2989,36 @@ def test_mini_dma_transition_review_dialog_shows_empty_state_for_unsupported_run
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_section_opens_transition_review_for_all_records_without_selection(
+def test_mini_dma_section_opens_shared_transition_review_for_all_records_without_selection(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
-    opened: list[MiniDmaRecord] = []
-
-    class FakeReviewDialog:
-        def __init__(
-            self,
-            records: list[MiniDmaRecord],
-            _logger: logging.Logger,
-            _parent: QtWidgets.QWidget | None = None,
-            **_kwargs: object,
-        ) -> None:
-            opened.extend(records)
-
-        def exec(self) -> int:
-            return int(QtWidgets.QDialog.DialogCode.Accepted)
-
+    opened: list[Path] = []
     try:
-        record = _sample_mini_dma_record()
+        run_path = tmp_path / "Ni50Fe27Ga23 12_2 run"
+        run_path.mkdir()
+        record = MiniDmaRecord(
+            path=run_path,
+            sample="Ni50Fe27Ga23 12_2",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            label=run_path.name,
+        )
         section._record_groups = {record.sample: [record]}  # noqa: SLF001
-        monkeypatch.setattr(builder_ui, "_MiniDmaTransitionReviewDialog", FakeReviewDialog)
+        monkeypatch.setattr(
+            "plotting.shared.transition_review_dialog.review_tma_runs",
+            lambda _parent, paths: opened.extend(paths) or 0,
+        )
 
         section._open_transition_review()  # noqa: SLF001
 
-        assert opened == [record]
+        assert opened == [run_path]
     finally:
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
-
 
 def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
     _ensure_qapp()
@@ -4586,6 +4671,8 @@ def test_microscope_apply_override_skips_autosize_for_enter(
 
         full_resets: list[bool] = []
         saves: list[bool] = []
+        updates: list[bool] = []
+        section.data_updated.connect(lambda: updates.append(True))
         original_set_frame = section.model.set_frame
 
         def _count_set_frame(frame: pd.DataFrame | None) -> None:
@@ -4601,6 +4688,7 @@ def test_microscope_apply_override_skips_autosize_for_enter(
         updated = section.model.frame()
         assert full_resets == []
         assert saves == []
+        assert updates == [True]
         assert updated.at[0, builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(31.0)
         assert section._validated["Ni50Fe27Ga23|2|4"]["d_reviewed"] is True
 
@@ -8833,9 +8921,9 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.widget(0) is not window.current_density_section
         assert transitions.tab_widget.widget(1) is not window.transition_temps_section
         assert transitions.tab_widget.widget(2) is not window.dma_transitions_section
-        assert transitions.annealing_workspace._dialog is None  # noqa: SLF001
+        assert transitions.annealing_workspace.review_button.text() == "Review all runs..."
         assert transitions.vsm_workspace.tree.headerItem().text(0) == "VSM scan"
-        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+        assert transitions.dma_workspace.review_button.text() == "Review all runs..."
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
 
@@ -8844,13 +8932,14 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.currentIndex() == 1
 
         window.show_transitions_view("annealing")
-        assert transitions.annealing_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.annealing_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
-        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+        assert "same PyQtGraph transition reviewer" in (
+            transitions.annealing_workspace.findChildren(QtWidgets.QLabel)[1].text()
+        )
 
         window.show_transitions_view("dma")
-        assert transitions.dma_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.dma_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert "same PyQtGraph transition reviewer" in (
+            transitions.dma_workspace.findChildren(QtWidgets.QLabel)[1].text()
+        )
 
         assert window.annealing_section.review_transitions_button.text() == "Transitions..."
         assert window.mini_dma_section.review_transitions_button.text() == "Transitions..."
@@ -8976,13 +9065,11 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
         window.transitions_section.tab_widget.setCurrentIndex(0)
         window._refresh_sections_after_project_load()  # noqa: SLF001
 
-        dialog = window.transitions_section.annealing_workspace._dialog  # noqa: SLF001
-        assert dialog is not None
-        tree = dialog.findChild(QtWidgets.QTreeWidget)
-        assert tree is not None
-        assert tree.topLevelItemCount() == 1
-        assert tree.topLevelItem(0).text(1) == "No transition"
-        assert "Done 1" in dialog._counts_label.text()  # noqa: SLF001
+        workspace = window.transitions_section.annealing_workspace
+        assert "1 run(s) in project" in workspace.status_label.text()
+        assert "1 reviewed in project" in workspace.status_label.text()
+        assert "1 source file(s) unavailable" in workspace.status_label.text()
+        assert workspace.review_button.isEnabled() is False
     finally:
         window._dirty = False
         window.hide()
@@ -9100,6 +9187,40 @@ def test_annealing_transition_no_transition_defers_next_graph_render(
         dialog.deleteLater()
         QtWidgets.QApplication.processEvents()
 
+
+def test_current_density_source_refresh_waits_until_hidden_tab_is_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        app.processEvents()
+        section.hide()
+        refreshes: list[bool] = []
+        monkeypatch.setattr(section, "refresh_data", lambda: refreshes.append(True))
+
+        section._source_data_changed()  # noqa: SLF001
+        app.processEvents()
+
+        assert section._source_refresh_dirty is True  # noqa: SLF001
+        assert refreshes == []
+
+        section.show()
+        app.processEvents()
+
+        assert refreshes == [True]
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
+        app.processEvents()
 
 def test_annealing_transition_view_uses_one_row_per_graph() -> None:
     _ensure_qapp()
