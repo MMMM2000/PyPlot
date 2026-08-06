@@ -639,6 +639,38 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     backend.close()
 
 
+def test_production_backend_preserves_run_relative_terminal_readback() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+    backend._window._recipe_terminal_readback = {
+        "load_g": 0.005,
+        "stress_mpa": 0.16,
+        "plot_elapsed_s": 88.5,
+        "plot_load_g": 0.005,
+    }
+    backend._window._automation_active = False
+
+    readback = dict(backend.readback())
+
+    assert readback["load_g"] == pytest.approx(0.005)
+    assert readback["stress_mpa"] == pytest.approx(0.16)
+    assert readback["plot_elapsed_s"] == pytest.approx(88.5)
+    assert readback["plot_load_g"] == pytest.approx(0.005)
+    backend.close()
+
+
 def test_production_backend_emergency_does_not_preserve_motor_supply() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app

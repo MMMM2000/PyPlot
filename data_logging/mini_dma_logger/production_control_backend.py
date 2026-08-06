@@ -464,6 +464,15 @@ class ProductionTmaBackend:
             speed_mm_s = window._live_speed_values().get("speed_mm_s")
         except Exception:
             speed_mm_s = None
+        terminal_readback = getattr(window, "_recipe_terminal_readback", None)
+        if not bool(window._automation_active) and isinstance(
+            terminal_readback,
+            Mapping,
+        ):
+            if terminal_readback.get("load_g") is not None:
+                effective_load = float(terminal_readback["load_g"])
+            if terminal_readback.get("stress_mpa") is not None:
+                stress = float(terminal_readback["stress_mpa"])
         snapshot = getattr(window, "_supply_snapshot", {})
         session_path = getattr(window, "_session_base_path", None)
         base_readback: tuple[tuple[str, ReadbackValue], ...] = (
@@ -547,6 +556,17 @@ class ProductionTmaBackend:
             ),
             ("ui_log_sequence", self._ui_log_sequence),
         ) + tuple(self._hardware_preflight.items())
+        if not bool(window._automation_active) and isinstance(
+            terminal_readback,
+            Mapping,
+        ):
+            terminal_plot_readback = tuple(
+                (str(key), value)
+                for key, value in terminal_readback.items()
+                if str(key).startswith("plot_")
+            )
+            if terminal_plot_readback:
+                return base_readback + terminal_plot_readback
         capture_plot_point = getattr(window, "_capture_live_plot_point", None)
         plot_point = capture_plot_point() if callable(capture_plot_point) else None
         if plot_point is None:

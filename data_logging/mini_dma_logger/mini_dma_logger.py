@@ -22,6 +22,7 @@ from itertools import zip_longest
 from pathlib import Path
 from threading import Condition, Event, Lock, RLock, Thread, current_thread, get_ident
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
@@ -5379,7 +5380,12 @@ class MiniDmaAutomationController:
             return
         if host._automation_index >= len(host._automation_steps):
             if not host._is_ui_thread():
-                host._call_on_ui_thread_sync(
+                # Completion stops the control loop.  Queue it asynchronously so
+                # the worker can return before the UI thread joins that worker.
+                # A synchronous callback deadlocks here: the worker waits for the
+                # UI while the UI waits for this worker to stop.
+                host._automation_paused = True
+                host._run_on_ui_thread(
                     WeakOwnerCallback(self, "execute_next_tick")
                 )
                 return
@@ -5392,6 +5398,12 @@ class MiniDmaAutomationController:
             return_to_origin = config.return_to_origin if config is not None else host.check_return_to_origin.isChecked()
             if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
+            if any(
+                step.note == "recipe_return_zero"
+                for step in host._automation_steps
+            ):
+                return_to_origin = False
+            host._capture_recipe_terminal_readback()
             host._update_recipe_progress(complete=True)
             completion_reason = "recovery_completed" if is_recovery else "recipe_completed"
             completion_detail = "Recovery completed." if is_recovery else "Recipe completed."
@@ -8108,6 +8120,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._production_control_identity: ControlSessionIdentity | None = None
         self._production_control_generation = 0
         self._production_control_snapshot: object | None = None
+        self._isolated_terminal_readback: dict[str, object] | None = None
+        self._isolated_terminal_state: ControlState | None = None
+        self._isolated_terminal_task = ""
+        self._recipe_terminal_readback: dict[str, object] | None = None
         self._isolated_recipe_active = False
         self._isolated_recipe_paused = False
         self._isolated_command_pending: str | None = None
@@ -16882,6 +16898,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if show_errors:
                 QtWidgets.QMessageBox.warning(self, APP_NAME, "Select a scale serial port first.")
             return False
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
         baudrate = int(self.combo_scale_baud.currentText())
         worker = ScaleWorker(
             port_name=port_name,
@@ -25220,6 +25239,32 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _append_return_to_origin(self, steps: list[AutomationStep]) -> list[AutomationStep]:
+        controlled_basis = next(
+            (
+                step.basis
+                for step in reversed(steps)
+                if step.action
+                in {
+                    "seek_target",
+                    "ramp_target",
+                    "mechanical_scan",
+                    "fatigue_loop",
+                    "calibration_move",
+                    "calibration_record",
+                }
+                and step.basis
+            ),
+            None,
+        )
+        if controlled_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            steps.append(
+                AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=HSW_BASIS_LOAD_G,
+                    note="recipe_return_zero",
+                )
+            )
         return steps
 
     def _tic_motor_power_warning(self, vin_v: float | None) -> str | None:
@@ -29538,6 +29583,28 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_sample_rate_hz=self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
         )
 
+    def _capture_recipe_terminal_readback(self) -> None:
+        """Freeze run-relative values before session teardown clears its zero."""
+
+        terminal: dict[str, object] = {}
+        try:
+            terminal["load_g"] = float(self._current_effective_load_g())
+        except Exception:
+            pass
+        try:
+            stress_mpa = self._current_distribution_value(HSW_BASIS_STRESS_MPA)
+        except Exception:
+            stress_mpa = None
+        if stress_mpa is not None:
+            terminal["stress_mpa"] = float(stress_mpa)
+        point = self._capture_live_plot_point()
+        if point is not None:
+            for field_info in fields(point):
+                value = getattr(point, field_info.name)
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    terminal[f"plot_{field_info.name}"] = value
+        self._recipe_terminal_readback = terminal or None
+
     def _scale_summary_for_record(self, *, now_s: float) -> ScaleIntervalSummary:
         since_s = self._last_session_log_timestamp_s
         if since_s is None and self._session_start_wall_s > 0.0:
@@ -33076,6 +33143,9 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
         if not self._confirm_current_sweep_load_limit_plan():
             self._log("Recipe start cancelled at the applied-load cap confirmation.")
             return
@@ -33498,9 +33568,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         snapshot: object,
         readback: Mapping[str, object],
+        *,
+        terminal_task: str = "",
     ) -> None:
         """Publish process-owned state through the current dashboard widgets."""
-        task_text = str(readback.get("task") or self._automation_phase)
+        task_text = terminal_task or str(
+            readback.get("task") or self._automation_phase
+        )
         self.label_current_task.setText(f"Current task: {task_text}")
         self.label_current_task.setVisible(False)
         self.label_recipe_banner.setVisible(False)
@@ -33544,6 +33618,12 @@ class MainWindow(QtWidgets.QMainWindow):
         state = getattr(snapshot, "state", None)
         if state in {ControlState.RUNNING, ControlState.PAUSED}:
             self.label_control_process_status.setVisible(False)
+
+        if terminal_task:
+            self.recipe_progress.setRange(0, 100)
+            self.recipe_progress.setValue(100)
+            self.recipe_progress.setFormat(f"Overall 100% | {task_text}")
+            return
 
         if str(readback.get("automation_name") or "") == CURRENT_SWEEP_FATIGUE:
             completed_cycles = max(
@@ -33612,10 +33692,29 @@ class MainWindow(QtWidgets.QMainWindow):
         readback: Mapping[str, object] | None = None,
     ) -> None:
         process = self._production_control_process
+        user_stop_requested = self._isolated_user_stop_requested
         offer_recovery = (
             state is ControlState.STOPPED
-            and self._isolated_user_stop_requested
+            and user_stop_requested
         )
+        final_readback = dict(readback or {})
+        if not final_readback and self._production_control_snapshot is not None:
+            final_readback = dict(
+                getattr(self._production_control_snapshot, "readback", {})
+            )
+        if state is ControlState.STOPPED:
+            terminal_task = (
+                "Recipe stopped (final values)"
+                if user_stop_requested
+                else "Recipe completed (final values)"
+            )
+        elif state is ControlState.EMERGENCY:
+            terminal_task = "Emergency stop (final values)"
+        else:
+            terminal_task = "Recipe faulted (final values)"
+        self._isolated_terminal_readback = final_readback or None
+        self._isolated_terminal_state = state
+        self._isolated_terminal_task = terminal_task
         summary_run_dir: Path | None = None
         if readback is not None:
             position_mm = readback.get("position_mm")
@@ -33692,6 +33791,12 @@ class MainWindow(QtWidgets.QMainWindow):
             state in {ControlState.FAULTED, ControlState.EMERGENCY}
         )
         self._update_recipe_buttons()
+        if self._isolated_terminal_readback is not None:
+            self._apply_isolated_recipe_status(
+                SimpleNamespace(state=state),
+                self._isolated_terminal_readback,
+                terminal_task=self._isolated_terminal_task,
+            )
         if offer_recovery:
             self._schedule_recovery_after_stop()
 
@@ -33835,6 +33940,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_dashboard_plot_refresh_s = now_s
 
     def _start_auto_ramp(self) -> None:
+        self._recipe_terminal_readback = None
         if (
             self._control_process_enabled
             and not self._controller_process_mode
@@ -36310,6 +36416,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         fatigue_cycle_limit=None if fatigue_cycles == 0 else fatigue_cycles,
                     )
                 )
+                if fatigue_cycles > 0:
+                    steps = self._append_return_to_origin(steps)
                 cycle_text = "forever" if fatigue_cycles == 0 else f"{fatigue_cycles} cycle(s)"
                 summary = (
                     f"Started iso-stress fatigue: stress {target_start:.4f} MPa, "
@@ -36389,6 +36497,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         note=str(len(targets) + 1),
                     )
                 )
+            steps = self._append_return_to_origin(steps)
             suffix, _ = self._distribution_units(basis)
             if basis == HSW_BASIS_LOAD_G:
                 recipe_name = "iso-load current sweep"
@@ -37803,6 +37912,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._fatigue_loop_anchor_index is None:
             self._fatigue_loop_anchor_index = int(step_index)
         anchor_index = int(self._fatigue_loop_anchor_index)
+        tail_steps = list(self._automation_steps[int(step_index) + 1 :])
         completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
         if completed_cycle > int(self._fatigue_cycles_completed):
@@ -37813,7 +37923,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._write_session_metadata()
         next_cycle_index = int(self._fatigue_cycle_index) + 1
         if cycle_limit is not None and next_cycle_index > int(cycle_limit):
-            del self._automation_steps[anchor_index:]
+            self._automation_steps[anchor_index:] = tail_steps
             self._automation_index = anchor_index
             return
         try:
@@ -37824,7 +37934,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._fatigue_cycle_index = next_cycle_index
         self._fatigue_cycle_limit = cycle_limit
-        self._automation_steps[anchor_index:] = [*cycle_steps, loop_step]
+        self._automation_steps[anchor_index:] = [
+            *cycle_steps,
+            loop_step,
+            *tail_steps,
+        ]
         self._automation_index = anchor_index
         limit_text = "forever" if cycle_limit is None else str(cycle_limit)
         self._log(f"Starting fatigue cycle {next_cycle_index}/{limit_text}.")
@@ -38733,6 +38847,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_isolated_recipe_status(
                 isolated_snapshot,
                 dict(getattr(isolated_snapshot, "readback", {})),
+            )
+            return
+        if (
+            self._isolated_terminal_readback is not None
+            and self._isolated_terminal_state is not None
+            and self._scale_thread is None
+            and not self._session_active
+        ):
+            self._apply_isolated_recipe_status(
+                SimpleNamespace(state=self._isolated_terminal_state),
+                self._isolated_terminal_readback,
+                terminal_task=self._isolated_terminal_task,
             )
             return
         scale_age_s = self._scale_reading_age_s()

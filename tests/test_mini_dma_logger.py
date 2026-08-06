@@ -4447,6 +4447,57 @@ def test_isolated_finish_generates_summary_in_visible_parent_after_child_close(
         _close_test_window(window)
 
 
+def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    final_readback = {
+        "task": "Returning load to zero",
+        "load_g": 0.002,
+        "stress_mpa": 0.1,
+        "plot_strain_pct": 7.5,
+        "position_mm": 4.2,
+        "speed_mm_s": 0.0,
+        "supply_current_mA": 1.0,
+        "supply_voltage_V": 0.12,
+        "automation_completed": 20,
+        "automation_total": 20,
+    }
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback=final_readback,
+        )
+        window._latest_scale_timestamp = time.time() - 1000.0
+        window._refresh_live_labels()
+
+        assert window._dashboard_value_labels["task"].text() == (
+            "Recipe completed (final values)"
+        )
+        assert window._dashboard_value_labels["load_g"].text() == "0.002 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "0.1 MPa"
+        assert window.recipe_progress.value() == 100
+        assert window.recipe_progress.format() == (
+            "Overall 100% | Recipe completed (final values)"
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_iso_stress_recipe_blocks_when_first_target_exceeds_planning_limit(
     tmp_path: Path,
     qtbot,
@@ -7879,7 +7930,11 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         ]
         assert [step.relative_mm for step in forward_moves] == [pytest.approx(0.01)] * 4
         assert [step.relative_mm for step in reverse_moves] == [pytest.approx(-0.01)] * 4
-        assert steps[-1].action == "calibration_record"
+        assert steps[-2].action == "calibration_record"
+        assert steps[-1].action == "seek_target"
+        assert steps[-1].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert steps[-1].target_value == pytest.approx(0.0)
+        assert steps[-1].note == "recipe_return_zero"
     finally:
         _close_test_window(window)
 
@@ -9722,17 +9777,16 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         payload = window._current_recipe_payload()
 
         assert interval_ms == window._control_interval_ms()
-        assert len(steps) == 1
+        assert len(steps) == 2
         loop_step = steps[0]
         assert loop_step.action == "fatigue_loop"
         assert loop_step.fatigue_cycle_limit == 3
+        assert steps[1].note == "recipe_return_zero"
         observed_cycles: list[tuple[int | None, list[str | None]]] = []
+        window._automation_steps = list(steps)
         for expected_cycle in range(1, 4):
-            window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps))
-            if not window._automation_steps:
-                window._automation_steps = steps
-                window._fatigue_loop_anchor_index = None
-                window._expand_next_fatigue_cycle(loop_step, 0)
+            loop_index = window._automation_steps.index(loop_step)
+            window._expand_next_fatigue_cycle(loop_step, loop_index)
             sweep_steps = [
                 step for step in window._automation_steps if step.action == "sweep_current"
             ]
@@ -9742,7 +9796,8 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
                     [step.fatigue_leg for step in sweep_steps],
                 )
             )
-            assert len(window._automation_steps) == 5
+            assert len(window._automation_steps) == 6
+            assert window._automation_steps[-1].note == "recipe_return_zero"
             assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == [
                 (pytest.approx(1.0), pytest.approx(60.0)),
                 (pytest.approx(60.0), pytest.approx(1.0)),
@@ -9752,8 +9807,12 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
             (2, ["up", "down"]),
             (3, ["up", "down"]),
         ]
-        window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps) - 1)
-        assert window._automation_steps == []
+        window._expand_next_fatigue_cycle(
+            loop_step,
+            window._automation_steps.index(loop_step),
+        )
+        assert len(window._automation_steps) == 1
+        assert window._automation_steps[0].note == "recipe_return_zero"
         assert "iso-stress fatigue" in summary
         assert "3 cycle" in summary
         assert "Force control:" in summary
@@ -9810,9 +9869,10 @@ def test_large_finite_fatigue_recipe_stays_compact(tmp_path: Path, qtbot) -> Non
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
-        assert len(steps) == 1
+        assert len(steps) == 2
         assert steps[0].action == "fatigue_loop"
         assert steps[0].fatigue_cycle_limit == 100_000
+        assert steps[1].note == "recipe_return_zero"
         assert "100000 cycle(s)" in summary
         point_count, tick_count = window._estimate_recipe_points_and_ticks(
             steps,
@@ -9969,10 +10029,13 @@ def test_iso_stress_fatigue_recipe_can_start_with_first_overheating(tmp_path: Pa
         window.spin_current_sweep_first_overheating_end_mA.setValue(40.0)
 
         steps, summary, _interval_ms = window._build_automation_recipe()
-        loop_step = steps[-1]
+        loop_step = next(step for step in steps if step.action == "fatigue_loop")
         assert loop_step.action == "fatigue_loop"
         window._automation_steps = list(steps)
-        window._expand_next_fatigue_cycle(loop_step, len(steps) - 1)
+        window._expand_next_fatigue_cycle(
+            loop_step,
+            window._automation_steps.index(loop_step),
+        )
 
         set_current_steps = [
             step for step in window._automation_steps if step.action == "set_current"
@@ -10643,7 +10706,7 @@ def test_completed_recipe_cleanup_from_worker_is_queued_to_ui_thread(tmp_path: P
         window._automation_steps = []
         window._automation_index = 0
         window._is_ui_thread = lambda: False  # type: ignore[method-assign]
-        window._call_on_ui_thread_sync = lambda callback: queued.append(callback)  # type: ignore[method-assign]
+        window._run_on_ui_thread = lambda callback: queued.append(callback)  # type: ignore[method-assign]
 
         window._handle_auto_ramp_tick()
 
@@ -17521,6 +17584,10 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         assert current_steps[0].current_mA == pytest.approx(1.0)
         assert max(step.current_end_mA for step in current_sweep_steps if step.current_end_mA is not None) == pytest.approx(3.0)
         assert target_ramps[-1].target_end_value == pytest.approx(0.0)
+        assert steps[-1].action == "seek_target"
+        assert steps[-1].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert steps[-1].target_value == pytest.approx(0.0)
+        assert steps[-1].note == "recipe_return_zero"
         assert "iso-load current sweep" in summary.lower()
         assert "control every 250 ms" in summary
         assert "log every 500 ms" in summary
@@ -34286,6 +34353,70 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
 
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, True)]
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_completion_from_worker_queues_without_waiting_for_ui(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    queued: list[object] = []
+    synchronous_calls: list[bool] = []
+    window._automation_active = True
+    window._automation_steps = []
+    window._automation_index = 0
+    window._run_on_ui_thread = lambda callback: queued.append(callback)  # type: ignore[method-assign]
+    window._call_on_ui_thread_sync = lambda _callback: synchronous_calls.append(True)  # type: ignore[method-assign]
+
+    try:
+        worker = threading.Thread(
+            target=window._automation_controller.execute_next_tick
+        )
+        worker.start()
+        worker.join(timeout=1.0)
+
+        assert worker.is_alive() is False
+        assert len(queued) == 1
+        assert synchronous_calls == []
+        assert window._automation_paused is True
+    finally:
+        _close_test_window(window)
+
+
+def test_inline_zero_load_completion_does_not_start_second_recovery(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    origin_recoveries: list[bool] = []
+    window._automation_active = True
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "seek_target",
+            target_value=0.0,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            note="recipe_return_zero",
+        )
+    ]
+    window._automation_index = 1
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    terminal_captures: list[bool] = []
+    window._capture_recipe_terminal_readback = (  # type: ignore[method-assign]
+        lambda: terminal_captures.append(window._automation_active)
+    )
+    window._start_recovery_position_origin = (  # type: ignore[method-assign]
+        lambda: origin_recoveries.append(True)
+    )
+
+    try:
+        window._automation_controller.execute_next_tick()
+
+        assert window._automation_active is False
+        assert terminal_captures == [True]
+        assert origin_recoveries == []
+        assert "Recipe completed" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
