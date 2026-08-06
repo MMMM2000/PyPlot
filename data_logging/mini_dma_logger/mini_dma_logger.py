@@ -8491,6 +8491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_completed_ticks = 0
         self._automation_progress_started_s = 0.0
         self._automation_progress_last_format_update_s = 0.0
+        self._isolated_progress_last_task = ""
         self._automation_name = ""
         self._current_sweep_load_limit_plan_snapshot: CurrentSweepLoadLimitPlan | None = None
         self._automation_phase = "idle"
@@ -33170,6 +33171,44 @@ class MainWindow(QtWidgets.QMainWindow):
             heartbeat_interval_s=0.10,
         )
 
+    def _rollback_isolated_controller_startup(
+        self,
+        process: object,
+        exc: BaseException,
+    ) -> None:
+        poll_fault_detail = getattr(process, "poll_fault_detail", None)
+        fault_detail, fault_traceback = (
+            poll_fault_detail()
+            if callable(poll_fault_detail)
+            else ("", "")
+        )
+        close_process = getattr(process, "close", None)
+        if callable(close_process):
+            close_process()
+        detail = str(fault_detail or exc)
+        self._log(
+            "Dedicated-process startup failed before hardware ownership "
+            f"transfer: {detail}"
+        )
+        if fault_traceback:
+            self._log(
+                "Dedicated-process bootstrap traceback:\n"
+                f"{fault_traceback.rstrip()}"
+            )
+        # Setup never became child-owned. Leaving its modal-looking graph
+        # open with disabled pause/stop buttons traps the operator in a dead
+        # idle state, so roll the pre-run view back completely.
+        self._close_length_setup_dialog()
+        QtWidgets.QMessageBox.critical(
+            self,
+            APP_NAME,
+            "The dedicated controller did not become ready. No hardware "
+            "ownership was transferred and PSU outputs were not changed.\n\n"
+            f"{detail}",
+        )
+        self._first_overheating_preflight_decision = None
+        self._update_recipe_buttons()
+
     def _start_isolated_auto_ramp(self) -> None:
         if self._isolated_recipe_active:
             return
@@ -33240,12 +33279,24 @@ class MainWindow(QtWidgets.QMainWindow):
         has_length_setup = any(
             step.action == "starting_length_prompt" for step in steps
         )
+        process = self._create_production_control_process()
+        try:
+            # This child is hardware-free until START. Warming its imports
+            # while the operator enters the mounted length hides most of the
+            # Windows spawn delay without transferring any hardware ownership.
+            process.start_process()
+        except Exception as exc:
+            self._rollback_isolated_controller_startup(process, exc)
+            return
         if has_length_setup:
             # Preserve the established pre-run experience: the setup graphs
             # exist behind the modal length prompt. The visible process owns
             # only these immutable views; the child still owns every setup
             # hardware command and authoritative setup/run file.
             self._show_length_setup_dialog()
+            self._update_length_setup_dialog(
+                "Preparing dedicated controller; hardware remains UI-owned."
+            )
             starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
                 self,
                 APP_NAME,
@@ -33257,6 +33308,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if not accepted:
                 self._log("Recipe start cancelled before transferring hardware ownership.")
+                process.close()
                 self._close_length_setup_dialog()
                 self._first_overheating_preflight_decision = None
                 return
@@ -33267,44 +33319,13 @@ class MainWindow(QtWidgets.QMainWindow):
             starting_length_mm=starting_length_mm,
             cadence_downgrade_accepted=True,
         )
-        process = self._create_production_control_process()
         self._update_length_setup_dialog(
-            "Starting dedicated controller process; hardware remains UI-owned."
+            "Waiting for dedicated controller readiness; hardware remains UI-owned."
         )
         try:
-            process.start_process()
             process.wait_until_ready(timeout_s=10.0)
         except Exception as exc:
-            poll_fault_detail = getattr(process, "poll_fault_detail", None)
-            fault_detail, fault_traceback = (
-                poll_fault_detail()
-                if callable(poll_fault_detail)
-                else ("", "")
-            )
-            process.close()
-            detail = str(fault_detail or exc)
-            self._log(
-                "Dedicated-process startup failed before hardware ownership "
-                f"transfer: {detail}"
-            )
-            if fault_traceback:
-                self._log(
-                    "Dedicated-process bootstrap traceback:\n"
-                    f"{fault_traceback.rstrip()}"
-                )
-            # Setup never became child-owned. Leaving its modal-looking graph
-            # open with disabled pause/stop buttons traps the operator in a
-            # dead idle state, so roll the pre-run view back completely.
-            self._close_length_setup_dialog()
-            QtWidgets.QMessageBox.critical(
-                self,
-                APP_NAME,
-                "The dedicated controller did not become ready. No hardware "
-                "ownership was transferred and PSU outputs were not changed.\n\n"
-                f"{detail}",
-            )
-            self._first_overheating_preflight_decision = None
-            self._update_recipe_buttons()
+            self._rollback_isolated_controller_startup(process, exc)
             return
         self._log(
             "Dedicated controller process reported ready; beginning hardware "
@@ -33424,6 +33445,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
         self._isolated_user_stop_requested = False
+        self._isolated_progress_last_task = ""
         self._session_points = []
         self._live_plot_points = []
         self._automation_active = True
@@ -33728,12 +33750,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         value = min(completed, max(0, total - 1))
         percent = min(99, int(math.floor(100.0 * value / total)))
-        self.recipe_progress.setRange(0, total)
-        self.recipe_progress.setValue(value)
-        progress_text = f"Overall {percent:3d}% | {task_text}"
         now_s = time.monotonic()
         if self._automation_progress_started_s <= 0.0:
             self._automation_progress_started_s = now_s
+        should_refresh_progress = (
+            self._automation_progress_last_format_update_s <= 0.0
+            or now_s - self._automation_progress_last_format_update_s >= 1.0
+            or task_text != self._isolated_progress_last_task
+        )
+        if not should_refresh_progress:
+            return
+        self._automation_progress_last_format_update_s = now_s
+        self._isolated_progress_last_task = task_text
+        self.recipe_progress.setRange(0, total)
+        self.recipe_progress.setValue(value)
+        progress_text = f"Overall {percent:3d}% | {task_text}"
         remaining_s = self._estimated_recipe_remaining_s(
             value=value,
             total=total,

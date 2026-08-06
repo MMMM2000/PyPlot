@@ -2956,7 +2956,7 @@ def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
         _close_test_window(window)
 
 
-def test_isolated_start_cancelled_length_does_not_spawn_control_process(
+def test_isolated_start_cancelled_length_closes_prewarmed_control_process(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -2986,8 +2986,8 @@ def test_isolated_start_cancelled_length_does_not_spawn_control_process(
     try:
         window._start_auto_ramp()
 
-        assert process.started is False
-        assert process.closed is False
+        assert process.started is True
+        assert process.closed is True
         assert process.requests == []
         assert window._isolated_recipe_active is False
         assert "before transferring hardware ownership" in window.log_output.toPlainText()
@@ -4478,6 +4478,54 @@ def test_iso_stress_recipe_caps_target_grid_below_applied_load_limit(
         assert metadata["target_end_requested"] == pytest.approx(1000.0)
         assert metadata["target_end_effective"] == pytest.approx(700.0)
         assert metadata["load_limit_plan"]["clipped"] is True
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_progress_eta_refresh_is_throttled_until_task_changes(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    now_s = [100.0]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    snapshot = SimpleNamespace(state=mini_dma_mod.ControlState.RUNNING)
+    readback = {
+        "task": "Ramp to 50 MPa",
+        "automation_total": 100,
+        "automation_completed": 10,
+    }
+
+    try:
+        window._automation_progress_started_s = 90.0
+        window._automation_progress_last_format_update_s = 0.0
+        window._apply_isolated_recipe_status(snapshot, readback)
+        first_format = window.recipe_progress.format()
+        assert window.recipe_progress.value() == 10
+        assert "ETA" in first_format
+
+        now_s[0] = 100.1
+        readback["automation_completed"] = 20
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 10
+        assert window.recipe_progress.format() == first_format
+
+        now_s[0] = 100.2
+        readback["task"] = "Hold at 50 MPa"
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 20
+        assert "Hold at 50 MPa" in window.recipe_progress.format()
+
+        now_s[0] = 101.3
+        readback["automation_completed"] = 30
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 30
     finally:
         _close_test_window(window)
 
