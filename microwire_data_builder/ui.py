@@ -38947,6 +38947,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.logger.exception("Failed to load deferred project section %s", section_key)
             finally:
                 MiniDatabaseSection._project_load_batch_mode = False
+                try:
+                    if section_key == "assemble":
+                        loaded_section = getattr(self, "assembly_section", None)
+                    else:
+                        loaded_section = self.sections.get(section_key)
+                    self._refresh_loaded_project_section_ui(
+                        section_key,
+                        loaded_section,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Failed to refresh deferred project section UI: %s", section_key
+                    )
                 pending.discard(section_key)
                 self._update_project_actions()
                 transitions = getattr(self, "transitions_section", None)
@@ -41562,26 +41575,33 @@ class BuilderWindow(QtWidgets.QMainWindow):
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
+    def _refresh_loaded_project_section_ui(
+        self,
+        key: str,
+        section: object,
+    ) -> None:
+        if isinstance(section, MiniDatabaseSection):
+            try:
+                section._pending_count_cache = 0
+                section._reset_progress_ui()
+                section._update_status()
+                section._update_open_sources_enabled()
+            except Exception:
+                pass
+        status_text = ""
+        status_label = getattr(section, "status_label", None)
+        if isinstance(status_label, QtWidgets.QLabel):
+            status_text = status_label.text()
+        self._handle_section_status_changed(key, status_text)
+        sources: Iterable[str] = []
+        if isinstance(section, MiniDatabaseSection):
+            sources = section.data.sources
+        self._handle_section_sources_changed(key, sources)
+
     def _refresh_sections_after_project_load(self) -> None:
         self._sync_microscope_dependent_sections()
         for key, section in self.sections.items():
-            if isinstance(section, MiniDatabaseSection):
-                try:
-                    section._pending_count_cache = 0
-                    section._reset_progress_ui()
-                    section._update_status()
-                    section._update_open_sources_enabled()
-                except Exception:
-                    pass
-            status_text = ""
-            status_label = getattr(section, "status_label", None)
-            if isinstance(status_label, QtWidgets.QLabel):
-                status_text = status_label.text()
-            self._handle_section_status_changed(key, status_text)
-            sources: Iterable[str] = []
-            if isinstance(section, MiniDatabaseSection):
-                sources = section.data.sources
-            self._handle_section_sources_changed(key, sources)
+            self._refresh_loaded_project_section_ui(key, section)
         batch_mode = MiniDatabaseSection._project_load_batch_mode
         MiniDatabaseSection._project_load_batch_mode = False
         try:

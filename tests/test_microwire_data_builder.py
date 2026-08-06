@@ -8906,6 +8906,36 @@ def test_transition_workspace_loads_only_selected_peer_dependencies_lazily(
         window.close()
 
 
+def test_deferred_project_section_refreshes_restored_source_controls(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    section = window.microscope_section
+    try:
+        section.apply_data(
+            MiniDatabaseData(
+                sources=[str(tmp_path)],
+                table=pd.DataFrame({"Composition": ["Ni50Fe27Ga23"]}),
+            )
+        )
+        section.refresh_button.setEnabled(False)
+        section.status_label.setText("Connect one or more folders to begin.")
+        section._suppress_pending_scan_once = True
+        previous_batch_mode = builder_ui.MiniDatabaseSection._project_load_batch_mode
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        try:
+            window._refresh_loaded_project_section_ui("microscope", section)
+        finally:
+            builder_ui.MiniDatabaseSection._project_load_batch_mode = previous_batch_mode
+        assert section.refresh_button.isEnabled()
+        assert section.status_label.text() == "Up to date (1 record(s))."
+    finally:
+        window._dirty = False
+
+        window.close()
+
 def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
     _ensure_qapp()
     window = BuilderWindow()
