@@ -33656,6 +33656,12 @@ class MainWindow(QtWidgets.QMainWindow):
         task_text = terminal_task or str(
             readback.get("task") or self._automation_phase
         )
+        if (
+            self._length_setup_dialog is not None
+            and not terminal_task
+            and not bool(readback.get("session_logging_enabled"))
+        ):
+            self._update_length_setup_dialog(f"Controller: {task_text}")
         self.label_current_task.setText(f"Current task: {task_text}")
         self.label_current_task.setVisible(False)
         self.label_recipe_banner.setVisible(False)

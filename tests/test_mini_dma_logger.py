@@ -4482,6 +4482,40 @@ def test_iso_stress_recipe_caps_target_grid_below_applied_load_limit(
         _close_test_window(window)
 
 
+def test_isolated_setup_status_replaces_pre_handoff_message(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+
+    try:
+        window._show_length_setup_dialog()
+        window._update_length_setup_dialog(
+            "Waiting for dedicated controller readiness; hardware remains UI-owned."
+        )
+        window._apply_isolated_recipe_status(
+            SimpleNamespace(state=mini_dma_mod.ControlState.RUNNING),
+            {
+                "task": "Setup: return load to zero",
+                "session_logging_enabled": False,
+                "automation_total": 100,
+                "automation_completed": 10,
+            },
+        )
+
+        assert window._length_setup_status_label is not None
+        assert window._length_setup_status_label.text() == (
+            "Controller: Setup: return load to zero"
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_isolated_progress_eta_refresh_is_throttled_until_task_changes(
     tmp_path: Path,
     qtbot,
