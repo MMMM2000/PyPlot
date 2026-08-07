@@ -899,6 +899,49 @@ def test_production_backend_rejects_policy_profile_mismatch() -> None:
     backend.close()
 
 
+def test_production_backend_validates_kosice_policy_after_hardware_probe() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+
+    class _DetectedKosiceWindow(_FakeProductionWindow):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self.profile = "prague_legacy"
+
+        def _force_control_profile(self) -> object:
+            return SimpleNamespace(value=self.profile)
+
+        def _preflight_recipe_hardware(
+            self,
+            steps: list[object],
+            *,
+            show_progress: bool,
+        ) -> bool:
+            accepted = super()._preflight_recipe_hardware(
+                steps,
+                show_progress=show_progress,
+            )
+            self.profile = "kosice_adaptive"
+            return accepted
+
+    backend = ProductionMiniDmaBackend(window_factory=_DetectedKosiceWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.KOSICE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},'
+                '"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    assert backend._window.lifecycle_calls == ["hardware_preflight", "recipe_start"]
+    backend.close()
+
+
 def test_production_backend_readback_exposes_bounded_ui_log_tail() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app

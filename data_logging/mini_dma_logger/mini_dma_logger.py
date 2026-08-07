@@ -15014,8 +15014,25 @@ class MainWindow(QtWidgets.QMainWindow):
         current_mA = self._continuity_current_mA()
         if current_mA <= 0.0:
             return True
-        if not self._set_recipe_current_mA(current_mA, measure_after=True):
+        # Continuity is a pre-motion safety condition, including the interval
+        # before the recipe/session flags become active.  Suppress the generic
+        # voltage-limit fallback while obtaining this readback: an open circuit
+        # at the continuity current must abort startup, not silently replace the
+        # continuity current with 0 mA and allow setup motion to continue.
+        self._continuity_preflight_active = True
+        try:
+            current_set = self._set_recipe_current_mA(current_mA, measure_after=True)
+        finally:
+            self._continuity_preflight_active = False
+        if not current_set:
             self._log("Recipe stopped because continuity-current setup failed.")
+            return False
+        if self._supply_readback_indicates_open_circuit(current_mA):
+            self._log(
+                "Recipe stopped before motion because the continuity check detected an open circuit: "
+                f"{self._wire_break_stop_message()}"
+            )
+            self._disable_supply_output()
             return False
         self._log(
             f"Continuity monitor enabled at {_format_compact_unit(current_mA, 'mA', decimals=3)}."
@@ -15039,6 +15056,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return
 
     def _handle_supply_limit_condition(self) -> None:
+        if getattr(self, "_continuity_preflight_active", False):
+            return
         if self._wire_break_detected():
             self._stop_for_wire_break()
             return
@@ -15106,6 +15125,9 @@ class MainWindow(QtWidgets.QMainWindow):
             setpoint_mA = self._supply_last_setpoint_mA
         if setpoint_mA is None:
             return False
+        return self._supply_readback_indicates_open_circuit(float(setpoint_mA))
+
+    def _supply_readback_indicates_open_circuit(self, setpoint_mA: float) -> bool:
         min_setpoint_mA = (
             min(WIRE_BREAK_MIN_SETPOINT_MA, max(self._supply_current_resolution_mA(), self._continuity_current_mA()))
             if self._continuity_monitor_enabled()

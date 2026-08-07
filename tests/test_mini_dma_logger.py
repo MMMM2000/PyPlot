@@ -25836,6 +25836,47 @@ def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
         _close_test_window(window)
 
 
+def test_length_setup_open_circuit_fails_before_automation_or_motion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    current_commands: list[tuple[float, bool]] = []
+    disabled: list[bool] = []
+    window.check_continuity_monitor.setChecked(True)
+    window.spin_continuity_current_mA.setValue(1.0)
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._automation_active = False
+    window._session_active = False
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+
+    def _set_current(current_mA: float, *, measure_after: bool = False) -> bool:
+        current_commands.append((current_mA, measure_after))
+        window._supply_output_enabled = True
+        window._supply_last_setpoint_mA = current_mA
+        if measure_after:
+            window._supply_snapshot = {
+                "current_mA": 0.1,
+                "voltage_V": 32.05,
+                "resistance_ohm": None,
+                "power_W": 0.003205,
+            }
+            window._handle_supply_limit_condition()
+        return True
+
+    window._set_recipe_current_mA = _set_current  # type: ignore[method-assign]
+    window._disable_supply_output = lambda: disabled.append(True)  # type: ignore[method-assign]
+    steps = [mini_dma_mod.AutomationStep("starting_length_prompt", note="setup_start_length")]
+
+    try:
+        assert window._prepare_continuity_current_for_recipe(steps) is False
+
+        assert current_commands == [(pytest.approx(1.0), True)]
+        assert disabled == [True]
+        assert window._automation_active is False
+        assert "stopped before motion" in window.log_output.toPlainText()
+        assert "open circuit" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_isolated_current_sweep_shows_runtime_update_for_hold_edit_without_ui_steps(
     tmp_path: Path,
     qtbot,

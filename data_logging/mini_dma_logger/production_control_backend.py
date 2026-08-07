@@ -273,24 +273,6 @@ class ProductionTmaBackend:
             self._window._supply_lease_owner = (
                 f"tma-session-{request.identity.session_id}"
             )
-        profile_method = getattr(self._window, "_force_control_profile", None)
-        if callable(profile_method):
-            selected_profile = profile_method()
-            profile_value = str(
-                getattr(selected_profile, "value", selected_profile)
-            ).casefold()
-            policy_matches = (
-                request.policy is ControlPolicy.PRAGUE
-                and "prague" in profile_value
-            ) or (
-                request.policy is ControlPolicy.KOSICE
-                and "kosice" in profile_value
-            )
-            if not policy_matches:
-                raise ValueError(
-                    "TMA IPC policy does not match the reconstructed hardware "
-                    f"profile ({request.policy.value} vs {profile_value})."
-                )
         self._window._controller_process_cadence_downgrade_accepted = bool(
             payload.get("cadence_downgrade_accepted", False)
         )
@@ -321,6 +303,29 @@ class ProductionTmaBackend:
             if recent_log:
                 detail = f"{detail} Child log: {recent_log}"
             raise RuntimeError(detail)
+        # Hardware auto-detection can update the scale protocol and therefore
+        # the Prague/Košice force-control profile. Validate the IPC policy only
+        # after the child has reconstructed and probed its actual hardware;
+        # checking the constructor defaults here incorrectly classified a
+        # Košice KERN setup as Prague before the probe ran.
+        profile_method = getattr(self._window, "_force_control_profile", None)
+        if callable(profile_method):
+            selected_profile = profile_method()
+            profile_value = str(
+                getattr(selected_profile, "value", selected_profile)
+            ).casefold()
+            policy_matches = (
+                request.policy is ControlPolicy.PRAGUE
+                and "prague" in profile_value
+            ) or (
+                request.policy is ControlPolicy.KOSICE
+                and "kosice" in profile_value
+            )
+            if not policy_matches:
+                raise ValueError(
+                    "TMA IPC policy does not match the reconstructed hardware "
+                    f"profile ({request.policy.value} vs {profile_value})."
+                )
         self._window._controller_process_hardware_preflight_complete = True
         should_connect_ir = getattr(
             self._window,
