@@ -54,6 +54,27 @@ def test_control_process_spawn_entrypoint_preserves_legacy_positional_abi() -> N
     assert parameters[9].default is None
 
 
+def test_windows_pythonw_parent_selects_console_spawn_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from data_logging.mini_dma_logger import control_process as module
+
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.touch()
+    pythonw.touch()
+    selected: list[str] = []
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.sys, "executable", str(pythonw))
+    monkeypatch.setattr(module.multiprocessing, "set_executable", selected.append)
+
+    actual = module._prepare_windows_spawn_executable()
+
+    assert actual == python
+    assert selected == [str(python)]
+
+
 def test_legacy_nine_argument_windows_parent_can_spawn_updated_child() -> None:
     """Exercise the exact old-parent/new-child boundary that failed live."""
 

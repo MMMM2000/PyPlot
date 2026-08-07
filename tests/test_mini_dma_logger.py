@@ -2153,6 +2153,7 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         window._stop_recipe_from_button()
         assert [kind for kind, _identity in process.commands] == [
             "update_config",
+            "hold_bypass",
             "pause",
             "resume",
             "stop",

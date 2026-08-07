@@ -13,7 +13,9 @@ from enum import Enum
 import importlib
 import multiprocessing
 import os
+from pathlib import Path
 from queue import Empty, Full
+import sys
 from threading import Event as ThreadEvent, Lock, Thread
 import time
 import traceback
@@ -54,6 +56,17 @@ class ControlEventKind(str, Enum):
     COMMAND_REJECTED = "command_rejected"
     CONFIG_UPDATED = "config_updated"
     SHUTDOWN = "shutdown"
+
+
+def _prepare_windows_spawn_executable() -> Path:
+    executable = Path(sys.executable)
+    if sys.platform != "win32" or executable.name.casefold() != "pythonw.exe":
+        return executable
+    console_executable = executable.with_name("python.exe")
+    if not console_executable.exists():
+        return executable
+    multiprocessing.set_executable(str(console_executable))
+    return console_executable
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,6 +779,10 @@ class TmaControlProcess:
     def start_process(self) -> None:
         if self._process is not None:
             raise RuntimeError("control process was already started")
+        # The visible app may have been started through pythonw. Its isolated
+        # controller still needs the console runtime for reliable Windows
+        # spawn bootstrap and diagnostics.
+        _prepare_windows_spawn_executable()
         self._process = self._context.Process(
             target=_run_control_process,
             name="TmaControlProcess",

@@ -11,6 +11,7 @@ from plotting.shared.experiment_processes import (
     build_experiment_process_env,
     build_experiment_process_command,
     experiment_process_log_path,
+    control_python_executable,
     launch_experiment_process,
 )
 
@@ -29,6 +30,19 @@ def test_experiment_process_command_uses_module_entrypoint() -> None:
         "-m",
         "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
     ]
+
+
+def test_experiment_process_uses_console_interpreter_for_child_spawning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.touch()
+    pythonw.touch()
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    assert control_python_executable(pythonw) == python
 
 
 def test_experiment_process_command_uses_launcher_entrypoint_when_frozen(
