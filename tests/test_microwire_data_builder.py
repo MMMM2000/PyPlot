@@ -11967,6 +11967,68 @@ def test_store_memory_transaction_nested_rollback_and_memory_commit(
         store_cls._memory_transactions = transactions
 
 
+def test_memory_only_payload_skips_redundant_disk_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("memory_only_payload")
+    store.keep_payload_in_memory("records")
+    path = store.payload_path("records")
+    path.write_text("stale", encoding="utf-8")
+    payload = {"records": [1, 2, 3]}
+    monkeypatch.setattr(
+        store,
+        "_write_payload_to_disk",
+        lambda *_args: pytest.fail("memory-only payload was encoded for disk"),
+    )
+
+    assert store.save_payload("records", payload) == path
+
+    assert store.load_payload("records") == payload
+    assert not path.exists()
+
+
+def test_oversized_payload_cache_falls_back_to_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("oversized_payload")
+    path = store.payload_path("records")
+    path.write_text("stale", encoding="utf-8")
+    payload = {"records": [1, 2, 3]}
+
+    def fail_oversized(_name: str, _payload: object) -> Path:
+        raise builder_ui.SafeCodecError(
+            "Encoded JSON exceeds the safe file limit of 268435456 bytes"
+        )
+
+    monkeypatch.setattr(store, "_write_payload_to_disk", fail_oversized)
+    with caplog.at_level(logging.WARNING):
+        assert store.save_payload("records", payload) == path
+
+    assert store.load_payload("records") == payload
+    assert not path.exists()
+    assert "keeping it in memory for this session" in caplog.text
+
+
+def test_payload_cache_does_not_hide_other_safe_codec_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("failed_payload")
+
+    def fail_decode(_name: str, _payload: object) -> Path:
+        raise builder_ui.SafeCodecError("checksum mismatch")
+
+    monkeypatch.setattr(store, "_write_payload_to_disk", fail_decode)
+    with pytest.raises(builder_ui.SafeCodecError, match="checksum mismatch"):
+        store.save_payload("records", {"records": [1]})
+
+
 @pytest.mark.parametrize("failure_target", ["fabrication", "mini_dma", "assemble"])
 def test_project_import_failure_restores_previous_state_without_disk_writes(
     tmp_path: Path,

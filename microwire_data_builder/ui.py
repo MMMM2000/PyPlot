@@ -25004,6 +25004,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self._preview_render_pending: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self.store.keep_payload_in_memory("vsm_temperature_scan_records")
         self._preview_render_timer = QtCore.QTimer(self)
         self._preview_render_timer.setSingleShot(True)
         self._preview_render_timer.timeout.connect(self._render_next_preview)

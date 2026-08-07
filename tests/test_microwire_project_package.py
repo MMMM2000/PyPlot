@@ -97,7 +97,11 @@ def test_v3_round_trip_uses_split_entries_and_content_addressed_blobs(tmp_path: 
         assert "sections/annealing/state.json" in names
         assert "sections/annealing/table.json" in names
         assert "sections/annealing/payloads/annealing_records.json" in names
-        assert any(name.startswith("blobs/sha256/") for name in names)
+        blob_infos = [
+            info for info in infos if info.filename.startswith("blobs/sha256/")
+        ]
+        assert blob_infos
+        assert all(info.compress_type == zipfile.ZIP_DEFLATED for info in blob_infos)
 
     materialized = index.materialize()
     section = materialized["sections"]["annealing"]
@@ -703,6 +707,14 @@ def test_trusted_migration_reencodes_safe_payload_in_child_and_externalizes_bina
     result = migrate_legacy_project_trusted(source, output)
 
     migrated = project_package.inspect_project_package(output, verify_entries=True)
+    with zipfile.ZipFile(output, "r") as archive:
+        blob_infos = [
+            info
+            for info in archive.infolist()
+            if info.filename.startswith("blobs/sha256/")
+        ]
+    assert len(blob_infos) == 1
+    assert blob_infos[0].compress_type == zipfile.ZIP_STORED
     assert result["legacy_payloads_migrated"] == 0
     assert migrated.manifest["migration"]["pickle_payload_count"] == 0
     assert len(migrated.blobs) == 1

@@ -18,6 +18,7 @@ import tempfile
 import threading
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -51,6 +52,47 @@ MAX_BLOB_BYTES = 256 * 1024 * 1024
 MAX_AGGREGATE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 STREAM_CHUNK_BYTES = 1024 * 1024
+
+
+def _safe_zip_compression_for_chunks(chunks: Iterable[bytes], raw_size: int) -> int:
+    """Compress entries unless doing so would violate our anti-zip-bomb ratio."""
+    compressor = zlib.compressobj(level=6, wbits=-zlib.MAX_WBITS)
+    compressed_size = 0
+    for chunk in chunks:
+        compressed_size += len(compressor.compress(chunk))
+    compressed_size += len(compressor.flush())
+    if raw_size > max(1, compressed_size) * MAX_COMPRESSION_RATIO:
+        return zipfile.ZIP_STORED
+    return zipfile.ZIP_DEFLATED
+
+
+def _safe_zip_compression_for_bytes(raw: bytes) -> int:
+    return _safe_zip_compression_for_chunks((raw,), len(raw))
+
+
+def _safe_zip_compression_for_file(path: Path) -> int:
+    size = path.stat().st_size
+
+    def chunks() -> Iterable[bytes]:
+        with path.open("rb") as handle:
+            while chunk := handle.read(STREAM_CHUNK_BYTES):
+                yield chunk
+
+    return _safe_zip_compression_for_chunks(chunks(), size)
+
+
+def _safe_zip_compression_for_archive_entry(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+) -> int:
+    def chunks() -> Iterable[bytes]:
+        with archive.open(info, "r") as handle:
+            while chunk := handle.read(STREAM_CHUNK_BYTES):
+                yield chunk
+
+    return _safe_zip_compression_for_chunks(chunks(), info.file_size)
+
+
 DELETED_PAYLOADS_KEY = "__deleted_payloads__"
 
 SUPPORTED_REQUIRED_FEATURES = frozenset({"split-sections", "sha256", "content-blobs"})
@@ -1302,8 +1344,7 @@ def write_project_package(
             archive.writestr(MIMETYPE_PATH, MIMETYPE, compress_type=zipfile.ZIP_STORED)
             archive.writestr(MANIFEST_PATH, manifest_raw, compress_type=zipfile.ZIP_STORED)
             for entry_path in sorted(entry_data):
-                descriptor = entry_descriptors[entry_path]
-                compression = zipfile.ZIP_STORED if descriptor.role == "blob" else zipfile.ZIP_DEFLATED
+                compression = _safe_zip_compression_for_bytes(entry_data[entry_path])
                 archive.writestr(
                     entry_path,
                     entry_data[entry_path],
@@ -1311,8 +1352,7 @@ def write_project_package(
                     compresslevel=None if compression == zipfile.ZIP_STORED else 6,
                 )
             for entry_path in sorted(entry_files):
-                descriptor = entry_descriptors[entry_path]
-                compression = zipfile.ZIP_STORED if descriptor.role == "blob" else zipfile.ZIP_DEFLATED
+                compression = _safe_zip_compression_for_file(entry_files[entry_path])
                 zip_info = zipfile.ZipInfo(entry_path)
                 zip_info.compress_type = compression
                 with entry_files[entry_path].open("rb") as source_handle, archive.open(
@@ -1328,10 +1368,8 @@ def write_project_package(
                         descriptor = entry_descriptors[entry_path]
                         info = source_reader.info_map[entry_path]
                         zip_info = zipfile.ZipInfo(entry_path)
-                        zip_info.compress_type = (
-                            zipfile.ZIP_STORED
-                            if descriptor.role == "blob"
-                            else zipfile.ZIP_DEFLATED
+                        zip_info.compress_type = _safe_zip_compression_for_archive_entry(
+                            source_archive, info
                         )
                         digest = hashlib.sha256()
                         copied = 0
@@ -1599,9 +1637,9 @@ def write_project_package_streaming(
         ) as archive:
             archive.writestr(MIMETYPE_PATH, MIMETYPE, compress_type=zipfile.ZIP_STORED)
             archive.writestr(MANIFEST_PATH, manifest_raw, compress_type=zipfile.ZIP_STORED)
-            for entry_path, descriptor in sorted(entry_descriptors.items()):
+            for entry_path in sorted(entry_descriptors):
                 staged = staging_dir.joinpath(*PurePosixPath(entry_path).parts)
-                compression = zipfile.ZIP_STORED if descriptor.role == "blob" else zipfile.ZIP_DEFLATED
+                compression = _safe_zip_compression_for_file(staged)
                 zip_info = zipfile.ZipInfo(entry_path)
                 zip_info.compress_type = compression
                 with staged.open("rb") as source_handle, archive.open(
