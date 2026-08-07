@@ -4713,6 +4713,49 @@ def test_isolated_finish_generates_summary_in_visible_parent_after_child_close(
         _close_test_window(window)
 
 
+def test_isolated_fault_generates_summary_from_cached_terminal_snapshot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-fault-run"
+    requested: list[tuple[Path, bool, bool]] = []
+    window._production_control_process = process
+    window._production_control_snapshot = SimpleNamespace(
+        readback={
+            "session_path": str(run_dir / "measurement.csv"),
+            "position_mm": 1.25,
+        }
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.FAULTED,
+            detail="wire break",
+        )
+
+        assert requested == [(run_dir, False, True)]
+        assert window._current_position_mm == pytest.approx(1.25)
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
     tmp_path: Path,
     qtbot,

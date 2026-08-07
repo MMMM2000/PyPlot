@@ -34082,15 +34082,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_terminal_state = state
         self._isolated_terminal_task = terminal_task
         summary_run_dir: Path | None = None
-        if readback is not None:
-            position_mm = readback.get("position_mm")
+        if final_readback:
+            position_mm = final_readback.get("position_mm")
             if position_mm is not None:
                 self._current_position_mm = float(position_mm)
                 self._effective_position_mm = float(position_mm)
                 self._last_move_target_mm = float(position_mm)
                 self._last_effective_move_target_mm = float(position_mm)
             self._tic_motor_power_ok = None
-            session_path = readback.get("session_path")
+            session_path = final_readback.get("session_path")
             if isinstance(session_path, str) and session_path.strip():
                 summary_run_dir = Path(session_path).parent
         self._control_process_poll_timer.stop()
