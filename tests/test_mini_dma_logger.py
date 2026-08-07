@@ -36,7 +36,7 @@ from microwire_data_builder import project_package, safe_codec
 
 TEST_QSETTINGS_ROOT = Path(
     os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
-)
+) / os.environ.get("PYTEST_XDIST_WORKER", "serial")
 TEST_QSETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 TEST_METADATA_CHECKPOINT_ROOT = Path("artifacts/test-metadata-checkpoints")
