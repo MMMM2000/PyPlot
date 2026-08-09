@@ -12395,7 +12395,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "#14b8a6",
                 self._plot_resistance_ohm,
             ),
-            PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
+            PlotChannel(
+                "power_W",
+                "Measured electrical power (W)",
+                "#c084fc",
+                lambda point: point.power_W,
+            ),
             PlotChannel(
                 "temperature_c",
                 "Temperature (C)",

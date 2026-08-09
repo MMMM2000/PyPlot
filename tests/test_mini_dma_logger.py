@@ -4092,6 +4092,20 @@ def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: P
         assert tile.y_left_combo.currentData() == "fatigue_fixed_strain_range_pct"
         assert tile.y_right_combo.currentData() == ""
         assert tile.y_left_combo.findData("fatigue_total_strain_pct") >= 0
+        assert tile.x_combo.findData("power_W") >= 0
+        assert tile.y_left_combo.findData("power_W") >= 0
+        assert tile.y_right_combo.findData("power_W") >= 0
+        power_channel = window._plot_channel("power_W")
+        assert power_channel is not None
+        point = window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=1.0,
+            load_g=1.0,
+        )
+        point.power_W = 0.123
+        assert power_channel.getter(point) == pytest.approx(0.123)
     finally:
         _close_test_window(window)
 
