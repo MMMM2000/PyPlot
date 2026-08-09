@@ -12396,6 +12396,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._plot_resistance_ohm,
             ),
             PlotChannel(
+                "power_mW_per_cm",
+                "Measured power per length (mW/cm)",
+                "#d8b4fe",
+                self._plot_power_mw_per_cm,
+            ),
+            PlotChannel(
                 "power_W",
                 "Measured electrical power (W)",
                 "#c084fc",
@@ -12463,6 +12469,20 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return None
         return point.resistance_ohm
+
+    def _plot_power_mw_per_cm(self, point: MeasurementPoint) -> float | None:
+        if point.power_W is None or not math.isfinite(float(point.power_W)):
+            return None
+        config = self._control_config()
+        initial_length_mm = (
+            config.initial_length_mm
+            if config is not None
+            else float(self.spin_initial_length.value())
+        )
+        current_length_mm = float(initial_length_mm) + float(point.position_mm)
+        if not math.isfinite(current_length_mm) or current_length_mm <= 0.0:
+            return None
+        return float(point.power_W) * 10_000.0 / current_length_mm
 
     def _plot_channel(self, key: str) -> PlotChannel | None:
         for channel in self._plot_channels():
@@ -12768,7 +12788,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ],
             "heating": [
                 ("elapsed_s", "current_measured_mA", "temperature_c"),
-                ("elapsed_s", "voltage_V", "power_W"),
+                ("elapsed_s", "voltage_V", "power_mW_per_cm"),
                 ("elapsed_s", "load_g", "position_mm"),
                 ("strain_pct", "stress_mpa", "current_measured_mA"),
             ],

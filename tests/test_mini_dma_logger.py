@@ -4095,6 +4095,9 @@ def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: P
         assert tile.x_combo.findData("power_W") >= 0
         assert tile.y_left_combo.findData("power_W") >= 0
         assert tile.y_right_combo.findData("power_W") >= 0
+        assert tile.x_combo.findData("power_mW_per_cm") >= 0
+        assert tile.y_left_combo.findData("power_mW_per_cm") >= 0
+        assert tile.y_right_combo.findData("power_mW_per_cm") >= 0
         power_channel = window._plot_channel("power_W")
         assert power_channel is not None
         point = window._capture_measurement_point(
@@ -4106,6 +4109,11 @@ def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: P
         )
         point.power_W = 0.123
         assert power_channel.getter(point) == pytest.approx(0.123)
+        window.spin_initial_length.setValue(30.0)
+        point.position_mm = 2.0
+        power_per_length_channel = window._plot_channel("power_mW_per_cm")
+        assert power_per_length_channel is not None
+        assert power_per_length_channel.getter(point) == pytest.approx(38.4375)
     finally:
         _close_test_window(window)
 
