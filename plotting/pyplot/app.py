@@ -13,6 +13,8 @@ import logging
 import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+from plotting.shared.qt_settings import create_qsettings
 from matplotlib import ticker as mticker
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -102,7 +104,7 @@ class PyPlotWorkbench(PyPlotWindow):
         plotters: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] | None = None,
         initial_plotter: str | None = None,
     ) -> None:
-        self.settings = QtCore.QSettings("MicrowireLab", "PyPlotWorkbench")
+        self.settings = create_qsettings("MicrowireLab", "PyPlotWorkbench")
         self._shared_settings = self.settings
         raw_dirs = self.settings.value("plugin_last_dirs", "{}")
         try:

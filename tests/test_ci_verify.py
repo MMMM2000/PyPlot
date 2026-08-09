@@ -52,6 +52,7 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
     assert "PYPLOT_TEST_TEMP_ISOLATED=1" in result.stdout
     if os.name == "nt":
         expected_temp = REPO_ROOT / "artifacts" / "t" / "unit"
+        expected_basetemp = REPO_ROOT / "artifacts" / "t" / "unit-pytest"
         env_lines = {
             key: value
             for line in result.stdout.splitlines()
@@ -61,7 +62,7 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
         assert Path(env_lines["TEMP"]).resolve() == expected_temp.resolve()
         assert Path(env_lines["TMP"]).resolve() == expected_temp.resolve()
         assert "--basetemp" in result.stdout
-        assert "unit-pytest" in result.stdout
+        assert Path(env_lines["pytest_basetemp"]).resolve() == expected_basetemp.resolve()
     assert "--basetemp" in result.stdout
     assert "-p no:cacheprovider" in result.stdout
     assert (

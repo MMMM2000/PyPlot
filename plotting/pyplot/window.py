@@ -81,6 +81,7 @@ from plotting.shared.origin import (
     set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
+from plotting.shared.qt_settings import create_qsettings
 from plotting.shared.readability import (
     apply_readability,
     apply_readability_fonts,
@@ -2802,7 +2803,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         self.bottom_margin_spin.setValue(float(payload.get("bottom_margin") or self.bottom_margin_spin.value()))
 
     def _save_house_style(self) -> None:
-        settings = QtCore.QSettings("microwire", "plotting")
+        settings = create_qsettings("microwire", "plotting")
         try:
             settings.setValue("figure_layout_house_style", json.dumps(self._style_settings_payload()))
             settings.sync()
@@ -2811,7 +2812,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _stored_house_style_payload() -> dict[str, Any] | None:
-        settings = QtCore.QSettings("microwire", "plotting")
+        settings = create_qsettings("microwire", "plotting")
         stored = settings.value("figure_layout_house_style", "")
         if not isinstance(stored, str) or not stored.strip():
             return None
@@ -2862,7 +2863,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         template_name = str(name).strip()
         if not ok or not template_name:
             return
-        settings = QtCore.QSettings("microwire", "plotting")
+        settings = create_qsettings("microwire", "plotting")
         raw = settings.value("figure_layout_templates", "{}")
         try:
             templates = json.loads(raw) if isinstance(raw, str) else {}
@@ -2875,7 +2876,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         settings.sync()
 
     def _load_figure_template(self) -> None:
-        settings = QtCore.QSettings("microwire", "plotting")
+        settings = create_qsettings("microwire", "plotting")
         raw = settings.value("figure_layout_templates", "{}")
         try:
             templates = json.loads(raw) if isinstance(raw, str) else {}
@@ -3441,7 +3442,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._maximized_hidden: set["_ManagedSubWindow"] = set()
 
         if not hasattr(self, "settings"):
-            self.settings = QtCore.QSettings("MicrowireLab", self.__class__.__name__)
+            self.settings = create_qsettings("MicrowireLab", self.__class__.__name__)
 
         self._load_recent_projects_setting()
 
@@ -11762,7 +11763,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     @staticmethod
     def _stored_house_style_payload_for_automation() -> dict[str, Any] | None:
-        settings = QtCore.QSettings("microwire", "plotting")
+        settings = create_qsettings("microwire", "plotting")
         stored = settings.value("figure_layout_house_style", "")
         if not isinstance(stored, str) or not stored.strip():
             return None
@@ -14017,7 +14018,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 platform_name = str(app.platformName() or "").strip().lower()
             except Exception:
                 platform_name = ""
-        if platform_name in {"offscreen", "minimal", "headless"}:
+        if not force_local and platform_name in {"offscreen", "minimal", "headless"}:
             self._connected_data_folders = []
             self._connected_folder_seen_files = set()
             self._update_connected_folder_state()

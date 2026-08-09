@@ -237,6 +237,8 @@ def print_dry_run(args: argparse.Namespace, env: dict[str, str], command: list[s
     print(f"mode={args.mode}")
     print(f"cwd={REPO_ROOT}")
     print(f"command={_command_line(command)}")
+    basetemp_index = command.index("--basetemp") + 1
+    print(f"pytest_basetemp={command[basetemp_index]}")
     print("environment:")
     for key in SELECTED_ENV_KEYS:
         print(f"  {key}={env.get(key, '')}")
