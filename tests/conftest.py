@@ -15,10 +15,33 @@ def _configure_qt_headless_defaults() -> None:
     os.environ.setdefault("PYTEST_QT_API", "pyqt6")
 
 
+def _configure_qsettings_isolation() -> None:
+    raw_root = os.environ.get("PYTEST_QSETTINGS_ROOT", "").strip()
+    if not raw_root:
+        return
+    from PyQt6 import QtCore
+
+    settings_root = Path(raw_root)
+    settings_root.mkdir(parents=True, exist_ok=True)
+    ini_format = QtCore.QSettings.Format.IniFormat
+    QtCore.QSettings.setDefaultFormat(ini_format)
+    QtCore.QSettings.setPath(
+        ini_format,
+        QtCore.QSettings.Scope.UserScope,
+        str(settings_root / "user"),
+    )
+    QtCore.QSettings.setPath(
+        ini_format,
+        QtCore.QSettings.Scope.SystemScope,
+        str(settings_root / "system"),
+    )
+
+
 def pytest_configure() -> None:
     """Ensure the bundled Veusz sources are importable for the selftests."""
 
     _configure_qt_headless_defaults()
+    _configure_qsettings_isolation()
 
     root = Path(__file__).resolve().parent.parent
     if str(root) not in sys.path:
@@ -34,9 +57,10 @@ def pytest_configure() -> None:
             or tempfile.gettempdir()
         )
         tmp_root = Path(base_tmp)
-        if os.name == "nt" and len(str(tmp_root.resolve())) > 60:
+        isolated_temp = os.environ.get("PYPLOT_TEST_TEMP_ISOLATED") == "1"
+        if os.name == "nt" and not isolated_temp and len(str(tmp_root.resolve())) > 60:
             tmp_root = Path("C:/tmp")
-        if tmp_root.name != "pyplot-tests":
+        if not isolated_temp and tmp_root.name != "pyplot-tests":
             tmp_root = tmp_root / "pyplot-tests"
         tmp_root.mkdir(parents=True, exist_ok=True)
         os.environ["TMPDIR"] = str(tmp_root)
