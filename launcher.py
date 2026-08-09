@@ -44,6 +44,7 @@ from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
     launch_experiment_process,
 )
+from plotting.shared.qt_settings import create_qsettings
 
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
@@ -7644,7 +7645,7 @@ class MasterLauncher(QtWidgets.QWidget):
         # destroyed callbacks can run safely.
         self._open_windows: list[QtWidgets.QWidget] = []
 
-        self._settings = QtCore.QSettings("MicrowireData", "Launcher")
+        self._settings = create_qsettings("MicrowireData", "Launcher")
         dev_opts_factory = _load_developer_options()
         self.dev_opts = dev_opts_factory()
         self._closing = False
