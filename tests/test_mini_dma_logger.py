@@ -4091,6 +4091,7 @@ def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: P
         assert tile.x_combo.currentData() == "fatigue_cycle_index"
         assert tile.y_left_combo.currentData() == "fatigue_fixed_strain_range_pct"
         assert tile.y_right_combo.currentData() == ""
+        assert tile.y_left_combo.findData("fatigue_total_strain_pct") >= 0
     finally:
         _close_test_window(window)
 
@@ -4130,6 +4131,16 @@ def test_fatigue_cycle_plot_uses_fixed_first_cycle_minimum_reference(tmp_path: P
         assert y_values[3:] == pytest.approx(
             [100.0 * -1.0 / 102.0, 100.0 * 5.0 / 102.0]
         )
+        total_x, total_y = window._fatigue_total_strain_plot_values()
+        assert total_x == pytest.approx([1.0, 2.0])
+        assert total_y == pytest.approx([100.0 * 6.0 / 102.0, 100.0 * 6.0 / 102.0])
+        cycle_channel = window._plot_channel("fatigue_cycle_index")
+        total_channel = window._plot_channel("fatigue_total_strain_pct")
+        assert cycle_channel is not None
+        assert total_channel is not None
+        configured_x, configured_y = window._plot_xy_values([], cycle_channel, total_channel)
+        assert configured_x == pytest.approx(total_x)
+        assert configured_y == pytest.approx(total_y)
         summary = window._fatigue_strain_summary_snapshot()
         assert summary is not None
         assert summary["reference_raw_strain_pct"] == pytest.approx(2.0)

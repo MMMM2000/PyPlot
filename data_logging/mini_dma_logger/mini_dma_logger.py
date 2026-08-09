@@ -12365,6 +12365,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda point: point.strain_pct,
             ),
             PlotChannel(
+                "fatigue_total_strain_pct",
+                "Total fatigue strain (%)",
+                "#14b8a6",
+                lambda point: point.strain_pct,
+            ),
+            PlotChannel(
                 "stress_mpa",
                 "Stress (MPa)",
                 "#a78bfa",
@@ -33311,6 +33317,11 @@ class MainWindow(QtWidgets.QMainWindow):
             and y_channel.key == "fatigue_fixed_strain_range_pct"
         ):
             return self._fatigue_cycle_strain_range_plot_values()
+        if (
+            x_channel.key == "fatigue_cycle_index"
+            and y_channel.key == "fatigue_total_strain_pct"
+        ):
+            return self._fatigue_total_strain_plot_values()
         x_values: list[float] = []
         y_values: list[float] = []
         previous_elapsed_s: float | None = None
@@ -33344,6 +33355,15 @@ class MainWindow(QtWidgets.QMainWindow):
             x_values.extend((cycle, cycle))
             y_values.extend((cycle_range.minimum_pct, cycle_range.maximum_pct))
         return x_values, y_values
+
+    def _fatigue_total_strain_plot_values(self) -> tuple[list[float], list[float]]:
+        return (
+            [float(cycle_range.cycle_index) for cycle_range in self._fatigue_cycle_strain_ranges],
+            [
+                cycle_range.maximum_pct - cycle_range.minimum_pct
+                for cycle_range in self._fatigue_cycle_strain_ranges
+            ],
+        )
 
     def _record_completed_fatigue_cycle_strain_range(self, cycle_index: int) -> bool:
         cycle = int(cycle_index)
