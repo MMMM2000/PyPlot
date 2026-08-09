@@ -4079,6 +4079,68 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        tile = window._plot_tiles[3]
+        assert tile.x_combo.currentData() == "fatigue_cycle_index"
+        assert tile.y_left_combo.currentData() == "fatigue_fixed_strain_range_pct"
+        assert tile.y_right_combo.currentData() == ""
+    finally:
+        _close_test_window(window)
+
+
+def test_fatigue_cycle_plot_uses_fixed_first_cycle_minimum_reference(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(cycle: int, leg: str, strain_pct: float) -> mini_dma_mod.MeasurementPoint:
+        point = window._capture_measurement_point(
+            elapsed_s=float(cycle),
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=1.0,
+            load_g=1.0,
+        )
+        point.fatigue_cycle_index = cycle
+        point.fatigue_leg = leg
+        point.strain_pct = strain_pct
+        return point
+
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._retain_session_point(_point(1, "up", 2.0))
+        window._retain_session_point(_point(1, "down", 8.0))
+        assert window._record_completed_fatigue_cycle_strain_range(1) is True
+        window._retain_session_point(_point(2, "up", 1.0))
+        window._retain_session_point(_point(2, "down", 7.0))
+        assert window._record_completed_fatigue_cycle_strain_range(2) is True
+
+        x_values, y_values = window._fatigue_cycle_strain_range_plot_values()
+
+        assert x_values[:2] == pytest.approx([1.0, 1.0])
+        assert math.isnan(x_values[2])
+        assert x_values[3:] == pytest.approx([2.0, 2.0])
+        assert y_values[:2] == pytest.approx([0.0, 100.0 * 6.0 / 102.0])
+        assert math.isnan(y_values[2])
+        assert y_values[3:] == pytest.approx(
+            [100.0 * -1.0 / 102.0, 100.0 * 5.0 / 102.0]
+        )
+        summary = window._fatigue_strain_summary_snapshot()
+        assert summary is not None
+        assert summary["reference_raw_strain_pct"] == pytest.approx(2.0)
+        assert summary["reference_length_mm"] == pytest.approx(
+            window.spin_initial_length.value() * 1.02
+        )
+        assert [cycle["cycle_index"] for cycle in summary["cycles"]] == [1, 2]
+    finally:
+        _close_test_window(window)
+
+
 def test_parse_mlx90614_probe_line_returns_temperature_sample() -> None:
     sample = mini_dma_mod._parse_mlx90614_probe_line(
         "MLX90614,42,1234,2370,23.01,40.25,14808,15670,2",
