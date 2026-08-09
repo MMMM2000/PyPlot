@@ -328,4 +328,3 @@ __all__ = [
     "utc_now_text",
     "validate_review",
 ]
-
