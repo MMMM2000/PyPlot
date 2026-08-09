@@ -7,7 +7,63 @@ import pytest
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot, _plot_strain_current
+from data_logging.mini_dma_logger.run_core_plot import (
+    _plateau_plot_context,
+    _plot_current_resistance,
+    _plot_error_trace,
+    _plot_resistance_current,
+    _plot_strain_current,
+    _plot_strain_stress,
+    _plot_stress_time,
+    generate_core_run_plot,
+)
+from data_logging.mini_dma_logger.time_axis import time_axis_display
+
+
+def _current_sweep_frame() -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    elapsed = 0.0
+    for current, strain, resistance in (
+        (1.0, 90.0, 900.0),
+        (10.0, 91.0, 910.0),
+        (20.0, 92.0, 920.0),
+        (10.0, 93.0, 930.0),
+    ):
+        records.append(
+            {
+                "elapsed_s": elapsed,
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_basis": "stress_mpa",
+                "automation_target_value": 20.0,
+                "plateau_index": float("nan"),
+                "stress_mpa": 20.0,
+                "strain_pct": strain,
+                "current_set_mA": current,
+                "current_measured_mA": current,
+                "resistance_ohm": resistance,
+            }
+        )
+        elapsed += 1.0
+    for plateau, target, offset in ((1.0, 50.0, 0.0), (2.0, 100.0, 1.0)):
+        for index, current in enumerate((1.0, 5.0, 10.0, 20.0, 20.0, 10.0, 5.0, 1.0)):
+            records.append(
+                {
+                    "elapsed_s": elapsed,
+                    "recipe_mode": "current_sweep_stress",
+                    "automation_phase": "target_ramp" if index == 0 else "current",
+                    "automation_basis": "stress_mpa",
+                    "automation_target_value": target,
+                    "plateau_index": plateau,
+                    "stress_mpa": target + index * 0.1,
+                    "strain_pct": offset + index * 0.05,
+                    "current_set_mA": current,
+                    "current_measured_mA": current,
+                    "resistance_ohm": 100.0 + offset * 10.0 + index,
+                }
+            )
+            elapsed += 1.0
+    return pd.DataFrame.from_records(records)
 
 
 def test_generate_core_run_plot_writes_png_and_summary(tmp_path: Path) -> None:
@@ -122,6 +178,89 @@ def test_generate_core_run_plot_rejects_missing_run_files(tmp_path: Path) -> Non
         generate_core_run_plot(tmp_path / "missing")
 
 
+@pytest.mark.parametrize(
+    ("elapsed_s", "expected_divisor_s", "expected_label"),
+    [
+        (59.999, 1.0, "Time (s)"),
+        (60.0, 60.0, "Time (min)"),
+        (3599.999, 60.0, "Time (min)"),
+        (3600.0, 3600.0, "Time (h)"),
+    ],
+)
+def test_summary_time_axis_uses_shared_display_units(
+    elapsed_s: float,
+    expected_divisor_s: float,
+    expected_label: str,
+) -> None:
+    display = time_axis_display(elapsed_s)
+
+    assert display.divisor_s == pytest.approx(expected_divisor_s)
+    assert display.label == expected_label
+
+
+def test_stress_summary_scales_time_data_and_hold_shading_to_minutes() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0, 120.0],
+            "stress_mpa": [50.0, 55.0, 50.0],
+            "automation_phase": ["current", "current_hold", "current"],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_stress_time(ax, frame, time_axis_display(120.0))
+
+        assert ax.get_xlabel() == "Time (min)"
+        assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 1.0, 2.0])
+        hold_patch = ax.patches[0]
+        assert hold_patch.get_x() == pytest.approx(1.0)
+        assert hold_patch.get_x() + hold_patch.get_width() == pytest.approx(1.0)
+    finally:
+        plt.close(fig)
+
+
+def test_stress_summary_adds_load_scale_when_wire_diameter_is_known() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0],
+            "stress_mpa": [0.0, 100.0],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_stress_time(
+            ax,
+            frame,
+            time_axis_display(60.0),
+            {"wire_diameter_mm": 0.0153},
+        )
+
+        assert len(ax.child_axes) == 1
+        assert ax.child_axes[0].get_ylabel() == "Load (g)"
+    finally:
+        plt.close(fig)
+
+
+def test_current_resistance_time_uses_colored_axes_without_redundant_legend() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 60.0],
+            "current_set_mA": [1.0, 10.0],
+            "current_measured_mA": [1.0, 10.0],
+            "resistance_ohm": [100.0, 110.0],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_current_resistance(ax, frame, time_axis_display(60.0))
+
+        assert ax.get_legend() is None
+        assert len(fig.axes) == 2
+        assert fig.axes[1].get_ylabel() == "Resistance (ohm)"
+    finally:
+        plt.close(fig)
+
+
 def test_grouped_strain_current_keeps_rows_without_numeric_plateau_index() -> None:
     frame = pd.DataFrame(
         {
@@ -137,5 +276,84 @@ def test_grouped_strain_current_keeps_rows_without_numeric_plateau_index() -> No
     try:
         _plot_strain_current(ax, frame, {}, grouped=True)
         assert ax.lines
+    finally:
+        plt.close(fig)
+
+
+def test_current_response_panels_share_plateau_colors_and_exclude_conditioning() -> None:
+    frame = _current_sweep_frame()
+    context = _plateau_plot_context(frame, {})
+
+    assert context is not None
+    assert [group.target_stress_mpa for group in context.groups] == [50.0, 100.0]
+
+    fig, (strain_ax, resistance_ax) = plt.subplots(1, 2)
+    try:
+        _plot_strain_current(strain_ax, frame, {}, grouped=True, context=context)
+        _plot_resistance_current(resistance_ax, frame, {}, context=context)
+
+        assert strain_ax.lines
+        assert len(strain_ax.lines) == len(resistance_ax.lines)
+        assert [line.get_color() for line in strain_ax.lines] == [
+            line.get_color() for line in resistance_ax.lines
+        ]
+        assert {line.get_linestyle() for line in strain_ax.lines} == {"-", "--"}
+        assert {line.get_marker() for line in strain_ax.lines} == {"o", "x"}
+        assert max(max(line.get_ydata()) for line in strain_ax.lines) < 10.0
+        assert strain_ax.get_xlim() == pytest.approx(resistance_ax.get_xlim())
+        assert strain_ax.get_xlim()[1] < 25.0
+    finally:
+        plt.close(fig)
+
+
+def test_selected_current_stress_strain_uses_simple_current_and_direction_legend() -> None:
+    frame = _current_sweep_frame()
+    fig, ax = plt.subplots()
+    try:
+        _plot_strain_stress(ax, frame, {})
+
+        assert ax.get_legend() is not None
+        labels = [text.get_text() for text in ax.get_legend().get_texts()]
+        assert "1 mA" in labels
+        assert "10 mA" in labels
+        assert "20 mA" in labels
+        assert "current increasing" in labels
+        assert "current decreasing" in labels
+        assert not any("ramp" in label or "pts" in label for label in labels)
+        assert {line.get_marker() for line in ax.lines} >= {".", "o", "x"}
+        assert max(max(line.get_ydata()) for line in ax.lines) < 200.0
+    finally:
+        plt.close(fig)
+
+
+def test_time_panels_use_hours_and_show_hold_and_tolerance_context() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 3600.0, 7200.0],
+            "automation_phase": ["current", "current_hold", "current"],
+            "recipe_mode": ["current_sweep_stress"] * 3,
+            "automation_basis": ["stress_mpa"] * 3,
+            "automation_target_value": [50.0] * 3,
+            "stress_mpa": [49.0, 50.0, 51.0],
+        }
+    )
+    trace = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 3600.0, 7200.0],
+            "error_value": [-1.0, 0.0, 1.0],
+            "tolerance": [2.0, 2.0, 2.0],
+        }
+    )
+    fig, (stress_ax, error_ax) = plt.subplots(1, 2)
+    try:
+        display = time_axis_display(7200.0)
+        _plot_stress_time(stress_ax, frame, display)
+        _plot_error_trace(error_ax, frame, trace, display)
+
+        assert stress_ax.get_xlabel() == "Time (h)"
+        assert "current hold" in stress_ax.get_legend_handles_labels()[1]
+        assert error_ax.get_xlabel() == "Time (h)"
+        assert "tolerance" in error_ax.get_legend_handles_labels()[1]
+        assert error_ax.collections
     finally:
         plt.close(fig)

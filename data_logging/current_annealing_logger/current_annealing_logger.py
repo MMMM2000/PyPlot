@@ -1959,7 +1959,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return f" Exact match: imported d = {float(record.diameter_um):.3g} um."
 
     def _read_builder_project_payload(self, path: Path) -> Any:
-        return json.loads(path.read_text(encoding="utf-8"))
+        from microwire_data_builder.project_package import load_project_table_projection
+
+        return load_project_table_projection(
+            path,
+            section_keys=("microscope", "fabrication", "assemble", "current_density"),
+        )
 
     @classmethod
     def _records_from_project_payload(cls, payload: Any, *, source: str) -> list[AnnealingSampleRecord]:

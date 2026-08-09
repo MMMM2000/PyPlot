@@ -14,6 +14,8 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable", exc_type=ImportError)
 
+from microwire_data_builder import project_package, safe_codec
+
 
 logger_mod = importlib.import_module("data_logging.current_annealing_logger.current_annealing_logger")
 source_provenance_mod = importlib.import_module("data_logging.source_provenance")
@@ -715,6 +717,67 @@ def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, q
     assert "16a34a" in window.ui.doubleSpinBox_wire_diameter_um.styleSheet()
     assert window.ui.label_current_density_hint.text() == "Imported d = 19.1 um"
     assert not window.label_live_set_density.isHidden()
+
+
+def test_current_annealing_imports_packaged_builder_project_table_projection(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    project = tmp_path / "packaged_project.pydpj"
+    project_package.write_project_package(
+        project,
+        {
+            "kind": project_package.PROJECT_KIND,
+            "version": project_package.PACKAGE_VERSION,
+            "sections": {
+                "microscope": {
+                    "columns": ["Composition", "Microwire", "d (um)"],
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "12/2",
+                            "d (um)": 19.1,
+                        }
+                    ],
+                    "index": [0],
+                    "payloads": {
+                        "synthetic_preview": safe_codec.encode_envelope(
+                            {"raw": b"must-not-be-loaded"}
+                        )
+                    },
+                }
+            },
+        },
+    )
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("12/2")
+    window.ui.lineEdit_builder_project.setText(str(project))
+
+    assert window._import_builder_project_from_ui() is True
+
+    assert window.ui.doubleSpinBox_wire_diameter_um.value() == pytest.approx(19.1)
+    assert window._metadata_diameter_imported is True
+    assert "Imported 1 microwire suggestion" in window.ui.label_microwire_metadata_status.text()
+
+
+def test_current_annealing_reports_actionable_corrupt_builder_project(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    project = tmp_path / "corrupt_project.pydpj"
+    project.write_bytes(b"\x88not-a-builder-project")
+    window.ui.lineEdit_builder_project.setText(str(project))
+
+    assert window._import_builder_project_from_ui() is False
+
+    status = window.ui.label_microwire_metadata_status.text()
+    assert "Unsupported or corrupt Builder project" in status
+    assert "Builder package v3 or legacy UTF-8 Builder JSON" in status
+    assert "codec can't decode" not in status
 
 
 def test_current_annealing_imported_diameter_reverts_to_untrusted_on_manual_or_stale_sample(

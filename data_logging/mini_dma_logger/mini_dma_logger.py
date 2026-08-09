@@ -82,6 +82,13 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlPolicy,
     ForceControlProfile,
 )
+from data_logging.mini_dma_logger.time_axis import (
+    TimeAxisDisplay,
+    time_axis_display as _time_axis_display,
+)
+from data_logging.mini_dma_logger.metadata_checkpoints import (
+    SessionMetadataCheckpointStore,
+)
 
 try:
     import serial
@@ -130,9 +137,9 @@ RUNTIME_PENDING_SPINBOX_STYLE = (
 RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; }"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
-CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-21.2"
-CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
+CONTROL_LOGIC_NAME = "tma_control"
+CONTROL_LOGIC_VERSION = "2026-08-05.1"
+CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -141,6 +148,9 @@ CONTROL_LOGIC_FEATURES = [
     "setup_slack_stress_cap",
     "setup_zero_plateau_accept_current_position",
     "current_hold_filtered_scale_signal",
+    "current_hold_cycle_center_motor_suppression",
+    "current_hold_cycle_center_resume_confirmation",
+    "current_hold_cycle_center_resume_uses_active_hold_state",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
     "current_hold_automatic_entry_gate",
@@ -161,9 +171,13 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
     "current_hold_volatile_response_contains_adaptive_recovery",
+    "current_hold_volatile_response_observer",
+    "current_hold_volatile_response_observer_transformation_gate",
     "current_hold_large_error_uses_geometry_base_cap_before_response",
     "current_hold_response_stiffness_requires_error_improvement",
     "current_hold_adaptive_cap_growth_is_response_earned",
+    "current_hold_one_outstanding_response_budget",
+    "current_hold_response_learning_is_once_per_correction",
     "current_hold_adaptive_large_error_floor_scales_with_band",
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
@@ -175,6 +189,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
     "kern_kcp_iso_current_settle_uses_processed_timed_recovery",
+    "current_hold_endpoint_acceptance_only_at_sweep_endpoint",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -184,6 +199,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_keeps_shortened_return_leg",
     "voltage_limit_preserves_rate_limited_nominal_return",
     "voltage_limit_unwind_obeys_current_hold",
+    "voltage_limit_unwind_rearms_decreasing_leg_hold",
     "voltage_limit_unwind_waits_for_target_recovery",
     "first_overheating_current_included_in_channel_limit",
     "wire_break_recovery_prompt_ui_thread",
@@ -193,6 +209,8 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
     "current_sweep_reverse_current_recipe_flag",
+    "fatigue_completed_cycle_tracking",
+    "durable_stop_transition_tracking",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -243,6 +261,18 @@ CONTROL_TRACE_FIELDNAMES = [
     "filtered_slope_per_s",
     "filtered_noise",
     "filtered_sample_count",
+    "cycle_center_enabled",
+    "cycle_center_value",
+    "cycle_center_error",
+    "cycle_center_slope_per_s",
+    "cycle_center_noise",
+    "cycle_center_sample_count",
+    "cycle_center_span_s",
+    "cycle_center_signal_span",
+    "cycle_center_ready",
+    "cycle_center_stationary",
+    "cycle_center_fast_veto",
+    "cycle_center_suppression_allowed",
     "latest_scale_age_s",
     "scale_recent_rate_hz",
     "raw_scale_sample_count",
@@ -302,6 +332,10 @@ UI_TELEMETRY_FIELDNAMES = [
     "graph_refresh_interval_ms",
     "task_text",
     "automation_active",
+    "fatigue_cycles_completed",
+    "fatigue_cycle_active",
+    "fatigue_cycle_limit",
+    "fatigue_cycle_leg",
     "session_active",
     "session_logging_enabled",
     "length_setup_dialog_visible",
@@ -840,6 +874,23 @@ SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_STABLE_SAMPLES = 4
 SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_OVERSHOOT_FACTOR = 8.0
 SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S = 20.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SPAN_S = 10.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SAMPLES = 32
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA = 5.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_DRIFT_RATIO_MAX = 0.15
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_SLOPE_MAX_MPA_S = 0.35
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA = 35.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA = 20.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA = 12.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S = 2.0
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT = 3
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_WINDOW_S = 15.0
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_RESPONSE_S = 10.0
+SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_ACTIVITY_SPAN_PCT = 0.30
+CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV = "MINI_DMA_CYCLE_CENTER_MOTOR_SUPPRESSION"
+CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_ENV = "MINI_DMA_CYCLE_CENTER_RESUME"
+CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_ENV = "MINI_DMA_VOLATILE_RESPONSE_OBSERVER"
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
@@ -857,7 +908,6 @@ SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
-TARGET_RAMP_ENDPOINT_STABLE_S = 0.75
 CURRENT_SWEEP_HOLD_ESTIMATE_MIN_S = 10.0
 CURRENT_SWEEP_HOLD_ESTIMATE_FRACTION = 0.25
 CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
@@ -1593,6 +1643,20 @@ class ScaleControlSignal:
     slope_per_s: float
     sample_count: int
     timestamp_s: float
+    span_s: float = 0.0
+    raw_min_value: float = 0.0
+    raw_max_value: float = 0.0
+    endpoint_slope_per_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class CurrentHoldCycleCenterState:
+    signal: ScaleControlSignal | None
+    error_value: float | None
+    ready: bool
+    stationary: bool
+    fast_veto: bool
+    suppression_allowed: bool
 
 
 class ScaleSignalBuffer:
@@ -1884,6 +1948,7 @@ class AutomationResumeState:
     current_setpoint_mA: float | None = None
     source_run_path: str | None = None
     fatigue_cycle_index: int = 0
+    fatigue_cycles_completed: int = 0
     fatigue_loop_anchor_index: int | None = None
 
 
@@ -2269,6 +2334,14 @@ def _builder_project_cache_key(path: Path) -> tuple[str, int, int]:
     return (path_text, int(stat_result.st_mtime_ns), int(stat_result.st_size))
 
 
+def _load_builder_project_table_projection(path: Path) -> dict[str, Any]:
+    """Load Builder table data through the safe non-UI project APIs."""
+
+    from microwire_data_builder.project_package import load_project_table_projection
+
+    return load_project_table_projection(path)
+
+
 def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     cache_key = _builder_project_cache_key(path)
     with _BUILDER_PROJECT_CACHE_LOCK:
@@ -2279,7 +2352,7 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
                 oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
                 _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
             return cached
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_builder_project_table_projection(path)
     entry = BuilderProjectCacheEntry(
         payload=payload,
         suggestions=_project_sample_suggestions_from_payload(payload),
@@ -2433,7 +2506,7 @@ def _first_overheating_preflight_required(
     continuation: bool = False,
 ) -> bool:
     return (
-        recipe_mode in CURRENT_SWEEP_MODES
+        (recipe_mode in CURRENT_SWEEP_MODES or recipe_mode == CONSTANT_CURRENT_STRAIN_SWEEP)
         and not first_overheating_enabled
         and not previous_tma_measurement_found
         and not continuation
@@ -5256,7 +5329,14 @@ class MiniDmaAutomationController:
             if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
             host._update_recipe_progress(complete=True)
-            host._stop_auto_ramp(log_completion=False, keep_progress=True)
+            completion_reason = "recovery_completed" if is_recovery else "recipe_completed"
+            completion_detail = "Recovery completed." if is_recovery else "Recipe completed."
+            host._stop_auto_ramp(
+                log_completion=False,
+                keep_progress=True,
+                stop_reason=completion_reason,
+                stop_detail=completion_detail,
+            )
             host._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and host._session_active:
                 host._stop_session(reason="recipe_completed", detail="Recipe completed.")
@@ -7904,7 +7984,13 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     _control_ui_event = QtCore.pyqtSignal(object)
 
-    def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+    def __init__(
+        self,
+        log_dir: str | None = None,
+        *,
+        persist_settings: bool = True,
+        metadata_checkpoint_root: str | Path | None = None,
+    ) -> None:
         super().__init__()
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
@@ -7915,6 +8001,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_restore_in_progress = False
         self._settings_persistence_ready = False
         self._provided_log_dir = log_dir
+        self._metadata_checkpoint_root = (
+            None if metadata_checkpoint_root is None else Path(metadata_checkpoint_root)
+        )
         self._restored_log_dir = ""
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
@@ -7953,7 +8042,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cached_zero_load_scale_g = DEFAULT_ZERO_LOAD_SCALE_G
         self._scale_connected_at_s: float | None = None
         self._scale_no_data_hint_emitted = False
-        self._scale_signal_buffer = ScaleSignalBuffer()
+        self._scale_signal_buffer = ScaleSignalBuffer(
+            window_s=SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S + 2.0
+        )
         self._kosice_force_control: ForceControlPolicy | None = None
         self._ir_state_lock = RLock()
         self._latest_ir_sample: IrTemperatureSample | None = None
@@ -8000,6 +8091,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
+        self._current_sweep_hold_response_evaluated_by_key: set[tuple[str, int, float]] = set()
+        self._current_sweep_hold_volatile_groups_by_key: dict[
+            tuple[str, int, float], deque[float]
+        ] = {}
+        self._current_sweep_hold_volatile_active_by_key: dict[
+            tuple[str, int, float], bool
+        ] = {}
+        self._current_sweep_hold_observer_keys: set[tuple[str, int, float]] = set()
+        self._current_sweep_observed_strain_min_pct: float | None = None
+        self._current_sweep_observed_strain_max_pct: float | None = None
+        self._current_sweep_cycle_center_motor_suppression_enabled = (
+            os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self._current_sweep_cycle_center_resume_enabled = (
+            os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_ENV, "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self._current_sweep_volatile_observer_enabled = (
+            os.environ.get(CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_ENV, "0").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
@@ -8040,6 +8153,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path: Path | None = None
         self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
+        self._session_metadata_store: SessionMetadataCheckpointStore | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
         self._session_run_log_path: Path | None = None
@@ -8060,6 +8174,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason: str | None = None
         self._session_stop_detail: str | None = None
         self._session_stop_recorded_utc: str | None = None
+        self._session_stop_transition: dict[str, Any] | None = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s: float | None = None
         self._session_raw_scale_max_gap_s = 0.0
@@ -8197,6 +8313,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_fatigue_cycle_index: int | None = None
         self._automation_fatigue_leg: str | None = None
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit: int | None = None
         self._fatigue_loop_anchor_index: int | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
@@ -8222,10 +8339,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
+        self._current_sweep_ramp_hold_cycle_center_since_s: float | None = None
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
+        self._current_sweep_endpoint_seek_accepted_step_index: int | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
         self._current_sweep_ramp_hold_entry_signed_error: float | None = None
         self._current_sweep_ramp_hold_entry_pause_band: float | None = None
+        self._current_sweep_ramp_hold_scale_started_s: float | None = None
         self._current_sweep_ramp_hold_candidate_step_index: int | None = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s: float | None = None
@@ -8241,7 +8361,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value: float | None = None
         self._active_target_ramp_rate_value_s: float | None = None
         self._active_target_ramp_setpoint_rate_value_s: float | None = None
-        self._target_ramp_endpoint_in_band_since_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
@@ -8295,6 +8414,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
         self._run_log_mirror_generation: int | None = None
         self._pending_run_log_lines: list[str] = []
+        self._last_log_message: str | None = None
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
@@ -10741,6 +10861,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_sweep_fatigue_cycles = current_sweep_form.labelForField(
             self.spin_current_sweep_fatigue_cycles
         )
+        self.label_current_sweep_fatigue_progress = QtWidgets.QLabel(
+            "Progress: 0/100 completed | not started",
+            automation_box,
+        )
+        self.label_current_sweep_fatigue_progress.setWordWrap(True)
+        self.label_current_sweep_fatigue_progress.setToolTip(
+            "Completed cycles are counted only after both the up and down current-sweep legs finish."
+        )
+        current_sweep_form.addRow("", self.label_current_sweep_fatigue_progress)
         self.current_sweep_advanced_panel = QtWidgets.QWidget(self)
         current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
         current_sweep_advanced_form.setContentsMargins(0, 0, 0, 0)
@@ -10876,6 +11005,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Pause while target recovers",
             automation_box,
         )
+        self.check_current_sweep_hold_on_error.setChecked(True)
         self.check_current_sweep_hold_on_error.setToolTip(
             "Hold the current setpoint when absolute load/stress/strain error is too far from the requested target, "
             "while the displacement servo keeps correcting."
@@ -11053,6 +11183,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_start_row, self.label_constant_current_start_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_start_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target start", constant_current_start_row)
         self.label_constant_current_start_target_row = constant_current_form.labelForField(
@@ -11065,6 +11197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_end_row, self.label_constant_current_end_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_constant_current_end_target,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_form.addRow("Target end", constant_current_end_row)
         self.label_constant_current_end_target_row = constant_current_form.labelForField(constant_current_end_row)
@@ -11181,6 +11315,144 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_step_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         constant_current_form.addRow("Step", constant_current_step_mA_row)
         self.label_constant_current_step_mA_row = constant_current_form.labelForField(constant_current_step_mA_row)
+        self.label_constant_current_first_overheating_section = QtWidgets.QLabel(
+            "First overheating",
+            automation_box,
+        )
+        constant_current_first_overheating_font = self.label_constant_current_first_overheating_section.font()
+        constant_current_first_overheating_font.setBold(True)
+        self.label_constant_current_first_overheating_section.setFont(
+            constant_current_first_overheating_font
+        )
+        constant_current_form.insertRow(
+            0,
+            "",
+            self.label_constant_current_first_overheating_section,
+        )
+        self.check_constant_current_first_overheating = QtWidgets.QCheckBox(
+            "Enable first-overheating iso-stress loop",
+            automation_box,
+        )
+        self.check_constant_current_first_overheating.setChecked(False)
+        self.check_constant_current_first_overheating.setToolTip(
+            "Before the iso-current mechanical scan, run one established iso-stress "
+            "current loop up to the configured maximum and back to the minimum current."
+        )
+        constant_current_form.insertRow(
+            1,
+            "",
+            self.check_constant_current_first_overheating,
+        )
+        self.spin_constant_current_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_first_overheating_target_mpa.setDecimals(3)
+        self.spin_constant_current_first_overheating_target_mpa.setRange(0.001, 100000.0)
+        self.spin_constant_current_first_overheating_target_mpa.setValue(20.0)
+        self.spin_constant_current_first_overheating_target_mpa.setSuffix(" MPa")
+        (
+            self.row_constant_current_first_overheating_target,
+            self.label_constant_current_first_overheating_target_equiv,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_target_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        constant_current_form.insertRow(
+            2,
+            "Stress",
+            self.row_constant_current_first_overheating_target,
+        )
+        self.label_constant_current_first_overheating_target = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_target
+        )
+        self.spin_constant_current_first_overheating_end_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_first_overheating_end_mA.setDecimals(2)
+        self.spin_constant_current_first_overheating_end_mA.setRange(0.0, 5000.0)
+        self.spin_constant_current_first_overheating_end_mA.setValue(80.0)
+        self.spin_constant_current_first_overheating_end_mA.setSuffix(" mA")
+        (
+            self.row_constant_current_first_overheating_end,
+            self.label_constant_current_first_overheating_end_density,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_end_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_first_overheating_end_density.setTextFormat(
+            QtCore.Qt.TextFormat.RichText
+        )
+        constant_current_form.insertRow(
+            3,
+            "Maximum current",
+            self.row_constant_current_first_overheating_end,
+        )
+        self.label_constant_current_first_overheating_end = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_end
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s = CompactDoubleSpinBox(
+            automation_box
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setDecimals(3)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setRange(0.001, 100000.0)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(5.0)
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setSuffix(" MPa/s")
+        (
+            self.row_constant_current_first_overheating_target_rate,
+            self.label_constant_current_first_overheating_target_rate_equiv,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        constant_current_form.insertRow(
+            4,
+            "Stress ramp",
+            self.row_constant_current_first_overheating_target_rate,
+        )
+        self.label_constant_current_first_overheating_target_rate = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_target_rate
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s = CompactDoubleSpinBox(
+            automation_box
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setDecimals(3)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setRange(0.001, 5000.0)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(1.0)
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setSuffix(" mA/s")
+        self.row_constant_current_first_overheating_current_rate, self.label_constant_current_first_overheating_rate_density = (
+            self._spin_with_equivalent_label(
+                automation_box,
+                self.spin_constant_current_first_overheating_current_rate_mA_s,
+                spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+                label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+            )
+        )
+        self.label_constant_current_first_overheating_rate_density.setTextFormat(
+            QtCore.Qt.TextFormat.RichText
+        )
+        constant_current_form.insertRow(
+            5,
+            "Current ramp",
+            self.row_constant_current_first_overheating_current_rate,
+        )
+        self.label_constant_current_first_overheating_current_rate = constant_current_form.labelForField(
+            self.row_constant_current_first_overheating_current_rate
+        )
+        self.check_constant_current_first_overheating_hold_on_error = QtWidgets.QCheckBox(
+            "Pause current while stress recovers",
+            automation_box,
+        )
+        self.check_constant_current_first_overheating_hold_on_error.setChecked(True)
+        self.check_constant_current_first_overheating_hold_on_error.setToolTip(
+            "Use the established iso-stress held-current recovery gates during first overheating."
+        )
+        constant_current_form.insertRow(
+            6,
+            "",
+            self.check_constant_current_first_overheating_hold_on_error,
+        )
         constant_transition_header = QtWidgets.QWidget(automation_box)
         constant_transition_header_layout = QtWidgets.QHBoxLayout(constant_transition_header)
         constant_transition_header_layout.setContentsMargins(0, 0, 0, 0)
@@ -11224,6 +11496,8 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_transition_row, self.label_constant_current_transition_equiv = self._spin_with_equivalent_label(
             self.constant_current_transition_panel,
             self.spin_constant_current_transition_stress_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         constant_current_transition_form.addRow("Stress", constant_current_transition_row)
         self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(self.constant_current_transition_panel)
@@ -11261,6 +11535,29 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_constant_current_return_to_start.setChecked(True)
         self.check_constant_current_return_to_start.setVisible(False)
+        for constant_current_input in (
+            self.combo_constant_current_start_basis,
+            self.spin_constant_current_start_target,
+            self.spin_constant_current_end_target,
+            self.combo_constant_current_step_basis,
+            self.spin_constant_current_step_size,
+            self.spin_constant_current_hold_s,
+            self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_release_record_s,
+            self.spin_constant_current_move_speed_mm_s,
+            self.spin_constant_current_stress_ramp_rate_mpa_s,
+            self.spin_constant_current_start_mA,
+            self.spin_constant_current_end_mA,
+            self.spin_constant_current_step_mA,
+            self.spin_constant_current_first_overheating_target_mpa,
+            self.spin_constant_current_first_overheating_end_mA,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.spin_constant_current_first_overheating_current_rate_mA_s,
+            self.spin_constant_current_transition_stress_mpa,
+            self.spin_constant_current_transition_rate_mA_s,
+            self.spin_constant_current_transition_settle_s,
+        ):
+            constant_current_input.setFixedWidth(RECIPE_SPINBOX_WIDTH_PX)
         self.recipe_stack.addWidget(constant_current_page)
 
         automation_form.addRow("", self.recipe_stack)
@@ -11765,6 +12062,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA,
             self.spin_constant_current_end_mA,
             self.spin_constant_current_step_mA,
+            self.spin_constant_current_first_overheating_target_mpa,
+            self.spin_constant_current_first_overheating_end_mA,
+            self.spin_constant_current_first_overheating_target_rate_mpa_s,
+            self.spin_constant_current_first_overheating_current_rate_mA_s,
             self.spin_constant_current_transition_stress_mpa,
             self.spin_constant_current_transition_rate_mA_s,
             self.spin_constant_current_transition_settle_s,
@@ -11783,6 +12084,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating_use_normal_end.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_first_overheating.toggled.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_first_overheating_hold_on_error.toggled.connect(
+            self._update_recipe_mode_ui
+        )
         self.check_constant_current_transition_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
@@ -12609,6 +12914,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(WeakOwnerCallback(self, "_log", message))
             return
+        self._last_log_message = str(message)
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self._queue_run_log_display_line(line)
@@ -13360,11 +13666,21 @@ class MainWindow(QtWidgets.QMainWindow):
             and hasattr(self, "spin_current_sweep_first_overheating_end_mA")
         ):
             first_overheating_end_mA = float(self.spin_current_sweep_first_overheating_end_mA.value())
+        constant_current_first_overheating_end_mA = 0.0
+        if (
+            hasattr(self, "check_constant_current_first_overheating")
+            and self.check_constant_current_first_overheating.isChecked()
+            and hasattr(self, "spin_constant_current_first_overheating_end_mA")
+        ):
+            constant_current_first_overheating_end_mA = float(
+                self.spin_constant_current_first_overheating_end_mA.value()
+            )
         return max(
             float(self.spin_supply_manual_current.value()),
             float(self.spin_current_sweep_start_mA.value()),
             float(self.spin_current_sweep_end_mA.value()),
             first_overheating_end_mA,
+            constant_current_first_overheating_end_mA,
             float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
             1.0,
         )
@@ -14664,6 +14980,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_voltage_limit_step_index = step_index
         self._current_sweep_voltage_limit_started_s = started_s if started_s is not None else time.monotonic()
         self._current_sweep_voltage_limit_start_mA = self._quantize_supply_current_mA(start_mA or 0.0)
+        # A recovery accepted earlier in the upward leg must not suppress hold
+        # entry on the voltage-limited return.  The unwind is a new decreasing
+        # control leg even though it reuses the upward recipe step index.
+        self._current_sweep_endpoint_seek_accepted_step_index = None
+        self._reset_current_sweep_ramp_hold_candidate()
         self._log(
             f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
             "reversing recipe current back to the sweep start current and continuing."
@@ -17602,6 +17923,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_current_first_overheating_end_density.setText(
             self._current_density_text(float(self.spin_current_sweep_first_overheating_end_mA.value()))
+        )
+        self.label_constant_current_first_overheating_target_equiv.setText(
+            self._load_equivalent_text(
+                float(self.spin_constant_current_first_overheating_target_mpa.value())
+            )
+        )
+        self.label_constant_current_first_overheating_end_density.setText(
+            self._current_density_text(
+                float(self.spin_constant_current_first_overheating_end_mA.value())
+            )
+        )
+        self.label_constant_current_first_overheating_target_rate_equiv.setText(
+            self._load_equivalent_text(
+                float(self.spin_constant_current_first_overheating_target_rate_mpa_s.value()),
+                per_second=True,
+            )
+        )
+        self.label_constant_current_first_overheating_rate_density.setText(
+            self._current_density_text(
+                float(self.spin_constant_current_first_overheating_current_rate_mA_s.value()),
+                per_second=True,
+            )
         )
         for label, spinbox in (
             (self.label_current_target_start_equiv, self.spin_current_sweep_target_start),
@@ -20871,11 +21214,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         else:
             return
+        if seek_key in self._current_sweep_hold_response_evaluated_by_key:
+            return
         current_position = self._current_effective_tensile_position_mm()
         previous_value = self._seek_last_value_by_key.get(seek_key)
         previous_position = self._seek_last_effective_position_by_key.get(seek_key)
         if previous_value is None or previous_position is None:
             return
+        if not self._current_sweep_hold_response_observation_complete(seek_key):
+            return
+        # A completed observation is consumed exactly once, whether or not it
+        # proves a useful directional response. Re-reading the same post-move
+        # plateau must never earn repeated adaptive-cap growth.
+        self._current_sweep_hold_response_evaluated_by_key.add(seek_key)
         signed_delta_position = float(current_position) - float(previous_position)
         delta_position = abs(signed_delta_position)
         if delta_position < self._motor_step_mm() * 0.5:
@@ -21295,6 +21646,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_stiffness_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_count_by_key.pop(seek_key, None)
+        self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
+        self._current_sweep_hold_volatile_groups_by_key.pop(seek_key, None)
+        self._current_sweep_hold_volatile_active_by_key.pop(seek_key, None)
+        self._current_sweep_hold_observer_keys.discard(seek_key)
 
     def _filtered_signal_changed_after_last_correction(
         self,
@@ -21316,11 +21671,97 @@ class MainWindow(QtWidgets.QMainWindow):
         if change > required_change:
             return True
         latest_s = self._latest_scale_sample_time_s()
-        clock_key = seek_key[0], seek_key[1]
-        last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
+        last_s = self._seek_last_scale_timestamp_by_key.get(seek_key)
         if latest_s is None or last_s is None:
             return False
         return latest_s - float(last_s) >= self._current_sweep_hold_filter_window_s()
+
+    def _current_sweep_hold_response_observation_complete(
+        self,
+        seek_key: tuple[str, int, float],
+    ) -> bool:
+        if (
+            self._automation_phase != "current_hold"
+            or seek_key not in self._seek_last_effective_position_by_key
+        ):
+            return True
+        ready_after_s = self._motion_feedback_ready_after_s()
+        latest_s = self._latest_scale_sample_time_s()
+        if ready_after_s is None:
+            return True
+        if latest_s is None:
+            return False
+        return (
+            float(latest_s)
+            >= float(ready_after_s) + SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S
+        )
+
+    def _current_sweep_transformation_activity_detected(self) -> bool:
+        low = self._current_sweep_observed_strain_min_pct
+        high = self._current_sweep_observed_strain_max_pct
+        if low is None or high is None:
+            return False
+        return (
+            float(high) - float(low)
+            >= SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_ACTIVITY_SPAN_PCT
+        )
+
+    def _update_current_sweep_hold_volatile_observer(
+        self,
+        seek_key: tuple[str, int, float],
+        *,
+        volatile_unsettled: bool,
+    ) -> bool:
+        if (
+            not self._current_sweep_volatile_observer_enabled
+            or self._automation_phase != "current_hold"
+            or self._current_sweep_transformation_activity_detected()
+        ):
+            self._current_sweep_hold_observer_keys.discard(seek_key)
+            self._current_sweep_hold_volatile_active_by_key.pop(seek_key, None)
+            self._current_sweep_hold_volatile_groups_by_key.pop(seek_key, None)
+            return False
+        latest_s = self._latest_scale_sample_time_s()
+        if latest_s is None:
+            return seek_key in self._current_sweep_hold_observer_keys
+        previous_active = self._current_sweep_hold_volatile_active_by_key.get(
+            seek_key,
+            False,
+        )
+        groups = self._current_sweep_hold_volatile_groups_by_key.setdefault(
+            seek_key,
+            deque(),
+        )
+        cutoff_s = (
+            float(latest_s)
+            - SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_WINDOW_S
+        )
+        while groups and groups[0] < cutoff_s:
+            groups.popleft()
+        if volatile_unsettled and not previous_active:
+            groups.append(float(latest_s))
+        self._current_sweep_hold_volatile_active_by_key[seek_key] = bool(
+            volatile_unsettled
+        )
+        if (
+            len(groups)
+            >= SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT
+        ):
+            self._current_sweep_hold_observer_keys.add(seek_key)
+        return seek_key in self._current_sweep_hold_observer_keys
+
+    def _current_sweep_hold_volatile_observation_complete(self) -> bool:
+        ready_after_s = self._motion_feedback_ready_after_s()
+        latest_s = self._latest_scale_sample_time_s()
+        if ready_after_s is None:
+            return True
+        if latest_s is None:
+            return False
+        return (
+            float(latest_s)
+            >= float(ready_after_s)
+            + SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_RESPONSE_S
+        )
 
     def _current_hold_error_is_persistent(
         self,
@@ -21397,6 +21838,7 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         *,
         window_s: float | None = None,
+        since_s: float | None = None,
         trend_aware: bool = False,
     ) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -21413,6 +21855,12 @@ class MainWindow(QtWidgets.QMainWindow):
             now_s=latest.timestamp_s,
             window_s=window,
         )
+        if since_s is not None:
+            samples = [
+                sample
+                for sample in samples
+                if sample.timestamp_s >= float(since_s)
+            ]
         if len(samples) < 3:
             return None
         loads = [float(sample.applied_load_g) for sample in samples]
@@ -21462,6 +21910,26 @@ class MainWindow(QtWidgets.QMainWindow):
             deviations = [abs(value - filtered_load) for value in loads]
         mad_load = statistics.median(deviations) if deviations else 0.0
         robust_noise_load = 1.4826 * mad_load
+        span_s = max(0.0, float(samples[-1].timestamp_s) - float(samples[0].timestamp_s))
+        midpoint = max(1, len(samples) // 2)
+        first_edge = samples[:midpoint]
+        last_edge = samples[midpoint:]
+        first_edge_load = statistics.median(
+            float(sample.applied_load_g) for sample in first_edge
+        )
+        last_edge_load = statistics.median(
+            float(sample.applied_load_g) for sample in last_edge
+        )
+        first_edge_time = statistics.median(
+            float(sample.timestamp_s) for sample in first_edge
+        )
+        last_edge_time = statistics.median(
+            float(sample.timestamp_s) for sample in last_edge
+        )
+        endpoint_slope_load_s = (
+            (last_edge_load - first_edge_load)
+            / max(1e-9, last_edge_time - first_edge_time)
+        )
         if basis == HSW_BASIS_LOAD_G:
             return ScaleControlSignal(
                 value=float(filtered_load),
@@ -21470,6 +21938,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 slope_per_s=float(slope_load_s),
                 sample_count=len(samples),
                 timestamp_s=float(latest.timestamp_s),
+                span_s=span_s,
+                raw_min_value=min(loads),
+                raw_max_value=max(loads),
+                endpoint_slope_per_s=float(endpoint_slope_load_s),
             )
         config = self._control_config()
         diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
@@ -21477,6 +21949,12 @@ class MainWindow(QtWidgets.QMainWindow):
         latest_stress = stress_mpa_from_load_g(float(loads[-1]), diameter_mm)
         noise_stress = stress_mpa_from_load_g(max(0.0, float(robust_noise_load)), diameter_mm)
         slope_stress = stress_mpa_from_load_g(float(slope_load_s), diameter_mm)
+        endpoint_slope_stress = stress_mpa_from_load_g(
+            float(endpoint_slope_load_s),
+            diameter_mm,
+        )
+        min_stress = stress_mpa_from_load_g(float(min(loads)), diameter_mm)
+        max_stress = stress_mpa_from_load_g(float(max(loads)), diameter_mm)
         if median_stress is None or latest_stress is None:
             return None
         return ScaleControlSignal(
@@ -21486,6 +21964,22 @@ class MainWindow(QtWidgets.QMainWindow):
             slope_per_s=0.0 if slope_stress is None else float(slope_stress),
             sample_count=len(samples),
             timestamp_s=float(latest.timestamp_s),
+            span_s=span_s,
+            raw_min_value=(
+                float(median_stress)
+                if min_stress is None
+                else float(min_stress)
+            ),
+            raw_max_value=(
+                float(median_stress)
+                if max_stress is None
+                else float(max_stress)
+            ),
+            endpoint_slope_per_s=(
+                0.0
+                if endpoint_slope_stress is None
+                else float(endpoint_slope_stress)
+            ),
         )
 
     def _seek_filtered_control_signal(self, basis: str) -> ScaleControlSignal | None:
@@ -21499,6 +21993,92 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._scale_control_signal_for_basis(
             basis,
             trend_aware=self._is_current_sweep_mode(self._automation_name),
+        )
+
+    def _current_sweep_hold_cycle_center_state(
+        self,
+        basis: str,
+        target_value: float,
+        fast_signal: ScaleControlSignal | None = None,
+    ) -> CurrentHoldCycleCenterState:
+        unavailable = CurrentHoldCycleCenterState(
+            signal=None,
+            error_value=None,
+            ready=False,
+            stationary=False,
+            fast_veto=False,
+            suppression_allowed=False,
+        )
+        hold_active = self._current_sweep_ramp_hold_step_index is not None
+        if (
+            self._automation_phase != "current_hold"
+            and not hold_active
+        ) or (
+            not self._is_current_sweep_mode(self._automation_name)
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or self._current_sweep_ramp_hold_scale_started_s is None
+        ):
+            return unavailable
+        signal = self._scale_control_signal_for_basis(
+            basis,
+            window_s=SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S,
+            since_s=self._current_sweep_ramp_hold_scale_started_s,
+        )
+        if signal is None:
+            return unavailable
+        center_band = self._current_sweep_hold_min_band_for_basis(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA,
+        )
+        slope_limit = self._current_sweep_hold_min_band_for_basis(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_SLOPE_MAX_MPA_S,
+        )
+        fast_veto_band = self._current_sweep_hold_min_band_for_basis(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA,
+        )
+        signal_span = max(
+            0.0,
+            float(signal.raw_max_value) - float(signal.raw_min_value),
+        )
+        endpoint_drift = (
+            abs(float(signal.endpoint_slope_per_s)) * float(signal.span_s)
+        )
+        drift_allowance = max(
+            center_band,
+            signal_span * SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_DRIFT_RATIO_MAX,
+        )
+        ready = (
+            signal.sample_count >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SAMPLES
+            and signal.span_s >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SPAN_S
+        )
+        stationary = (
+            ready
+            and abs(float(signal.endpoint_slope_per_s)) <= slope_limit
+            and endpoint_drift <= drift_allowance
+        )
+        if fast_signal is None:
+            fast_signal = self._scale_control_signal_for_basis(basis)
+        fast_veto = (
+            fast_signal is None
+            or abs(float(target_value) - float(fast_signal.value)) > fast_veto_band
+            or abs(float(target_value) - float(fast_signal.latest_value)) > fast_veto_band
+        )
+        error_value = float(target_value) - float(signal.value)
+        suppression_allowed = (
+            self._current_sweep_cycle_center_motor_suppression_enabled
+            and stationary
+            and not fast_veto
+            and abs(error_value) <= center_band
+        )
+        return CurrentHoldCycleCenterState(
+            signal=signal,
+            error_value=error_value,
+            ready=ready,
+            stationary=stationary,
+            fast_veto=fast_veto,
+            suppression_allowed=suppression_allowed,
         )
 
     def _current_sweep_filtered_window_spans_target(
@@ -21975,7 +22555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
         required_samples: int,
     ) -> bool:
-        if required_samples <= 1:
+        if required_samples <= 0:
             return False
         latest_s = self._latest_scale_sample_time_s()
         if latest_s is None:
@@ -21987,7 +22567,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if last_s is None or latest_s > float(last_s) + 1e-9:
             count = min(required_samples, count + 1)
             self._seek_post_move_sample_count_by_key[seek_key] = count
-            self._seek_last_scale_timestamp_by_key[seek_key] = latest_s
             self._seek_last_scale_timestamp_by_clock[clock_key] = latest_s
         return was_short
 
@@ -22661,6 +23240,8 @@ class MainWindow(QtWidgets.QMainWindow):
             basis,
             setup_preload_relaxation=setup_preload_relaxation,
         )
+        volatile_observer_active = False
+        volatile_observation_complete = False
         if (
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -22886,6 +23467,26 @@ class MainWindow(QtWidgets.QMainWindow):
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._last_motion_command_time_s is not None
         ):
+            if not self._current_sweep_hold_response_observation_complete(seek_key):
+                self._log_waiting_for_feedback(
+                    "Waiting for the full post-correction response window before issuing another "
+                    "current-hold move."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=acceptance_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(
+                        basis,
+                        seek_key=seek_key,
+                    ),
+                    result="waiting",
+                    reason="current_hold_response_observation",
+                )
+                return False
             if (
                 not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
                 and not self._filtered_signal_changed_after_last_correction(
@@ -22929,11 +23530,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 filtered_signal,
                 seek_key=seek_key,
             )
+            volatile_observer_active = (
+                self._update_current_sweep_hold_volatile_observer(
+                    seek_key,
+                    volatile_unsettled=volatile_unsettled_response,
+                )
+            )
+            volatile_observation_complete = (
+                self._current_sweep_hold_volatile_observation_complete()
+                if volatile_observer_active
+                else False
+            )
             waiting_for_required_samples = self._seek_wait_for_required_post_move_samples(
                 seek_key,
                 required_samples,
             )
-            if waiting_for_required_samples or volatile_unsettled_response:
+            if volatile_observer_active and not volatile_observation_complete:
+                self._log_waiting_for_feedback(
+                    "Repeated volatile motor responses detected; holding position for a full "
+                    "processed observation window before another correction."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(
+                        basis,
+                        seek_key=seek_key,
+                    ),
+                    result="waiting",
+                    reason="volatile_observer_response_window",
+                )
+                return False
+            if waiting_for_required_samples or (
+                volatile_unsettled_response and not volatile_observer_active
+            ):
                 self._log_waiting_for_feedback(
                     (
                         "Current-hold response is fluctuating after the last move; waiting for delayed "
@@ -22962,6 +23596,57 @@ class MainWindow(QtWidgets.QMainWindow):
                     ),
                 )
                 return False
+        cycle_center_state = self._current_sweep_hold_cycle_center_state(
+            basis,
+            target_value,
+            filtered_signal,
+        )
+        observer_centered = (
+            volatile_observer_active
+            and volatile_observation_complete
+            and cycle_center_state.ready
+            and cycle_center_state.stationary
+            and cycle_center_state.error_value is not None
+            and abs(float(cycle_center_state.error_value))
+            <= self._current_sweep_hold_min_band_for_basis(
+                basis,
+                SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA,
+            )
+        )
+        if cycle_center_state.suppression_allowed or observer_centered:
+            self._log_waiting_for_feedback(
+                "Fixed-current cycle center is stationary and near target; "
+                "suppressing the phase-chasing motor correction."
+            )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=acceptance_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(
+                    basis,
+                    seek_key=seek_key,
+                ),
+                result="suppressed",
+                reason=(
+                    "volatile_observer_centered_suppression"
+                    if observer_centered
+                    else "cycle_center_motor_suppression"
+                ),
+            )
+            return False
+        if (
+            volatile_observer_active
+            and volatile_observation_complete
+            and cycle_center_state.ready
+            and cycle_center_state.signal is not None
+            and cycle_center_state.error_value is not None
+        ):
+            current_value = float(cycle_center_state.signal.value)
+            delta_value = float(cycle_center_state.error_value)
+            filtered_signal = cycle_center_state.signal
         setup_preload_takeup = self._setup_preload_takeup_active(
             basis,
             current_value,
@@ -23396,6 +24081,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
             self._seek_post_move_sample_count_by_key[seek_key] = 0
             self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+            self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
             self._seek_travel_by_key[seek_key] = (
                 self._seek_travel_by_key.get(seek_key, 0.0) + abs(backlash_takeup_mm)
             )
@@ -23505,6 +24191,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
         self._seek_post_move_sample_count_by_key[seek_key] = 0
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+        self._current_sweep_hold_response_evaluated_by_key.discard(seek_key)
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
         )
@@ -23552,6 +24239,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.row_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
         if self.label_current_sweep_first_overheating_end is not None:
             self.label_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
+        constant_current_first_overheating_mode = self._is_constant_current_strain_sweep_mode(mode)
+        constant_current_first_overheating_enabled = (
+            constant_current_first_overheating_mode
+            and self.check_constant_current_first_overheating.isChecked()
+        )
+        for widget in (
+            self.label_constant_current_first_overheating_section,
+            self.check_constant_current_first_overheating,
+        ):
+            widget.setVisible(constant_current_first_overheating_mode)
+        for widget in (
+            self.row_constant_current_first_overheating_target,
+            self.row_constant_current_first_overheating_end,
+            self.row_constant_current_first_overheating_target_rate,
+            self.row_constant_current_first_overheating_current_rate,
+            self.check_constant_current_first_overheating_hold_on_error,
+        ):
+            widget.setVisible(constant_current_first_overheating_enabled)
+        for label in (
+            self.label_constant_current_first_overheating_target,
+            self.label_constant_current_first_overheating_end,
+            self.label_constant_current_first_overheating_target_rate,
+            self.label_constant_current_first_overheating_current_rate,
+        ):
+            if label is not None:
+                label.setVisible(constant_current_first_overheating_enabled)
         if hasattr(self, "row_current_sweep_target_end"):
             self.row_current_sweep_target_end.setVisible(not fatigue_mode)
         if hasattr(self, "label_current_sweep_target_end") and self.label_current_sweep_target_end is not None:
@@ -23568,6 +24281,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
         if hasattr(self, "label_current_sweep_fatigue_cycles") and self.label_current_sweep_fatigue_cycles is not None:
             self.label_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setVisible(fatigue_mode)
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         if mode == "cycle":
             summary = (
@@ -26152,7 +26868,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
                 return
             try:
-                patch_source_control_metadata(metadata_path, snapshot)
+                if self._session_active and metadata_path == self._session_json_path:
+                    self._write_session_metadata_locked(force_canonical=True)
+                else:
+                    patch_source_control_metadata(metadata_path, snapshot)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 self._log(
                     f"Source provenance metadata update failed for {metadata_path}: {exc}"
@@ -26266,6 +26985,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_volatile_slope_factor": (
                     SERVO_CURRENT_SWEEP_HOLD_VOLATILE_SLOPE_FACTOR
                 ),
+                "current_hold_cycle_center_window_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S
+                ),
+                "current_hold_cycle_center_min_span_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SPAN_S
+                ),
+                "current_hold_cycle_center_min_samples": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SAMPLES
+                ),
+                "current_hold_cycle_center_band_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA
+                ),
+                "current_hold_cycle_center_drift_ratio_max": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_DRIFT_RATIO_MAX
+                ),
+                "current_hold_cycle_center_slope_max_mpa_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_SLOPE_MAX_MPA_S
+                ),
+                "current_hold_cycle_center_fast_veto_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA
+                ),
+                "current_hold_cycle_center_resume_fast_veto_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA
+                ),
+                "current_hold_cycle_center_resume_noise_max_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA
+                ),
+                "current_hold_cycle_center_resume_evidence_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S
+                ),
+                "current_hold_volatile_observer_burst_count": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT
+                ),
+                "current_hold_volatile_observer_burst_window_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_WINDOW_S
+                ),
+                "current_hold_volatile_observer_response_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_RESPONSE_S
+                ),
+                "current_hold_transformation_activity_span_pct": (
+                    SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_ACTIVITY_SPAN_PCT
+                ),
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -26289,10 +27050,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+                "current_hold_cycle_center_resume_enabled": (
+                    self._current_sweep_cycle_center_resume_enabled
+                ),
                 "current_hold_filter_window_s": self._current_sweep_hold_filter_window_s(),
                 "current_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
+                "current_hold_cycle_center_motor_suppression_enabled": (
+                    self._current_sweep_cycle_center_motor_suppression_enabled
+                ),
+                "current_hold_volatile_observer_enabled": (
+                    self._current_sweep_volatile_observer_enabled
+                ),
             },
         }
 
@@ -26318,12 +27088,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_filter_window_s",
                 "current_hold_noise_sigma",
                 "current_hold_persistent_error_gate",
+                "current_hold_cycle_center_motor_suppression_enabled",
             ],
         }
 
     def _session_stop_label(self, reason: str | None) -> tuple[str, str]:
         labels = {
             "recipe_completed": ("normal", "Recipe completed normally"),
+            "recovery_completed": ("normal", "Recovery completed normally"),
             "manual_recipe_stop": ("operator", "Manual recipe stop"),
             "manual_session_stop": ("operator", "Manual session stop"),
             "emergency_stop": ("operator", "Emergency stop"),
@@ -26339,12 +27111,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _session_stop_metadata(self) -> dict[str, Any]:
         category, label = self._session_stop_label(self._session_stop_reason)
+        transition = None
+        if self._session_stop_transition is not None:
+            transition = dict(self._session_stop_transition)
+            transition["stages"] = [
+                dict(stage)
+                for stage in self._session_stop_transition.get("stages", [])
+                if isinstance(stage, dict)
+            ]
         return {
             "reason": self._session_stop_reason,
             "category": category,
             "label": label,
             "detail": self._session_stop_detail,
             "recorded_utc": self._session_stop_recorded_utc,
+            "transition": transition,
         }
 
     def _mark_session_stop_reason(
@@ -26359,6 +27140,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = str(reason)
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
+
+    def _stop_origin_from_caller(self) -> str:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back.f_back if frame is not None and frame.f_back is not None else None
+            if caller is None:
+                return "unknown"
+            return f"{caller.f_code.co_name}:{caller.f_lineno}"
+        finally:
+            del frame
+
+    def _begin_session_stop_transition(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        origin: str,
+        force_reason: bool = False,
+    ) -> None:
+        self._mark_session_stop_reason(reason, detail=detail, force=force_reason)
+        transition_created = self._session_stop_transition is None
+        if transition_created:
+            self._session_stop_transition = {
+                "transition_id": uuid4().hex,
+                "state": "requested",
+                "reason": self._session_stop_reason,
+                "detail": self._session_stop_detail,
+                "origin": str(origin or "unknown"),
+                "trigger_log_message": self._last_log_message,
+                "requested_utc": self._session_stop_recorded_utc,
+                "last_stage_utc": self._session_stop_recorded_utc,
+                "automation_name": self._automation_name,
+                "automation_phase": self._automation_phase,
+                "automation_index": int(self._automation_index),
+                "task": self._current_task_summary(),
+                "fatigue_progress": self._fatigue_progress_snapshot(),
+                "stages": [],
+            }
+        else:
+            self._session_stop_transition["reason"] = self._session_stop_reason
+            self._session_stop_transition["detail"] = self._session_stop_detail
+        if transition_created:
+            self._record_session_stop_stage("requested", detail=detail, force_canonical=True)
+
+    def _record_session_stop_stage(
+        self,
+        stage: str,
+        *,
+        detail: str | None = None,
+        error: BaseException | None = None,
+        force_canonical: bool = True,
+    ) -> None:
+        transition = self._session_stop_transition
+        if transition is None:
+            return
+        recorded_utc = _utc_timestamp()
+        stage_record: dict[str, Any] = {
+            "stage": str(stage),
+            "recorded_utc": recorded_utc,
+        }
+        if detail:
+            stage_record["detail"] = str(detail)
+        if error is not None:
+            stage_record["error_type"] = error.__class__.__name__
+            stage_record["error"] = str(error) or error.__class__.__name__
+        stages = transition.setdefault("stages", [])
+        if isinstance(stages, list):
+            stages.append(stage_record)
+        transition["state"] = str(stage)
+        transition["last_stage_utc"] = recorded_utc
+        transition["fatigue_progress"] = self._fatigue_progress_snapshot()
+        if error is not None:
+            transition["failure_stage"] = str(stage)
+            transition["failure_type"] = error.__class__.__name__
+            transition["failure_detail"] = str(error) or error.__class__.__name__
+        if (
+            not force_canonical
+            or self._session_json_path is None
+            or self._session_metadata_store is None
+            or self._stop_transition_metadata_write_in_progress
+        ):
+            return
+        self._stop_transition_metadata_write_in_progress = True
+        try:
+            self._write_session_metadata(force_canonical=True)
+        except Exception as exc:
+            # Stop diagnostics must never prevent the physical stop sequence.
+            self._queue_run_log_display_line(
+                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"Stop-transition metadata write failed at {stage}: {exc}"
+            )
+        finally:
+            self._stop_transition_metadata_write_in_progress = False
 
     def _freeze_run_metadata_snapshot(self) -> MiniDmaRunMetadataSnapshot:
         if not self._is_ui_thread():
@@ -26506,6 +27380,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         payload["recipe_summary"] = self._last_recipe_summary
         payload["recipe_estimated_points"] = int(self._recipe_estimated_points)
+        payload["fatigue_progress"] = self._fatigue_progress_snapshot()
         payload["first_overheating_preflight"] = self._first_overheating_preflight_decision
         payload["stop"] = self._session_stop_metadata()
         payload["source_control"] = self._source_control_metadata()
@@ -26774,6 +27649,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
+                "current_hold_volatile_observer_enabled": (
+                    self._current_sweep_volatile_observer_enabled
+                ),
                 "first_overheating": self.check_current_sweep_first_overheating.isChecked(),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
@@ -26782,6 +27660,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
+                "iso_current_first_overheating": {
+                    "enabled": bool(self.check_constant_current_first_overheating.isChecked()),
+                    "target_mpa": float(
+                        self.spin_constant_current_first_overheating_target_mpa.value()
+                    ),
+                    "current_end_mA": float(
+                        self.spin_constant_current_first_overheating_end_mA.value()
+                    ),
+                    "target_ramp_rate_mpa_s": float(
+                        self.spin_constant_current_first_overheating_target_rate_mpa_s.value()
+                    ),
+                    "current_ramp_rate_mA_s": float(
+                        self.spin_constant_current_first_overheating_current_rate_mA_s.value()
+                    ),
+                    "hold_on_error": bool(
+                        self.check_constant_current_first_overheating_hold_on_error.isChecked()
+                    ),
+                    "lifecycle": "iso_stress_up_and_return",
+                },
                 "reverse_current": (
                     True
                     if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE
@@ -26804,15 +27701,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
-    def _write_session_metadata(self, *, finished_utc: str | None = None, throttle: bool = False) -> None:
+    def _write_session_metadata(
+        self,
+        *,
+        finished_utc: str | None = None,
+        throttle: bool = False,
+        force_canonical: bool = False,
+    ) -> None:
         with self._session_metadata_write_lock:
-            self._write_session_metadata_locked(finished_utc=finished_utc, throttle=throttle)
+            self._write_session_metadata_locked(
+                finished_utc=finished_utc,
+                throttle=throttle,
+                force_canonical=force_canonical,
+            )
 
     def _write_session_metadata_locked(
         self,
         *,
         finished_utc: str | None = None,
         throttle: bool = False,
+        force_canonical: bool = False,
     ) -> None:
         if self._session_json_path is None:
             return
@@ -26825,6 +27733,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_metadata_dirty = True
                 return
         payload = self._session_metadata()
+        payload["session_identity"] = self._session_identity
         payload["point_count"] = self._session_point_count()
         payload["memory_retained_point_count"] = len(self._session_points)
         payload["memory_discarded_point_count"] = int(
@@ -26837,28 +27746,31 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["session_state"] = "finished"
         if finished_utc:
             payload["finished_utc"] = finished_utc
-        temporary = self._session_json_path.with_name(
-            f".{self._session_json_path.name}.{uuid4().hex}.tmp"
-        )
         try:
-            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(temporary, self._session_json_path)
+            store = self._session_metadata_store
+            if store is None:
+                raise OSError("session metadata checkpoint store is unavailable")
+            result = store.write(
+                payload,
+                final=finished_utc is not None,
+                force_canonical=force_canonical,
+            )
             self._last_session_metadata_write_s = time.monotonic()
             self._session_metadata_dirty = False
+            if result.checkpoint_cleanup_error:
+                self._log(
+                    "Final metadata was saved, but its local recovery checkpoint "
+                    f"could not be removed: {result.checkpoint_cleanup_error}"
+                )
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
                 reason="metadata_write_failed",
                 error=exc,
             )
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def _session_recovery_root(self) -> Path:
-        return Path(_default_download_dir()) / "MiniDMA_recovered_sessions"
+        return Path(_default_download_dir()) / "TMA_recovered_sessions"
 
     def _write_emergency_session_snapshot(
         self,
@@ -26875,7 +27787,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_name).strip("._") or "session"
                 self._session_recovery_path = (
                     self._session_recovery_root()
-                    / f"MiniDMA_recovered_{safe_name}_{_utc_filename_timestamp()}"
+                    / f"TMA_recovered_{safe_name}_{_utc_filename_timestamp()}"
                 )
             self._session_recovery_path.mkdir(parents=True, exist_ok=True)
             recovery_payload = dict(payload)
@@ -27057,6 +27969,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = None
         self._session_stop_detail = None
         self._session_stop_recorded_utc = None
+        self._session_stop_transition = None
+        self._stop_transition_metadata_write_in_progress = False
         self._session_recovery_path = None
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s = None
@@ -27112,6 +28026,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path = txt_path
         self._session_csv_path = csv_path
         self._session_json_path = json_path
+        self._session_metadata_store = SessionMetadataCheckpointStore(
+            json_path,
+            session_identity=self._session_identity,
+            checkpoint_root=self._metadata_checkpoint_root,
+        )
         self._request_session_source_provenance()
         self._session_raw_scale_path = raw_scale_path
         self._session_ir_temperature_path = ir_temperature_path
@@ -27298,19 +28217,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._session_active:
             return
-        self._finalize_calibration_report_if_needed()
+        resolved_reason = reason or self._session_stop_reason or "manual_session_stop"
+        resolved_detail = detail or self._session_stop_detail
+        if resolved_detail is None:
+            resolved_detail = (
+                "Session stopped without completing an active recipe."
+                if resolved_reason == "manual_session_stop"
+                else self._session_stop_label(resolved_reason)[1]
+            )
+        stop_origin = self._stop_origin_from_caller()
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=stop_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
+        self._record_session_stop_stage("session_finalization_started")
+        try:
+            self._finalize_calibration_report_if_needed()
+        except Exception as exc:
+            self._record_session_stop_stage("calibration_report_finalize_failed", error=exc)
+            self._log(f"Session stop could not finalize the calibration report: {exc}")
         self._stop_auto_ramp(
             log_completion=False,
-            stop_reason=reason,
-            stop_detail=detail,
+            stop_reason=resolved_reason,
+            stop_detail=resolved_detail,
+            stop_origin=stop_origin,
         )
-        if reason is not None:
-            self._mark_session_stop_reason(reason, detail=detail, force=reason != "app_closed")
-        elif self._session_stop_reason is None:
-            self._mark_session_stop_reason(
-                "manual_session_stop",
-                detail="Session stopped without completing an active recipe.",
-            )
         if (
             self._session_csv_writer is not None
             and self._session_stop_reason == "recipe_completed"
@@ -27336,6 +28269,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
+        self._record_session_stop_stage("session_logging_fenced")
         timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
         if self._session_txt_handle is not None:
@@ -27363,6 +28297,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_setup_csv_handle.close()
             self._session_setup_csv_handle = None
         self._session_setup_csv_writer = None
+        self._record_session_stop_stage("session_files_closed")
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = self._session_point_count()
@@ -27406,6 +28341,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 reconcile_run_log = True
         self._session_run_log_accepting = False
         if self._session_json_path is not None:
+            self._record_session_stop_stage(
+                "completed",
+                detail="Recipe and session teardown completed.",
+                force_canonical=False,
+            )
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
             if (
@@ -27574,6 +28514,19 @@ class MainWindow(QtWidgets.QMainWindow):
         filtered_signal: ScaleControlSignal | None = None
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             filtered_signal = self._seek_filtered_control_signal(basis)
+        cycle_center_state: CurrentHoldCycleCenterState | None = None
+        if (
+            basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and target_value is not None
+        ):
+            cycle_center_state = self._current_sweep_hold_cycle_center_state(
+                basis,
+                float(target_value),
+                filtered_signal,
+            )
+        cycle_center_signal = (
+            None if cycle_center_state is None else cycle_center_state.signal
+        )
         scale_age_s = self._scale_reading_age_s()
         scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
         voltage_limit_v = self._run_supply_voltage_limit_v()
@@ -27611,6 +28564,59 @@ class MainWindow(QtWidgets.QMainWindow):
                     "filtered_noise": _number(None if filtered_signal is None else filtered_signal.noise),
                     "filtered_sample_count": (
                         "" if filtered_signal is None else int(filtered_signal.sample_count)
+                    ),
+                    "cycle_center_enabled": int(
+                        self._current_sweep_cycle_center_motor_suppression_enabled
+                    ),
+                    "cycle_center_value": _number(
+                        None if cycle_center_signal is None else cycle_center_signal.value
+                    ),
+                    "cycle_center_error": _number(
+                        None if cycle_center_state is None else cycle_center_state.error_value
+                    ),
+                    "cycle_center_slope_per_s": _number(
+                        (
+                            None
+                            if cycle_center_signal is None
+                            else cycle_center_signal.endpoint_slope_per_s
+                        )
+                    ),
+                    "cycle_center_noise": _number(
+                        None if cycle_center_signal is None else cycle_center_signal.noise
+                    ),
+                    "cycle_center_sample_count": (
+                        "" if cycle_center_signal is None else int(cycle_center_signal.sample_count)
+                    ),
+                    "cycle_center_span_s": _number(
+                        None if cycle_center_signal is None else cycle_center_signal.span_s
+                    ),
+                    "cycle_center_signal_span": _number(
+                        (
+                            None
+                            if cycle_center_signal is None
+                            else cycle_center_signal.raw_max_value
+                            - cycle_center_signal.raw_min_value
+                        )
+                    ),
+                    "cycle_center_ready": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.ready)
+                    ),
+                    "cycle_center_stationary": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.stationary)
+                    ),
+                    "cycle_center_fast_veto": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.fast_veto)
+                    ),
+                    "cycle_center_suppression_allowed": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.suppression_allowed)
                     ),
                     "latest_scale_age_s": _number(scale_age_s),
                     "scale_recent_rate_hz": _number(scale_recent_rate_hz),
@@ -28178,6 +29184,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _retain_session_point(self, point: MeasurementPoint) -> None:
         self._session_points.append(point)
         self._session_point_count_total += 1
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and point.strain_pct is not None
+            and math.isfinite(float(point.strain_pct))
+        ):
+            strain_pct = float(point.strain_pct)
+            if self._current_sweep_observed_strain_min_pct is None:
+                self._current_sweep_observed_strain_min_pct = strain_pct
+                self._current_sweep_observed_strain_max_pct = strain_pct
+            else:
+                self._current_sweep_observed_strain_min_pct = min(
+                    float(self._current_sweep_observed_strain_min_pct),
+                    strain_pct,
+                )
+                self._current_sweep_observed_strain_max_pct = max(
+                    float(self._current_sweep_observed_strain_max_pct),
+                    strain_pct,
+                )
         if (
             self._automation_name != CURRENT_SWEEP_FATIGUE
             or self._fatigue_cycle_index <= 0
@@ -28947,6 +29971,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
                 "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
                 "transition_hold_on_error": bool(self.check_constant_current_transition_hold_on_error.isChecked()),
+                "first_overheating": bool(
+                    self.check_constant_current_first_overheating.isChecked()
+                ),
+                "first_overheating_target_mpa": float(
+                    self.spin_constant_current_first_overheating_target_mpa.value()
+                ),
+                "first_overheating_current_end_mA": float(
+                    self.spin_constant_current_first_overheating_end_mA.value()
+                ),
+                "first_overheating_target_ramp_rate_mpa_s": float(
+                    self.spin_constant_current_first_overheating_target_rate_mpa_s.value()
+                ),
+                "first_overheating_current_ramp_rate_mA_s": float(
+                    self.spin_constant_current_first_overheating_current_rate_mA_s.value()
+                ),
+                "first_overheating_hold_on_error": bool(
+                    self.check_constant_current_first_overheating_hold_on_error.isChecked()
+                ),
+                "first_overheating_lifecycle": "iso_stress_up_and_return",
                 "return_to_start": True,
             }
         if self._is_constant_current_stress_ramp_mode(mode):
@@ -29136,6 +30179,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA.setValue(float(constant_current.get("current_start_mA", self.spin_constant_current_start_mA.value())))
             self.spin_constant_current_end_mA.setValue(float(constant_current.get("current_end_mA", self.spin_constant_current_end_mA.value())))
             self.spin_constant_current_step_mA.setValue(float(constant_current.get("current_step_mA", self.spin_constant_current_step_mA.value())))
+            self.check_constant_current_first_overheating.setChecked(
+                bool(
+                    constant_current.get(
+                        "first_overheating",
+                        self.check_constant_current_first_overheating.isChecked(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_target_mpa.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_target_mpa",
+                        self.spin_constant_current_first_overheating_target_mpa.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_end_mA.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_current_end_mA",
+                        self.spin_constant_current_first_overheating_end_mA.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_target_ramp_rate_mpa_s",
+                        self.spin_constant_current_first_overheating_target_rate_mpa_s.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(
+                float(
+                    constant_current.get(
+                        "first_overheating_current_ramp_rate_mA_s",
+                        self.spin_constant_current_first_overheating_current_rate_mA_s.value(),
+                    )
+                )
+            )
+            self.check_constant_current_first_overheating_hold_on_error.setChecked(
+                bool(
+                    constant_current.get(
+                        "first_overheating_hold_on_error",
+                        self.check_constant_current_first_overheating_hold_on_error.isChecked(),
+                    )
+                )
+            )
             self.check_constant_current_transition_enabled.setChecked(True)
             self.spin_constant_current_transition_stress_mpa.setValue(
                 float(
@@ -29403,8 +30494,10 @@ class MainWindow(QtWidgets.QMainWindow):
         end_mA = step.current_end_mA
         if start_mA is None or end_mA is None:
             return f"Current sweep at {target_text}"
-        direction = "increasing" if float(end_mA) >= float(start_mA) else "decreasing"
         target_current = self._automation_current_target_text(end_mA)
+        if abs(float(end_mA) - float(start_mA)) <= 1e-12:
+            return f"At {target_text}: holding current at {target_current}"
+        direction = "increasing" if float(end_mA) > float(start_mA) else "decreasing"
         return f"At {target_text}: {direction} current to {target_current}"
 
     def _previous_current_sweep_step_for_settle(self, step_index: int, step: AutomationStep) -> AutomationStep | None:
@@ -29451,8 +30544,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return "Starting measurement log"
 
         if (
-            self._is_current_sweep_mode(self._automation_name)
-            and self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
+            self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
+            and self._active_current_sweep_display_target_mA is not None
         ):
             context_target_text = self._automation_target_text(self._automation_basis, self._automation_target_value)
             if self._automation_phase == "current_hold":
@@ -29460,8 +30553,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 return f"At {context_target_text}: holding {held}, recovering target"
             target_current = self._automation_current_target_text(self._active_current_sweep_display_target_mA)
             direction_value = self._active_current_sweep_display_direction
+            start_for_display = self._active_current_sweep_last_setpoint_mA
+            if (
+                start_for_display is not None
+                and self._active_current_sweep_display_target_mA is not None
+                and abs(
+                    float(self._active_current_sweep_display_target_mA)
+                    - float(start_for_display)
+                )
+                <= 1e-12
+            ):
+                return f"At {context_target_text}: holding current at {target_current}"
             if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
-                start_for_display = self._active_current_sweep_last_setpoint_mA
                 if start_for_display is not None:
                     direction_value = float(self._active_current_sweep_display_target_mA) - float(start_for_display)
             direction = "increasing" if direction_value >= 0.0 else "decreasing"
@@ -29575,6 +30678,56 @@ class MainWindow(QtWidgets.QMainWindow):
         direction = "up" if direction_value >= 0.0 else "down"
         return f"{target_text}, current {direction} {current_text}/{end_text}{sweep_text}"
 
+    def _fatigue_progress_snapshot(self) -> dict[str, object] | None:
+        if self._automation_name != CURRENT_SWEEP_FATIGUE:
+            return None
+        completed_cycles = max(0, int(self._fatigue_cycles_completed))
+        cycle_index = max(0, int(self._fatigue_cycle_index))
+        cycle_limit = self._fatigue_cycle_limit
+        active_cycle = cycle_index if cycle_index > completed_cycles else None
+        if cycle_limit is not None and completed_cycles >= int(cycle_limit):
+            state = "complete"
+        elif self._automation_active:
+            if self._automation_paused:
+                state = "paused"
+            elif active_cycle is None:
+                state = "preparing"
+            else:
+                state = "running"
+        elif active_cycle is not None:
+            state = "incomplete"
+        else:
+            state = "stopped"
+        return {
+            "cycle_limit": None if cycle_limit is None else int(cycle_limit),
+            "completed_cycles": completed_cycles,
+            "active_cycle": active_cycle,
+            "active_leg": self._automation_fatigue_leg if active_cycle is not None else None,
+            "state": state,
+        }
+
+    def _fatigue_progress_text(self) -> str:
+        progress = self._fatigue_progress_snapshot()
+        if progress is None:
+            configured_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            if configured_cycles == 0:
+                return "Progress: 0 completed | not started (Forever)"
+            return f"Progress: 0/{configured_cycles} completed | not started"
+        completed = int(progress["completed_cycles"])
+        cycle_limit = progress["cycle_limit"]
+        active_cycle = progress["active_cycle"]
+        state = str(progress["state"])
+        completed_text = (
+            f"{completed} completed"
+            if cycle_limit is None
+            else f"{completed}/{int(cycle_limit)} completed"
+        )
+        if active_cycle is None:
+            return f"Progress: {completed_text} | {state}"
+        if state == "running" and progress["active_leg"]:
+            state = str(progress["active_leg"])
+        return f"Progress: {completed_text} | cycle {int(active_cycle)} {state}"
+
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
             self._recipe_progress_pending_complete = self._recipe_progress_pending_complete or bool(complete)
@@ -29595,13 +30748,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recipe_progress_pending_complete = False
         if self._automation_name == CURRENT_SWEEP_FATIGUE:
             cycle_index = max(0, int(self._fatigue_cycle_index))
+            completed_cycles = max(0, int(self._fatigue_cycles_completed))
             cycle_limit = self._fatigue_cycle_limit
             current_sweep_text = self._active_current_sweep_progress_text()
             if complete:
                 completed_cycles = (
-                    cycle_index
+                    completed_cycles
                     if cycle_limit is None
-                    else max(cycle_index, int(cycle_limit))
+                    else max(completed_cycles, int(cycle_limit))
                 )
                 self.recipe_progress.setRange(0, max(1, completed_cycles))
                 self.recipe_progress.setValue(max(1, completed_cycles))
@@ -29617,14 +30771,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     progress_text = (
                         "Fatigue: preparing forever"
                         if cycle_index <= 0
-                        else f"Fatigue cycle {cycle_index} | running until stopped"
+                        else (
+                            f"Fatigue: {completed_cycles} complete | "
+                            f"cycle {cycle_index} | until stopped"
+                        )
                     )
-                    progress_value = cycle_index
-                    progress_total = max(1, cycle_index + 1)
+                    progress_value = completed_cycles
+                    progress_total = max(1, completed_cycles + 1)
                     percent = 0
                 else:
                     finite_limit = max(1, int(cycle_limit))
-                    completed_cycles = max(0, cycle_index - 1)
                     self.recipe_progress.setRange(0, finite_limit)
                     self.recipe_progress.setValue(min(completed_cycles, finite_limit))
                     progress_text = (
@@ -30888,6 +32044,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None if self._session_base_path is None else str(self._session_base_path.parent)
             ),
             fatigue_cycle_index=int(self._fatigue_cycle_index),
+            fatigue_cycles_completed=int(self._fatigue_cycles_completed),
             fatigue_loop_anchor_index=self._fatigue_loop_anchor_index,
         )
 
@@ -30944,6 +32101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = int(state.interval_ms)
         self._automation_name = str(state.name)
         self._fatigue_cycle_index = int(state.fatigue_cycle_index)
+        self._fatigue_cycles_completed = int(state.fatigue_cycles_completed)
         self._fatigue_loop_anchor_index = state.fatigue_loop_anchor_index
         fatigue_loop_step = next(
             (step for step in reversed(self._automation_steps) if step.action == "fatigue_loop"),
@@ -30980,6 +32138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
+        self._current_sweep_endpoint_seek_accepted_step_index = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -30997,7 +32156,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._setup_zero_fallback_return_position_mm = None
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -31157,18 +32315,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _focus_first_overheating_controls(self) -> None:
         self.control_tabs.setCurrentWidget(self.experiment_tab)
         self._update_recipe_mode_ui()
+        recipe_mode = str(self.combo_recipe_mode.currentData() or "")
+        target_widget = (
+            self.spin_constant_current_first_overheating_target_mpa
+            if self._is_constant_current_strain_sweep_mode(recipe_mode)
+            else self.spin_current_sweep_first_overheating_target_mpa
+        )
 
         def _reveal() -> None:
             if self._control_scroll_area is not None:
                 self._control_scroll_area.ensureWidgetVisible(
-                    self.spin_current_sweep_first_overheating_target_mpa,
+                    target_widget,
                     24,
                     48,
                 )
-            self.spin_current_sweep_first_overheating_target_mpa.setFocus(
-                QtCore.Qt.FocusReason.OtherFocusReason
-            )
-            self.spin_current_sweep_first_overheating_target_mpa.selectAll()
+            target_widget.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            target_widget.selectAll()
 
         QtCore.QTimer.singleShot(0, _reveal)
 
@@ -31177,15 +32339,23 @@ class MainWindow(QtWidgets.QMainWindow):
         identity = self._current_tma_sample_identity()
         recipe_mode = str(self.combo_recipe_mode.currentData() or "")
         history_found = self._has_previous_tma_measurement(identity)
+        first_overheating_enabled = (
+            self.check_constant_current_first_overheating.isChecked()
+            if self._is_constant_current_strain_sweep_mode(recipe_mode)
+            else self.check_current_sweep_first_overheating.isChecked()
+        )
         if not _first_overheating_preflight_required(
             recipe_mode=recipe_mode,
-            first_overheating_enabled=self.check_current_sweep_first_overheating.isChecked(),
+            first_overheating_enabled=first_overheating_enabled,
             previous_tma_measurement_found=history_found,
         ):
             return True
         action = self._ask_first_overheating_preflight_action()
         if action == FIRST_OVERHEATING_CONFIGURE:
-            self.check_current_sweep_first_overheating.setChecked(True)
+            if self._is_constant_current_strain_sweep_mode(recipe_mode):
+                self.check_constant_current_first_overheating.setChecked(True)
+            else:
+                self.check_current_sweep_first_overheating.setChecked(True)
             self._focus_first_overheating_controls()
             return False
         if action != FIRST_OVERHEATING_CONTINUE:
@@ -31291,7 +32461,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_starting_length_mm = None
@@ -31326,6 +32495,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
+        self._current_sweep_hold_response_evaluated_by_key.clear()
+        self._current_sweep_hold_volatile_groups_by_key.clear()
+        self._current_sweep_hold_volatile_active_by_key.clear()
+        self._current_sweep_hold_observer_keys.clear()
+        self._current_sweep_observed_strain_min_pct = None
+        self._current_sweep_observed_strain_max_pct = None
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
@@ -31344,6 +32519,7 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
         )
         self._fatigue_cycle_index = 0
+        self._fatigue_cycles_completed = 0
         self._fatigue_cycle_limit = (
             None
             if fatigue_loop_step is None
@@ -32004,6 +33180,30 @@ class MainWindow(QtWidgets.QMainWindow):
             previous_elapsed_s = elapsed_s
         return x_values, y_values
 
+    def _time_axis_display_for_points(
+        self,
+        points: Sequence[MeasurementPoint],
+    ) -> TimeAxisDisplay:
+        max_elapsed_s = max(
+            (
+                float(point.elapsed_s)
+                for point in points
+                if math.isfinite(float(point.elapsed_s))
+            ),
+            default=0.0,
+        )
+        return _time_axis_display(max_elapsed_s)
+
+    def _display_x_values(
+        self,
+        values: Sequence[float],
+        x_channel: PlotChannel,
+        time_axis: TimeAxisDisplay,
+    ) -> list[float]:
+        if x_channel.key != "elapsed_s" or time_axis.divisor_s == 1.0:
+            return list(values)
+        return [float(value) / time_axis.divisor_s for value in values]
+
     def _refresh_length_setup_plot(self) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_length_setup_plot)
@@ -32017,10 +33217,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 key=lambda indexed: (float(indexed[1].elapsed_s), indexed[0]),
             )
         )
+        time_axis = self._time_axis_display_for_points(points)
+        setup_time_label = time_axis.label.replace("Time", "Setup time", 1)
         self._style_pyqtgraph_plot(
             self._length_setup_stress_plot,
             title="Length setup load and stress",
-            x_label="Setup time (s)",
+            x_label=setup_time_label,
             left_label="Stress (MPa)",
             right_label="Load (g)",
             left_color=self._plot_channel_color("stress_mpa"),
@@ -32029,12 +33231,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._style_pyqtgraph_plot(
             self._length_setup_displacement_plot,
             title="Length setup displacement",
-            x_label="Setup time (s)",
+            x_label=setup_time_label,
             left_label="Displacement (mm)",
             right_label=None,
             left_color=self._plot_channel_color("position_mm"),
         )
-        x_values = [point.elapsed_s for point in points]
+        x_values = [point.elapsed_s / time_axis.divisor_s for point in points]
         stress_values = [
             float("nan") if point.stress_mpa is None else float(point.stress_mpa)
             for point in points
@@ -32061,17 +33263,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._recovery_plot is None:
             return
+        points = self._recovery_points
+        time_axis = self._time_axis_display_for_points(points)
+        recovery_time_label = time_axis.label.replace("Time", "Recovery time", 1)
         self._style_pyqtgraph_plot(
             self._recovery_plot,
             title="Recovery load + displacement vs time",
-            x_label="Recovery time (s)",
+            x_label=recovery_time_label,
             left_label="Applied tensile load (g)",
             right_label="Tensile displacement (mm)",
             left_color=self._plot_channel_color("load_g"),
             right_color=self._plot_channel_color("position_mm"),
         )
-        points = self._recovery_points
-        x_values = [point.elapsed_s for point in points]
+        x_values = [point.elapsed_s / time_axis.divisor_s for point in points]
         self._set_pyqtgraph_curve_data(
             self._recovery_left_curve,
             x_values,
@@ -32247,7 +33451,9 @@ class MainWindow(QtWidgets.QMainWindow):
         offer_recovery: bool = False,
         stop_reason: str | None = None,
         stop_detail: str | None = None,
+        stop_origin: str | None = None,
     ) -> None:
+        resolved_origin = stop_origin or self._stop_origin_from_caller()
         if not self._is_ui_thread():
             self._automation_paused = True
             self._run_on_ui_thread(
@@ -32260,32 +33466,66 @@ class MainWindow(QtWidgets.QMainWindow):
                     offer_recovery=offer_recovery,
                     stop_reason=stop_reason,
                     stop_detail=stop_detail,
+                    stop_origin=resolved_origin,
                 )
             )
             return
         if not self._automation_active:
             return
-        if stop_reason is not None:
-            self._mark_session_stop_reason(stop_reason, detail=stop_detail, force=stop_reason != "app_closed")
-        elif user_initiated:
-            self._mark_session_stop_reason(
-                "manual_recipe_stop",
-                detail="Recipe stop was requested by the operator.",
-            )
-        elif offer_recovery:
-            self._mark_session_stop_reason(
-                "recipe_control_stop",
-                detail="Recipe stopped before completion and recovery was offered.",
-            )
+        resolved_reason = stop_reason
+        resolved_detail = stop_detail
+        if resolved_reason is None and user_initiated:
+            resolved_reason = "manual_recipe_stop"
+            resolved_detail = resolved_detail or "Recipe stop was requested by the operator."
+        elif resolved_reason is None:
+            resolved_reason = "recipe_control_stop"
+            if resolved_detail is None and self._last_log_message:
+                resolved_detail = f"Automatic stop followed: {self._last_log_message}"
+            elif resolved_detail is None and offer_recovery:
+                resolved_detail = "Recipe stopped before completion and recovery was offered."
+            elif resolved_detail is None:
+                resolved_detail = "An automatic safety/control path requested a recipe stop."
+        if resolved_detail is None:
+            resolved_detail = self._session_stop_label(resolved_reason)[1]
+        self._begin_session_stop_transition(
+            reason=resolved_reason,
+            detail=resolved_detail,
+            origin=resolved_origin,
+            force_reason=resolved_reason != "app_closed",
+        )
         should_store_resume = user_initiated and self._automation_index < len(self._automation_steps)
         if should_store_resume:
-            self._store_resume_state()
+            try:
+                self._store_resume_state()
+                self._record_session_stop_stage("resume_state_saved")
+            except Exception as exc:
+                self._record_session_stop_stage("resume_state_save_failed", error=exc)
+                self._log(f"Recipe stop could not preserve resume state: {exc}")
         self._automation_active = False
         self._automation_paused = True
+        self._record_session_stop_stage("automation_fenced")
         if self._supply_output_enabled:
-            self._disable_supply_output()
-        self._stop_automation_control_loop()
-        self._stop_tic_keepalive()
+            try:
+                self._disable_supply_output()
+                self._record_session_stop_stage("supply_disabled")
+            except Exception as exc:
+                self._supply_output_enabled = False
+                self._record_session_stop_stage("supply_disable_failed", error=exc)
+                self._log(f"Recipe stop could not disable supply output: {exc}")
+        else:
+            self._record_session_stop_stage("supply_already_disabled")
+        try:
+            self._stop_automation_control_loop()
+            self._record_session_stop_stage("control_loop_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("control_loop_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop the control loop cleanly: {exc}")
+        try:
+            self._stop_tic_keepalive()
+            self._record_session_stop_stage("tic_keepalive_stopped")
+        except Exception as exc:
+            self._record_session_stop_stage("tic_keepalive_stop_failed", error=exc)
+            self._log(f"Recipe stop could not stop Tic keepalive cleanly: {exc}")
         motion_halted = False
         try:
             dispatcher = self._build_tic_dispatcher()
@@ -32297,6 +33537,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 timeout_s=2.0,
             )
         except Exception as exc:
+            self._record_session_stop_stage("tic_halt_failed", error=exc)
             self._log(f"Recipe stop could not halt Tic: {exc}")
         if motion_halted:
             try:
@@ -32304,8 +33545,18 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._release_motion_tracking_after_halt(reason="recipe stop")
+            self._record_session_stop_stage("tic_motion_halted")
         else:
             self._tic_motor_power_ok = False
+            if not any(
+                stage.get("stage") == "tic_halt_failed"
+                for stage in (self._session_stop_transition or {}).get("stages", [])
+                if isinstance(stage, dict)
+            ):
+                self._record_session_stop_stage(
+                    "tic_halt_unconfirmed",
+                    detail="Tic halt was not confirmed within the bounded stop wait.",
+                )
             self._log(
                 "Recipe stopped, but Tic halt was not confirmed; automatic and manual motion "
                 "remain blocked until motor status is checked."
@@ -32316,8 +33567,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._kosice_force_control = None
         self._automation_steps = []
         self._automation_index = 0
-        self._fatigue_cycle_index = 0
-        self._fatigue_cycle_limit = None
         self._fatigue_loop_anchor_index = None
         if not keep_progress:
             self._automation_completed_ticks = 0
@@ -32340,6 +33589,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
+        self._current_sweep_hold_response_evaluated_by_key.clear()
+        self._current_sweep_hold_volatile_groups_by_key.clear()
+        self._current_sweep_hold_volatile_active_by_key.clear()
+        self._current_sweep_hold_observer_keys.clear()
+        self._current_sweep_observed_strain_min_pct = None
+        self._current_sweep_observed_strain_max_pct = None
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
@@ -32358,7 +33613,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -32378,12 +33632,20 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self._run_on_ui_thread(self._sync_manual_motion_base_from_current_position)
         self._set_automation_context(phase="idle")
+        self._record_session_stop_stage("recipe_state_cleared")
         if log_completion:
             self._log("Recipe stopped.")
         self._close_length_setup_dialog()
         if (user_initiated or offer_recovery) and self._session_active:
-            self._stop_session()
+            self._record_session_stop_stage("session_finalization_requested")
+            self._stop_session(reason=resolved_reason, detail=resolved_detail)
+        elif self._session_active:
+            self._record_session_stop_stage(
+                "automation_stopped_session_open",
+                detail="Automation stopped while session logging remained active.",
+            )
         elif not self._session_active:
+            self._record_session_stop_stage("automation_stop_completed", force_canonical=False)
             self._clear_recovery_tic_command_context(retain_capture=False)
         if not keep_progress:
             self._update_recipe_progress()
@@ -32996,12 +34258,34 @@ class MainWindow(QtWidgets.QMainWindow):
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
             transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            first_overheating_enabled = bool(
+                self.check_constant_current_first_overheating.isChecked()
+            )
+            first_overheating_target_mpa = float(
+                self.spin_constant_current_first_overheating_target_mpa.value()
+            )
+            first_overheating_end_mA = self._recipe_current_setpoint_mA(
+                float(self.spin_constant_current_first_overheating_end_mA.value())
+            )
+            first_overheating_target_rate_mpa_s = abs(
+                float(self.spin_constant_current_first_overheating_target_rate_mpa_s.value())
+            )
+            first_overheating_current_rate_mA_s = abs(
+                float(self.spin_constant_current_first_overheating_current_rate_mA_s.value())
+            )
+            first_overheating_hold_enabled = bool(
+                self.check_constant_current_first_overheating_hold_on_error.isChecked()
+            )
             if mechanical_step_value <= 0.0:
                 raise ValueError("Set a non-zero mechanical step size.")
             if current_step <= 0.0:
                 raise ValueError("Set a non-zero current step.")
             if transition_enabled and transition_rate_mA_s <= 0.0:
                 raise ValueError("Set a non-zero current-transition ramp rate.")
+            if first_overheating_enabled and first_overheating_target_rate_mpa_s <= 0.0:
+                raise ValueError("Set a non-zero first-overheating stress-ramp rate.")
+            if first_overheating_enabled and first_overheating_current_rate_mA_s <= 0.0:
+                raise ValueError("Set a non-zero first-overheating current-ramp rate.")
             current_targets = []
             for current_target in self._build_numeric_targets(current_start, current_end, current_step):
                 clamped_target = self._recipe_current_setpoint_mA(current_target)
@@ -33009,6 +34293,59 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_targets.append(clamped_target)
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_current_mA = MIN_RECIPE_CURRENT_MA
+            if first_overheating_enabled:
+                first_overheating_start_mA = self._recipe_current_setpoint_mA(
+                    MIN_RECIPE_CURRENT_MA
+                )
+                steps.extend(
+                    (
+                        AutomationStep(
+                            "set_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_mA=first_overheating_start_mA,
+                            note="first_overheating",
+                        ),
+                        AutomationStep(
+                            "ramp_target",
+                            target_value=first_overheating_target_mpa,
+                            target_start_value=0.0,
+                            target_end_value=first_overheating_target_mpa,
+                            target_ramp_rate_value_s=first_overheating_target_rate_mpa_s,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            note="first_overheating",
+                        ),
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_start_mA=first_overheating_start_mA,
+                            current_end_mA=first_overheating_end_mA,
+                            current_ramp_rate_mA_s=first_overheating_current_rate_mA_s,
+                            current_hold_enabled=first_overheating_hold_enabled,
+                            current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                            current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                            current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                            note="first_overheating",
+                        ),
+                    )
+                )
+                if abs(first_overheating_end_mA - first_overheating_start_mA) > 1e-12:
+                    steps.append(
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=first_overheating_target_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_start_mA=first_overheating_end_mA,
+                            current_end_mA=first_overheating_start_mA,
+                            current_ramp_rate_mA_s=first_overheating_current_rate_mA_s,
+                            current_hold_enabled=first_overheating_hold_enabled,
+                            current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                            current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                            current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                            note="first_overheating",
+                        )
+                    )
             for current_index, current_mA in enumerate(current_targets, start=1):
                 note_prefix = f"{current_index}"
                 transition_start_mA = self._recipe_current_setpoint_mA(previous_current_mA)
@@ -33120,6 +34457,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 if transition_hold_enabled:
                     summary += " Current transition pauses while the target recovers."
+            if first_overheating_enabled:
+                summary += (
+                    " First overheating enabled: one established iso-stress current loop at "
+                    f"{first_overheating_target_mpa:.3f} MPa, "
+                    f"{first_overheating_start_mA:.2f} to {first_overheating_end_mA:.2f} mA "
+                    f"and back at {first_overheating_current_rate_mA_s:.3f} mA/s."
+                )
             summary += " Each current leg scans up and back to the start target."
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
@@ -33393,13 +34737,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
+        self._current_sweep_ramp_hold_cycle_center_since_s = None
         self._current_sweep_ramp_hold_seek_accepted_since_s = None
         self._current_sweep_ramp_hold_entry_abs_error = None
         self._current_sweep_ramp_hold_entry_signed_error = None
         self._current_sweep_ramp_hold_entry_pause_band = None
+        self._current_sweep_ramp_hold_scale_started_s = None
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
+
+    def _mark_current_sweep_ramp_hold_scale_start(self) -> None:
+        latest = self._scale_signal_buffer.latest()
+        self._current_sweep_ramp_hold_scale_started_s = (
+            None if latest is None else float(latest.timestamp_s)
+        )
 
     def _resume_current_sweep_ramp_from_hold(self, *, now_s: float, reason: str) -> None:
         held_s = max(0.0, float(now_s) - self._current_sweep_ramp_hold_started_s)
@@ -33766,6 +35118,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return signed_error, abs(signed_error), max(1e-12, abs(float(acceptance_tolerance))), max(0.0, noise_value)
 
     def _current_sweep_endpoint_recovered(self, step: AutomationStep) -> bool:
+        step_index = self._active_current_sweep_step_index
+        if (
+            step_index is not None
+            and self._current_sweep_endpoint_seek_accepted_step_index == int(step_index)
+        ):
+            return True
         if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return True
         if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE:
@@ -33796,6 +35154,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         return error_value <= recovery_band
+
+    def _current_sweep_setpoint_is_at_endpoint(self, step: AutomationStep) -> bool:
+        step_index = self._active_current_sweep_step_index
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if step_index is None or setpoint_mA is None:
+            return False
+        endpoint_mA = (
+            step.current_start_mA
+            if self._current_sweep_voltage_limit_step_index == step_index
+            else step.current_end_mA
+        )
+        if endpoint_mA is None:
+            return False
+        endpoint_mA = self._recipe_current_setpoint_mA(float(endpoint_mA))
+        return abs(float(setpoint_mA) - endpoint_mA) <= 1e-9
 
     def _current_sweep_hold_entry_confirmed(
         self,
@@ -34015,6 +35388,8 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         now_s: float,
     ) -> tuple[bool, bool]:
+        if self._current_sweep_endpoint_seek_accepted_step_index == int(step_index):
+            return False, False
         if not step.current_hold_enabled:
             if self._current_sweep_ramp_hold_step_index == step_index:
                 self._clear_current_sweep_ramp_hold()
@@ -34076,6 +35451,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_ramp_hold_entry_abs_error = float(error_value)
             self._current_sweep_ramp_hold_entry_signed_error = float(signed_error)
             self._current_sweep_ramp_hold_entry_pause_band = float(pause_band)
+            self._mark_current_sweep_ramp_hold_scale_start()
             self._reset_current_sweep_ramp_hold_candidate()
             setpoint = self._active_current_sweep_last_setpoint_mA
             self._log(
@@ -34115,7 +35491,121 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False, False
         else:
             self._current_sweep_ramp_hold_in_band_since_s = None
+        if self._maybe_resume_current_sweep_ramp_from_cycle_center(
+            step,
+            now_s=now_s,
+        ):
+            return False, False
         return True, False
+
+    def _maybe_resume_current_sweep_ramp_from_cycle_center(
+        self,
+        step: AutomationStep,
+        *,
+        now_s: float,
+    ) -> bool:
+        """Resume from a mature, stationary distribution centered on target.
+
+        This supplements the fast-window criterion without weakening it:
+        recent and latest feedback, long-window dispersion, coherent drift,
+        motor settling, and fresh-sample evidence can all veto the resume.
+        """
+        if (
+            not self._current_sweep_cycle_center_resume_enabled
+            or step.target_value is None
+            or step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            self._current_sweep_ramp_hold_cycle_center_since_s = None
+            return False
+        fast_signal = self._scale_control_signal_for_basis(
+            step.basis,
+            trend_aware=True,
+        )
+        state = self._current_sweep_hold_cycle_center_state(
+            step.basis,
+            float(step.target_value),
+            fast_signal,
+        )
+        signal = state.signal
+        fast_veto_band = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA,
+        )
+        noise_cap = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA,
+        )
+        center_band = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA,
+        )
+        motion_ready_after_s = self._motion_feedback_ready_after_s()
+        motion_ready_after_monotonic_s = self._motion_feedback_ready_after_monotonic_s()
+        motor_active_or_settling = (
+            self._pending_motion_command is not None
+            or self._kosice_active_motion_target_steps is not None
+            or (
+                motion_ready_after_monotonic_s is not None
+                and time.monotonic() < motion_ready_after_monotonic_s
+            )
+        )
+        post_move_feedback_ready = (
+            not motor_active_or_settling
+            and self._has_fresh_scale_reading(
+                after_s=motion_ready_after_s,
+                after_monotonic_s=motion_ready_after_monotonic_s,
+            )
+        )
+        eligible = (
+            state.ready
+            and state.stationary
+            and not state.fast_veto
+            and signal is not None
+            and state.error_value is not None
+            and abs(float(state.error_value)) <= center_band
+            and float(signal.noise) <= noise_cap
+            and fast_signal is not None
+            and abs(float(step.target_value) - float(fast_signal.value)) <= fast_veto_band
+            and abs(float(step.target_value) - float(fast_signal.latest_value)) <= fast_veto_band
+            and post_move_feedback_ready
+        )
+        sample_clock_s = self._latest_scale_arrival_monotonic_s
+        if not eligible or sample_clock_s is None:
+            self._current_sweep_ramp_hold_cycle_center_since_s = None
+            return False
+        if self._current_sweep_ramp_hold_cycle_center_since_s is None:
+            self._current_sweep_ramp_hold_cycle_center_since_s = float(sample_clock_s)
+            self._log_waiting_for_feedback(
+                "The mature fixed-current stress distribution is centered on target; "
+                "confirming fresh stationary feedback before resuming current."
+            )
+            return False
+        evidence_s = max(
+            0.0,
+            float(sample_clock_s)
+            - float(self._current_sweep_ramp_hold_cycle_center_since_s),
+        )
+        if evidence_s < SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S:
+            return False
+        self._write_control_trace(
+            decision="accept",
+            basis=step.basis,
+            target_value=step.target_value,
+            current_value=signal.value,
+            error_value=state.error_value,
+            tolerance=center_band,
+            result="cycle_center_resume",
+            reason="mature_stationary_distribution",
+        )
+        self._resume_current_sweep_ramp_from_hold(
+            now_s=now_s,
+            reason=(
+                "mature fixed-current distribution is centered on target "
+                f"(center error {_format_compact_number(abs(float(state.error_value)))}, "
+                f"robust noise {_format_compact_number(float(signal.noise))})"
+            ),
+        )
+        return True
 
     def _maybe_resume_current_sweep_held_recovery_from_adaptive_band(
         self,
@@ -34215,6 +35705,12 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"{stable_s:.2f} s"
                     ),
                 )
+                if self._current_sweep_setpoint_is_at_endpoint(step):
+                    self._current_sweep_endpoint_seek_accepted_step_index = (
+                        self._active_current_sweep_step_index
+                    )
+                else:
+                    self._current_sweep_endpoint_seek_accepted_step_index = None
             else:
                 self._log_waiting_for_feedback(
                     "Held-current recovery reached the target; confirming stable recovery before resuming current."
@@ -34238,8 +35734,17 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         target_mA = self._recipe_current_setpoint_mA(target_mA)
         start_mA = max(target_mA, self._current_sweep_voltage_limit_start_mA)
+        unwind_step = replace(
+            step,
+            current_start_mA=start_mA,
+            current_end_mA=target_mA,
+        )
         if self._current_sweep_voltage_limit_started_s is None:
             self._current_sweep_voltage_limit_started_s = time.monotonic()
+        self._active_current_sweep_display_target_mA = target_mA
+        self._active_current_sweep_display_direction = (
+            -1.0 if start_mA > target_mA else 0.0
+        )
         plateau_index = int(step.note) if step.note.isdigit() else None
         self._set_automation_context(
             phase="current_limit_unwind",
@@ -34252,7 +35757,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         now_s = time.monotonic()
         holding_current, stopped_for_hold = self._update_current_sweep_ramp_hold(
-            step,
+            unwind_step,
             step_index,
             now_s=now_s,
         )
@@ -34260,7 +35765,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if holding_current:
             return self._handle_current_sweep_held_recovery(
-                step,
+                unwind_step,
                 plateau_index=plateau_index,
                 tolerance=tolerance,
             )
@@ -34287,7 +35792,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if setpoint_mA <= target_mA + 1e-12:
             current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
-            if not target_recovered or not self._current_sweep_endpoint_recovered(step):
+            if not target_recovered or not self._current_sweep_endpoint_recovered(unwind_step):
                 self._write_control_trace(
                     decision="wait",
                     basis=step.basis,
@@ -34318,6 +35823,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -34573,8 +36079,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._fatigue_loop_anchor_index is None:
             self._fatigue_loop_anchor_index = int(step_index)
         anchor_index = int(self._fatigue_loop_anchor_index)
-        next_cycle_index = int(self._fatigue_cycle_index) + 1
+        completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
+        if completed_cycle > int(self._fatigue_cycles_completed):
+            self._fatigue_cycles_completed = completed_cycle
+            limit_text = "forever" if cycle_limit is None else str(cycle_limit)
+            self._log(f"Completed fatigue cycle {completed_cycle}/{limit_text}.")
+            if self._session_active:
+                self._write_session_metadata()
+        next_cycle_index = int(self._fatigue_cycle_index) + 1
         if cycle_limit is not None and next_cycle_index > int(cycle_limit):
             del self._automation_steps[anchor_index:]
             self._automation_index = anchor_index
@@ -34620,6 +36133,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_schedule_update_s = now_s
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -34703,6 +36217,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._current_sweep_ramp_hold_started_s = now_s
                     self._current_sweep_ramp_hold_in_band_since_s = None
                     self._current_sweep_ramp_hold_seek_accepted_since_s = None
+                    self._mark_current_sweep_ramp_hold_scale_start()
                     self._reset_current_sweep_ramp_hold_candidate()
                 current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
                 self._write_control_trace(
@@ -34728,6 +36243,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
+            self._current_sweep_endpoint_seek_accepted_step_index = None
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -34776,7 +36292,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setup_preload_ramp_skipped = False
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
-            self._target_ramp_endpoint_in_band_since_s = None
             self._active_target_ramp_started_s = time.monotonic()
             self._active_target_ramp_rate_value_s = configured_ramp_rate
             self._active_target_ramp_end_value = end_value
@@ -34881,22 +36396,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         if elapsed_s >= duration_s and reached:
-            now_s = time.monotonic()
-            if self._target_ramp_endpoint_in_band_since_s is None:
-                self._target_ramp_endpoint_in_band_since_s = now_s
-                return False
-            if now_s - self._target_ramp_endpoint_in_band_since_s < TARGET_RAMP_ENDPOINT_STABLE_S:
-                return False
             self._active_target_ramp_step_index = None
             self._active_target_ramp_started_s = 0.0
             self._active_target_ramp_start_value = None
             self._active_target_ramp_end_value = None
             self._active_target_ramp_rate_value_s = None
             self._active_target_ramp_setpoint_rate_value_s = None
-            self._target_ramp_endpoint_in_band_since_s = None
             return True
-        if elapsed_s >= duration_s:
-            self._target_ramp_endpoint_in_band_since_s = None
         return False
 
     def _handle_starting_length_prompt_step(self) -> bool:
@@ -35327,6 +36833,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
+                "fatigue_cycles_completed": int(self._fatigue_cycles_completed),
+                "fatigue_cycle_active": (
+                    int(self._fatigue_cycle_index)
+                    if int(self._fatigue_cycle_index) > int(self._fatigue_cycles_completed)
+                    else ""
+                ),
+                "fatigue_cycle_limit": (
+                    "" if self._fatigue_cycle_limit is None else int(self._fatigue_cycle_limit)
+                ),
+                "fatigue_cycle_leg": self._automation_fatigue_leg or "",
                 "session_active": int(bool(self._session_active)),
                 "session_logging_enabled": int(bool(self._session_logging_enabled)),
                 "length_setup_dialog_visible": int(self._setup_dialog_visible()),
@@ -35626,6 +37142,8 @@ class MainWindow(QtWidgets.QMainWindow):
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
         self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm")
+        if hasattr(self, "label_current_sweep_fatigue_progress"):
+            self.label_current_sweep_fatigue_progress.setText(self._fatigue_progress_text())
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"
@@ -35656,6 +37174,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_recovery_plot()
             return
         display_points = self._display_plot_points()
+        time_axis = self._time_axis_display_for_points(display_points)
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
@@ -35673,7 +37192,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._style_pyqtgraph_plot(
                 bundle,
                 title=self._plot_title(x_channel, y_left_channel, y_right_channel),
-                x_label=x_channel.label,
+                x_label=(
+                    time_axis.label
+                    if x_channel.key == "elapsed_s"
+                    else x_channel.label
+                ),
                 left_label=y_left_channel.label,
                 right_label=y_right_channel.label if y_right_channel is not None else None,
                 left_color=y_left_channel.color,
@@ -35686,6 +37209,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 symbol="o",
             )
             left_x, left_y = self._plot_xy_values(display_points, x_channel, y_left_channel)
+            left_x = self._display_x_values(left_x, x_channel, time_axis)
             self._set_pyqtgraph_curve_data(bundle.left_curve, left_x, left_y)
             if y_right_channel is not None:
                 self._set_pyqtgraph_curve_style(
@@ -35700,7 +37224,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     left_y,
                 )
                 if equivalent_axis_values is None:
-                    right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
+                    right_x, right_y = self._plot_xy_values(
+                        display_points,
+                        x_channel,
+                        y_right_channel,
+                    )
+                    right_x = self._display_x_values(right_x, x_channel, time_axis)
                     self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
                 else:
                     self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
@@ -36112,6 +37641,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_start_mA", self.spin_constant_current_start_mA.value())
         self.settings.setValue("constant_current_end_mA", self.spin_constant_current_end_mA.value())
         self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
+        self.settings.setValue(
+            "constant_current_first_overheating",
+            self.check_constant_current_first_overheating.isChecked(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_target_mpa",
+            self.spin_constant_current_first_overheating_target_mpa.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_current_end_mA",
+            self.spin_constant_current_first_overheating_end_mA.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_target_ramp_rate_mpa_s",
+            self.spin_constant_current_first_overheating_target_rate_mpa_s.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_current_ramp_rate_mA_s",
+            self.spin_constant_current_first_overheating_current_rate_mA_s.value(),
+        )
+        self.settings.setValue(
+            "constant_current_first_overheating_hold_on_error",
+            self.check_constant_current_first_overheating_hold_on_error.isChecked(),
+        )
         self.settings.setValue(
             "constant_current_transition_enabled",
             True,
@@ -36731,7 +38284,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.check_current_sweep_hold_on_error.setChecked(
-            bool(self.settings.value("current_sweep_hold_on_error", False, type=bool))
+            bool(self.settings.value("current_sweep_hold_on_error", True, type=bool))
         )
         self.spin_current_sweep_hold_pause_factor.setValue(
             max(
@@ -36875,6 +38428,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
         self.spin_constant_current_step_mA.setValue(
             max(0.01, float(self.settings.value("constant_current_step_mA", 10.0)))
+        )
+        self.check_constant_current_first_overheating.setChecked(
+            bool(
+                self.settings.value(
+                    "constant_current_first_overheating",
+                    False,
+                    type=bool,
+                )
+            )
+        )
+        self.spin_constant_current_first_overheating_target_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_target_mpa",
+                        20.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_end_mA.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_current_end_mA",
+                        80.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_target_rate_mpa_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_target_ramp_rate_mpa_s",
+                        5.0,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_first_overheating_current_rate_mA_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_first_overheating_current_ramp_rate_mA_s",
+                        1.0,
+                    )
+                ),
+            )
+        )
+        self.check_constant_current_first_overheating_hold_on_error.setChecked(
+            bool(
+                self.settings.value(
+                    "constant_current_first_overheating_hold_on_error",
+                    True,
+                    type=bool,
+                )
+            )
         )
         self.check_constant_current_transition_enabled.setChecked(
             True

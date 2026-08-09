@@ -1069,6 +1069,84 @@ def load_project(path: Path) -> dict[str, Any]:
     return payload
 
 
+def load_project_table_projection(
+    path: Path,
+    *,
+    section_keys: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Load safe Builder table state without materializing embedded payloads."""
+
+    target = Path(path)
+    supported_formats = f"Builder package v{PACKAGE_VERSION} or legacy UTF-8 Builder JSON"
+    try:
+        packaged = is_project_package(target)
+        if packaged:
+            index = inspect_project_package(target)
+            requested = (
+                None if section_keys is None else {str(key) for key in section_keys}
+            )
+            selected = [
+                key
+                for key in index.sections
+                if requested is None or key in requested
+            ]
+            payload = index.project_header()
+            with index.open_reader() as reader:
+                payload["sections"] = {
+                    key: reader.read_section(key, load_payloads=False)
+                    for key in selected
+                }
+        else:
+            payload = load_project(target)
+    except SafeCodecError as exc:
+        raise SafeCodecError(
+            f"Unsupported or corrupt Builder project; expected {supported_formats}. {exc}"
+        ) from exc
+
+    kind = payload.get("kind")
+    if isinstance(kind, str) and kind and kind != PROJECT_KIND:
+        raise SafeCodecError(
+            f"Unsupported Builder project kind {kind!r}; expected {PROJECT_KIND!r}."
+        )
+    supported_json_versions = frozenset({1, 2, PACKAGE_VERSION})
+    version = payload.get("version")
+    if version is not None and (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version not in supported_json_versions
+    ):
+        supported_versions = ", ".join(
+            str(item) for item in sorted(supported_json_versions)
+        )
+        raise SafeCodecError(
+            f"Unsupported legacy Builder JSON version {version!r}; "
+            f"supported versions are {supported_versions}."
+        )
+
+    if not packaged:
+        sections = payload.get("sections")
+        if isinstance(sections, Mapping):
+            requested = (
+                None if section_keys is None else {str(key) for key in section_keys}
+            )
+            selected = [
+                str(key)
+                for key in sections
+                if requested is None or str(key) in requested
+            ]
+            payload = dict(payload)
+            payload["sections"] = {
+                key: {
+                    field: value
+                    for field, value in section.items()
+                    if field != "payloads"
+                }
+                for key in selected
+                if isinstance((section := sections.get(key)), Mapping)
+            }
+    return payload
+
+
 def _fsync_directory(path: Path) -> None:
     if os.name == "nt":
         return
@@ -1690,6 +1768,7 @@ __all__ = [
     "ALLOWED_SECTION_KEYS", "MIMETYPE", "PACKAGE_FORMAT", "PACKAGE_VERSION",
     "EntryDescriptor", "FileFingerprint", "ProjectIndex", "ProjectPayloadResolver",
     "ReadBudget", "inspect_project_package",
-    "is_project_package", "load_project", "write_project_package",
+    "is_project_package", "load_project", "load_project_table_projection",
+    "write_project_package",
     "write_project_package_streaming",
 ]
