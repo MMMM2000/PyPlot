@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import subprocess
 import sys
@@ -24,6 +25,7 @@ SELECTED_ENV_KEYS = [
     "UV_CACHE_DIR",
     "PIP_CACHE_DIR",
     "PYTEST_QSETTINGS_ROOT",
+    "PYPLOT_TEST_TEMP_ISOLATED",
 ]
 
 
@@ -51,6 +53,27 @@ def _temp_root_for_run(run_id: str, run_root: Path) -> Path:
         # so Excel/xlsxwriter tests do not collide in a shared temp directory.
         return REPO_ROOT / "artifacts" / "t" / _safe_path_token(run_id)
     return run_root / "temp"
+
+
+def _basetemp_for_run(run_id: str, run_root: Path) -> Path:
+    if os.name == "nt":
+        # Builder/package tests create several nested staging directories below
+        # pytest's base directory. Keep that root short as well as TEMP/TMP so
+        # a full run does not fail only because the checkout path is long.
+        return REPO_ROOT / "artifacts" / "t" / f"{_safe_path_token(run_id)}-pytest"
+    return run_root / "pytest-basetemp"
+
+
+def _windows_short_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(  # type: ignore[attr-defined]
+        str(path), buffer, len(buffer)
+    )
+    if not length or length >= len(buffer):
+        return path
+    return Path(buffer.value)
 
 
 def _has_pytest_target(args: Iterable[str]) -> bool:
@@ -141,7 +164,7 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     run_root = artifacts_dir / run_id
 
     temp_root = _temp_root_for_run(run_id, run_root)
-    basetemp = run_root / "pytest-basetemp"
+    basetemp = _basetemp_for_run(run_id, run_root)
     qsettings_root = run_root / "qsettings"
     builder_root = run_root / "microwire-builder-storage"
     mpl_cache = REPO_ROOT / "artifacts" / "mpl-cache"
@@ -159,6 +182,18 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     ):
         path.mkdir(parents=True, exist_ok=True)
 
+    # Preserve the same directories while presenting their 8.3 aliases to
+    # Windows subprocesses. This saves enough path budget for deeply nested
+    # Builder fixtures without moving artifacts outside the workspace.
+    if os.name == "nt":
+        temp_root = _windows_short_path(temp_root)
+        basetemp = _windows_short_path(basetemp)
+        qsettings_root = _windows_short_path(qsettings_root)
+        builder_root = _windows_short_path(builder_root)
+        mpl_cache = _windows_short_path(mpl_cache)
+        uv_cache = _windows_short_path(uv_cache)
+        pip_cache = _windows_short_path(pip_cache)
+
     env = os.environ.copy()
     env.update(
         {
@@ -173,6 +208,7 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
             "PIP_CACHE_DIR": str(pip_cache),
             "PYTEST_QSETTINGS_ROOT": str(qsettings_root),
             "PYTEST_GUI_HEADLESS": env.get("PYTEST_GUI_HEADLESS", "1"),
+            "PYPLOT_TEST_TEMP_ISOLATED": "1",
         }
     )
     return env, basetemp
@@ -201,6 +237,8 @@ def print_dry_run(args: argparse.Namespace, env: dict[str, str], command: list[s
     print(f"mode={args.mode}")
     print(f"cwd={REPO_ROOT}")
     print(f"command={_command_line(command)}")
+    basetemp_index = command.index("--basetemp") + 1
+    print(f"pytest_basetemp={command[basetemp_index]}")
     print("environment:")
     for key in SELECTED_ENV_KEYS:
         print(f"  {key}={env.get(key, '')}")
