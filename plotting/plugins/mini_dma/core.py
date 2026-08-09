@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
-from typing import Collection, Iterable, Sequence
+from typing import Collection, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -520,6 +520,66 @@ def power_axis_label_and_scale(
 
 def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
     return pd.Series(_strain_from_trace_minimum_length(run, group), index=group.index)
+
+
+def group_l0_mm(run: MiniDmaRun, group: pd.DataFrame) -> float | None:
+    """Return the per-target minimum-length reference used for TMA strain."""
+
+    return _group_l0_mm(run, group)
+
+
+def interpolate_transition_strain_pct(
+    current_mA: pd.Series,
+    strain_pct: pd.Series,
+    transition_currents_mA: Mapping[str, object],
+) -> dict[str, float]:
+    """Interpolate reviewed transition strain on the physically correct sweep leg.
+
+    As/Af are evaluated on the increasing-current leg and Ms/Mf on the
+    decreasing-current leg.  Values outside their leg's measured current range
+    are omitted rather than extrapolated.
+    """
+
+    frame = pd.DataFrame(
+        {
+            "current_mA": pd.to_numeric(current_mA, errors="coerce"),
+            "strain_pct": pd.to_numeric(strain_pct, errors="coerce"),
+        }
+    ).dropna()
+    if frame.empty:
+        return {}
+    max_position = int(frame["current_mA"].to_numpy(dtype=float).argmax())
+    legs = {
+        "heating": frame.iloc[: max_position + 1],
+        "cooling": frame.iloc[max_position:],
+    }
+    result: dict[str, float] = {}
+    for label, raw_current in transition_currents_mA.items():
+        if label not in {"As", "Af", "Ms", "Mf"}:
+            continue
+        try:
+            selected_current = float(raw_current)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(selected_current):
+            continue
+        leg_name = "heating" if label in {"As", "Af"} else "cooling"
+        leg = legs[leg_name]
+        if leg.empty:
+            continue
+        interpolation = (
+            leg.groupby("current_mA", as_index=False, sort=True)["strain_pct"]
+            .median()
+            .dropna()
+        )
+        if interpolation.empty:
+            continue
+        x = interpolation["current_mA"].to_numpy(dtype=float)
+        y = interpolation["strain_pct"].to_numpy(dtype=float)
+        if selected_current < x[0] or selected_current > x[-1]:
+            continue
+        result[label] = float(np.interp(selected_current, x, y))
+    return result
 
 
 def strain_from_global_minimum_length(

@@ -34,6 +34,8 @@ class ReviewPlot:
     y: pd.Series
     title: str
     y_label: str
+    derives_transition_strain: bool = False
+    strain_reference: Mapping[str, Any] | None = None
 
 
 class PortableTransitionReviewDialog(QtWidgets.QDialog):
@@ -170,6 +172,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         manual_layout.addWidget(self.manual_value_edit)
         manual_layout.addWidget(self.manual_graph_hint, 1)
         values_layout.addWidget(self.manual_editor)
+        self.derived_strain_label = QtWidgets.QLabel()
+        self.derived_strain_label.setWordWrap(True)
+        self.derived_strain_label.setStyleSheet("color: #9ca3af;")
+        values_layout.addWidget(self.derived_strain_label)
         review_layout.addWidget(self.values_box)
 
         self.exclude_check = QtWidgets.QCheckBox("Exclude from Builder analysis")
@@ -470,6 +476,28 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         )
         self.manual_value_edit.setEnabled(manual_mode)
         self.manual_graph_hint.setEnabled(manual_mode)
+        self._update_derived_strain_label()
+
+    def _update_derived_strain_label(self) -> None:
+        label = self._selected_label()
+        if not label or self._target_index < 0:
+            self.derived_strain_label.clear()
+            self.derived_strain_label.hide()
+            return
+        target = self._targets()[self._target_index]
+        values = target.get("strain_at_transition_pct")
+        strain = values.get(label) if isinstance(values, Mapping) else None
+        if strain is None:
+            self.derived_strain_label.clear()
+            self.derived_strain_label.hide()
+            return
+        reference = target.get("strain_reference")
+        l0_mm = reference.get("l0_mm") if isinstance(reference, Mapping) else None
+        suffix = f" · target L₀ {float(l0_mm):.6g} mm" if l0_mm is not None else ""
+        self.derived_strain_label.setText(
+            f"{label} strain: {float(strain):.6g}%{suffix}"
+        )
+        self.derived_strain_label.show()
 
     def _manual_text_changed(self, text: str) -> None:
         if self._loading:
@@ -644,6 +672,20 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             "manual_adjusted",
             "no_transition",
         }
+        plot = self.plots.get(str(target.get("target_key") or ""))
+        if plot is not None and plot.derives_transition_strain:
+            target["strain_at_transition_pct"] = (
+                {}
+                if base_status == "no_transition"
+                else tma_core.interpolate_transition_strain_pct(
+                    plot.x,
+                    plot.y,
+                    target.get("final_values") or {},
+                )
+            )
+            if plot.strain_reference:
+                target["strain_reference"] = dict(plot.strain_reference)
+        self._update_derived_strain_label()
 
     def _target_changed(self, row: int) -> None:
         if row < 0 or row >= len(self._targets()):
@@ -856,11 +898,21 @@ def review_tma_run(
         title = f"{run.sample_name} \N{MIDDLE DOT} {float(target):.6g} MPa"
         if sweep_count > 1:
             title += f" \N{MIDDLE DOT} sweep {sweep_index}/{sweep_count}"
+        l0_mm = tma_core.group_l0_mm(run, group)
         plots[key] = ReviewPlot(
             pd.to_numeric(group["current_mA"], errors="coerce"),
-            pd.to_numeric(group["strain_pct"], errors="coerce"),
+            tma_core.strain_from_trace_minimum_length(run, group),
             title,
-            "Strain (%)",
+            "Strain (%) · per-target L₀",
+            derives_transition_strain=True,
+            strain_reference={
+                "method": (
+                    "per_target_minimum_length"
+                    if l0_mm is not None
+                    else "per_target_minimum_recorded_strain"
+                ),
+                **({"l0_mm": l0_mm} if l0_mm is not None else {}),
+            },
         )
     dialog = PortableTransitionReviewDialog(payload, plots, sidecar, parent)
     _apply_queue_context(dialog, queue_position)

@@ -64,6 +64,37 @@ def test_atomic_review_round_trip_and_cleanup(tmp_path) -> None:
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_tma_review_round_trip_preserves_derived_transition_strain(tmp_path) -> None:
+    fingerprint = "sha256:" + "d" * 64
+    target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="stress_mpa:50",
+        status="manual_adjusted",
+        final_values={"As": 20.0, "Af": 40.0},
+    )
+    target["strain_at_transition_pct"] = {"As": 1.25, "Af": 0.45}
+    target["strain_reference"] = {
+        "method": "per_target_minimum_length",
+        "l0_mm": 35.6,
+    }
+    payload = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+
+    path = tmp_path / "transition_review.json"
+    atomic_write_review(path, payload)
+    restored = load_review(path)["targets"][0]
+
+    assert restored["strain_at_transition_pct"] == {"As": 1.25, "Af": 0.45}
+    assert restored["strain_reference"] == {
+        "method": "per_target_minimum_length",
+        "l0_mm": 35.6,
+    }
+
+
 def test_invalid_status_is_rejected(tmp_path) -> None:
     frame = pd.DataFrame({"I_mA": [1.0], "R_ohm": [10.0]})
     payload = _review(frame)
@@ -386,6 +417,72 @@ def test_review_dialog_requires_each_choice_and_uses_human_tma_labels(
     assert dialog.payload["targets"][1]["status"] == "no_transition"
     assert "4 not observed" in dialog.decision_summary.text()
 
+
+def test_tma_review_dialog_derives_point_strain_and_retains_it_when_excluded(
+    tmp_path,
+    qtbot,
+) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    current = pd.Series([0.0, 10.0, 20.0, 10.0, 0.0])
+    strain = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+    frame = pd.DataFrame({"current_mA": current, "strain_pct": strain})
+    fingerprint = dataframe_fingerprint(frame, namespace="tma")
+    target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="stress_mpa:50",
+        auto_values={"As": 5.0, "Af": 15.0, "Ms": 15.0, "Mf": 5.0},
+    )
+    target["target"] = {"stress_mpa": 50.0}
+    payload = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "stress_mpa:50": ReviewPlot(
+                current,
+                strain,
+                "test TMA run",
+                "Strain (%)",
+                derives_transition_strain=True,
+                strain_reference={
+                    "method": "per_target_minimum_length",
+                    "l0_mm": 35.6,
+                },
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    for label in ("As", "Af", "Ms", "Mf"):
+        dialog.choice_buttons[label]["auto"].click()
+
+    stored = dialog.payload["targets"][0]
+    assert stored["strain_at_transition_pct"] == pytest.approx(
+        {"As": 0.5, "Af": 1.5, "Ms": 2.5, "Mf": 3.5}
+    )
+    assert stored["strain_reference"]["l0_mm"] == pytest.approx(35.6)
+    dialog.values_table.selectRow(dialog._row_for_label("As"))  # noqa: SLF001
+    assert "As strain: 0.5%" in dialog.derived_strain_label.text()
+
+    dialog.exclude_check.setChecked(True)
+    assert stored["status"] == "excluded"
+    assert stored["strain_at_transition_pct"]["Af"] == pytest.approx(1.5)
+
+    dialog.exclude_check.setChecked(False)
+    for label in ("As", "Af", "Ms", "Mf"):
+        dialog.choice_buttons[label]["not_observed"].click()
+    assert stored["status"] == "no_transition"
+    assert stored["strain_at_transition_pct"] == {}
+
 def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -> None:
     import pyqtgraph as pg
 
@@ -584,6 +681,11 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
                 "auto_values": {"As": 20.0},
                 "manual_values": {"As": 21.0},
                 "final_values": {"As": 21.0},
+                "strain_at_transition_pct": {"As": 1.75},
+                "strain_reference": {
+                    "method": "per_target_minimum_length",
+                    "l0_mm": 35.6,
+                },
                 "cleared_labels": [],
             }
         ],
@@ -617,6 +719,11 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
     assert imported["analysis_included"] is True
     assert imported["values"] == {"As": 21.0}
     assert imported["manual_values_mA"] == {"As": 21.0}
+    assert imported["strain_at_transition_pct"] == {"As": 1.75}
+    assert imported["strain_reference"] == {
+        "method": "per_target_minimum_length",
+        "l0_mm": 35.6,
+    }
     assert imported["portable_review_revision"] == 2
 
 

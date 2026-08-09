@@ -653,6 +653,31 @@ def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
         plt.close(fig)
 
 
+def test_transition_strain_interpolation_uses_heating_and_cooling_legs() -> None:
+    current = pd.Series([0.0, 10.0, 20.0, 10.0, 0.0])
+    strain = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    values = core.interpolate_transition_strain_pct(
+        current,
+        strain,
+        {"As": 5.0, "Af": 15.0, "Ms": 15.0, "Mf": 5.0},
+    )
+
+    assert values == pytest.approx(
+        {"As": 0.5, "Af": 1.5, "Ms": 2.5, "Mf": 3.5}
+    )
+
+
+def test_transition_strain_interpolation_does_not_extrapolate() -> None:
+    values = core.interpolate_transition_strain_pct(
+        pd.Series([0.0, 10.0, 20.0, 10.0]),
+        pd.Series([0.0, 1.0, 2.0, 3.0]),
+        {"As": 25.0, "Mf": -1.0},
+    )
+
+    assert values == {}
+
+
 def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     run = core.load_run(SAMPLE_RUN)
     frame = core.build_plot_frame(run, y_column="strain_pct")

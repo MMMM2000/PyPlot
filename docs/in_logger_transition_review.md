@@ -24,6 +24,8 @@ Only targets present in the run are shown. Current Annealing hides the target li
 
 The interactive plot uses PyQtGraph. Current Annealing uses a compact cycle selector so cycles 1, 2, and later cycles are reviewed independently without displaying every cycle row at once. Repeated TMA sweeps at the same stress are separate targets labelled `sweep 1/2`, `sweep 2/2`, and so on. The curve and marker objects are reused while navigating, downsampling and clipping are enabled, and manual markers remain draggable.
 
+For TMA, every chosen As/Af/Ms/Mf current also derives the strain at that point from the displayed trace. As/Af are interpolated on the increasing-current leg and Ms/Mf on the decreasing-current leg; the calculation never crosses branches or extrapolates beyond measured current. It uses the same per-stress-target minimum-length `L0` convention as the existing TMA peak-strain summary. If absolute length cannot be reconstructed because the run lacks an initial length, the existing fallback is recorded explicitly as per-target minimum recorded strain. The selected row shows its derived strain and `L0` when available, and the sidecar stores both the values and reference method. A whole-target `No transition` has no point strains. An `Excluded` target retains them for audit.
+
 A multi-run queue loads one run at a time, shows `run N/total`, changes the action to `Save & next`, and stops without touching later runs when Cancel is pressed. Each completed run is saved atomically before the next run opens.
 
 ## Safety and process boundary
@@ -43,6 +45,7 @@ New current-annealing runs and TMA runs use one `transition_review.json` in the 
 - target identity (current-annealing graph, or TMA run plus stress/load target);
 - review status: accepted automatic, manually adjusted, no transition, excluded, or unreviewed;
 - automatic, manual, and final As/Af/Ms/Mf values with units;
+- for TMA, derived strain at each final transition current plus the strain-reference method and `L0` where reconstructable;
 - explicitly cleared partial labels, kept separate from whole-target `No transition`;
 - review timestamp and optional note.
 
@@ -57,6 +60,8 @@ The content fingerprint is the durable identity. Paths are useful provenance but
 3. Existing project-only reviews remain supported for old data.
 4. If both locations contain different explicit decisions, Builder retains both, shows a conflict, and asks which version to adopt; it does not silently overwrite reviewed work.
 5. Assemble consumes only the resolved review. Explicit no-transition decisions remain visible and excluded records remain auditable.
+
+The expanded TMA workbook export includes `TMA strain at As/Af/Ms/Mf (%)` beside the reviewed transition currents. These are point strains on each target's per-target `L0` reference, distinct from the existing peak-strain column.
 
 ## Retrospective review
 

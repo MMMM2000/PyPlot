@@ -8591,6 +8591,9 @@ def _import_portable_tma_reviews(
                 "manual_values_mA": _clean_mini_dma_transition_values(
                     target.get("manual_values")
                 ),
+                "strain_at_transition_pct": _clean_mini_dma_transition_values(
+                    target.get("strain_at_transition_pct")
+                ),
                 "cleared_labels": sorted(_mini_dma_cleared_transition_labels(target)),
                 "portable_sidecar_path": str(review_path),
                 "portable_review_revision": portable_payload.get("review_revision", 1),
@@ -8598,6 +8601,9 @@ def _import_portable_tma_reviews(
                     "measurement_fingerprint", ""
                 ),
             }
+            strain_reference = target.get("strain_reference")
+            if isinstance(strain_reference, Mapping):
+                portable_review["strain_reference"] = dict(strain_reference)
             portable_review = {
                 key: value
                 for key, value in portable_review.items()
@@ -8626,7 +8632,12 @@ def _import_portable_tma_reviews(
                         key: value
                         for key, value in portable_review.items()
                         if key.startswith("portable_")
-                        or key == "measurement_fingerprint"
+                        or key
+                        in {
+                            "measurement_fingerprint",
+                            "strain_at_transition_pct",
+                            "strain_reference",
+                        }
                     }
                 )
             else:
@@ -26510,6 +26521,22 @@ class MiniDmaSection(MiniDatabaseSection):
         manual_values = _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
         if manual_values:
             entry["manual_values_mA"] = manual_values
+        transition_strain = _clean_mini_dma_transition_values(
+            payload.get("strain_at_transition_pct")
+        )
+        if transition_strain:
+            entry["strain_at_transition_pct"] = transition_strain
+        strain_reference = payload.get("strain_reference")
+        if isinstance(strain_reference, Mapping):
+            method = str(strain_reference.get("method") or "").strip()
+            clean_reference: Dict[str, Any] = {}
+            if method:
+                clean_reference["method"] = method
+            l0_mm = _coerce_finite_float(strain_reference.get("l0_mm"))
+            if l0_mm is not None and l0_mm > 0.0:
+                clean_reference["l0_mm"] = l0_mm
+            if clean_reference:
+                entry["strain_reference"] = clean_reference
         cleared_labels = _mini_dma_cleared_transition_labels(payload)
         if cleared_labels and status in {
             MINI_DMA_REVIEW_STATUS_ACCEPTED,

@@ -232,6 +232,29 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
             cleaned[key] = _finite_values(raw.get(key))
         if status == "no_transition":
             cleaned["final_values"] = {}
+        if family == "tma" or "strain_at_transition_pct" in raw:
+            strain_values = _finite_values(raw.get("strain_at_transition_pct"))
+            cleaned["strain_at_transition_pct"] = (
+                {} if status == "no_transition" else strain_values
+            )
+        raw_reference = raw.get("strain_reference")
+        if isinstance(raw_reference, Mapping):
+            reference: dict[str, Any] = {}
+            method = str(raw_reference.get("method") or "").strip()
+            if method:
+                reference["method"] = method
+            try:
+                l0_mm = float(raw_reference.get("l0_mm"))
+            except (TypeError, ValueError):
+                l0_mm = math.nan
+            if math.isfinite(l0_mm) and l0_mm > 0.0:
+                reference["l0_mm"] = l0_mm
+            if reference:
+                cleaned["strain_reference"] = reference
+            else:
+                cleaned.pop("strain_reference", None)
+        else:
+            cleaned.pop("strain_reference", None)
         cleaned["cleared_labels"] = sorted(
             {str(label).strip() for label in raw.get("cleared_labels", ())} & TRANSITION_LABELS
         )

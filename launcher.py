@@ -1943,6 +1943,10 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA Af",
     "TMA Ms",
     "TMA Mf",
+    "TMA strain at As (%)",
+    "TMA strain at Af (%)",
+    "TMA strain at Ms (%)",
+    "TMA strain at Mf (%)",
 ]
 ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Composition",
@@ -2037,6 +2041,10 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA Af": "TMA Af (mA)",
     "TMA Ms": "TMA Ms (mA)",
     "TMA Mf": "TMA Mf (mA)",
+    "TMA strain at As (%)": "TMA strain at As (%)",
+    "TMA strain at Af (%)": "TMA strain at Af (%)",
+    "TMA strain at Ms (%)": "TMA strain at Ms (%)",
+    "TMA strain at Mf (%)": "TMA strain at Mf (%)",
 }
 ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP = {
     "TMA As (mA)": "TMA J_As (A/mm^2)",
@@ -2607,6 +2615,9 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         if not values:
             values = _coerce_tma_values(review.get("auto_values_mA"))
         cleared = _coerce_tma_cleared_labels(review.get("cleared_labels"))
+        transition_strain = _coerce_tma_values(
+            review.get("strain_at_transition_pct")
+        )
         if status == "no_transition":
             for label in ("As", "Af", "Ms", "Mf"):
                 row[f"TMA {label}"] = "No transition"
@@ -2616,6 +2627,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                     row[f"TMA {label}"] = "Not observed"
                 elif label in values:
                     row[f"TMA {label}"] = values[label]
+                if label in transition_strain:
+                    row[f"TMA strain at {label} (%)"] = transition_strain[label]
         rows.append(row)
         reviewed_targets.add((composition, microwire, target_key))
         if source_key:

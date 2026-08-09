@@ -84,6 +84,12 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                                 "run_label": "run01",
                                 "target_label": "50 MPa / 1.46 g",
                                 "values": {"As": 31.0, "Af": 71.0, "Ms": 66.0, "Mf": 26.0},
+                                "strain_at_transition_pct": {
+                                    "As": 4.8,
+                                    "Af": 2.1,
+                                    "Ms": 2.4,
+                                    "Mf": 4.5,
+                                },
                             },
                             "G:/runs/run01::75 MPa / 2.19 g": {
                                 "status": "no_transition",
@@ -243,6 +249,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "TMA target type" in analysis_headers
     assert "TMA As (mA)" in analysis_headers
     assert "TMA strain (%)" in analysis_headers
+    assert "TMA strain at As (%)" in analysis_headers
     assert "TMA J_As (A/mm^2)" in analysis_headers
     assert "Video end length (m)" not in analysis_headers
     assert "Video wire range (m)" not in analysis_headers
@@ -301,6 +308,10 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert first["TMA Af (mA)"] == 71
     assert first["TMA Ms (mA)"] == 66
     assert first["TMA Mf (mA)"] == 26
+    assert first["TMA strain at As (%)"] == 4.8
+    assert first["TMA strain at Af (%)"] == 2.1
+    assert first["TMA strain at Ms (%)"] == 2.4
+    assert first["TMA strain at Mf (%)"] == 4.5
     assert first["TMA J_As (A/mm^2)"] == pytest.approx(98.676, rel=1e-3)
     assert first["TMA J_Af (A/mm^2)"] == pytest.approx(226.0, rel=1e-3)
     assert first["TMA J_Ms (A/mm^2)"] == pytest.approx(210.085, rel=1e-3)
