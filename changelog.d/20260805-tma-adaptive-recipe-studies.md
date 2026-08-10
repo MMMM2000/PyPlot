@@ -1,0 +1,2 @@
+- Add Python-native adaptive TMA workspace studies for iso-load and iso-strain to the launcher experiments.
+- Prevent adaptive-header controls, navigation tabs, compact plot titles, and footer actions from overlapping or clipping at supported window sizes.

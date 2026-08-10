@@ -12377,7 +12377,7 @@ def test_recipe_advanced_panels_restore_defaults(tmp_path: Path, qtbot) -> None:
         window.spin_jog_mm.setValue(0.5)
         window.spin_setup_return_duration_s.setValue(12.0)
 
-        window.button_restore_manual_action_defaults.click()
+        window._restore_manual_action_defaults()
 
         assert window.spin_motion_speed_mm_s.value() == pytest.approx(1.0)
         assert window.spin_jog_mm.value() == pytest.approx(0.1)
@@ -15332,19 +15332,27 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_advanced_software_tare.isVisible() is False
         assert window.button_save_recipe.text() == "Save recipe"
         assert window.button_load_recipe.text() == "Load recipe"
-        assert window.button_manual_action_settings.text() == "Manual action settings"
-        assert window.manual_action_settings_panel.isVisible() is False
-        window.button_manual_action_settings.setChecked(True)
+        manual_buttons = window.manual_actions_box.findChildren(
+            QtWidgets.QPushButton,
+            options=QtCore.Qt.FindChildOption.FindDirectChildrenOnly,
+        )
+        assert [button.text() for button in manual_buttons] == [
+            "Auto-connect hardware",
+            "Move up",
+            "Move down",
+        ]
+        assert not hasattr(window, "button_manual_action_settings")
+        window._show_hardware_settings_dialog("connections")
         assert window.spin_motion_speed_mm_s.isHidden() is False
         assert window.spin_jog_mm.isHidden() is False
-        assert window.spin_setup_return_duration_s.isHidden() is False
+        assert window._hardware_settings_tabs.currentIndex() == 0
         assert window.button_start_recipe.text() == "Start recipe"
         assert window.button_start_recipe.parent() is window.recipe_action_footer
-        assert window.recipe_progress.parent() is window.recipe_action_footer
+        assert window.recipe_progress.parent().parent() is window.recipe_action_footer
         fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         assert window.recipe_progress.font().family() != fixed_font.family()
         assert "padding-left" not in window.recipe_progress.styleSheet()
-        assert window.label_current_task.parent() is window.recipe_action_footer
+        assert window.label_current_task.parent().parent() is window.recipe_action_footer
         assert window.label_current_task.isVisible() is False
         assert window.label_recipe_estimate.isVisible() is False
     finally:
@@ -23476,7 +23484,7 @@ def test_current_sweep_runtime_update_button_waits_for_pending_changes(
         window._update_recipe_buttons()
 
         assert window._current_sweep_pending_update_preview()["changed_steps"] == []
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
         assert window.button_apply_current_sweep_edits.isEnabled() is False
         assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
 
@@ -23493,7 +23501,7 @@ def test_current_sweep_runtime_update_button_waits_for_pending_changes(
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
 
         assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
         assert window.button_apply_current_sweep_edits.isEnabled() is False
     finally:
         window._automation_active = False
@@ -23589,7 +23597,8 @@ def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
         window._current_sweep_runtime_applied_values = window._current_sweep_visible_runtime_values_from_controls()
         window._update_recipe_buttons()
 
-        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.button_apply_current_sweep_edits.isEnabled() is False
 
         window.spin_current_sweep_target_end.setValue(150.0)
         window._update_recipe_buttons()

@@ -1,0 +1,2 @@
+- Added the Python-native TMA hardware workspace to the production logger with a quiet readiness summary, clickable device-status rows, exactly three routine manual controls, active-run-only ownership, and complete low-frequency hardware settings in a separate dialog.
+- Unified adaptive and configurable TMA live plots on an explicit dark plot surface across Prepare, Run, and Review, avoiding white or operating-system-palette-dependent graph backgrounds.
