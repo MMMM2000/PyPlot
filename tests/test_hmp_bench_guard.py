@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -12,6 +13,7 @@ from data_logging.shared_power_supply.bench_guard import (
     read_lock_info,
 )
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE
+from data_logging.shared_power_supply import bench_guard
 
 
 def test_bench_lock_is_atomic_and_records_owner(tmp_path: Path) -> None:
@@ -28,6 +30,32 @@ def test_bench_lock_is_atomic_and_records_owner(tmp_path: Path) -> None:
         lock.release()
 
     assert read_lock_info(lock_path) is None
+
+
+def test_bench_lock_recovers_verified_stale_owner(tmp_path: Path, monkeypatch) -> None:
+    lock_path = tmp_path / "bench.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": "dead-controller",
+                "purpose": "interrupted hardware run",
+                "pid": 424242,
+                "cwd": str(tmp_path),
+                "created_at_utc": "2026-08-10T15:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bench_guard, "_pid_is_running", lambda pid: pid != 424242)
+
+    lock = acquire_bench_lock(owner="replacement", lock_path=lock_path)
+    try:
+        info = read_lock_info(lock_path)
+        assert info is not None
+        assert info.owner == "replacement"
+        assert info.pid != 424242
+    finally:
+        lock.release()
 
 
 def test_bench_probe_reports_unavailable_when_driver_cannot_connect() -> None:
