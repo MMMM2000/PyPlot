@@ -309,6 +309,25 @@ def test_wait_for_tma_history_scan_blocks_until_current_root_is_ready(
     assert events == ["start", "process", "sleep", "process"]
 
 
+def test_recipe_with_first_overheating_skips_tma_history_scan() -> None:
+    class _Combo:
+        def currentData(self) -> str:
+            return "current_sweep_stress"
+
+    class _Checkbox:
+        def isChecked(self) -> bool:
+            return True
+
+    class _Window:
+        combo_recipe_mode = _Combo()
+        check_current_sweep_first_overheating = _Checkbox()
+
+        def _is_constant_current_strain_sweep_mode(self, _mode: str) -> bool:
+            return False
+
+    assert bench_automation._recipe_needs_tma_history_scan(_Window()) is False
+
+
 def test_process_isolated_bench_does_not_open_ui_owned_logging_session() -> None:
     events: list[str] = []
 

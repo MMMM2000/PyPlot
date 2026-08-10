@@ -578,6 +578,28 @@ def _wait_for_tma_history_scan(
     app.processEvents()
 
 
+def _recipe_needs_tma_history_scan(window: Any) -> bool:
+    mode_combo = getattr(window, "combo_recipe_mode", None)
+    current_data = getattr(mode_combo, "currentData", None)
+    if not callable(current_data):
+        return True
+    recipe_mode = str(current_data() or "")
+    is_constant_current = getattr(window, "_is_constant_current_strain_sweep_mode", None)
+    constant_current_mode = bool(
+        callable(is_constant_current) and is_constant_current(recipe_mode)
+    )
+    checkbox_name = (
+        "check_constant_current_first_overheating"
+        if constant_current_mode
+        else "check_current_sweep_first_overheating"
+    )
+    checkbox = getattr(window, checkbox_name, None)
+    is_checked = getattr(checkbox, "isChecked", None)
+    if not callable(is_checked):
+        return True
+    return not bool(is_checked())
+
+
 def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
     _set_text_if_present(window, "edit_name_composition", sample.composition)
     _set_text_if_present(window, "edit_name_wire", sample.microwire)
@@ -864,6 +886,12 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
+    if _recipe_needs_tma_history_scan(window):
+        _wait_for_tma_history_scan(
+            window,
+            app=app,
+            sleep_fn=sleep_fn,
+        )
     _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
     _prefer_next_output_run(window)
@@ -1118,11 +1146,6 @@ def run_mini_dma_bench_plan(
                     )
                     _apply_hardware_config(window, plan.hardware)
                     _apply_sample_identity(window, plan.sample_identity)
-                    _wait_for_tma_history_scan(
-                        window,
-                        app=app,
-                        sleep_fn=sleep_fn,
-                    )
                     run_summary = _execute_run(
                         run,
                         app=app,
