@@ -36,6 +36,7 @@ class ReviewPlot:
     y_label: str
     derives_transition_strain: bool = False
     strain_reference: Mapping[str, Any] | None = None
+    unit_series: Mapping[str, tuple[pd.Series, pd.Series]] | None = None
 
 
 class PortableTransitionReviewDialog(QtWidgets.QDialog):
@@ -74,9 +75,23 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         left.setMaximumWidth(250)
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 4, 0)
+        self.navigation_label = QtWidgets.QLabel("Samples / cycles")
+        left_layout.addWidget(self.navigation_label)
         self.target_list = QtWidgets.QListWidget()
-        for target in self.payload.get("targets", []):
-            self.target_list.addItem(self._target_display_label(target))
+        self._navigation_items: list[tuple[int, int]] = []
+        targets = list(self.payload.get("targets", []))
+        for target_index, target in enumerate(targets):
+            units = self._review_units_for_target(target)
+            target_label = self._target_display_label(target)
+            for unit_index, (unit_title, _labels) in enumerate(units):
+                if len(targets) == 1 and len(units) > 1:
+                    label = unit_title
+                elif len(units) > 1:
+                    label = f"{target_label} · {unit_title}"
+                else:
+                    label = target_label
+                self.target_list.addItem(label)
+                self._navigation_items.append((target_index, unit_index))
         self.target_list.currentRowChanged.connect(self._target_changed)
         left_layout.addWidget(self.target_list, 1)
         split.addWidget(left)
@@ -117,6 +132,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         review_unit_layout.addWidget(self.review_unit_label)
         review_unit_layout.addWidget(self.review_unit_combo, 1)
         review_layout.addWidget(self.review_unit_row)
+        self.review_unit_row.hide()
         self._review_unit_labels: list[list[str]] = []
         self._active_unit_labels: list[str] = []
 
@@ -289,7 +305,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             for loop in loop_numbers
         ]
 
-    def _populate_review_units(self, target: Mapping[str, Any]) -> None:
+    def _populate_review_units(
+        self,
+        target: Mapping[str, Any],
+        *,
+        selected_index: int = 0,
+    ) -> None:
         blocker = QtCore.QSignalBlocker(self.review_unit_combo)
         try:
             units = self._review_units_for_target(target)
@@ -298,11 +319,14 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             for title, labels in units:
                 self.review_unit_combo.addItem(title)
                 self._review_unit_labels.append(labels)
-            self.review_unit_combo.setCurrentIndex(0 if units else -1)
+            selected_index = min(max(int(selected_index), 0), max(len(units) - 1, 0))
+            self.review_unit_combo.setCurrentIndex(selected_index if units else -1)
             self._active_unit_labels = (
-                list(self._review_unit_labels[0]) if self._review_unit_labels else []
+                list(self._review_unit_labels[selected_index])
+                if self._review_unit_labels
+                else []
             )
-            self.review_unit_row.setVisible(len(units) > 1)
+            self.review_unit_row.hide()
         finally:
             del blocker
 
@@ -688,14 +712,15 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._update_derived_strain_label()
 
     def _target_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self._targets()):
+        if row < 0 or row >= len(self._navigation_items):
             return
         self._store_target_controls()
-        self._target_index = row
-        target = self._targets()[row]
+        target_index, unit_index = self._navigation_items[row]
+        self._target_index = target_index
+        target = self._targets()[target_index]
         self._loading = True
         self.exclude_check.setChecked(str(target.get("status") or "") == "excluded")
-        self._populate_review_units(target)
+        self._populate_review_units(target, selected_index=unit_index)
         self._populate_values_table(target)
         self._loading = False
         self._selected_row_changed()
@@ -753,8 +778,11 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             self.curve_item.setData([], [])
             self.plot_item.setTitle("Plot unavailable")
             return
-        x = pd.to_numeric(plot.x, errors="coerce")
-        y = pd.to_numeric(plot.y, errors="coerce")
+        unit_title = self.review_unit_combo.currentText()
+        unit_series = (plot.unit_series or {}).get(unit_title)
+        plot_x, plot_y = unit_series if unit_series is not None else (plot.x, plot.y)
+        x = pd.to_numeric(plot_x, errors="coerce")
+        y = pd.to_numeric(plot_y, errors="coerce")
         valid = x.notna() & y.notna()
         self.curve_item.setData(
             x.loc[valid].to_numpy(dtype=float),
@@ -769,6 +797,8 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             else {}
         )
         for label, value in auto.items():
+            if label not in self._active_unit_labels:
+                continue
             if self._choices.get(label) == "not_observed":
                 continue
             marker = self._marker_item(
@@ -847,6 +877,40 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
 
 
 
+def _current_annealing_cycle_series(
+    frame: pd.DataFrame,
+) -> dict[str, tuple[pd.Series, pd.Series]]:
+    """Return one heating/cooling trace per current cycle for review."""
+
+    resistance_column = "R_Ohm" if "R_Ohm" in frame.columns else "R_ohm"
+    if "I_mA" not in frame.columns or resistance_column not in frame.columns:
+        return {}
+    working = pd.DataFrame(
+        {
+            "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+            "R_Ohm": pd.to_numeric(frame[resistance_column], errors="coerce"),
+        }
+    ).dropna()
+    if working.empty:
+        return {}
+    _directions, segments = annealing_core._direction_profile(  # noqa: SLF001
+        working["I_mA"].to_numpy(dtype=float)
+    )
+    result: dict[str, tuple[pd.Series, pd.Series]] = {}
+    cycle = 0
+    for segment_index, (start, end, direction) in enumerate(segments):
+        if direction < 0:
+            continue
+        cycle += 1
+        cycle_end = end
+        for _next_start, next_end, next_direction in segments[segment_index + 1 :]:
+            if next_direction >= 0:
+                break
+            cycle_end = next_end
+        trace = working.iloc[start:cycle_end]
+        result[f"Cycle {cycle}"] = (trace["I_mA"], trace["R_Ohm"])
+    return result
+
 def review_current_annealing_file(
     parent: QtWidgets.QWidget,
     measurement_path: Path,
@@ -861,7 +925,13 @@ def review_current_annealing_file(
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different measurement content.")
     frame = annealing_core.load_file(str(path))
-    plot = ReviewPlot(frame["I_mA"], frame["R_Ohm"], path.parent.name or path.stem, "Resistance (ohm)")
+    plot = ReviewPlot(
+        frame["I_mA"],
+        frame["R_Ohm"],
+        path.parent.name or path.stem,
+        "Resistance (ohm)",
+        unit_series=_current_annealing_cycle_series(frame),
+    )
     dialog = PortableTransitionReviewDialog(payload, {"graph": plot}, sidecar, parent)
     _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted

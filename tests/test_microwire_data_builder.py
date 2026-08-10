@@ -8921,9 +8921,9 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.widget(0) is not window.current_density_section
         assert transitions.tab_widget.widget(1) is not window.transition_temps_section
         assert transitions.tab_widget.widget(2) is not window.dma_transitions_section
-        assert transitions.annealing_workspace.review_button.text() == "Review all runs..."
-        assert transitions.vsm_workspace.tree.headerItem().text(0) == "VSM scan"
-        assert transitions.dma_workspace.review_button.text() == "Review all runs..."
+        assert transitions.annealing_workspace.review_button.text() == "Review all..."
+        assert transitions.vsm_workspace.summary_table.horizontalHeaderItem(0).text() == "Sample"
+        assert transitions.dma_workspace.review_button.text() == "Review all..."
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
 
@@ -8932,12 +8932,12 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.currentIndex() == 1
 
         window.show_transitions_view("annealing")
-        assert "same PyQtGraph transition reviewer" in (
+        assert "Browse every saved result here" in (
             transitions.annealing_workspace.findChildren(QtWidgets.QLabel)[1].text()
         )
 
         window.show_transitions_view("dma")
-        assert "same PyQtGraph transition reviewer" in (
+        assert "Browse every saved result here" in (
             transitions.dma_workspace.findChildren(QtWidgets.QLabel)[1].text()
         )
 
@@ -9066,9 +9066,9 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
         window._refresh_sections_after_project_load()  # noqa: SLF001
 
         workspace = window.transitions_section.annealing_workspace
-        assert "1 run(s) in project" in workspace.status_label.text()
+        assert "1 result row(s) in project" in workspace.status_label.text()
         assert "1 reviewed in project" in workspace.status_label.text()
-        assert "1 source file(s) unavailable" in workspace.status_label.text()
+        assert "0 with available source data" in workspace.status_label.text()
         assert workspace.review_button.isEnabled() is False
     finally:
         window._dirty = False
@@ -11660,14 +11660,17 @@ def test_vsm_transition_workspace_refresh_preserves_selected_scan(tmp_path: Path
     try:
         section.refresh_data()
         workspace.refresh_workspace()
-        second_item = workspace.tree.topLevelItem(1)
-        assert second_item is not None
-        workspace.tree.setCurrentItem(second_item)
-        selected_ref = workspace._current_ref()  # noqa: SLF001
+        assert workspace.summary_table.rowCount() == 2
+        workspace.summary_table.selectRow(1)
+        selected = workspace._selected_row()  # noqa: SLF001
+        assert selected is not None
+        selected_ref = selected["record_id"]
 
         workspace.refresh_workspace()
 
-        assert workspace._current_ref() == selected_ref  # noqa: SLF001
+        selected = workspace._selected_row()  # noqa: SLF001
+        assert selected is not None
+        assert selected["record_id"] == selected_ref
     finally:
         workspace.close()
         workspace.deleteLater()
@@ -11675,6 +11678,84 @@ def test_vsm_transition_workspace_refresh_preserves_selected_scan(tmp_path: Path
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
 
+
+def test_vsm_transition_workspace_lists_saved_reviews_without_loaded_scans() -> None:
+    _ensure_qapp()
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    section._transition_reviews = {  # noqa: SLF001
+        "vsm:deferred": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "included": False,
+            "sample": "Ni50Fe27Ga23 12/2",
+            "record_label": "10 kOe scan",
+            "record_path": "missing-vsm-source.txt",
+        }
+    }
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace.summary_table.item(0, 0).text() == "Ni50Fe27Ga23 12/2"
+        assert workspace.summary_table.item(0, 3).text() == "No transition"
+        assert "1 result row(s) in project" in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+def test_tma_transition_workspace_uses_lazy_project_table_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 TMA"
+    run_path.mkdir()
+    record = builder_ui.MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="fatigue run",
+        transition_summary=("50 MPa: As 10 mA, Af 20 mA",),
+    )
+    frame = pd.DataFrame({"TMA": ["cached"]})
+    fake_section = SimpleNamespace(
+        _all_mini_dma_records=[],
+        model=SimpleNamespace(frame=lambda: frame),
+        transition_reviews_snapshot=lambda: {},
+    )
+    fake_section._set_record_groups = lambda records: setattr(
+        fake_section, "_all_mini_dma_records", list(records)
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_records_from_project_table",
+        lambda _frame: [record],
+    )
+    workspace = builder_ui._MiniDmaTransitionWorkspace(fake_section)  # noqa: SLF001
+    try:
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace._records() == [record]  # noqa: SLF001
+        assert "1 result row(s) in project" in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 def test_project_load_defers_hidden_transition_workspace_refresh(
     monkeypatch: pytest.MonkeyPatch,
@@ -11711,11 +11792,7 @@ def test_project_load_batch_suppresses_hidden_vsm_preview_render(
     window._auto_open_last = False
     preview_updates: list[str] = []
     try:
-        monkeypatch.setattr(
-            window.transitions_section.vsm_workspace.preview_panel,
-            "update_selection",
-            lambda *args, **kwargs: preview_updates.append("preview"),
-        )
+        assert not hasattr(window.transitions_section.vsm_workspace, "preview_panel")
         builder_ui.MiniDatabaseSection._project_load_batch_mode = True
 
         window.transition_temps_section.refresh_data()

@@ -559,21 +559,26 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
     )
     qtbot.addWidget(dialog)
 
-    assert dialog.review_unit_row.isVisible() is False
     dialog.show()
     qtbot.wait(20)
-    assert dialog.review_unit_row.isVisible() is True
-    assert [dialog.review_unit_combo.itemText(index) for index in range(2)] == [
+    assert dialog.review_unit_row.isVisible() is False
+    assert [dialog.target_list.item(index).text() for index in range(2)] == [
         "Cycle 1",
         "Cycle 2",
     ]
     assert set(dialog.choice_buttons) == {"As1", "Af1", "Ms1", "Mf1"}
+    assert {
+        label for label, marker in dialog._auto_marker_items.items() if marker.isVisible()  # noqa: SLF001
+    } == {"As1", "Af1", "Ms1", "Mf1"}
     for label in tuple(dialog.choice_buttons):
         dialog.choice_buttons[label]["auto"].click()
     assert not dialog.save_button.isEnabled()
 
-    dialog.review_unit_combo.setCurrentIndex(1)
+    dialog.target_list.setCurrentRow(1)
     assert set(dialog.choice_buttons) == {"As2", "Af2", "Ms2", "Mf2"}
+    assert {
+        label for label, marker in dialog._auto_marker_items.items() if marker.isVisible()  # noqa: SLF001
+    } == {"As2", "Af2", "Ms2", "Mf2"}
     assert dialog.payload["targets"][0]["final_values"] == {
         "As1": 20.0,
         "Af1": 30.0,
@@ -587,7 +592,7 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
     assert stored["status"] == "manual_adjusted"
     assert stored["cleared_labels"] == ["Af2", "As2", "Mf2", "Ms2"]
 
-    dialog.review_unit_combo.setCurrentIndex(0)
+    dialog.target_list.setCurrentRow(0)
     assert all(
         dialog.choice_buttons[label]["auto"].isChecked()
         for label in ("As1", "Af1", "Ms1", "Mf1")
