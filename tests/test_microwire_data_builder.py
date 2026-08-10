@@ -8973,27 +8973,73 @@ def test_transition_workspace_loads_only_selected_peer_dependencies_lazily(
             "mini_dma",
         }
 
+        calls.clear()
         window.transitions_section.tab_widget.setCurrentIndex(2)
-        calls.clear()
-        window._load_current_deferred_project_sections()
         assert calls == [("mini_dma", False)]
+        assert window.transitions_section.dma_workspace.loading_bar.isHidden() is False
+        assert (
+            window.transitions_section.dma_workspace.status_label.text()
+            == "Loading transition review data..."
+        )
 
-        window.transitions_section.tab_widget.setCurrentIndex(1)
         calls.clear()
-        window._load_current_deferred_project_sections()
+        window.transitions_section.tab_widget.setCurrentIndex(1)
         assert calls == [
             ("transition_temps", False),
             ("vsm_temperature_scan", True),
         ]
+        assert window.transitions_section.vsm_workspace.loading_bar.isHidden() is False
 
-        window.transitions_section.tab_widget.setCurrentIndex(0)
         calls.clear()
-        window._load_current_deferred_project_sections()
+        window.transitions_section.tab_widget.setCurrentIndex(0)
         assert calls == [("annealing", True), ("current_density", False)]
+        assert window.transitions_section.annealing_workspace.loading_bar.isHidden() is False
     finally:
         window._dirty = False
         window.close()
 
+
+def test_transition_workspace_refresh_requests_current_deferred_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        window,
+        "_load_deferred_project_section_async",
+        lambda key, *, decode_payloads=False: calls.append((key, decode_payloads)),
+    )
+    try:
+        transitions = window.transitions_section
+        window.tab_widget.setCurrentWidget(transitions)
+        transitions.tab_widget.setCurrentIndex(1)
+        window._deferred_project_section_keys = {
+            "vsm_temperature_scan",
+            "transition_temps",
+        }
+        calls.clear()
+
+        transitions.vsm_workspace.refresh_button.click()
+
+        assert calls == [
+            ("transition_temps", False),
+            ("vsm_temperature_scan", True),
+        ]
+        assert transitions.vsm_workspace.loading_bar.isHidden() is False
+        assert not transitions.vsm_workspace.refresh_button.isEnabled()
+        assert "Loading transition review data" in transitions.vsm_workspace.status_label.text()
+
+        transitions.show_load_error(
+            "Could not load transition review data. Click Refresh to try again."
+        )
+        assert transitions.vsm_workspace.loading_bar.isHidden()
+        assert transitions.vsm_workspace.refresh_button.isEnabled()
+        assert "Click Refresh to try again" in transitions.vsm_workspace.status_label.text()
+    finally:
+        window._dirty = False
+        window.close()
 
 def test_deferred_project_section_refreshes_restored_source_controls(
     tmp_path: Path,

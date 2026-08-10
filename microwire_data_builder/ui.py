@@ -27145,6 +27145,8 @@ class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
 class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
     """Compact project overview backed by the logger's portable reviewer."""
 
+    refreshRequested = QtCore.pyqtSignal()
+
     TABLE_COLUMNS = (
         "Sample",
         "Run / scan",
@@ -27195,7 +27197,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self.review_button.clicked.connect(self._open_review)
         controls.addWidget(self.review_button)
         self.refresh_button = QtWidgets.QPushButton("Refresh", self)
-        self.refresh_button.clicked.connect(self.refresh_workspace)
+        self.refresh_button.clicked.connect(self._request_refresh)
         controls.addWidget(self.refresh_button)
         controls.addSpacing(12)
         controls.addWidget(QtWidgets.QLabel("Filter:"))
@@ -27215,6 +27217,12 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel(self)
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self.loading_bar = QtWidgets.QProgressBar(self)
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setMaximumHeight(6)
+        self.loading_bar.hide()
+        layout.addWidget(self.loading_bar)
         self.summary_table = QtWidgets.QTableWidget(0, len(self.TABLE_COLUMNS), self)
         unit = "°C" if self._family == "vsm" else "mA"
         headers = list(self.TABLE_COLUMNS)
@@ -27241,6 +27249,26 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.summary_table, 1)
+        self._update_review_buttons()
+
+    def _request_refresh(self) -> None:
+        self.show_loading("Loading transition review data...")
+        if self.receivers(self.refreshRequested):
+            self.refreshRequested.emit()
+            return
+        self.refresh_workspace()
+
+    def show_loading(self, message: str = "Loading transition review data...") -> None:
+        self.status_label.setText(message)
+        self.loading_bar.show()
+        self.review_button.setEnabled(False)
+        self.review_selected_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+
+    def show_load_error(self, message: str) -> None:
+        self.loading_bar.hide()
+        self.status_label.setText(message)
+        self.refresh_button.setEnabled(True)
         self._update_review_buttons()
 
     def _paths(self) -> List[Path]:
@@ -27346,6 +27374,8 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         )
 
     def refresh_workspace(self) -> None:
+        self.loading_bar.hide()
+        self.refresh_button.setEnabled(True)
         rows = self._overview_rows()
         self._populate_table(rows)
         paths = self._paths()
@@ -27913,6 +27943,7 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
 
 class TransitionsSection(QtWidgets.QWidget):
     section_title = "Transitions"
+    dependencyLoadRequested = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -27941,12 +27972,27 @@ class TransitionsSection(QtWidgets.QWidget):
         self.tab_widget.addTab(self.annealing_workspace, "Annealing")
         self.tab_widget.addTab(self.vsm_workspace, "VSM")
         self.tab_widget.addTab(self.dma_workspace, "TMA")
+        for workspace in (
+            self.annealing_workspace,
+            self.vsm_workspace,
+            self.dma_workspace,
+        ):
+            workspace.refreshRequested.connect(
+                lambda: self.request_current_workspace_load(force=True)
+            )
         self.tab_widget.currentChanged.connect(self._handle_view_changed)
         layout.addWidget(self.tab_widget, 1)
 
     def _handle_view_changed(self, _index: int) -> None:
         if self._active:
-            self.refresh_current_workspace()
+            self.mark_workspaces_dirty()
+            self.request_current_workspace_load()
+
+    def request_current_workspace_load(self, *, force: bool = False) -> None:
+        if force:
+            self.mark_workspaces_dirty()
+        self.show_loading("Loading transition review data...")
+        self.dependencyLoadRequested.emit()
 
     def set_active(self, active: bool, *, refresh: bool = True) -> None:
         self._active = bool(active)
@@ -27957,6 +28003,10 @@ class TransitionsSection(QtWidgets.QWidget):
         """Show an honest placeholder while transition dependencies load."""
 
         widget = self.tab_widget.currentWidget()
+        show = getattr(widget, "show_loading", None)
+        if callable(show):
+            show(message)
+            return
         empty = getattr(widget, "_show_empty", None)
         if callable(empty):
             empty(message)
@@ -27965,6 +28015,14 @@ class TransitionsSection(QtWidgets.QWidget):
         update = getattr(preview, "update_selection", None)
         if callable(update):
             update(message, [], {})
+
+    def show_load_error(self, message: str) -> None:
+        widget = self.tab_widget.currentWidget()
+        show = getattr(widget, "show_load_error", None)
+        if callable(show):
+            show(message)
+            return
+        self.show_loading(message)
 
     def mark_workspaces_dirty(self, view: str | None = None) -> None:
         if view is None:
@@ -39238,6 +39296,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.transition_temps_section,
                 self.dma_transitions_section,
             )
+            self.transitions_section.dependencyLoadRequested.connect(
+                self._handle_transition_workspace_load_requested
+            )
             self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
             self.tab_widget.currentChanged.connect(self._handle_builder_tab_changed)
             self._install_transition_shortcuts()
@@ -39486,24 +39547,46 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _handle_builder_tab_changed(self, _index: int) -> None:
         self._load_current_deferred_project_sections()
         transitions = getattr(self, "transitions_section", None)
-        if isinstance(transitions, TransitionsSection):
-            active = self.tab_widget.currentWidget() is transitions
-            dependencies = {
-                "annealing", "current_density", "vsm_temperature_scan",
-                "transition_temps", "mini_dma",
-            }
-            pending = getattr(self, "_deferred_project_section_pending", set())
-            deferred = getattr(self, "_deferred_project_section_keys", set())
-            waiting = active and bool(
-                dependencies
-                & (
-                    (pending if isinstance(pending, set) else set())
-                    | (deferred if isinstance(deferred, set) else set())
-                )
+        if not isinstance(transitions, TransitionsSection):
+            return
+        active = self.tab_widget.currentWidget() is transitions
+        transitions.set_active(active, refresh=False)
+        if active:
+            self._update_transition_workspace_loading_state()
+
+    def _handle_transition_workspace_load_requested(self) -> None:
+        transitions = getattr(self, "transitions_section", None)
+        if (
+            not isinstance(transitions, TransitionsSection)
+            or self.tab_widget.currentWidget() is not transitions
+        ):
+            return
+        self._load_current_deferred_project_sections()
+        self._update_transition_workspace_loading_state(force_refresh=True)
+
+    def _update_transition_workspace_loading_state(
+        self, *, force_refresh: bool = False
+    ) -> None:
+        transitions = getattr(self, "transitions_section", None)
+        if (
+            not isinstance(transitions, TransitionsSection)
+            or self.tab_widget.currentWidget() is not transitions
+        ):
+            return
+        dependencies = self._active_transition_project_section_keys()
+        pending = getattr(self, "_deferred_project_section_pending", set())
+        deferred = getattr(self, "_deferred_project_section_keys", set())
+        waiting = bool(
+            dependencies
+            & (
+                (pending if isinstance(pending, set) else set())
+                | (deferred if isinstance(deferred, set) else set())
             )
-            transitions.set_active(active, refresh=not waiting)
-            if waiting:
-                transitions.show_loading("Loading transition review data...")
+        )
+        if waiting:
+            transitions.show_loading("Loading transition review data...")
+            return
+        transitions.refresh_current_workspace(force=force_refresh)
 
     def _invalidate_deferred_project_loads(self) -> int:
         """Invalidate results/loaders tied to the previously active package."""
@@ -39694,6 +39777,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.logger.error(
                     "Failed to read deferred project section %s: %s", section_key, exc
                 )
+                transitions = getattr(self, "transitions_section", None)
+                if (
+                    isinstance(transitions, TransitionsSection)
+                    and self.tab_widget.currentWidget() is transitions
+                    and section_key in self._active_transition_project_section_keys()
+                ):
+                    transitions.show_load_error(
+                        "Could not load transition review data. "
+                        "Click Refresh to try again."
+                    )
 
         worker.failed.connect(_failed)
         worker.finished.connect(thread.quit)
