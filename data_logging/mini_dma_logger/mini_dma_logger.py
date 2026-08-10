@@ -3226,6 +3226,9 @@ class ScaleWorker(QtCore.QObject):
         self.request_command = request_command
         self.request_terminator = request_terminator
         self._stop_event = Event()
+        self.opened_event = Event()
+        self.finished_event = Event()
+        self.startup_error = ""
 
     def _read_timeout_s(self) -> float:
         timeout_s = max(0.05, self.poll_interval_ms / 1000.0)
@@ -3255,6 +3258,7 @@ class ScaleWorker(QtCore.QObject):
                 timeout=timeout_s,
                 write_timeout=0.2,
             )
+            self.opened_event.set()
             self.status_changed.emit(
                 f"Scale connected on {self.port_name} at {self.baudrate} baud."
             )
@@ -3284,8 +3288,10 @@ class ScaleWorker(QtCore.QObject):
                     if delay_s > 0.0:
                         self._stop_event.wait(delay_s)
         except SerialException as exc:
+            self.startup_error = f"Scale connection failed: {exc}"
             self.error_occurred.emit(f"Scale connection failed: {exc}")
         except Exception as exc:
+            self.startup_error = f"Scale worker failed: {exc}"
             self.error_occurred.emit(f"Scale worker failed: {exc}")
         finally:
             if port is not None:
@@ -3293,6 +3299,7 @@ class ScaleWorker(QtCore.QObject):
                     port.close()
                 except Exception:
                     pass
+            self.finished_event.set()
             self.finished.emit()
 
     @QtCore.pyqtSlot()
@@ -17125,16 +17132,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.start(SCALE_NO_DATA_HINT_DELAY_MS)
         return True
 
-    def _disconnect_scale(self, *, timeout_ms: int = 1500) -> None:
+    def _disconnect_scale(self, *, timeout_ms: int = 1500) -> bool:
         worker = self._scale_worker
         thread = self._scale_thread
         lifetime = self._scale_thread_lifetime
         ui_bridge = self._scale_ui_bridge
         self._scale_connection_token = None
-        self._scale_worker = None
-        self._scale_thread = None
-        self._scale_thread_lifetime = None
-        self._scale_ui_bridge = None
         self._scale_connected_at_s = None
         self._scale_no_data_hint_emitted = False
         self._scale_hint_timer.stop()
@@ -17143,18 +17146,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 worker.stop()
             except RuntimeError:
                 pass
+        released = True
         if thread is not None:
             try:
                 thread.quit()
                 if lifetime is not None:
-                    lifetime.wait(timeout_ms)
+                    released = lifetime.wait(timeout_ms)
                 elif thread.isRunning():
-                    thread.wait(max(0, int(timeout_ms)))
+                    released = bool(thread.wait(max(0, int(timeout_ms))))
             except RuntimeError:
-                pass
+                released = False
+        self._scale_worker = None
+        self._scale_thread = None
+        self._scale_thread_lifetime = None
+        self._scale_ui_bridge = None
         if ui_bridge is not None:
             ui_bridge.deleteLater()
         self.button_scale_connect.setText("Connect scale")
+        return released
 
     def _sensor_callback_is_current(self, sensor_kind: str, token: object) -> bool:
         if self._window_closing:
@@ -30241,7 +30250,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self._log("Preflight: scale is not connected, trying auto-detect/connect.")
         self._fast_auto_detect_scale_port()
-        return self._connect_scale(show_errors=False)
+        if not self._connect_scale(show_errors=False):
+            return False
+        worker = self._scale_worker
+        if worker is None:
+            return False
+        deadline = time.monotonic() + max(
+            1.0,
+            (float(worker._read_timeout_s()) * 2.0) + 0.5,
+        )
+        while time.monotonic() < deadline:
+            if worker.opened_event.wait(0.02):
+                return True
+            if worker.finished_event.is_set():
+                break
+        detail = str(worker.startup_error or "scale serial port did not open in time")
+        self._controller_process_error = detail
+        self._log(f"Preflight: {detail}")
+        self._disconnect_scale()
+        return False
 
     def _ensure_supply_ready_for_recipe(self) -> bool:
         if self._supply_controller is not None and self._supply_controller.is_connected():
@@ -33609,7 +33636,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Releasing UI-process hardware handles before starting the dedicated "
                 "control process."
             )
-            self._disconnect_scale()
+            if not self._disconnect_scale():
+                self._log(
+                    "Dedicated-process startup aborted because the UI scale "
+                    "worker did not release the serial port cleanly."
+                )
+                process.close()
+                self._first_overheating_preflight_decision = None
+                return
             self._log("UI scale ownership released.")
             if self._ir_thread is not None:
                 self._disconnect_ir_thermometer()

@@ -75,6 +75,31 @@ def test_windows_pythonw_parent_selects_console_spawn_runtime(
     assert selected == [str(python)]
 
 
+def test_apply_window_configuration_preserves_text_only_combo_selection() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    combo = QtWidgets.QComboBox()
+    combo.addItems(["600", "9600", "19200"])
+    host = SimpleNamespace(combo_scale_baud=combo)
+
+    _apply_window_configuration(
+        host,
+        {
+            "widgets": {
+                "combo_scale_baud": {
+                    "kind": "combo",
+                    "index": 1,
+                    "data": None,
+                    "text": "9600",
+                }
+            }
+        },
+    )
+
+    assert combo.currentText() == "9600"
+    del combo
+    del app
+
+
 def test_legacy_nine_argument_windows_parent_can_spawn_updated_child() -> None:
     """Exercise the exact old-parent/new-child boundary that failed live."""
 

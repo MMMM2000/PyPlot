@@ -81,6 +81,13 @@ def capture_window_configuration(
             getattr(window, "_supply_lease_owner", "")
         ),
         "parent_pid": os.getpid(),
+        "force_control_profile": str(
+            getattr(
+                getattr(window, "_force_control_profile", lambda: "")(),
+                "value",
+                "",
+            )
+        ),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -124,7 +131,11 @@ def _apply_window_configuration(window: object, payload: Mapping[str, object]) -
         try:
             if kind == "combo" and isinstance(candidate, QtWidgets.QComboBox):
                 wanted = raw_state.get("data")
-                index = candidate.findData(wanted)
+                # QComboBox.currentData() is None for ordinary text-only
+                # entries.  Searching for None therefore always selected the
+                # first entry instead of the captured text (notably 600 baud
+                # instead of the Košice KERN setting).
+                index = candidate.findData(wanted) if wanted is not None else -1
                 if index < 0:
                     wanted_text = str(raw_state.get("text", ""))
                     index = candidate.findText(wanted_text)
@@ -286,6 +297,20 @@ class ProductionTmaBackend:
         self._window._controller_process_output_collision_action = str(
             payload.get("output_collision_action", "cancel")
         )
+        captured_profile = str(payload.get("force_control_profile") or "").casefold()
+        if captured_profile:
+            captured_policy_matches = (
+                request.policy is ControlPolicy.PRAGUE
+                and "prague" in captured_profile
+            ) or (
+                request.policy is ControlPolicy.KOSICE
+                and "kosice" in captured_profile
+            )
+            if not captured_policy_matches:
+                raise ValueError(
+                    "TMA IPC policy does not match the captured UI hardware "
+                    f"profile ({request.policy.value} vs {captured_profile})."
+                )
         starting_length = payload.get("starting_length_mm")
         steps, _summary, _interval_ms = self._window._build_automation_recipe()
         if not self._window._preflight_recipe_hardware(steps, show_progress=False):

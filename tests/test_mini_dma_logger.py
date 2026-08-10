@@ -2833,8 +2833,8 @@ def test_isolated_start_proves_child_ready_before_releasing_ui_hardware(
     window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
     window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
     window._stop_manual_jog = lambda: ordering.append("stop_manual_jog")  # type: ignore[method-assign]
-    window._disconnect_scale = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
-        "release_scale", "_scale_thread"
+    window._disconnect_scale = lambda *args, **kwargs: (  # type: ignore[method-assign]
+        _release("release_scale", "_scale_thread") or True
     )
     window._detach_supply_for_handoff = lambda: (  # type: ignore[method-assign]
         _release("transfer_supply", "_supply_controller") or {}
@@ -6889,6 +6889,67 @@ def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
     finally:
         if window._session_active:
             window._stop_session()
+        _close_test_window(window)
+
+
+def test_recipe_scale_preflight_waits_for_serial_open_failure(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker = SimpleNamespace(
+        opened_event=threading.Event(),
+        finished_event=threading.Event(),
+        startup_error="Scale connection failed: access denied",
+        _read_timeout_s=lambda: 0.05,
+    )
+    worker.finished_event.set()
+    disconnected: list[bool] = []
+    window._fast_auto_detect_scale_port = lambda: False  # type: ignore[method-assign]
+
+    def _connect(*, show_errors: bool) -> bool:
+        assert show_errors is False
+        window._scale_worker = worker
+        window._scale_thread = object()
+        return True
+
+    window._connect_scale = _connect  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: (  # type: ignore[method-assign]
+        disconnected.append(True) or True
+    )
+
+    try:
+        assert window._ensure_scale_ready_for_recipe() is False
+        assert disconnected == [True]
+        assert "access denied" in window._controller_process_error
+    finally:
+        window._scale_thread = None
+        window._scale_worker = None
+        _close_test_window(window)
+
+
+def test_disconnect_scale_reports_unreleased_worker(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    stopped: list[str] = []
+    quit_calls: list[str] = []
+    bridge_deleted: list[str] = []
+    window._scale_worker = SimpleNamespace(stop=lambda: stopped.append("stop"))
+    window._scale_thread = SimpleNamespace(quit=lambda: quit_calls.append("quit"))
+    window._scale_thread_lifetime = SimpleNamespace(wait=lambda _timeout: False)
+    window._scale_ui_bridge = SimpleNamespace(
+        deleteLater=lambda: bridge_deleted.append("delete")
+    )
+
+    try:
+        assert window._disconnect_scale(timeout_ms=1) is False
+        assert stopped == ["stop"]
+        assert quit_calls == ["quit"]
+        assert bridge_deleted == ["delete"]
+        assert window._scale_thread is None
+    finally:
         _close_test_window(window)
 
 
