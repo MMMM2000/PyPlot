@@ -430,6 +430,13 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
 
 
 def _ensure_measurement_logging_session(window: Any) -> None:
+    # Process-isolated TMA starts the authoritative logging session in the
+    # child after hardware ownership transfers. Opening a UI-owned session
+    # here makes the isolated start reject it as a conflicting manual session.
+    if bool(getattr(window, "_control_process_enabled", False)) and not bool(
+        getattr(window, "_controller_process_mode", False)
+    ):
+        return
     if bool(getattr(window, "_session_active", False)):
         return
     start_session = getattr(window, "_start_session", None)

@@ -309,6 +309,38 @@ def test_wait_for_tma_history_scan_blocks_until_current_root_is_ready(
     assert events == ["start", "process", "sleep", "process"]
 
 
+def test_process_isolated_bench_does_not_open_ui_owned_logging_session() -> None:
+    events: list[str] = []
+
+    class _Window:
+        _control_process_enabled = True
+        _controller_process_mode = False
+        _session_active = False
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(f"start:{enable_logging}:{record_initial_point}")
+
+    bench_automation._ensure_measurement_logging_session(_Window())
+
+    assert events == []
+
+
+def test_in_process_bench_still_opens_logging_session() -> None:
+    events: list[str] = []
+
+    class _Window:
+        _control_process_enabled = False
+        _controller_process_mode = False
+        _session_active = False
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(f"start:{enable_logging}:{record_initial_point}")
+
+    bench_automation._ensure_measurement_logging_session(_Window())
+
+    assert events == ["start:True:False"]
+
+
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)

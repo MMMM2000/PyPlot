@@ -33590,15 +33590,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_length_setup_dialog(
                 "Preparing dedicated controller; hardware remains UI-owned."
             )
-            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
-                self,
-                APP_NAME,
-                "Measured mounted wire length now (mm):",
-                max(0.001, float(self.spin_initial_length.value())),
-                0.001,
-                100000.0,
-                4,
-            )
+            if self._automated_setup_starting_length_mm is not None:
+                starting_length_mm = float(
+                    self._automated_setup_starting_length_mm
+                )
+                accepted = True
+                self._log(
+                    "Using the campaign-provided mounted length for the "
+                    "dedicated controller: "
+                    f"{_format_compact_unit(starting_length_mm, 'mm', decimals=4)}."
+                )
+            else:
+                starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    APP_NAME,
+                    "Measured mounted wire length now (mm):",
+                    max(0.001, float(self.spin_initial_length.value())),
+                    0.001,
+                    100000.0,
+                    4,
+                )
             if not accepted:
                 self._log("Recipe start cancelled before transferring hardware ownership.")
                 process.close()
