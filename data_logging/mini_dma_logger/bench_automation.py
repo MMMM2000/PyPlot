@@ -886,7 +886,8 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
-    if _recipe_needs_tma_history_scan(window):
+    needs_history_scan = _recipe_needs_tma_history_scan(window)
+    if needs_history_scan:
         _wait_for_tma_history_scan(
             window,
             app=app,
@@ -896,6 +897,12 @@ def _execute_run(
     _apply_length_setup_automation(window, run)
     _prefer_next_output_run(window)
     _ensure_measurement_logging_session(window)
+    if not needs_history_scan:
+        # The armed bench wrapper has already evaluated the same
+        # first-overheating/history gate after loading the recipe.  Tell the
+        # isolated-start path not to repeat it after sample identity updates
+        # have scheduled a fresh background history scan.
+        window._controller_process_prior_run_preflight_complete = True
     window._start_auto_ramp()
     app.processEvents()
     if not _window_active(window):

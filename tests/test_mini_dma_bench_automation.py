@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -326,6 +327,66 @@ def test_recipe_with_first_overheating_skips_tma_history_scan() -> None:
             return False
 
     assert bench_automation._recipe_needs_tma_history_scan(_Window()) is False
+
+
+def test_execute_run_hands_completed_first_overheating_preflight_to_isolated_start(
+    monkeypatch,
+) -> None:
+    class _Checkbox:
+        def isChecked(self) -> bool:
+            return True
+
+    class _Combo:
+        def currentData(self) -> str:
+            return "current_sweep_stress"
+
+    class _Window:
+        combo_recipe_mode = _Combo()
+        check_current_sweep_first_overheating = _Checkbox()
+        _controller_process_prior_run_preflight_complete = False
+        _control_process_enabled = True
+        _controller_process_mode = False
+        _session_active = False
+        _automation_active = False
+
+        def _is_constant_current_strain_sweep_mode(self, _mode: str) -> bool:
+            return False
+
+        def _load_recipe_from_path(self, _path: Path) -> None:
+            return None
+
+        def _start_auto_ramp(self) -> None:
+            assert self._controller_process_prior_run_preflight_complete is True
+
+    window = _Window()
+    monkeypatch.setattr(bench_automation, "_apply_sample_identity", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_apply_length_setup_automation", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_prefer_next_output_run", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_ensure_measurement_logging_session", lambda *_args: None)
+
+    run = bench_automation.MiniDmaBenchRun(
+        name="bounded",
+        recipe_path=Path("bounded.recipe.json"),
+        repeat_index=0,
+        max_run_duration_s=1.0,
+    )
+    sample = bench_automation.MiniDmaSampleIdentity(
+        composition="Ni50Fe27Ga23",
+        microwire="12/5",
+        sample_name="Ni50Fe27Ga23 12/5",
+        diameter_mm=0.00935,
+    )
+    result = bench_automation._execute_run(
+        run,
+        app=SimpleNamespace(processEvents=lambda: None),
+        window=window,
+        sample_identity=sample,
+        guardrails=bench_automation.MiniDmaBenchGuardrails(),
+        sleep_fn=lambda _seconds: None,
+        total_deadline_s=None,
+    )
+
+    assert result["status"] == "not_started"
 
 
 def test_process_isolated_bench_does_not_open_ui_owned_logging_session() -> None:
