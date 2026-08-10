@@ -593,6 +593,8 @@ def _plateau_target_stress(part: pd.DataFrame) -> float | None:
 def _plateau_plot_context(
     df: pd.DataFrame,
     metadata: dict[str, Any],
+    *,
+    include_first_overheating: bool = True,
 ) -> _PlateauPlotContext | None:
     df = _plot_rows(df)
     if df.empty:
@@ -601,14 +603,22 @@ def _plateau_plot_context(
     grouped_parts: list[tuple[str, pd.DataFrame]] = []
     if not plateau.empty and plateau.notna().any():
         # Normal stress-ladder rows have numbered plateaus. First overheating is
-        # deliberately unindexed, so this keeps conditioning out of comparison
-        # panels without truncating the first normal 1 mA stress ramp.
+        # deliberately unindexed. Keep that current loop in current-response
+        # panels, but let stress-strain callers explicitly exclude it because it
+        # is conditioning rather than a normal stress-ladder measurement.
+        if include_first_overheating:
+            phase = df.get("automation_phase", pd.Series("", index=df.index)).astype(str)
+            first_overheating = df.loc[
+                plateau.isna() & phase.isin({"current", "current_hold"})
+            ].copy()
+            if not first_overheating.empty:
+                grouped_parts.append(("First overheating", first_overheating))
         normal = df.loc[plateau.notna()].copy()
         normal["_plot_plateau_index"] = plateau.loc[plateau.notna()].to_numpy()
-        grouped_parts = [
+        grouped_parts.extend(
             (str(label), part.drop(columns="_plot_plateau_index"))
             for label, part in normal.groupby("_plot_plateau_index", sort=True)
-        ]
+        )
     else:
         # Older result files can predate numeric plateau indices. Preserve a
         # useful fallback rather than returning an empty plot.
@@ -905,7 +915,11 @@ def _plot_strain_stress(
         ax.plot(x, y, color="#7c3aed", lw=1.2)
         _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
         return
-    context = _plateau_plot_context(df, metadata or {})
+    context = _plateau_plot_context(
+        df,
+        metadata or {},
+        include_first_overheating=False,
+    )
     if context is None:
         x, y = _clean_xy(df, "strain_pct", "stress_mpa")
         x, y = _decimate(x, y)

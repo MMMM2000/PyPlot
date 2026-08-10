@@ -280,12 +280,12 @@ def test_grouped_strain_current_keeps_rows_without_numeric_plateau_index() -> No
         plt.close(fig)
 
 
-def test_current_response_panels_share_plateau_colors_and_exclude_conditioning() -> None:
+def test_current_response_panels_share_plateau_colors_and_include_first_overheating() -> None:
     frame = _current_sweep_frame()
     context = _plateau_plot_context(frame, {})
 
     assert context is not None
-    assert [group.target_stress_mpa for group in context.groups] == [50.0, 100.0]
+    assert [group.target_stress_mpa for group in context.groups] == [20.0, 50.0, 100.0]
 
     fig, (strain_ax, resistance_ax) = plt.subplots(1, 2)
     try:
@@ -299,9 +299,22 @@ def test_current_response_panels_share_plateau_colors_and_exclude_conditioning()
         ]
         assert {line.get_linestyle() for line in strain_ax.lines} == {"-", "--"}
         assert {line.get_marker() for line in strain_ax.lines} == {"o", "x"}
-        assert max(max(line.get_ydata()) for line in strain_ax.lines) < 10.0
+        assert max(max(line.get_ydata()) for line in strain_ax.lines) > 80.0
         assert strain_ax.get_xlim() == pytest.approx(resistance_ax.get_xlim())
-        assert strain_ax.get_xlim()[1] < 25.0
+        assert strain_ax.get_xlim()[1] > 20.0
+    finally:
+        plt.close(fig)
+
+
+def test_selected_current_stress_strain_excludes_first_overheating() -> None:
+    frame = _current_sweep_frame()
+    fig, ax = plt.subplots()
+    try:
+        _plot_strain_stress(ax, frame, {})
+
+        plotted_stress = [value for line in ax.lines for value in line.get_ydata()]
+        assert plotted_stress
+        assert min(plotted_stress) >= 50.0
     finally:
         plt.close(fig)
 
