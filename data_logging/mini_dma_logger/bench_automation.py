@@ -655,6 +655,17 @@ def _session_stop_metadata(window: Any) -> dict[str, Any] | None:
     return dict(metadata) if isinstance(metadata, Mapping) else None
 
 
+def _persisted_stop_metadata(metadata_path: str | None) -> dict[str, Any] | None:
+    if metadata_path is None:
+        return None
+    try:
+        payload = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    stop = payload.get("stop") if isinstance(payload, Mapping) else None
+    return dict(stop) if isinstance(stop, Mapping) else None
+
+
 def _task_text(window: Any) -> str:
     label = getattr(window, "label_task_status", None)
     text_method = getattr(label, "text", None)
@@ -916,10 +927,14 @@ def _execute_run(
             "startup_log_tail": _window_log_tail(window),
         }
 
+    metadata_path = _metadata_path(window)
     status = "completed"
     guard_events: list[dict[str, Any]] = []
     while _window_active(window):
         app.processEvents()
+        active_metadata_path = _metadata_path(window)
+        if active_metadata_path is not None:
+            metadata_path = active_metadata_path
         guard_event = _check_guardrails(window, guardrails)
         if guard_event is not None:
             guard_events.append(guard_event)
@@ -971,7 +986,9 @@ def _execute_run(
             break
         sleep_fn(0.05)
     app.processEvents()
-    metadata_path = _metadata_path(window)
+    active_metadata_path = _metadata_path(window)
+    if active_metadata_path is not None:
+        metadata_path = active_metadata_path
     run_dir = _run_dir_from_metadata_path(metadata_path)
     return {
         "name": run.name,
@@ -981,7 +998,8 @@ def _execute_run(
         "elapsed_s": max(0.0, time.monotonic() - start_s),
         "metadata_path": metadata_path,
         "guard_events": guard_events,
-        "stop_metadata": _session_stop_metadata(window),
+        "stop_metadata": _session_stop_metadata(window)
+        or _persisted_stop_metadata(metadata_path),
         "task_text": _task_text(window),
         "control_trace_stop": _last_control_trace_stop(run_dir),
     }

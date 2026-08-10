@@ -8,3 +8,4 @@
 - Keep the external TMA safety supervisor from mistaking the first completed run in a multi-run validation plan for completion of the whole plan.
 - Restore the motor-supply channel to its pre-test output state after shared-HMP live validation.
 - Suppress current-hold motor correction only for genuinely target-spanning fluctuations, preventing one-sided stationary error from deadlocking a current ramp.
+- Retain finalized child-run metadata in the unattended bench summary after the isolated window clears its live session path.

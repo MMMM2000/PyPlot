@@ -590,7 +590,10 @@ def test_mini_dma_bench_plan_replaces_stale_execute_summary_while_running(tmp_pa
     def _sleep(_seconds: float) -> None:
         observed_running_summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
         assert windows
-        windows[-1]._automation_active = False  # type: ignore[attr-defined]
+        completed_window = windows[-1]
+        completed_window._automation_active = False  # type: ignore[attr-defined]
+        completed_window._session_active = False  # type: ignore[attr-defined]
+        completed_window._session_json_path = None  # type: ignore[attr-defined]
 
     summary = bench_automation.run_mini_dma_bench_plan(
         plan_path,
@@ -608,6 +611,9 @@ def test_mini_dma_bench_plan_replaces_stale_execute_summary_while_running(tmp_pa
     assert "old-run" not in json.dumps(running)
     assert summary["state"] == "completed"
     assert summary["run_count"] == 1
+    assert summary["runs"][0]["metadata_path"] == str(
+        tmp_path / "logs" / "run01" / "metadata.json"
+    )
 
 
 def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: Path) -> None:
