@@ -514,6 +514,12 @@ class ProductionTmaBackend:
                 stress = float(terminal_readback["stress_mpa"])
         snapshot = getattr(window, "_supply_snapshot", {})
         session_path = getattr(window, "_session_base_path", None)
+        stop_metadata_reader = getattr(window, "_session_stop_metadata", None)
+        stop_metadata = (
+            dict(stop_metadata_reader())
+            if callable(stop_metadata_reader)
+            else {}
+        )
         base_readback: tuple[tuple[str, ReadbackValue], ...] = (
             ("backend_owner_pid", self._owner_pid),
             ("started", self._started),
@@ -597,6 +603,10 @@ class ProductionTmaBackend:
             ("session_active", bool(window._session_active)),
             ("session_points", int(len(window._session_points))),
             ("session_path", None if session_path is None else str(session_path)),
+            ("session_stop_reason", stop_metadata.get("reason")),
+            ("session_stop_category", stop_metadata.get("category")),
+            ("session_stop_label", stop_metadata.get("label")),
+            ("session_stop_detail", stop_metadata.get("detail")),
             ("tic_vin_v", window._last_tic_vin_v),
             ("emergency_reason", self._emergency_reason),
             ("error", self._last_error),

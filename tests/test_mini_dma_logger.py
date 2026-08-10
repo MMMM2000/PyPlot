@@ -4756,6 +4756,104 @@ def test_isolated_fault_generates_summary_from_cached_terminal_snapshot(
         _close_test_window(window)
 
 
+def test_isolated_wire_break_finishes_in_visible_parent_and_schedules_summary_and_prompt(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-wire-break"
+    requested: list[tuple[Path, bool, bool]] = []
+    prompts: list[str] = []
+    deferred: list[object] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+    window._ask_wire_break_recovery_after_stop = prompts.append  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtCore.QTimer,
+        "singleShot",
+        lambda _delay, callback: deferred.append(callback),
+    )
+    detail = "Wire break detected: synthetic open circuit."
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={
+                "session_path": str(run_dir / "measurement.csv"),
+                "session_stop_reason": "wire_break_or_contact_loss",
+                "session_stop_category": "fault",
+                "session_stop_label": "Wire break or contact loss",
+                "session_stop_detail": detail,
+            },
+        )
+
+        assert process.closed is True
+        assert requested == [(run_dir, False, True)]
+        assert window._dashboard_value_labels["task"].text() == (
+            "Wire break or contact loss (final values)"
+        )
+        assert not window.label_control_process_status.isHidden()
+        assert deferred
+        deferred[-1]()
+        assert prompts == [detail]
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_controller_process_wire_break_does_not_open_hidden_prompt(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    prompts: list[str] = []
+    cleanup_offers: list[bool] = []
+    window._ask_wire_break_recovery_after_stop = prompts.append  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: cleanup_offers.append(True)
+    )
+    window._automation_active = True
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 39.4
+    window._supply_snapshot = {
+        "current_mA": 0.2,
+        "voltage_V": 32.056,
+        "resistance_ohm": None,
+        "power_W": 0.0,
+    }
+    window._stop_auto_ramp = lambda **_kwargs: setattr(window, "_automation_active", False)  # type: ignore[method-assign]
+
+    try:
+        window._finish_wire_break_stop_on_ui_thread()
+
+        assert window._automation_active is False
+        assert prompts == []
+        assert cleanup_offers == []
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
     tmp_path: Path,
     qtbot,

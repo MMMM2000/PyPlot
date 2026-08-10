@@ -680,6 +680,8 @@ class _FakeProductionWindow:
         self._session_active = False
         self._session_points = [object()]
         self._session_base_path = None
+        self._session_stop_reason = None
+        self._session_stop_detail = None
         self._last_tic_vin_v = 12.0
         self.starting_length_mm = None
         self.closed = False
@@ -771,6 +773,16 @@ class _FakeProductionWindow:
 
         return _PlotPoint(elapsed_s=1.5, load_g=0.5)
 
+    def _session_stop_metadata(self) -> dict[str, object | None]:
+        reason = self._session_stop_reason
+        is_fault = reason == "wire_break_or_contact_loss"
+        return {
+            "reason": reason,
+            "category": "fault" if is_fault else "unknown",
+            "label": "Wire break or contact loss" if is_fault else "Unknown stop reason",
+            "detail": self._session_stop_detail,
+        }
+
     def close(self) -> None:
         self.closed = True
 
@@ -847,6 +859,34 @@ def test_production_backend_preserves_run_relative_terminal_readback() -> None:
     assert readback["stress_mpa"] == pytest.approx(0.16)
     assert readback["plot_elapsed_s"] == pytest.approx(88.5)
     assert readback["plot_load_g"] == pytest.approx(0.005)
+    backend.close()
+
+
+def test_production_backend_exposes_wire_break_terminal_metadata() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+    backend._window._session_stop_reason = "wire_break_or_contact_loss"
+    backend._window._session_stop_detail = "synthetic wire break"
+    backend._window._automation_active = False
+
+    readback = dict(backend.readback())
+
+    assert readback["session_stop_reason"] == "wire_break_or_contact_loss"
+    assert readback["session_stop_category"] == "fault"
+    assert readback["session_stop_label"] == "Wire break or contact loss"
+    assert readback["session_stop_detail"] == "synthetic wire break"
     backend.close()
 
 

@@ -15207,8 +15207,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._session_active:
                 self._stop_session(reason="wire_break_or_contact_loss", detail=message)
             self.statusBar().showMessage(message, 15000)
-            self._ask_wire_break_recovery_after_stop(message)
-            self._maybe_offer_run_cleanup()
+            if not self._controller_process_mode:
+                self._ask_wire_break_recovery_after_stop(message)
+                self._maybe_offer_run_cleanup()
         finally:
             self._wire_break_stop_in_progress = False
 
@@ -34103,7 +34104,18 @@ class MainWindow(QtWidgets.QMainWindow):
             final_readback = dict(
                 getattr(self._production_control_snapshot, "readback", {})
             )
-        if state is ControlState.STOPPED:
+        session_stop_reason = str(final_readback.get("session_stop_reason") or "")
+        session_stop_category = str(final_readback.get("session_stop_category") or "")
+        session_stop_label = str(final_readback.get("session_stop_label") or "")
+        session_stop_detail = str(final_readback.get("session_stop_detail") or "")
+        wire_break_terminal = session_stop_reason == "wire_break_or_contact_loss"
+        metadata_fault = session_stop_category == "fault"
+        terminal_fault = state in {ControlState.FAULTED, ControlState.EMERGENCY} or metadata_fault
+        if session_stop_detail and not detail:
+            detail = session_stop_detail
+        if wire_break_terminal:
+            terminal_task = "Wire break or contact loss (final values)"
+        elif state is ControlState.STOPPED:
             terminal_task = (
                 "Recipe stopped (final values)"
                 if user_stop_requested
@@ -34170,7 +34182,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if summary_run_dir is not None:
             self._start_run_summary_generation(
                 summary_run_dir,
-                offer_cleanup=(state is ControlState.STOPPED and not offer_recovery),
+                offer_cleanup=(
+                    state is ControlState.STOPPED
+                    and not offer_recovery
+                    and not terminal_fault
+                ),
             )
         if self._isolated_supply_handoff_leases:
             if state in {ControlState.FAULTED, ControlState.EMERGENCY}:
@@ -34185,15 +34201,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_supply_handoff_leases
             )
             self._isolated_supply_handoff_leases = {}
-        color = "#b91c1c" if state in {ControlState.FAULTED, ControlState.EMERGENCY} else "#15803d"
+        color = "#b91c1c" if terminal_fault else "#15803d"
         self.label_control_process_status.setStyleSheet(f"color: {color};")
         suffix = f": {detail}" if detail else ""
         self.label_control_process_status.setText(
-            f"Controller: dedicated process {state.value}{suffix}"
+            "Controller: "
+            + (
+                f"{session_stop_label or 'dedicated process fault'}{suffix}"
+                if metadata_fault
+                else f"dedicated process {state.value}{suffix}"
+            )
         )
-        self.label_control_process_status.setVisible(
-            state in {ControlState.FAULTED, ControlState.EMERGENCY}
-        )
+        self.label_control_process_status.setVisible(terminal_fault)
         self._update_recipe_buttons()
         if self._isolated_terminal_readback is not None:
             self._apply_isolated_recipe_status(
@@ -34203,6 +34222,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if offer_recovery:
             self._schedule_recovery_after_stop()
+        elif wire_break_terminal:
+            message = session_stop_detail or "Wire break or contact loss was detected."
+            QtCore.QTimer.singleShot(
+                0,
+                WeakOwnerCallback(self, "_ask_wire_break_recovery_after_stop", message),
+            )
 
     def _consume_isolated_log_snapshot(
         self,
