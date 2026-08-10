@@ -8614,6 +8614,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_load_curve: Any | None = None
         self._length_setup_displacement_curve: Any | None = None
         self._length_setup_start_monotonic = 0.0
+        self._length_setup_position_origin_mm: float | None = None
         self._length_setup_last_record_scale_timestamp: float | None = None
         self._last_length_setup_plot_refresh_s: float | None = None
         self._length_setup_points: list[MeasurementPoint] = []
@@ -34906,6 +34907,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._controller_process_mode:
             self._length_setup_points.clear()
+            self._length_setup_position_origin_mm = float(self._current_position_mm)
             self._length_setup_last_record_scale_timestamp = None
             self._last_length_setup_plot_refresh_s = None
             self._setup_return_zero_start_point_index = 0
@@ -34984,6 +34986,13 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             dialog.setWindowTitle(title)
         self._length_setup_points.clear()
+        # Setup points can span the visible UI and dedicated controller
+        # processes.  Each process has its own session displacement reference,
+        # so plotting MeasurementPoint.position_mm directly creates a false
+        # jump at ownership handoff.  Keep one raw Tic-coordinate origin for
+        # the complete visible setup instead.  This is a display reference
+        # only; it does not rewrite the Tic position or move the motor.
+        self._length_setup_position_origin_mm = float(self._current_position_mm)
         self._length_setup_last_record_scale_timestamp = None
         self._last_length_setup_plot_refresh_s = None
         self._setup_return_zero_start_point_index = 0
@@ -35430,7 +35439,16 @@ class MainWindow(QtWidgets.QMainWindow):
             for point in points
         ]
         load_values = [float(point.load_g) for point in points]
-        displacement_values = [float(point.position_mm) for point in points]
+        position_origin_mm = self._length_setup_position_origin_mm
+        displacement_values = [
+            (
+                float(point.position_mm)
+                if position_origin_mm is None
+                else self._tension_motion_sign()
+                * (float(point.raw_position_mm) - float(position_origin_mm))
+            )
+            for point in points
+        ]
         self._set_pyqtgraph_curve_data(self._length_setup_stress_curve, x_values, stress_values)
         self._set_pyqtgraph_curve_data(self._length_setup_load_curve, x_values, load_values)
         self._set_pyqtgraph_curve_data(

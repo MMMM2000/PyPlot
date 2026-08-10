@@ -16572,9 +16572,27 @@ def test_length_setup_plot_sorts_points_by_elapsed_time(tmp_path: Path, qtbot) -
 
         base = window._length_setup_points[0]
         window._length_setup_points = [
-            dataclasses.replace(base, elapsed_s=2.0, position_mm=-0.2, load_g=0.3),
-            dataclasses.replace(base, elapsed_s=0.0, position_mm=0.0, load_g=0.1),
-            dataclasses.replace(base, elapsed_s=1.0, position_mm=-0.1, load_g=0.2),
+            dataclasses.replace(
+                base,
+                elapsed_s=2.0,
+                raw_position_mm=0.2,
+                position_mm=-0.2,
+                load_g=0.3,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=0.0,
+                raw_position_mm=0.0,
+                position_mm=0.0,
+                load_g=0.1,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=1.0,
+                raw_position_mm=0.1,
+                position_mm=-0.1,
+                load_g=0.2,
+            ),
         ]
 
         window._refresh_length_setup_plot()
@@ -16587,6 +16605,59 @@ def test_length_setup_plot_sorts_points_by_elapsed_time(tmp_path: Path, qtbot) -
             float(next_x) >= float(current_x)
             for current_x, next_x in zip(displacement_x, displacement_x[1:])
         )
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_plot_keeps_one_raw_position_origin_across_process_handoff(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_positive_motion_is_tension.setChecked(True)
+        window._current_position_mm = 1.85
+        window._effective_position_mm = 1.85
+        window._show_length_setup_dialog()
+        assert window._length_setup_position_origin_mm == pytest.approx(1.85)
+
+        base = window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=1.85,
+            effective_position_mm=1.85,
+            raw_load_g=0.0,
+            load_g=0.0,
+        )
+        # The visible process still carries its older session reference, while
+        # the child has already rebased its own MeasurementPoint.position_mm to
+        # zero.  Raw Tic coordinates remain continuous across the handoff.
+        window._length_setup_points = [
+            dataclasses.replace(
+                base,
+                elapsed_s=0.0,
+                raw_position_mm=1.85,
+                position_mm=1.85,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=1.0,
+                raw_position_mm=1.85,
+                position_mm=0.0,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=2.0,
+                raw_position_mm=1.80,
+                position_mm=-0.05,
+            ),
+        ]
+
+        window._refresh_length_setup_plot()
+
+        assert window._length_setup_displacement_curve is not None
+        _, displacement_y = window._length_setup_displacement_curve.getData()
+        assert list(displacement_y) == pytest.approx([0.0, 0.0, -0.05])
     finally:
         _close_test_window(window)
 
