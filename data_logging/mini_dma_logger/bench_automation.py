@@ -1072,6 +1072,7 @@ def run_mini_dma_bench_plan(
 
     run_summaries: list[dict[str, Any]] = []
     total_start_s = time.monotonic()
+    active_stage = "initializing"
 
     def _execute_summary(state: str) -> dict[str, Any]:
         return {
@@ -1090,12 +1091,18 @@ def run_mini_dma_bench_plan(
             },
             "planned_run_count": len(plan.runs),
             "run_count": len(run_summaries),
+            "active_stage": active_stage,
             "elapsed_s": max(0.0, time.monotonic() - total_start_s),
             "runs": list(run_summaries),
         }
 
     def _write_execute_summary(state: str = "running") -> None:
         _write_summary(plan.summary_path, _execute_summary(state))
+
+    def _set_active_stage(stage: str) -> None:
+        nonlocal active_stage
+        active_stage = stage
+        _write_execute_summary()
 
     _write_execute_summary()
     total_deadline_s = None
@@ -1115,6 +1122,7 @@ def run_mini_dma_bench_plan(
         bench_lock_context = nullcontext()
 
     with bench_lock_context:
+        _set_active_stage("creating_qapplication")
         app = app_factory(qt_args) if app_factory is not None else _ensure_qapplication(qt_args)
         factory = window_factory or MainWindow
         restore_warning = _suppress_modal_warnings()
@@ -1143,16 +1151,21 @@ def run_mini_dma_bench_plan(
                     )
                     _write_execute_summary()
                     continue
+                _set_active_stage(f"{run.name}:creating_window")
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _set_active_stage(f"{run.name}:waiting_for_serial_scan")
                     _wait_for_serial_port_scan(
                         window,
                         plan.hardware,
                         app=app,
                         sleep_fn=sleep_fn,
                     )
+                    _set_active_stage(f"{run.name}:applying_hardware_config")
                     _apply_hardware_config(window, plan.hardware)
+                    _set_active_stage(f"{run.name}:applying_sample_identity")
                     _apply_sample_identity(window, plan.sample_identity)
+                    _set_active_stage(f"{run.name}:executing_recipe")
                     run_summary = _execute_run(
                         run,
                         app=app,
@@ -1168,6 +1181,7 @@ def run_mini_dma_bench_plan(
                         and plan.guardrails.wire_break_stops_plan
                     ):
                         stop_after_wire_break = True
+                    active_stage = f"{run.name}:finished"
                     _write_execute_summary()
                 finally:
                     close = getattr(window, "close", None)
