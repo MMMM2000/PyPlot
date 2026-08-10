@@ -33379,8 +33379,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _first_overheating_preflight_allows_start(self) -> bool:
         self._first_overheating_preflight_decision = None
-        identity = self._current_tma_sample_identity()
         recipe_mode = str(self.combo_recipe_mode.currentData() or "")
+        first_overheating_enabled = (
+            self.check_constant_current_first_overheating.isChecked()
+            if self._is_constant_current_strain_sweep_mode(recipe_mode)
+            else self.check_current_sweep_first_overheating.isChecked()
+        )
+        # Previous-run evidence is needed only when first overheating is disabled.
+        # Avoid making a configured recipe wait for an unrelated cloud-history scan.
+        if first_overheating_enabled:
+            return True
+        identity = self._current_tma_sample_identity()
         history_found = self._has_previous_tma_measurement(identity)
         if self._tma_history_check_pending:
             self._tma_history_start_deferred = True
@@ -33394,11 +33403,6 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return False
         self._log_previous_tma_measurement_evidence(found=history_found)
-        first_overheating_enabled = (
-            self.check_constant_current_first_overheating.isChecked()
-            if self._is_constant_current_strain_sweep_mode(recipe_mode)
-            else self.check_current_sweep_first_overheating.isChecked()
-        )
         if not _first_overheating_preflight_required(
             recipe_mode=recipe_mode,
             first_overheating_enabled=first_overheating_enabled,

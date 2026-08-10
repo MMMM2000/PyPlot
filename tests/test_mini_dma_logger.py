@@ -3327,11 +3327,15 @@ def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists
         window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
             lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
         )
+        window._tma_history_scan_pending_root = window._current_tma_history_root()
         window.check_current_sweep_first_overheating.setChecked(True)
         assert window._first_overheating_preflight_allows_start() is True
         assert prompts == []
+        assert window._tma_history_check_pending is False
+        assert window._tma_history_start_deferred is False
 
         window.check_current_sweep_first_overheating.setChecked(False)
+        window._tma_history_scan_pending_root = None
         window._tma_history_records = (
             mini_dma_mod.TmaHistoryRecord(
                 identity=mini_dma_mod.TmaSampleIdentity(
