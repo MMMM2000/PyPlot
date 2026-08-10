@@ -5,3 +5,4 @@
 - Do not delay recipes that already enable first overheating on an unrelated completed-run history scan.
 - Make campaign-supervised runs load their recipe before deciding whether previous-run history is required, then hand that completed decision to the isolated start path instead of repeating the gate after sample identity changes.
 - Recover a shared-HMP bench lock only when its recorded controller PID is verified absent, allowing safe restart after an abnormal process exit without stealing a live controller's ownership.
+- Keep the external TMA safety supervisor from mistaking the first completed run in a multi-run validation plan for completion of the whole plan.

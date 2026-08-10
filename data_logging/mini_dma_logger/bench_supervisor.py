@@ -101,29 +101,39 @@ def _latest_run_finished_metadata(
     log_dir: Path | None,
     *,
     not_before_s: float,
+    expected_finished_count: int = 1,
 ) -> dict[str, Any] | None:
-    latest = _latest_run_dir(log_dir)
-    if latest is None:
+    if log_dir is None or not log_dir.exists():
         return None
-    metadata_path = Path(latest) / "metadata.json"
-    metadata = _read_json_if_exists(metadata_path)
-    if metadata is None or str(metadata.get("session_state") or "") != "finished":
+    finished: list[tuple[float, Path, dict[str, Any], float]] = []
+    for run_dir in log_dir.iterdir():
+        if not run_dir.is_dir() or run_dir.name == "metadata":
+            continue
+        metadata_path = run_dir / "metadata.json"
+        metadata = _read_json_if_exists(metadata_path)
+        if metadata is None or str(metadata.get("session_state") or "") != "finished":
+            continue
+        try:
+            mtime_s = metadata_path.stat().st_mtime
+            age_s = max(0.0, time.time() - mtime_s)
+        except Exception:
+            continue
+        if mtime_s < not_before_s - 1.0:
+            continue
+        finished.append((mtime_s, metadata_path, metadata, age_s))
+    expected_finished_count = max(1, int(expected_finished_count))
+    if len(finished) < expected_finished_count:
         return None
-    try:
-        mtime_s = metadata_path.stat().st_mtime
-        age_s = max(0.0, time.time() - mtime_s)
-    except Exception:
-        mtime_s = 0.0
-        age_s = 0.0
-    if mtime_s < not_before_s - 1.0:
-        return None
+    _mtime_s, metadata_path, metadata, age_s = max(finished, key=lambda item: item[0])
     if age_s < FINISHED_METADATA_CHILD_GRACE_S:
         return None
     return {
-        "run_dir": latest,
+        "run_dir": str(metadata_path.parent),
         "metadata_path": str(metadata_path),
         "stop": metadata.get("stop"),
         "age_s": age_s,
+        "finished_run_count": len(finished),
+        "expected_finished_count": expected_finished_count,
     }
 
 
@@ -386,7 +396,11 @@ def run_supervised_mini_dma_bench(
                 if child_returncode is not None:
                     break
                 time.sleep(max(0.1, float(poll_interval_s)))
-                finished_metadata = _latest_run_finished_metadata(plan.log_dir, not_before_s=started_wall_s)
+                finished_metadata = _latest_run_finished_metadata(
+                    plan.log_dir,
+                    not_before_s=started_wall_s,
+                    expected_finished_count=len(plan.runs),
+                )
                 if finished_metadata is not None:
                     child_returncode = _terminate_child_if_running(child)
                     supervisor_recovery = {
