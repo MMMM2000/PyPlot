@@ -877,6 +877,253 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
 
 
 
+@dataclass(frozen=True)
+class ReviewQueueEntry:
+    sample_label: str
+    run_label: str
+    builder: Callable[[QtWidgets.QWidget], PortableTransitionReviewDialog]
+    saved: bool = False
+
+    @property
+    def label(self) -> str:
+        return " · ".join(
+            part for part in (self.sample_label, self.run_label) if part
+        )
+
+
+class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
+    """Lazily navigate every sample, run, and cycle in one review popup."""
+
+    def __init__(
+        self,
+        entries: Sequence[ReviewQueueEntry],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.entries = list(entries)
+        self._editors: dict[int, PortableTransitionReviewDialog] = {}
+        self._run_items: list[QtWidgets.QTreeWidgetItem] = []
+        self._saved_indices: set[int] = set()
+        self._current_index: int | None = None
+        self.setWindowTitle("Transition review")
+        self.resize(1280, 720)
+        self.setMinimumSize(900, 560)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        hint = QtWidgets.QLabel(
+            "Select any sample, run, and cycle or stress target. "
+            "Measurements load only when first opened."
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        root.addWidget(splitter, 1)
+
+        navigation = QtWidgets.QWidget(splitter)
+        navigation.setMinimumWidth(250)
+        navigation.setMaximumWidth(390)
+        navigation_layout = QtWidgets.QVBoxLayout(navigation)
+        navigation_layout.setContentsMargins(0, 0, 4, 0)
+        navigation_layout.addWidget(QtWidgets.QLabel("Samples / runs / cycles"))
+        self.tree = QtWidgets.QTreeWidget(navigation)
+        self.tree.setHeaderLabels(["Sample / run / cycle", "Review"])
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.tree.header().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.tree.header().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        navigation_layout.addWidget(self.tree, 1)
+        splitter.addWidget(navigation)
+
+        self.editor_host = QtWidgets.QWidget(splitter)
+        self.editor_layout = QtWidgets.QVBoxLayout(self.editor_host)
+        self.editor_layout.setContentsMargins(0, 0, 0, 0)
+        self.placeholder = QtWidgets.QLabel("Select a sample or run to load its review.")
+        self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.editor_layout.addWidget(self.placeholder, 1)
+        splitter.addWidget(self.editor_host)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([310, 970])
+
+        footer = QtWidgets.QHBoxLayout()
+        self.status_label = QtWidgets.QLabel()
+        footer.addWidget(self.status_label, 1)
+        close_button = QtWidgets.QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        footer.addWidget(close_button)
+        root.addLayout(footer)
+
+        sample_items: dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for index, entry in enumerate(self.entries):
+            sample_label = entry.sample_label or "Unknown sample"
+            sample_item = sample_items.get(sample_label)
+            if sample_item is None:
+                sample_item = QtWidgets.QTreeWidgetItem([sample_label, ""])
+                sample_item.setData(
+                    0, QtCore.Qt.ItemDataRole.UserRole, ("sample", -1, -1)
+                )
+                self.tree.addTopLevelItem(sample_item)
+                sample_items[sample_label] = sample_item
+            status = "Saved" if entry.saved else "Not opened"
+            run_item = QtWidgets.QTreeWidgetItem(
+                [entry.run_label or entry.label, status]
+            )
+            run_item.setData(
+                0, QtCore.Qt.ItemDataRole.UserRole, ("run", index, -1)
+            )
+            sample_item.addChild(run_item)
+            sample_item.setExpanded(True)
+            self._run_items.append(run_item)
+        self.tree.currentItemChanged.connect(self._selection_changed)
+        self._update_status()
+        if self._run_items:
+            QtCore.QTimer.singleShot(
+                0, lambda: self.tree.setCurrentItem(self._run_items[0])
+            )
+
+    @property
+    def completed_count(self) -> int:
+        return len(self._saved_indices)
+
+    def _update_status(self, message: str = "") -> None:
+        saved_total = sum(
+            entry.saved or index in self._saved_indices
+            for index, entry in enumerate(self.entries)
+        )
+        summary = (
+            f"{len(self.entries)} run(s) · {saved_total} saved review(s) · "
+            f"{self.completed_count} saved in this session"
+        )
+        self.status_label.setText(f"{message}  {summary}".strip())
+
+    def _build_editor(self, run_index: int) -> PortableTransitionReviewDialog | None:
+        existing = self._editors.get(run_index)
+        if existing is not None:
+            return existing
+        entry = self.entries[run_index]
+        try:
+            editor = entry.builder(self.editor_host)
+        except Exception as exc:
+            self._run_items[run_index].setText(1, "Load failed")
+            self._run_items[run_index].setToolTip(0, str(exc))
+            self._update_status(f"Could not load {entry.label}: {exc}")
+            return None
+        editor.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        editor.target_panel.hide()
+        editor.heading.setText(
+            f"{entry.label} · saves {editor.sidecar_path.name} beside this measurement"
+        )
+        editor.save_button.setText("Save current run")
+        for button_box in editor.findChildren(QtWidgets.QDialogButtonBox):
+            cancel_button = button_box.button(
+                QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            )
+            if cancel_button is not None:
+                cancel_button.hide()
+        editor.accepted.connect(
+            lambda selected_index=run_index: self._editor_saved(selected_index)
+        )
+        self.editor_layout.addWidget(editor, 1)
+        editor.hide()
+        self._editors[run_index] = editor
+
+        top_item = self._run_items[run_index]
+        blocker = QtCore.QSignalBlocker(self.tree)
+        try:
+            while top_item.childCount():
+                top_item.removeChild(top_item.child(0))
+            for navigation_row in range(editor.target_list.count()):
+                child = QtWidgets.QTreeWidgetItem(
+                    [editor.target_list.item(navigation_row).text(), ""]
+                )
+                child.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    ("unit", run_index, navigation_row),
+                )
+                top_item.addChild(child)
+            top_item.setExpanded(True)
+            if top_item.text(1) == "Not opened":
+                top_item.setText(1, "Open")
+        finally:
+            del blocker
+        return editor
+
+    def _show_editor(self, run_index: int, navigation_row: int = 0) -> None:
+        if self._current_index is not None:
+            current = self._editors.get(self._current_index)
+            if current is not None:
+                current._store_target_controls()  # noqa: SLF001
+                current.hide()
+        editor = self._build_editor(run_index)
+        if editor is None:
+            return
+        self.placeholder.hide()
+        self._current_index = run_index
+        if editor.target_list.count():
+            navigation_row = min(
+                max(int(navigation_row), 0), editor.target_list.count() - 1
+            )
+            editor.target_list.setCurrentRow(navigation_row)
+        editor.show()
+        self._update_status(self.entries[run_index].label)
+
+    def _selection_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        ref = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(ref, tuple) or len(ref) != 3:
+            return
+        kind, run_index, navigation_row = ref
+        run_index = int(run_index)
+        if kind == "sample":
+            if current.childCount():
+                self.tree.setCurrentItem(current.child(0))
+            return
+        if kind == "run":
+            editor = self._build_editor(run_index)
+            if editor is None:
+                return
+            top_item = self._run_items[run_index]
+            if top_item.childCount():
+                self.tree.setCurrentItem(top_item.child(0))
+                return
+            self._show_editor(run_index, 0)
+            return
+        self._show_editor(run_index, int(navigation_row))
+
+    def _editor_saved(self, run_index: int) -> None:
+        self._saved_indices.add(run_index)
+        self._run_items[run_index].setText(1, "Saved")
+        self._update_status(f"Saved {self.entries[run_index].label}.")
+        next_index = run_index + 1
+        if next_index < len(self._run_items):
+            self.tree.setCurrentItem(self._run_items[next_index])
+            return
+        editor = self._editors.get(run_index)
+        if editor is not None:
+            editor.show()
+
+    def accept(self) -> None:
+        if self._current_index is not None:
+            editor = self._editors.get(self._current_index)
+            if editor is not None:
+                editor._store_target_controls()  # noqa: SLF001
+        super().accept()
+
 def _current_annealing_cycle_series(
     frame: pd.DataFrame,
 ) -> dict[str, tuple[pd.Series, pd.Series]]:
@@ -911,13 +1158,12 @@ def _current_annealing_cycle_series(
         result[f"Cycle {cycle}"] = (trace["I_mA"], trace["R_Ohm"])
     return result
 
-def review_current_annealing_file(
+def _build_current_annealing_review_dialog(
     parent: QtWidgets.QWidget,
     measurement_path: Path,
     *,
     sample: Mapping[str, Any] | None = None,
-    queue_position: tuple[int, int] | None = None,
-) -> bool:
+) -> PortableTransitionReviewDialog:
     path = Path(measurement_path)
     sidecar = sidecar_path_for_measurement(path, family="current_annealing")
     draft = current_annealing_review_draft(path, sample=sample)
@@ -932,17 +1178,28 @@ def review_current_annealing_file(
         "Resistance (ohm)",
         unit_series=_current_annealing_cycle_series(frame),
     )
-    dialog = PortableTransitionReviewDialog(payload, {"graph": plot}, sidecar, parent)
+    return PortableTransitionReviewDialog(
+        payload, {"graph": plot}, sidecar, parent
+    )
+
+
+def review_current_annealing_file(
+    parent: QtWidgets.QWidget,
+    measurement_path: Path,
+    *,
+    sample: Mapping[str, Any] | None = None,
+    queue_position: tuple[int, int] | None = None,
+) -> bool:
+    dialog = _build_current_annealing_review_dialog(
+        parent, measurement_path, sample=sample
+    )
     _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
 
-
-def review_tma_run(
+def _build_tma_review_dialog(
     parent: QtWidgets.QWidget,
     run_path: Path,
-    *,
-    queue_position: tuple[int, int] | None = None,
-) -> bool:
+) -> PortableTransitionReviewDialog:
     run_dir = Path(run_path)
     sidecar = sidecar_path_for_measurement(run_dir, family="tma")
     draft = tma_review_draft(run_dir)
@@ -984,7 +1241,16 @@ def review_tma_run(
                 **({"l0_mm": l0_mm} if l0_mm is not None else {}),
             },
         )
-    dialog = PortableTransitionReviewDialog(payload, plots, sidecar, parent)
+    return PortableTransitionReviewDialog(payload, plots, sidecar, parent)
+
+
+def review_tma_run(
+    parent: QtWidgets.QWidget,
+    run_path: Path,
+    *,
+    queue_position: tuple[int, int] | None = None,
+) -> bool:
+    dialog = _build_tma_review_dialog(parent, run_path)
     _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
 
@@ -1004,43 +1270,86 @@ def _apply_queue_context(
     dialog.save_button.setText("Save && next" if index < total else "Save review")
 
 
+def _queue_labels(
+    path: Path,
+    sample: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    sample = sample if isinstance(sample, Mapping) else {}
+    explicit_sample = str(sample.get("sample") or "").strip()
+    composition = str(sample.get("composition") or "").strip()
+    microwire = str(sample.get("microwire") or "").strip()
+    sample_label = explicit_sample or " ".join(
+        part for part in (composition, microwire) if part
+    )
+    if not sample_label:
+        sample_label = path.parent.name if path.is_file() else path.name
+    run_label = path.stem if path.is_file() else path.name
+    if run_label == sample_label:
+        run_label = "Measurement"
+    return sample_label or "Unknown sample", run_label
+
+
 def review_current_annealing_files(
     parent: QtWidgets.QWidget,
     measurement_paths: Sequence[Path],
     *,
     sample_for_path: Callable[[Path], Mapping[str, Any] | None] | None = None,
 ) -> int:
-    paths = [Path(path) for path in measurement_paths]
-    completed = 0
-    for index, path in enumerate(paths, start=1):
+    entries: list[ReviewQueueEntry] = []
+    for path_value in measurement_paths:
+        path = Path(path_value)
         sample = sample_for_path(path) if sample_for_path is not None else None
-        if not review_current_annealing_file(
-            parent,
-            path,
-            sample=sample,
-            queue_position=(index, len(paths)),
-        ):
-            break
-        completed += 1
-    return completed
+        sample_label, run_label = _queue_labels(path, sample)
+        sidecar = sidecar_path_for_measurement(path, family="current_annealing")
+        entries.append(
+            ReviewQueueEntry(
+                sample_label=sample_label,
+                run_label=run_label,
+                saved=sidecar.exists(),
+                builder=lambda owner, selected_path=path, selected_sample=sample: _build_current_annealing_review_dialog(
+                    owner, selected_path, sample=selected_sample
+                ),
+            )
+        )
+    if not entries:
+        return 0
+    dialog = PortableTransitionReviewQueueDialog(entries, parent)
+    dialog.exec()
+    return dialog.completed_count
 
 
-def review_tma_runs(parent: QtWidgets.QWidget, run_paths: Sequence[Path]) -> int:
-    paths = [Path(path) for path in run_paths]
-    completed = 0
-    for index, path in enumerate(paths, start=1):
-        if not review_tma_run(
-            parent,
-            path,
-            queue_position=(index, len(paths)),
-        ):
-            break
-        completed += 1
-    return completed
-
+def review_tma_runs(
+    parent: QtWidgets.QWidget,
+    run_paths: Sequence[Path],
+    *,
+    sample_for_path: Callable[[Path], Mapping[str, Any] | None] | None = None,
+) -> int:
+    entries: list[ReviewQueueEntry] = []
+    for path_value in run_paths:
+        path = Path(path_value)
+        sample = sample_for_path(path) if sample_for_path is not None else None
+        sample_label, run_label = _queue_labels(path, sample)
+        sidecar = sidecar_path_for_measurement(path, family="tma")
+        entries.append(
+            ReviewQueueEntry(
+                sample_label=sample_label,
+                run_label=run_label,
+                saved=sidecar.exists(),
+                builder=lambda owner, selected_path=path: _build_tma_review_dialog(
+                    owner, selected_path
+                ),
+            )
+        )
+    if not entries:
+        return 0
+    dialog = PortableTransitionReviewQueueDialog(entries, parent)
+    dialog.exec()
+    return dialog.completed_count
 
 __all__ = [
     "PortableTransitionReviewDialog",
+    "PortableTransitionReviewQueueDialog",
+    "ReviewQueueEntry",
     "ReviewPlot",
     "review_current_annealing_file",
     "review_current_annealing_files",

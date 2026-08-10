@@ -853,48 +853,119 @@ def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     assert tma_draft["targets"][0]["final_values"] == {}
 
 
-def test_review_queue_is_lazy_and_stops_after_cancel(tmp_path, monkeypatch) -> None:
-    from plotting.shared import transition_review_dialog as review_dialog
-
-    first = tmp_path / "first" / "measurement.txt"
-    second = tmp_path / "second" / "measurement.txt"
-    third = tmp_path / "third" / "measurement.txt"
-    calls = []
-
-    def fake_review(parent, path, *, sample=None, queue_position=None):
-        calls.append((path, sample, queue_position))
-        return path != second
-
-    monkeypatch.setattr(review_dialog, "review_current_annealing_file", fake_review)
-
-    completed = review_dialog.review_current_annealing_files(
-        None,
-        [first, second, third],
-        sample_for_path=lambda path: {"sample": path.parent.name},
+def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        PortableTransitionReviewQueueDialog,
+        ReviewPlot,
+        ReviewQueueEntry,
     )
 
-    assert completed == 1
-    assert calls == [
-        (first, {"sample": "first"}, (1, 3)),
-        (second, {"sample": "second"}, (2, 3)),
+    built: list[str] = []
+
+    def builder(sample: str, sidecar_name: str):
+        def build(parent):
+            built.append(sample)
+            frame = pd.DataFrame(
+                {"I_mA": [10.0, 20.0, 10.0], "R_Ohm": [180.0, 160.0, 181.0]}
+            )
+            fingerprint = dataframe_fingerprint(
+                frame,
+                namespace=f"queue-{sample}",
+                columns=("I_mA", "R_Ohm"),
+            )
+            target = make_target(
+                family="current_annealing",
+                measurement_fingerprint=fingerprint,
+                target_key="graph",
+                auto_values={
+                    "As1": 12.0,
+                    "Af1": 18.0,
+                    "Ms1": 16.0,
+                    "Mf1": 11.0,
+                    "As2": 13.0,
+                    "Af2": 19.0,
+                    "Ms2": 17.0,
+                    "Mf2": 12.0,
+                },
+            )
+            payload = make_review(
+                family="current_annealing",
+                measurement_fingerprint=fingerprint,
+                targets=[target],
+            )
+            plot = ReviewPlot(
+                frame["I_mA"], frame["R_Ohm"], sample, "Resistance (ohm)"
+            )
+            return PortableTransitionReviewDialog(
+                payload, {"graph": plot}, tmp_path / sidecar_name, parent
+            )
+
+        return build
+
+    dialog = PortableTransitionReviewQueueDialog(
+        [
+            ReviewQueueEntry("Sample A", "100 mA", builder("Sample A", "a.json")),
+            ReviewQueueEntry("Sample B", "60 mA", builder("Sample B", "b.json")),
+        ]
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.wait(30)
+
+    assert dialog.tree.topLevelItemCount() == 2
+    sample_a = dialog.tree.topLevelItem(0)
+    sample_b = dialog.tree.topLevelItem(1)
+    assert sample_a.text(0) == "Sample A"
+    assert sample_b.text(0) == "Sample B"
+    assert built == ["Sample A"]
+    run_a = sample_a.child(0)
+    assert run_a.text(0) == "100 mA"
+    assert [run_a.child(index).text(0) for index in range(run_a.childCount())] == [
+        "Cycle 1",
+        "Cycle 2",
     ]
 
+    run_b = sample_b.child(0)
+    dialog.tree.setCurrentItem(run_b)
+    qtbot.wait(20)
+    assert built == ["Sample A", "Sample B"]
+    assert [run_b.child(index).text(0) for index in range(run_b.childCount())] == [
+        "Cycle 1",
+        "Cycle 2",
+    ]
+    dialog.tree.setCurrentItem(run_b.child(1))
+    qtbot.wait(10)
+    assert dialog._editors[1].target_list.currentRow() == 1  # noqa: SLF001
 
-def test_tma_review_queue_reports_each_run_position(tmp_path, monkeypatch) -> None:
+
+def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> None:
     from plotting.shared import transition_review_dialog as review_dialog
 
-    run_dirs = [tmp_path / "run-a", tmp_path / "run-b"]
-    calls = []
+    captured = []
 
-    def fake_review(parent, path, *, queue_position=None):
-        calls.append((path, queue_position))
-        return True
+    class FakeQueue:
+        def __init__(self, entries, parent):
+            captured.append((list(entries), parent))
+            self.completed_count = len(entries)
 
-    monkeypatch.setattr(review_dialog, "review_tma_run", fake_review)
+        def exec(self):
+            return 0
 
-    assert review_dialog.review_tma_runs(None, run_dirs) == 2
-    assert calls == [(run_dirs[0], (1, 2)), (run_dirs[1], (2, 2))]
+    monkeypatch.setattr(review_dialog, "PortableTransitionReviewQueueDialog", FakeQueue)
+    ca_paths = [tmp_path / "Sample A" / "100mA.txt", tmp_path / "Sample B" / "60mA.txt"]
+    completed = review_dialog.review_current_annealing_files(
+        None,
+        ca_paths,
+        sample_for_path=lambda path: {"sample": path.parent.name},
+    )
+    assert completed == 2
+    assert [entry.sample_label for entry in captured[0][0]] == ["Sample A", "Sample B"]
 
+    tma_paths = [tmp_path / "Sample C", tmp_path / "Sample D"]
+    completed = review_dialog.review_tma_runs(None, tma_paths)
+    assert completed == 2
+    assert [entry.sample_label for entry in captured[1][0]] == ["Sample C", "Sample D"]
 
 def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatch) -> None:
     import logging

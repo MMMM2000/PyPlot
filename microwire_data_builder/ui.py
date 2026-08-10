@@ -27465,7 +27465,26 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def _review(self, paths: Sequence[Path]) -> int:
         from plotting.shared.transition_review_dialog import review_current_annealing_files
 
-        completed = review_current_annealing_files(self, paths)
+        records_by_path = {
+            record.path: record
+            for record in self._records()
+            if isinstance(getattr(record, "path", None), Path)
+        }
+
+        def sample_for_path(path: Path) -> Dict[str, Any] | None:
+            record = records_by_path.get(path)
+            metadata = getattr(record, "metadata", None)
+            if metadata is None:
+                return None
+            composition = str(getattr(metadata, "composition_token", "") or "").strip()
+            draw = getattr(metadata, "draw_x", None)
+            piece = getattr(metadata, "piece_y", None)
+            microwire = f"{draw}/{piece}" if draw is not None and piece is not None else ""
+            return {"composition": composition, "microwire": microwire}
+
+        completed = review_current_annealing_files(
+            self, paths, sample_for_path=sample_for_path
+        )
         section = self._section()
         if completed and section is not None:
             section._prune_transition_reviews(store=True)
@@ -27557,8 +27576,21 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def _review(self, paths: Sequence[Path]) -> int:
         from plotting.shared.transition_review_dialog import review_tma_runs
 
-        completed = review_tma_runs(self, paths)
         records = self._records()
+        records_by_path = {
+            record.path: record
+            for record in records
+            if isinstance(getattr(record, "path", None), Path)
+        }
+        completed = review_tma_runs(
+            self,
+            paths,
+            sample_for_path=lambda path: {
+                "sample": str(
+                    getattr(records_by_path.get(path), "sample", "") or ""
+                ).strip()
+            },
+        )
         if completed and self._mini_dma_section._reconcile_transition_reviews(records):
             self._mini_dma_section._schedule_transition_review_store()
             self._mini_dma_section._schedule_transition_table_apply()

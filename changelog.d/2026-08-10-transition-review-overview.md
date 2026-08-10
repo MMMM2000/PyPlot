@@ -1,6 +1,6 @@
 ### Changed
 
-- Unify Current Annealing, VSM, and TMA transition pages around compact searchable result tables, move VSM graph review into a popup, and navigate Current Annealing cycles from a sidebar with cycle-specific traces.
+- Unify Current Annealing, VSM, and TMA transition pages around compact searchable result tables, move VSM graph review into a popup, and navigate samples, runs, and cycles or stress targets from one lazy-loading sidebar with cycle-specific Current Annealing traces.
 
 ### Fixed
 
