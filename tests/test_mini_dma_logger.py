@@ -35084,6 +35084,7 @@ def test_cycle_center_classifier_requires_repeated_balanced_target_crossings(
 
         assert state.classification == "centered_fluctuation"
         assert state.balanced_crossings is True
+        assert state.suppression_allowed is True
         assert state.crossing_count >= 3
         assert state.above_fraction >= 0.15
         assert state.below_fraction >= 0.15
@@ -35126,6 +35127,7 @@ def test_cycle_center_classifier_rejects_one_sided_stationary_noise(
 
         assert state.balanced_crossings is False
         assert state.classification != "centered_fluctuation"
+        assert state.suppression_allowed is False
     finally:
         _close_test_window(window)
 

@@ -22533,6 +22533,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_cycle_center_motor_suppression_enabled
             and stationary
             and not fast_veto
+            and balanced_crossings
             and abs(error_value) <= center_band
         )
         return CurrentHoldCycleCenterState(
