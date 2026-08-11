@@ -8100,6 +8100,13 @@ def build_database(
             path_text = repr(record)
         return f"{path_text}::"
 
+    def _mini_dma_transition_target_from_text(line: object) -> str:
+        text = str(line or "").strip()
+        match = re.search(r":\s*(?:As|Af|Ms|Mf)\s+", text, flags=re.IGNORECASE)
+        if match is None:
+            return ""
+        return text[: match.start()].strip()
+
     def _mini_dma_transition_status_for_records(
         records: Sequence[MiniDmaRecord],
     ) -> Tuple[str, str]:
@@ -8111,7 +8118,7 @@ def build_database(
             prefix = _mini_dma_review_record_prefix(record)
             target_labels: List[str] = []
             for line in getattr(record, "transition_summary", ()) or ():
-                target = str(line).split(":", 1)[0].strip()
+                target = _mini_dma_transition_target_from_text(line)
                 if target and target not in target_labels:
                     target_labels.append(target)
             matching_reviews: Dict[str, Mapping[str, object]] = {}

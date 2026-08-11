@@ -6569,6 +6569,16 @@ def _format_mini_dma_transition_review_line(
     return f"{target_label}: {', '.join(parts)}"
 
 
+def _mini_dma_transition_target_from_text(line: object) -> str:
+    """Extract a TMA target label without truncating labels such as 1st:."""
+
+    text = str(line or "").strip()
+    match = re.search(r":\s*(?:As|Af|Ms|Mf)\s+", text, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    return text[: match.start()].strip()
+
+
 def _mini_dma_transition_values_from_text(line: object) -> Dict[str, float]:
     """Parse cached TMA transition-summary text without reloading a raw run."""
 
@@ -11581,7 +11591,9 @@ def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[Min
             labels = [str(value) for value in raw_labels]
         else:
             labels = []
-        sample = _row_sample_value(row) or "TMA"
+        sample = str(row.get("_sample") or "").strip()
+        if not sample:
+            sample = _row_sample_value(row) or "TMA"
         raw_key = str(row.get("_group_key") or "").strip()
         parsed_key = _microwire_key_from_string(raw_key) if raw_key else None
         for position, raw_source in enumerate(sources):
@@ -11849,17 +11861,17 @@ def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
     frame = section.model.frame() if hasattr(section, "model") else None
     if not isinstance(frame, pd.DataFrame):
         return
-    sample_columns: List[str] = []
+    visible_sample_columns: List[str] = []
     for column in frame.columns:
         normalized = str(column).strip().lower()
-        if normalized in {"sample", "_sample"}:
-            sample_columns.append(str(column))
-    if not sample_columns:
+        if normalized == "sample":
+            visible_sample_columns.append(str(column))
+    if not visible_sample_columns:
         return
     cleaned = frame.copy()
-    if "_sample" not in cleaned.columns and sample_columns:
-        cleaned["_sample"] = cleaned[sample_columns[0]]
-    cleaned = cleaned.drop(columns=sample_columns)
+    if "_sample" not in cleaned.columns:
+        cleaned["_sample"] = cleaned[visible_sample_columns[0]]
+    cleaned = cleaned.drop(columns=visible_sample_columns)
     try:
         section.data.table = cleaned
     except Exception:
@@ -21381,7 +21393,6 @@ class TransitionTempsSection(QtWidgets.QWidget):
             pass
 
     def _refresh_record_groups(self) -> None:
-        self._auto_values_cache.clear()
         grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
         payload = None
         all_records: List[VsmTemperatureScanRecord] = []
@@ -21405,6 +21416,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 all_records.append(record)
                 seen.add(marker)
         self._all_transition_records = all_records
+        valid_review_ids = {
+            _vsm_transition_review_record_id(record) for record in all_records
+        }
+        self._auto_values_cache = {
+            key: value
+            for key, value in self._auto_values_cache.items()
+            if key in valid_review_ids
+        }
         current_records_by_id = {id(record): record for record in all_records}
         self._review_content_identity_cache = {
             key: value
@@ -21470,6 +21489,20 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return {}
         return self._clean_transition_review_payload(record_id, payload)
 
+    def _available_auto_values_for_record(
+        self,
+        record: VsmTemperatureScanRecord,
+    ) -> Dict[str, float]:
+        record_id = _vsm_transition_review_record_id(record)
+        cached = self._auto_values_cache.get(record_id)
+        if cached is not None:
+            return dict(cached)
+        review = self._review_payload_for_record(record)
+        saved = _clean_vsm_transition_values(review.get("auto_values_C"))
+        if saved:
+            self._auto_values_cache[record_id] = dict(saved)
+        return saved
+
     def _auto_values_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, float]:
         record_id = _vsm_transition_review_record_id(record)
         try:
@@ -21491,6 +21524,9 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 record=record_id,
             )
             return dict(cached)
+        saved = self._available_auto_values_for_record(record)
+        if saved:
+            return saved
         processor = _get_vsm_temp_processor(self.logger)
         if processor is None:
             return {}
@@ -21585,7 +21621,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED and manual:
             return manual
         if status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
-            return final or self._auto_values_for_record(record)
+            saved_auto = _clean_vsm_transition_values(
+                review.get("auto_values_C") if isinstance(review, Mapping) else None
+            )
+            return final or saved_auto or self._auto_values_for_record(record)
         if final and bool(review.get("included")):
             return final
         return {}
@@ -21594,10 +21633,16 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self,
         record: VsmTemperatureScanRecord,
         payload: Mapping[str, Any] | None = None,
+        *,
+        compute_auto: bool = True,
     ) -> str:
         review = payload if isinstance(payload, Mapping) else self._review_payload_for_record(record)
         values = self._values_for_record(record, review)
-        auto_values = self._auto_values_for_record(record)
+        auto_values = (
+            self._auto_values_for_record(record)
+            if compute_auto
+            else self._available_auto_values_for_record(record)
+        )
         status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
         return _transition_review_status_label(
             status,
@@ -21608,6 +21653,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
     def _review_counts_for_records(
         self,
         records: Sequence[VsmTemperatureScanRecord],
+        *,
+        compute_auto: bool = False,
     ) -> Dict[str, int]:
         counts = {
             "total": len(records),
@@ -21621,8 +21668,17 @@ class TransitionTempsSection(QtWidgets.QWidget):
         }
         for record in records:
             payload = self._review_payload_for_record(record)
-            status_label = self._status_for_record(record, payload)
-            if self._auto_values_for_record(record):
+            status_label = self._status_for_record(
+                record,
+                payload,
+                compute_auto=compute_auto,
+            )
+            auto_values = (
+                self._auto_values_for_record(record)
+                if compute_auto
+                else self._available_auto_values_for_record(record)
+            )
+            if auto_values:
                 counts["auto_candidates"] += 1
             if status_label == "Accepted":
                 counts["accepted"] += 1
@@ -21757,6 +21813,18 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 return cleaned
         return {}
 
+    def _available_auto_values_for_records(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Dict[str, float]:
+        for record in records:
+            if _vsm_transition_review_blocks_values(self._review_payload_for_record(record)):
+                continue
+            cleaned = self._available_auto_values_for_record(record)
+            if cleaned:
+                return cleaned
+        return {}
+
     def _auto_estimated_transition_count(
         self,
         frame: pd.DataFrame,
@@ -21777,7 +21845,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if not isinstance(key, str) or not key.strip():
                 continue
             records = self._record_groups.get(key, [])
-            if self._auto_values_for_records(records):
+            if self._available_auto_values_for_records(records):
                 count += 1
         return count
 
@@ -26192,7 +26260,8 @@ class MiniDmaSection(MiniDatabaseSection):
         self._load_transition_reviews()
         if _has_lazy_project_payloads(payload):
             self._set_record_groups(
-                _mini_dma_records_from_project_table(self.model.frame())
+                _mini_dma_records_from_project_table(self.model.frame()),
+                reconcile_reviews=False,
             )
         else:
             self._refresh_record_groups()
@@ -26214,7 +26283,12 @@ class MiniDmaSection(MiniDatabaseSection):
         records = list(payload) if isinstance(payload, list) else []
         self._set_record_groups(records)
 
-    def _set_record_groups(self, records: Sequence[MiniDmaRecord]) -> None:
+    def _set_record_groups(
+        self,
+        records: Sequence[MiniDmaRecord],
+        *,
+        reconcile_reviews: bool = True,
+    ) -> None:
         grouped: Dict[str, List[MiniDmaRecord]] = {}
         records = list(records)
         self._all_mini_dma_records = records
@@ -26224,7 +26298,7 @@ class MiniDmaSection(MiniDatabaseSection):
             for key, value in self._review_content_identity_cache.items()
             if current_records_by_id.get(key) is value[0]
         }
-        if self._reconcile_transition_reviews(records):
+        if reconcile_reviews and self._reconcile_transition_reviews(records):
             self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
                 "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
                 "records": self.transition_reviews_snapshot(),
@@ -26754,7 +26828,7 @@ class MiniDmaSection(MiniDatabaseSection):
             ]
             target_labels: List[str] = []
             for line in existing_lines:
-                target_label = line.split(":", 1)[0].strip()
+                target_label = _mini_dma_transition_target_from_text(line)
                 if target_label and target_label not in target_labels:
                     target_labels.append(target_label)
             for payload in reviews.values():
@@ -26763,7 +26837,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     target_labels.append(target_label)
             reviewed_lines: List[str] = []
             for line in existing_lines:
-                target_label = line.split(":", 1)[0].strip()
+                target_label = _mini_dma_transition_target_from_text(line)
                 review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
                 status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
                 if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
@@ -26779,7 +26853,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 if line not in reviewed_lines:
                     reviewed_lines.append(line)
             for target_label in target_labels:
-                if any(line.split(":", 1)[0].strip() == target_label for line in reviewed_lines):
+                if any(_mini_dma_transition_target_from_text(line) == target_label for line in reviewed_lines):
                     continue
                 review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
                 if not isinstance(review, Mapping):
@@ -26947,23 +27021,11 @@ class DmaTransitionsSection(QtWidgets.QWidget):
         for record in records:
             cached_targets: Dict[str, Tuple[str, Dict[str, float]]] = {}
             for line in getattr(record, "transition_summary", ()) or ():
-                target_label = str(line).split(":", 1)[0].strip()
+                target_label = _mini_dma_transition_target_from_text(line)
                 if not target_label:
                     continue
                 cached_targets[target_label] = (str(line), _mini_dma_transition_values_from_text(line))
-            try:
-                detected_entries = _mini_dma_transition_review_entries([record], logging.getLogger(__name__))
-            except Exception:
-                detected_entries = []
-            for entry in detected_entries:
-                auto_values = _mini_dma_transition_values_from_summary(entry.target_summary)
-                cached_targets.setdefault(
-                    entry.target_label,
-                    (
-                        _format_mini_dma_transition_review_line(entry.target_label, auto_values),
-                        auto_values,
-                    ),
-                )
+
             run_id_prefix = f"{_MiniDmaTransitionReviewDialog._run_key(record)}::"
             if isinstance(reviews, Mapping):
                 for record_id, payload in reviews.items():
@@ -27470,6 +27532,21 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
             sample = " ".join(part for part in (composition, microwire) if part)
             if not sample:
                 sample = str(getattr(record, "sample", "") or "").strip()
+            if not sample:
+                metadata = getattr(record, "metadata", None)
+                composition = str(
+                    getattr(metadata, "composition_token", "") or ""
+                ).strip()
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                microwire = (
+                    f"{draw}/{piece}"
+                    if draw is not None and piece is not None
+                    else ""
+                )
+                sample = " ".join(
+                    part for part in (composition, microwire) if part
+                )
             if not sample and path is not None:
                 sample = path.parent.name
             run_label = str(review.get("graph_label") or "").strip()
@@ -27545,7 +27622,10 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
         if isinstance(frame, pd.DataFrame) and not frame.empty:
             records = _mini_dma_records_from_project_table(frame)
             if records:
-                self._mini_dma_section._set_record_groups(records)
+                self._mini_dma_section._set_record_groups(
+                    records,
+                    reconcile_reviews=False,
+                )
         return records
 
     def _paths(self) -> List[Path]:  # type: ignore[override]
@@ -27562,7 +27642,7 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
         for record in self._records():
             targets: Dict[str, Dict[str, float]] = {}
             for line in getattr(record, "transition_summary", ()) or ():
-                target_label = str(line).split(":", 1)[0].strip()
+                target_label = _mini_dma_transition_target_from_text(line)
                 if target_label:
                     targets[target_label] = _mini_dma_transition_values_from_text(line)
             prefix = f"{_MiniDmaTransitionReviewDialog._run_key(record)}::"
@@ -27574,7 +27654,7 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
                     if target_label:
                         targets.setdefault(target_label, {})
             if not targets:
-                targets["Transition target"] = {}
+                continue
             path = getattr(record, "path", None)
             path = path if isinstance(path, Path) else None
             for target_label, auto_values in targets.items():
@@ -27701,7 +27781,10 @@ class _VsmTransitionReviewPanel(QtWidgets.QWidget):
             records = sorted(self._section._record_groups.get(group_key, []), key=_record_label_for_display)
             for record in records:
                 record_id = _vsm_transition_review_record_id(record)
-                status = self._section._status_for_record(record)
+                status = self._section._status_for_record(
+                    record,
+                    compute_auto=False,
+                )
                 label = " | ".join(
                     part
                     for part in (
@@ -27817,6 +27900,64 @@ class _VsmTransitionReviewPanel(QtWidgets.QWidget):
         self._refresh_current_item()
 
 
+_VSM_TRANSITION_SCAN_SUFFIX_RE = re.compile(
+    r"-(?P<target>RT|T[+-]?\d+)-\d+$",
+    re.IGNORECASE,
+)
+
+
+def _vsm_transition_cycle_count(record: VsmTemperatureScanRecord) -> int | None:
+    frame = getattr(record, "data", None)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    if "section_index" not in frame.columns or "temperature" not in frame.columns:
+        return None
+    directions: List[str] = []
+    for _section_index, segment in frame.groupby("section_index", sort=False):
+        temperatures = pd.to_numeric(segment["temperature"], errors="coerce").dropna()
+        if len(temperatures.index) < 2:
+            continue
+        delta = float(temperatures.iloc[-1] - temperatures.iloc[0])
+        if math.isclose(delta, 0.0, abs_tol=1e-9):
+            continue
+        directions.append("up" if delta > 0.0 else "down")
+    heating = directions.count("up")
+    cooling = directions.count("down")
+    if heating and cooling:
+        return min(heating, cooling)
+    return max(heating, cooling) or None
+
+
+def _vsm_transition_cycle_target_label(value: object) -> str:
+    """Return an honest cycle-count and temperature-target label for a VSM scan."""
+
+    record = value if isinstance(value, VsmTemperatureScanRecord) else None
+    if record is not None:
+        raw_label = _record_label_for_display(record)
+    else:
+        raw_label = str(value or "").strip()
+        raw_label = Path(raw_label).stem if raw_label else ""
+    match = _VSM_TRANSITION_SCAN_SUFFIX_RE.search(raw_label)
+    target = ""
+    if match is not None:
+        raw_target = match.group("target").upper()
+        if raw_target == "RT":
+            target = "RT"
+        else:
+            try:
+                target = f"{int(raw_target[1:])} °C"
+            except (TypeError, ValueError):
+                target = raw_target
+    cycle_count = _vsm_transition_cycle_count(record) if record is not None else None
+    if cycle_count == 1:
+        prefix = "Cycle 1"
+    elif cycle_count and cycle_count > 1:
+        prefix = f"{cycle_count} cycles"
+    else:
+        prefix = "Temperature scan"
+    return " · ".join(part for part in (prefix, target) if part)
+
+
 class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def __init__(
         self,
@@ -27862,7 +28003,10 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
             seen.add(record_id)
             review = reviews.get(record_id, {})
             values = self._review_values(review)
-            status = self._section._status_for_record(record)
+            status = self._section._status_for_record(
+                record,
+                compute_auto=False,
+            )
             key = getattr(record, "key", None)
             if isinstance(key, tuple) and len(key) >= 3:
                 composition, microwire = _microwire_info_from_key(
@@ -27877,7 +28021,7 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
                 {
                     "sample": sample,
                     "run": _record_label_for_display(record),
-                    "target": "Temperature scan",
+                    "target": _vsm_transition_cycle_target_label(record),
                     "status": status,
                     "As": values.get("As"),
                     "Af": values.get("Af"),
@@ -27903,7 +28047,11 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
                 {
                     "sample": str(review.get("sample") or review.get("group_key") or "").strip(),
                     "run": str(review.get("record_label") or (path.name if path else record_id)),
-                    "target": "Temperature scan",
+                    "target": _vsm_transition_cycle_target_label(
+                        review.get("record_label")
+                        or review.get("record_path")
+                        or record_id
+                    ),
                     "status": status,
                     "As": values.get("As"),
                     "Af": values.get("Af"),
