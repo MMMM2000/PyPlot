@@ -24606,6 +24606,59 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         _close_test_window(window)
 
 
+def test_ui_telemetry_flush_failure_does_not_stop_authoritative_session(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("ui_telemetry_flush_failure")
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    class _FailingFlushHandle:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def flush(self) -> None:
+            raise OSError(22, "synthetic invalid telemetry handle")
+
+        def close(self) -> None:
+            self.wrapped.close()
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        original_handle = window._session_ui_telemetry_handle
+        window._session_ui_telemetry_handle = _FailingFlushHandle(original_handle)
+        window._session_ui_telemetry_count = 9
+
+        window._write_ui_telemetry_sample(
+            started_s=window._session_start_monotonic + 0.2,
+            finished_s=window._session_start_monotonic + 0.21,
+            previous_ui_s=window._session_start_monotonic,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            live_plot_sample_recorded=True,
+            dashboard_plot_refreshed=False,
+        )
+
+        assert window._session_active is True
+        assert window._session_ui_telemetry_writer is None
+        assert window._session_ui_telemetry_handle is None
+        assert window._session_ui_telemetry_error is not None
+        assert "authoritative control and measurement logging continue" in window.log_output.toPlainText()
+
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_completed"
+        assert payload["logging"]["ui_telemetry_complete"] is False
+        assert payload["logging"]["ui_telemetry_error"]["error_type"] == "OSError"
+        assert payload["logging"]["file_io_errors"][0]["sidecar"] == "ui_telemetry"
+    finally:
+        _close_test_window(window)
+
+
 def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("control_trace_task")
@@ -34677,6 +34730,54 @@ def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
         assert payload["stop"]["detail"] == f"Synthetic {reason} finalization."
         assert window._run_metadata_snapshot is None
         assert payload["sample_name"] == launch_sample_name
+    finally:
+        _close_test_window(window)
+
+
+def test_stop_session_finalizes_metadata_when_measurement_handle_is_invalid(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("invalid_handle_finalization")
+    window._record_current_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    summary_requests: list[Path] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, **_kwargs: summary_requests.append(Path(run_dir))
+    )
+
+    class _InvalidHandle:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def flush(self) -> None:
+            raise OSError(22, "synthetic invalid measurement handle")
+
+        def close(self) -> None:
+            self.wrapped.close()
+            raise OSError(22, "synthetic invalid measurement handle")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        run_dir = metadata_path.parent
+        window._session_txt_handle = _InvalidHandle(window._session_txt_handle)
+
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["finished_utc"]
+        assert payload["stop"]["reason"] == "recipe_completed"
+        assert payload["stop"]["transition"]["stages"][-1]["stage"] == "completed"
+        errors = payload["logging"]["file_io_errors"]
+        assert [(item["sidecar"], item["operation"]) for item in errors] == [
+            ("measurement_txt", "flush"),
+            ("measurement_txt", "close"),
+        ]
+        assert summary_requests == [run_dir]
+        assert window._session_active is False
     finally:
         _close_test_window(window)
 

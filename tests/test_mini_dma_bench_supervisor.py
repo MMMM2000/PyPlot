@@ -117,6 +117,17 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
     _write_recipe(recipe_path)
     _write_plan(plan_path, recipe_path, summary_path=summary_path)
     summary_path.write_text(json.dumps({"runs": [{"status": "completed"}]}), encoding="utf-8")
+    run_dir = tmp_path / "runs" / "run01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "stop": {"reason": "recipe_completed", "category": "normal"},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     safe_off_calls: list[dict[str, Any]] = []
 
@@ -146,6 +157,7 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
     assert result["state"] == "completed"
     assert result["child_pid"] == 12345
     assert result["child_returncode"] == 0
+    assert result["supervisor_recovery"]["reason"] == "child_exited_after_finished_metadata"
     assert result["summary"] == {"runs": [{"status": "completed"}]}
     assert result["safe_off"]["status"] == "ok"
     assert safe_off_calls == [{"channels": (3, 2), "port_name": "COM4", "baudrate": 115200}]
@@ -159,6 +171,37 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
         "--mini-dma-bench-plan",
     ]
     assert _FakePopen.instances[0].kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_supervisor_rejects_zero_exit_without_finished_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    plan_path = tmp_path / "bench-plan.json"
+    _write_recipe(recipe_path)
+    _write_plan(plan_path, recipe_path, summary_path=tmp_path / "summary.json")
+
+    monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    _FakePopen.instances.clear()
+    result = bench_supervisor.run_supervised_mini_dma_bench(
+        plan_path,
+        python_executable="python-test",
+        launcher_path="launcher.py",
+        status_path=tmp_path / "status.json",
+        stdout_path=tmp_path / "stdout.log",
+        stderr_path=tmp_path / "stderr.log",
+        poll_interval_s=0.1,
+        popen_factory=_FakePopen,
+        safe_off_fn=lambda **_kwargs: {"status": "ok"},
+    )
+
+    assert result["state"] == "failed"
+    assert result["child_returncode"] == 0
+    assert result["supervisor_recovery"] == {
+        "reason": "child_exited_without_finished_metadata",
+        "latest_run_dir": None,
+    }
 
 
 def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, monkeypatch) -> None:
@@ -352,9 +395,10 @@ def test_supervisor_does_not_stop_multi_run_plan_after_first_finished_metadata(
         safe_off_fn=_fake_safe_off,
     )
 
-    assert result["state"] == "completed"
+    assert result["state"] == "failed"
     assert result["child_returncode"] == 0
-    assert result["supervisor_recovery"] is None
+    assert result["supervisor_recovery"]["reason"] == "child_exited_without_finished_metadata"
+    assert result["supervisor_recovery"]["latest_run_dir"] == str(run_dir)
     assert _FakePopen.instances[0].terminated is False
     assert len(safe_off_calls) == 1
 

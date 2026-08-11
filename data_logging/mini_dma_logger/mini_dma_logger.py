@@ -8394,6 +8394,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_ui_telemetry_error: dict[str, str] | None = None
+        self._session_file_io_errors: list[dict[str, str]] = []
         self._ui_refresh_last_monotonic_s: float | None = None
         self._last_ui_refresh_interval_ms: float | None = None
         self._last_ui_handler_duration_ms: float | None = None
@@ -27453,16 +27455,70 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         return now - self._last_session_data_flush_s >= SESSION_DATA_FLUSH_INTERVAL_S
 
+    def _record_session_file_io_error(
+        self,
+        *,
+        sidecar: str,
+        operation: str,
+        error: BaseException,
+    ) -> dict[str, str]:
+        record = {
+            "sidecar": str(sidecar),
+            "operation": str(operation),
+            "error_type": error.__class__.__name__,
+            "error": str(error) or error.__class__.__name__,
+            "recorded_utc": _utc_timestamp(),
+        }
+        self._session_file_io_errors.append(record)
+        return record
+
     def _flush_session_data_handles(self) -> None:
-        for handle in (
-            self._session_txt_handle,
-            self._session_csv_handle,
-            self._session_setup_txt_handle,
-            self._session_setup_csv_handle,
+        for sidecar, handle in (
+            ("measurement_txt", self._session_txt_handle),
+            ("measurement_csv", self._session_csv_handle),
+            ("setup_txt", self._session_setup_txt_handle),
+            ("setup_csv", self._session_setup_csv_handle),
         ):
-            if handle is not None:
+            if handle is None:
+                continue
+            try:
                 handle.flush()
+            except (OSError, ValueError) as exc:
+                self._record_session_file_io_error(
+                    sidecar=sidecar,
+                    operation="flush",
+                    error=exc,
+                )
         self._last_session_data_flush_s = time.monotonic()
+
+    def _close_session_file_handle(
+        self,
+        attribute: str,
+        *,
+        sidecar: str,
+        flush: bool = False,
+    ) -> None:
+        handle = getattr(self, attribute, None)
+        setattr(self, attribute, None)
+        if handle is None:
+            return
+        if flush:
+            try:
+                handle.flush()
+            except (OSError, ValueError) as exc:
+                self._record_session_file_io_error(
+                    sidecar=sidecar,
+                    operation="flush",
+                    error=exc,
+                )
+        try:
+            handle.close()
+        except (OSError, ValueError) as exc:
+            self._record_session_file_io_error(
+                sidecar=sidecar,
+                operation="close",
+                error=exc,
+            )
 
     def _session_measurement_csv_has_data_rows(self) -> bool:
         handle = self._session_csv_handle
@@ -28155,6 +28211,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+                "ui_telemetry_complete": self._session_ui_telemetry_error is None,
+                "ui_telemetry_error": self._session_ui_telemetry_error,
+                "file_io_errors": list(self._session_file_io_errors),
                 "sensor_sidecars": self._session_sensor_sidecar_metadata(),
             }
         )
@@ -28324,6 +28383,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+                "ui_telemetry_complete": self._session_ui_telemetry_error is None,
+                "ui_telemetry_error": self._session_ui_telemetry_error,
+                "file_io_errors": list(self._session_file_io_errors),
             },
             "control": {
                 "logic_name": CONTROL_LOGIC_NAME,
@@ -28768,6 +28830,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_ui_telemetry_error = None
+        self._session_file_io_errors = []
         self._ui_refresh_last_monotonic_s = None
         self._last_ui_refresh_interval_ms = None
         self._last_ui_handler_duration_ms = None
@@ -29063,32 +29127,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self._record_session_stop_stage("session_logging_fenced")
         timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
-        if self._session_txt_handle is not None:
-            self._session_txt_handle.close()
-            self._session_txt_handle = None
-        if self._session_csv_handle is not None:
-            self._session_csv_handle.close()
-            self._session_csv_handle = None
+        self._close_session_file_handle(
+            "_session_txt_handle",
+            sidecar="measurement_txt",
+        )
+        self._close_session_file_handle(
+            "_session_csv_handle",
+            sidecar="measurement_csv",
+        )
         self._session_csv_writer = None
         with self._session_control_trace_lock:
-            if self._session_control_trace_handle is not None:
-                self._session_control_trace_handle.flush()
-                self._session_control_trace_handle.close()
-                self._session_control_trace_handle = None
+            self._close_session_file_handle(
+                "_session_control_trace_handle",
+                sidecar="control_trace",
+                flush=True,
+            )
             self._session_control_trace_writer = None
             self._last_control_trace_flush_s = 0.0
-        if self._session_ui_telemetry_handle is not None:
-            self._session_ui_telemetry_handle.close()
-            self._session_ui_telemetry_handle = None
+        self._close_session_file_handle(
+            "_session_ui_telemetry_handle",
+            sidecar="ui_telemetry",
+            flush=True,
+        )
         self._session_ui_telemetry_writer = None
-        if self._session_setup_txt_handle is not None:
-            self._session_setup_txt_handle.close()
-            self._session_setup_txt_handle = None
-        if self._session_setup_csv_handle is not None:
-            self._session_setup_csv_handle.close()
-            self._session_setup_csv_handle = None
+        self._close_session_file_handle(
+            "_session_setup_txt_handle",
+            sidecar="setup_txt",
+        )
+        self._close_session_file_handle(
+            "_session_setup_csv_handle",
+            sidecar="setup_csv",
+        )
         self._session_setup_csv_writer = None
-        self._record_session_stop_stage("session_files_closed")
+        if self._session_file_io_errors:
+            self._record_session_stop_stage(
+                "session_files_closed_with_errors",
+                detail=(
+                    f"Recorded {len(self._session_file_io_errors)} "
+                    "bounded file finalization error(s); terminal metadata continues."
+                ),
+            )
+        else:
+            self._record_session_stop_stage("session_files_closed")
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = self._session_point_count()
@@ -39195,7 +39275,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
             return f"{float(value):.{decimals}f}"
 
-        self._session_ui_telemetry_writer.writerow(
+        row = (
             {
                 "elapsed_s": f"{max(0.0, started_s - self._session_start_monotonic):.6f}",
                 "timestamp_utc": _utc_timestamp(),
@@ -39238,9 +39318,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 "live_plot_points": len(self._live_plot_points),
             }
         )
-        self._session_ui_telemetry_count += 1
-        if self._session_ui_telemetry_count % 10 == 0:
-            self._session_ui_telemetry_handle.flush()
+        try:
+            self._session_ui_telemetry_writer.writerow(row)
+            self._session_ui_telemetry_count += 1
+            if self._session_ui_telemetry_count % 10 == 0:
+                self._session_ui_telemetry_handle.flush()
+        except (OSError, ValueError) as exc:
+            self._session_ui_telemetry_error = self._record_session_file_io_error(
+                sidecar="ui_telemetry",
+                operation="write_or_flush",
+                error=exc,
+            )
+            handle = self._session_ui_telemetry_handle
+            self._session_ui_telemetry_writer = None
+            self._session_ui_telemetry_handle = None
+            try:
+                if handle is not None:
+                    handle.close()
+            except (OSError, ValueError) as close_exc:
+                self._record_session_file_io_error(
+                    sidecar="ui_telemetry",
+                    operation="close_after_failure",
+                    error=close_exc,
+                )
+            self._log(
+                "UI telemetry disabled after file I/O failure; authoritative control and "
+                f"measurement logging continue: {exc}"
+            )
         self._maybe_log_remote_debug_health(
             scale_age_s=scale_age_s,
             scale_recent_rate_hz=scale_recent_rate_hz,

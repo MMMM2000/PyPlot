@@ -102,6 +102,7 @@ def _latest_run_finished_metadata(
     *,
     not_before_s: float,
     expected_finished_count: int = 1,
+    require_child_grace: bool = True,
 ) -> dict[str, Any] | None:
     if log_dir is None or not log_dir.exists():
         return None
@@ -125,7 +126,7 @@ def _latest_run_finished_metadata(
     if len(finished) < expected_finished_count:
         return None
     _mtime_s, metadata_path, metadata, age_s = max(finished, key=lambda item: item[0])
-    if age_s < FINISHED_METADATA_CHILD_GRACE_S:
+    if require_child_grace and age_s < FINISHED_METADATA_CHILD_GRACE_S:
         return None
     return {
         "run_dir": str(metadata_path.parent),
@@ -439,7 +440,25 @@ def run_supervised_mini_dma_bench(
                 baudrate=int(plan.hardware.supply_baud or safe_off_baud),
             )
 
-    state = "completed" if child_returncode == 0 else "failed"
+    if supervisor_recovery is None:
+        finished_metadata = _latest_run_finished_metadata(
+            plan.log_dir,
+            not_before_s=started_wall_s,
+            expected_finished_count=len(plan.runs),
+            require_child_grace=False,
+        )
+        if finished_metadata is None:
+            supervisor_recovery = {
+                "reason": "child_exited_without_finished_metadata",
+                "latest_run_dir": _latest_run_dir(plan.log_dir),
+            }
+        else:
+            supervisor_recovery = {
+                "reason": "child_exited_after_finished_metadata",
+                **finished_metadata,
+            }
+    terminal_metadata_normal = _finished_metadata_is_normal(supervisor_recovery)
+    state = "completed" if terminal_metadata_normal else "failed"
     _release_child_lock_if_held(
         plan.bench_lock.lock_path,
         child_pid,
@@ -447,12 +466,12 @@ def run_supervised_mini_dma_bench(
         purpose=plan.bench_lock.purpose or f"TMA bench plan {plan.path.name}",
     )
     final_payload = _status_payload(
-        state="completed" if _finished_metadata_is_normal(supervisor_recovery) else state,
+        state=state,
         started_utc=started_utc,
         plan_path=resolved_plan_path,
         command=command,
         child_pid=child_pid,
-        child_returncode=0 if _finished_metadata_is_normal(supervisor_recovery) else child_returncode,
+        child_returncode=0 if terminal_metadata_normal else child_returncode,
         lock_path=plan.bench_lock.lock_path,
         summary_path=plan.summary_path,
         log_dir=plan.log_dir,

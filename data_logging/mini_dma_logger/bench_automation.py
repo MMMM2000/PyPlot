@@ -656,14 +656,40 @@ def _session_stop_metadata(window: Any) -> dict[str, Any] | None:
 
 
 def _persisted_stop_metadata(metadata_path: str | None) -> dict[str, Any] | None:
+    payload = _persisted_session_metadata(metadata_path)
+    stop = payload.get("stop") if isinstance(payload, Mapping) else None
+    return dict(stop) if isinstance(stop, Mapping) else None
+
+
+def _persisted_session_metadata(metadata_path: str | None) -> dict[str, Any] | None:
     if metadata_path is None:
         return None
     try:
         payload = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
-    stop = payload.get("stop") if isinstance(payload, Mapping) else None
-    return dict(stop) if isinstance(stop, Mapping) else None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _validated_terminal_status(status: str, metadata_path: str | None) -> str:
+    if status != "completed":
+        return status
+    if metadata_path is None:
+        return "not_started"
+    metadata = _persisted_session_metadata(metadata_path)
+    if metadata is None:
+        # Lightweight test/fake windows may expose the future path without
+        # creating a real session. Production sessions always create metadata
+        # before recipe control becomes active.
+        return "completed" if not Path(metadata_path).exists() else "incomplete"
+    if str(metadata.get("session_state") or "") != "finished":
+        return "incomplete"
+    stop = metadata.get("stop")
+    if not isinstance(stop, Mapping):
+        return "incomplete"
+    reason = str(stop.get("reason") or "")
+    category = str(stop.get("category") or "")
+    return "completed" if reason == "recipe_completed" or category == "normal" else "stopped"
 
 
 def _task_text(window: Any) -> str:
@@ -917,13 +943,14 @@ def _execute_run(
     window._start_auto_ramp()
     app.processEvents()
     if not _window_active(window):
+        metadata_path = _metadata_path(window)
         return {
             "name": run.name,
             "recipe_path": str(run.recipe_path),
             "repeat_index": run.repeat_index,
-            "status": "completed" if _metadata_path(window) is not None else "not_started",
+            "status": _validated_terminal_status("completed", metadata_path),
             "elapsed_s": max(0.0, time.monotonic() - start_s),
-            "metadata_path": _metadata_path(window),
+            "metadata_path": metadata_path,
             "startup_log_tail": _window_log_tail(window),
         }
 
@@ -990,6 +1017,7 @@ def _execute_run(
     if active_metadata_path is not None:
         metadata_path = active_metadata_path
     run_dir = _run_dir_from_metadata_path(metadata_path)
+    status = _validated_terminal_status(status, metadata_path)
     return {
         "name": run.name,
         "recipe_path": str(run.recipe_path),
