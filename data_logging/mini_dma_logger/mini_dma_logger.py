@@ -162,7 +162,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "tma_control"
-CONTROL_LOGIC_VERSION = "2026-08-06.1"
+CONTROL_LOGIC_VERSION = "2026-08-11.1"
 CONTROL_LOGIC_PROFILE = (
     "scale-routed-prague-legacy-kosice-adaptive-"
     "balanced-cycle-centered-resume-response-gated-volatile-observer"
@@ -238,7 +238,7 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_supply_snapshot",
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
-    "current_sweep_reverse_current_recipe_flag",
+    "current_sweep_always_bidirectional",
     "fatigue_completed_cycle_tracking",
     "durable_stop_transition_tracking",
     "single_prompt_length_setup",
@@ -11432,13 +11432,6 @@ class MainWindow(QtWidgets.QMainWindow):
             advanced_widget.setVisible(False)
 
         self.current_sweep_advanced_panel.setVisible(False)
-        self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
-        self.check_current_sweep_reverse_current.setChecked(True)
-        self.check_current_sweep_reverse_current.setToolTip(
-            "Record both increasing- and decreasing-current response at every target. "
-            "Disable this only when a deliberately one-way current sweep is required."
-        )
-        current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
         self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)
         self.spin_current_sweep_tolerance.setRange(0.0001, 100000.0)
@@ -12405,7 +12398,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating_use_normal_end.toggled.connect(self._update_recipe_mode_ui)
-        self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_first_overheating_hold_on_error.toggled.connect(
             self._update_recipe_mode_ui
@@ -28535,11 +28527,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ),
                     "lifecycle": "iso_stress_up_and_return",
                 },
-                "reverse_current": (
-                    True
-                    if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE
-                    else bool(self.check_current_sweep_reverse_current.isChecked())
-                ),
+                "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -30888,11 +30876,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
-                "reverse_current": (
-                    True
-                    if mode == CURRENT_SWEEP_FATIGUE
-                    else bool(self.check_current_sweep_reverse_current.isChecked())
-                ),
+                "reverse_current": True,
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
@@ -31092,15 +31076,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 )
             )
-            reverse_current = bool(
-                current_sweep.get(
-                    "reverse_current",
-                    self.check_current_sweep_reverse_current.isChecked(),
-                )
-            )
-            if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE:
-                reverse_current = True
-            self.check_current_sweep_reverse_current.setChecked(reverse_current)
+            # TMA current sweeps are always bidirectional.  Older recipe files may
+            # contain reverse_current=false from the removed one-way mode; ignore it.
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
@@ -36811,7 +36788,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            reverse_current = True if is_fatigue_recipe else self.check_current_sweep_reverse_current.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (
@@ -36891,7 +36867,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fatigue_cycle_index: int | None = None,
             ) -> None:
                 sweep_ranges = [(current_start, plateau_current_end_mA)]
-                if reverse_current and abs(plateau_current_end_mA - current_start) > 1e-12:
+                if abs(plateau_current_end_mA - current_start) > 1e-12:
                     sweep_ranges.append((plateau_current_end_mA, current_start))
                 for sweep_start_mA, sweep_end_mA in sweep_ranges:
                     fatigue_leg = None
@@ -37075,8 +37051,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
-            if not reverse_current:
-                summary += " Nominal current reverse sweeps are disabled."
             if first_overheating_enabled:
                 summary += (
                     " First overheating enabled: "
@@ -40120,7 +40094,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_first_overheating_current_end_mA",
             self.spin_current_sweep_first_overheating_end_mA.value(),
         )
-        self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
         self.settings.setValue("current_sweep_balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())
@@ -40892,9 +40865,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.spin_current_sweep_end_mA.value(),
                 )
             )
-        )
-        self.check_current_sweep_reverse_current.setChecked(
-            bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
         )
         self.spin_current_sweep_tolerance.setValue(float(self.settings.value("current_sweep_tolerance", 0.25)))
         self.spin_current_sweep_nudge_mm.setValue(float(self.settings.value("current_sweep_nudge_mm", 0.1)))

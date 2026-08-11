@@ -1,1 +1,1 @@
-TMA current-sweep recipes now expose the increasing/decreasing sweep choice, and run summaries distinguish the current directions actually recorded instead of silently implying a missing return leg.
+TMA current sweeps are now always bidirectional: the obsolete one-way setting and stale saved values can no longer suppress the decreasing-current leg. Run summaries distinguish only the directions actually recorded.

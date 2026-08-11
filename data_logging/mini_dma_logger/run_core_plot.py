@@ -801,25 +801,6 @@ def _plot_strain_current(
     axis_frame = _plateau_context_frame(context) if context is not None else df
     _set_current_axis_limits(ax, axis_frame, current_name)
     _add_power_per_cm_axis(ax, axis_frame, metadata)
-    if grouped and context is not None and "decreasing" not in _current_directions(context):
-        sweep = metadata.get("controlled_current_sweep")
-        reverse_requested = sweep.get("reverse_current") if isinstance(sweep, dict) else None
-        message = (
-            "Decreasing-current sweeps were disabled in this saved recipe."
-            if reverse_requested is False
-            else "No decreasing-current samples were recorded."
-        )
-        ax.text(
-            0.01,
-            0.02,
-            message,
-            transform=ax.transAxes,
-            fontsize=7.5,
-            color="#b45309",
-            ha="left",
-            va="bottom",
-            bbox={"boxstyle": "round,pad=0.25", "facecolor": "#fffbeb", "edgecolor": "#f59e0b", "alpha": 0.92},
-        )
     return context
 
 

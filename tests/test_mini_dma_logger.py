@@ -6671,7 +6671,6 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_step_mA.setValue(1.0)
     window.spin_current_sweep_target_ramp_rate.setValue(0.1)
     window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
-    window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_control_interval.setValue(250)
     window.spin_log_interval.setValue(500)
 
@@ -10290,7 +10289,6 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         window.spin_current_sweep_fatigue_cycles.setValue(3)
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(False)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         steps, summary, interval_ms = window._build_automation_recipe()
         payload = window._current_recipe_payload()
@@ -17602,7 +17600,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.label_current_sweep_targets_section.text() == "Load targets"
         assert window.label_current_sweep_current_section.text() == "Current sweep"
         assert window.check_current_sweep_return_target.isHidden() is True
-        assert window.check_current_sweep_reverse_current.isHidden() is False
+        assert not hasattr(window, "check_current_sweep_reverse_current")
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )
@@ -18286,7 +18284,7 @@ def test_current_sweep_returns_current_to_start_by_default(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
-def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_always_includes_reverse_current_steps(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -18294,21 +18292,21 @@ def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qt
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
-
         steps, summary, _interval_ms = window._build_automation_recipe()
 
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
 
-        assert len(current_sweep_steps) == 4
-        assert all(step.current_start_mA == pytest.approx(1.0) for step in current_sweep_steps)
-        assert all(step.current_end_mA == pytest.approx(3.0) for step in current_sweep_steps)
-        assert "Nominal current reverse sweeps are disabled." in summary
+        assert len(current_sweep_steps) == 8
+        assert [(step.current_start_mA, step.current_end_mA) for step in current_sweep_steps[:2]] == [
+            (pytest.approx(1.0), pytest.approx(3.0)),
+            (pytest.approx(3.0), pytest.approx(1.0)),
+        ]
+        assert "reverse sweeps are disabled" not in summary
     finally:
         _close_test_window(window)
 
 
-def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_recipe_payload_ignores_legacy_reverse_current_false(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -18316,16 +18314,16 @@ def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: 
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
-
         payload = window._current_recipe_payload()
+        assert payload["recipe"]["current_sweep"]["reverse_current"] is True
 
-        assert payload["recipe"]["current_sweep"]["reverse_current"] is False
-
-        window.check_current_sweep_reverse_current.setChecked(True)
+        payload["recipe"]["current_sweep"]["reverse_current"] = False
         window._apply_recipe_payload(payload)
-
-        assert window.check_current_sweep_reverse_current.isChecked() is False
+        assert window._current_recipe_payload()["recipe"]["current_sweep"]["reverse_current"] is True
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        assert current_sweep_steps
+        assert any(step.current_end_mA < step.current_start_mA for step in current_sweep_steps)
     finally:
         _close_test_window(window)
 
@@ -33407,7 +33405,6 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -33417,7 +33414,7 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(60.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
-        assert window.check_current_sweep_reverse_current.isChecked() is True
+        assert window._current_recipe_payload()["recipe"]["current_sweep"]["reverse_current"] is True
     finally:
         _close_test_window(window)
 
@@ -35058,7 +35055,8 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_hold_response_stiffness_requires_error_improvement" in first_logic["features"]
         assert "current_hold_adaptive_cap_growth_is_response_earned" in first_logic["features"]
         assert "current_hold_adaptive_large_error_floor_scales_with_band" in first_logic["features"]
-        assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
+        assert "current_sweep_reverse_current_recipe_flag" not in first_logic["features"]
+        assert "current_sweep_always_bidirectional" in first_logic["features"]
         assert "control_constants" in first_logic["fingerprint_fields"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
         assert (

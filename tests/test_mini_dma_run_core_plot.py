@@ -331,14 +331,14 @@ def test_current_direction_parts_preserves_each_increasing_and_decreasing_leg() 
     ]
 
 
-def test_strain_current_warns_when_saved_recipe_disabled_decreasing_sweeps() -> None:
+def test_strain_current_does_not_add_a_missing_direction_banner() -> None:
     frame = _current_sweep_frame().loc[lambda rows: rows["current_set_mA"].diff().fillna(0).ge(0)].copy()
     metadata = {"controlled_current_sweep": {"reverse_current": False}}
     fig, ax = plt.subplots()
     try:
         _plot_strain_current(ax, frame, metadata, grouped=True)
 
-        assert "disabled in this saved recipe" in " ".join(text.get_text() for text in ax.texts)
+        assert not ax.texts
     finally:
         plt.close(fig)
 
