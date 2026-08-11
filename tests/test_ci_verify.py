@@ -23,6 +23,8 @@ def test_ci_verify_help_lists_modes() -> None:
     assert "--mode" in result.stdout
     assert "focused" in result.stdout
     assert "full" in result.stdout
+    assert "--workers" in result.stdout
+    assert "--dist" in result.stdout
 
 
 def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> None:
@@ -54,8 +56,65 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
         assert f"TEMP={expected_temp}" in result.stdout
         assert f"TMP={expected_temp}" in result.stdout
     assert "--basetemp" in result.stdout
+    if os.name == "nt":
+        assert r"C:\tmp\pyt\unit" in result.stdout
     assert "-p no:cacheprovider" in result.stdout
     assert (
         "tests/test_launcher.py::test_launcher_detects_pyplot_automation_flags"
         in result.stdout
     )
+
+
+def test_ci_verify_full_mode_uses_parallel_and_serial_lanes(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "--mode",
+            "full",
+            "--dry-run",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "parallel-unit",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "lane=parallel" in result.stdout
+    assert "-n 4" in result.stdout
+    assert "--dist worksteal" in result.stdout
+    assert "not serial" in result.stdout
+    assert "lane=serial" in result.stdout
+    assert "-n 0" in result.stdout
+
+
+def test_ci_verify_workers_zero_keeps_one_lane(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "--mode",
+            "full",
+            "--workers",
+            "0",
+            "--dry-run",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--run-id",
+            "serial-unit",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.count("lane=") == 1
+    assert "lane=serial" in result.stdout
+    assert "-n " not in result.stdout

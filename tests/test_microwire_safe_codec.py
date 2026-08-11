@@ -26,6 +26,9 @@ from microwire_data_builder.legacy_migration import (
 )
 
 
+pytestmark = pytest.mark.serial
+
+
 class _MaliciousPayload:
     def __init__(self, marker: Path) -> None:
         self.marker = marker

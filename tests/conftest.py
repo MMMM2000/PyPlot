@@ -15,6 +15,43 @@ def _configure_qt_headless_defaults() -> None:
     os.environ.setdefault("PYTEST_QT_API", "pyqt6")
 
 
+def _worker_path(path: Path, worker_id: str) -> Path:
+    if worker_id and path.name != worker_id:
+        return path / worker_id
+    return path
+
+
+def _configure_isolated_test_paths() -> None:
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "").strip()
+    base_tmp = (
+        os.environ.get("TMPDIR")
+        or os.environ.get("TEMP")
+        or os.environ.get("TMP")
+        or tempfile.gettempdir()
+    )
+    tmp_root = Path(base_tmp)
+    if os.name == "nt" and len(str(tmp_root.resolve())) > 60:
+        tmp_root = Path("C:/tmp")
+    if tmp_root.name != "pyplot-tests":
+        tmp_root = tmp_root / "pyplot-tests"
+    tmp_root = _worker_path(tmp_root, worker_id)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        os.environ[key] = str(tmp_root)
+
+    isolated_roots = {
+        "MICROWIRE_BUILDER_STORAGE_ROOT": tmp_root / "microwire-data-builder",
+        "PYTEST_QSETTINGS_ROOT": tmp_root / "qsettings",
+        "MPLCONFIGDIR": tmp_root / "matplotlib",
+    }
+    for key, fallback in isolated_roots.items():
+        configured = os.environ.get(key)
+        root = _worker_path(Path(configured) if configured else fallback, worker_id)
+        root.mkdir(parents=True, exist_ok=True)
+        os.environ[key] = str(root)
+    tempfile.tempdir = str(tmp_root)
+
+
 def pytest_configure() -> None:
     """Ensure the bundled Veusz sources are importable for the selftests."""
 
@@ -27,26 +64,7 @@ def pytest_configure() -> None:
     if veusz_path.exists() and str(veusz_path) not in sys.path:
         sys.path.insert(0, str(veusz_path))
     try:
-        base_tmp = (
-            os.environ.get("TMPDIR")
-            or os.environ.get("TEMP")
-            or os.environ.get("TMP")
-            or tempfile.gettempdir()
-        )
-        tmp_root = Path(base_tmp)
-        if os.name == "nt" and len(str(tmp_root.resolve())) > 60:
-            tmp_root = Path("C:/tmp")
-        if tmp_root.name != "pyplot-tests":
-            tmp_root = tmp_root / "pyplot-tests"
-        tmp_root.mkdir(parents=True, exist_ok=True)
-        os.environ["TMPDIR"] = str(tmp_root)
-        os.environ["TEMP"] = str(tmp_root)
-        os.environ["TMP"] = str(tmp_root)
-        os.environ.setdefault(
-            "MICROWIRE_BUILDER_STORAGE_ROOT",
-            str(tmp_root / "microwire-data-builder"),
-        )
-        tempfile.tempdir = str(tmp_root)
+        _configure_isolated_test_paths()
     except Exception:
         pass
 

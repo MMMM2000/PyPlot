@@ -24,6 +24,9 @@ from microwire_data_builder import ui as builder_ui
 from microwire_eda import core as eda_core
 
 
+pytestmark = pytest.mark.serial
+
+
 def _payload(*, marker: str = "one") -> dict[str, object]:
     encoded = safe_codec.encode_envelope(
         {
