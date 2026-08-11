@@ -3354,6 +3354,33 @@ def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists
         _close_test_window(window)
 
 
+def test_armed_bench_missing_history_authorization_is_one_shot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    prompts: list[str] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window.authorize_missing_prior_tma_history_once()
+
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+        assert window._allow_missing_prior_tma_history_once is False
+        assert window._first_overheating_preflight_decision is not None
+        assert (
+            window._first_overheating_preflight_decision["decision"]
+            == "operator_explicitly_skipped_first_overheating"
+        )
+
+        assert window._first_overheating_preflight_allows_start() is False
+        assert prompts == ["prompt"]
+    finally:
+        _close_test_window(window)
+
+
 def test_isolated_start_waits_for_completed_history_scan_and_logs_match_source(
     tmp_path: Path,
     qtbot,

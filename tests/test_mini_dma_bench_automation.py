@@ -389,6 +389,69 @@ def test_execute_run_hands_completed_first_overheating_preflight_to_isolated_sta
     assert result["status"] == "not_started"
 
 
+def test_execute_run_applies_explicit_armed_missing_history_decision(monkeypatch) -> None:
+    events: list[str] = []
+
+    class _Window:
+        _session_active = False
+        _automation_active = False
+
+        def _load_recipe_from_path(self, _path: Path) -> None:
+            return None
+
+        def authorize_missing_prior_tma_history_once(self) -> None:
+            events.append("authorized")
+
+        def _start_auto_ramp(self) -> None:
+            events.append("started")
+
+    monkeypatch.setattr(bench_automation, "_recipe_needs_tma_history_scan", lambda _window: True)
+    monkeypatch.setattr(bench_automation, "_wait_for_tma_history_scan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bench_automation, "_apply_sample_identity", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_apply_length_setup_automation", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_prefer_next_output_run", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_ensure_measurement_logging_session", lambda *_args: None)
+
+    result = bench_automation._execute_run(
+        bench_automation.MiniDmaBenchRun(
+            name="bounded",
+            recipe_path=Path("bounded.recipe.json"),
+            max_run_duration_s=1.0,
+        ),
+        app=SimpleNamespace(processEvents=lambda: None),
+        window=_Window(),
+        sample_identity=bench_automation.MiniDmaSampleIdentity(),
+        guardrails=bench_automation.MiniDmaBenchGuardrails(),
+        sleep_fn=lambda _seconds: None,
+        total_deadline_s=None,
+        allow_missing_prior_tma_history=True,
+    )
+
+    assert result["status"] == "not_started"
+    assert events == ["authorized", "started"]
+
+
+def test_bench_plan_missing_history_authorization_defaults_off(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": False,
+                "runs": [{"recipe_path": recipe_path.name}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = bench_automation.load_mini_dma_bench_plan(plan_path)
+
+    assert plan.allow_missing_prior_tma_history is False
+
+
 def test_process_isolated_bench_does_not_open_ui_owned_logging_session() -> None:
     events: list[str] = []
 

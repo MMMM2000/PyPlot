@@ -8457,6 +8457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_scan_poll_timer.setInterval(50)
         self._tma_history_scan_poll_timer.timeout.connect(self._poll_tma_history_scan_task)
         self._first_overheating_preflight_decision: dict[str, Any] | None = None
+        self._allow_missing_prior_tma_history_once = False
         self._settings_save_timer = QtCore.QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.setInterval(750)
@@ -33469,8 +33470,17 @@ class MainWindow(QtWidgets.QMainWindow):
             first_overheating_enabled=first_overheating_enabled,
             previous_tma_measurement_found=history_found,
         ):
+            self._allow_missing_prior_tma_history_once = False
             return True
-        action = self._ask_first_overheating_preflight_action()
+        if self._allow_missing_prior_tma_history_once:
+            self._allow_missing_prior_tma_history_once = False
+            action = FIRST_OVERHEATING_CONTINUE
+            self._log(
+                "First-overheating preflight: the armed bench plan explicitly authorized "
+                "one run to continue without prior TMA history."
+            )
+        else:
+            action = self._ask_first_overheating_preflight_action()
         if action == FIRST_OVERHEATING_CONFIGURE:
             if self._is_constant_current_strain_sweep_mode(recipe_mode):
                 self.check_constant_current_first_overheating.setChecked(True)
@@ -33501,6 +33511,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "no previous TMA measurement was found for this wire."
         )
         return True
+
+    def authorize_missing_prior_tma_history_once(self) -> None:
+        """Authorize exactly one armed, non-interactive start past the history dialog."""
+        self._allow_missing_prior_tma_history_once = True
 
     def _record_first_overheating_preflight_skip_for_session(self) -> None:
         if self._first_overheating_preflight_decision is None or not self._session_active:

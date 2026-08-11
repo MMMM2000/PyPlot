@@ -105,6 +105,7 @@ class MiniDmaBenchPlan:
     hardware: MiniDmaHardwareConfig
     guardrails: MiniDmaBenchGuardrails
     bench_lock: MiniDmaBenchLockConfig
+    allow_missing_prior_tma_history: bool
     runs: tuple[MiniDmaBenchRun, ...]
 
 
@@ -387,6 +388,9 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         hardware=hardware,
         guardrails=guardrails,
         bench_lock=bench_lock,
+        allow_missing_prior_tma_history=bool(
+            payload.get("allow_missing_prior_tma_history", False)
+        ),
         runs=tuple(runs),
     )
 
@@ -916,6 +920,7 @@ def _execute_run(
     guardrails: MiniDmaBenchGuardrails,
     sleep_fn: Callable[[float], None],
     total_deadline_s: float | None,
+    allow_missing_prior_tma_history: bool = False,
 ) -> dict[str, Any]:
     start_s = time.monotonic()
     deadline_s = start_s + run.max_run_duration_s
@@ -930,6 +935,17 @@ def _execute_run(
             app=app,
             sleep_fn=sleep_fn,
         )
+        if allow_missing_prior_tma_history:
+            authorize = getattr(
+                window,
+                "authorize_missing_prior_tma_history_once",
+                None,
+            )
+            if not callable(authorize):
+                raise MiniDmaBenchAutomationError(
+                    "This TMA logger cannot apply the armed plan's explicit missing-history decision."
+                )
+            authorize()
     _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
     _prefer_next_output_run(window)
@@ -1220,6 +1236,9 @@ def run_mini_dma_bench_plan(
                         guardrails=plan.guardrails,
                         sleep_fn=sleep_fn,
                         total_deadline_s=total_deadline_s,
+                        allow_missing_prior_tma_history=(
+                            plan.allow_missing_prior_tma_history
+                        ),
                     )
                     run_summaries.append(_attach_control_trace_replay(run_summary))
                     if (
