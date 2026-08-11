@@ -20285,7 +20285,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         )
 
 
-def _vsm_transition_review_record_id(record: VsmTemperatureScanRecord) -> str:
+def _vsm_transition_base_record_id(record: VsmTemperatureScanRecord) -> str:
     path = getattr(record, "path", None)
     if isinstance(path, Path):
         try:
@@ -20303,6 +20303,118 @@ def _vsm_transition_review_record_id(record: VsmTemperatureScanRecord) -> str:
     ]
     digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
     return f"vsm-ts:{digest}"
+
+
+def _vsm_transition_review_record_id(record: VsmTemperatureScanRecord) -> str:
+    base_id = _vsm_transition_base_record_id(record)
+    cycle_index = getattr(record, "_transition_cycle_index", None)
+    if isinstance(cycle_index, int) and cycle_index > 0:
+        return f"{base_id}::cycle:{cycle_index}"
+    return base_id
+
+
+def _vsm_temperature_cycle_frames(
+    frame: pd.DataFrame,
+) -> List[Tuple[int, Tuple[int, ...], pd.DataFrame]]:
+    """Split a VSM scan into acquisition-ordered heating/cooling pairs."""
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    if "section_index" not in frame.columns or "temperature" not in frame.columns:
+        return [(1, (), frame.copy())]
+
+    working = frame.copy()
+    working["_transition_row_order"] = range(len(working.index))
+    cycle_rows: Dict[int, Set[int]] = {}
+    cycle_sections: Dict[int, Set[int]] = {}
+    grouped: Iterable[Tuple[Any, pd.DataFrame]]
+    if "field" in working.columns:
+        grouped = working.groupby("field", sort=False, dropna=False)
+    else:
+        grouped = [(None, working)]
+
+    for _field, field_frame in grouped:
+        branches: List[Tuple[int, str, List[int]]] = []
+        for section_value, segment in field_frame.groupby(
+            "section_index", sort=False, dropna=False
+        ):
+            temperatures = pd.to_numeric(
+                segment["temperature"], errors="coerce"
+            ).dropna()
+            if len(temperatures.index) < 2:
+                continue
+            delta = float(temperatures.iloc[-1] - temperatures.iloc[0])
+            if math.isclose(delta, 0.0, abs_tol=1e-9):
+                continue
+            try:
+                section_index = int(section_value)
+            except (TypeError, ValueError):
+                section_index = len(branches)
+            branches.append(
+                (
+                    section_index,
+                    "up" if delta > 0.0 else "down",
+                    [int(value) for value in segment["_transition_row_order"]],
+                )
+            )
+
+        field_cycles: List[List[Tuple[int, str, List[int]]]] = []
+        current: List[Tuple[int, str, List[int]]] = []
+        for branch in branches:
+            direction = branch[1]
+            if current and direction in {entry[1] for entry in current}:
+                field_cycles.append(current)
+                current = []
+            current.append(branch)
+            if len({entry[1] for entry in current}) == 2:
+                field_cycles.append(current)
+                current = []
+        if current:
+            field_cycles.append(current)
+
+        for cycle_offset, entries in enumerate(field_cycles):
+            cycle_index = cycle_offset + 1
+            cycle_rows.setdefault(cycle_index, set()).update(
+                row for _section, _direction, rows in entries for row in rows
+            )
+            cycle_sections.setdefault(cycle_index, set()).update(
+                section for section, _direction, _rows in entries
+            )
+
+    if not cycle_rows:
+        return [(1, (), frame.copy())]
+    result: List[Tuple[int, Tuple[int, ...], pd.DataFrame]] = []
+    for cycle_index in sorted(cycle_rows):
+        positions = sorted(cycle_rows[cycle_index])
+        subset = frame.iloc[positions].copy().reset_index(drop=True)
+        result.append(
+            (cycle_index, tuple(sorted(cycle_sections.get(cycle_index, set()))), subset)
+        )
+    return result or [(1, (), frame.copy())]
+
+
+def _vsm_transition_cycle_records(
+    record: VsmTemperatureScanRecord,
+) -> List[VsmTemperatureScanRecord]:
+    cycles = _vsm_temperature_cycle_frames(getattr(record, "data", pd.DataFrame()))
+    if len(cycles) <= 1:
+        return [record]
+    parent_id = _vsm_transition_base_record_id(record)
+    cycle_records: List[VsmTemperatureScanRecord] = []
+    for cycle_index, section_indices, data in cycles:
+        cycle_record = VsmTemperatureScanRecord(
+            path=record.path,
+            sample=record.sample,
+            data=data,
+            key=record.key,
+            label=record.label,
+        )
+        setattr(cycle_record, "_transition_cycle_index", int(cycle_index))
+        setattr(cycle_record, "_transition_cycle_count", len(cycles))
+        setattr(cycle_record, "_transition_section_indices", section_indices)
+        setattr(cycle_record, "_transition_parent_record_id", parent_id)
+        cycle_records.append(cycle_record)
+    return cycle_records
 
 
 def _vsm_transition_review_is_final(status: str | None) -> bool:
@@ -21157,10 +21269,23 @@ class TransitionTempsSection(QtWidgets.QWidget):
             "record_path",
             "content_identity",
             "source_name",
+            "migrated_from_record_id",
+            "migration_strategy",
         ):
             value = payload.get(key)
             if value not in (None, ""):
                 cleaned[key] = str(value)
+        for key in ("cycle_index", "cycle_count"):
+            value = payload.get(key)
+            if isinstance(value, (int, float)) and int(value) > 0:
+                cleaned[key] = int(value)
+        for key in ("section_indices", "superseded_by_cycle_ids"):
+            value = payload.get(key)
+            if isinstance(value, (list, tuple)):
+                cleaned[key] = [
+                    int(item) if key == "section_indices" else str(item)
+                    for item in value
+                ]
         if record_id:
             cleaned["record_id"] = str(record_id)
         return cleaned
@@ -21326,9 +21451,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         selected_key = self._current_selection_key()
         self._refresh_record_groups()
         all_groups = _group_graph_records_by_key(self._all_transition_records)
+        migrated_reviews = self._migrate_legacy_scan_reviews_to_cycles()
         reconciled_points = self._reconcile_transition_points(all_groups.keys())
         reconciled_reviews = self._reconcile_transition_reviews(self._all_transition_records)
-        if reconciled_points or reconciled_reviews:
+        if migrated_reviews or reconciled_points or reconciled_reviews:
             self._sync_transition_points_payload()
             self._store_transition_reviews(update_table=False)
         frame = self._build_frame()
@@ -21415,6 +21541,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     continue
                 all_records.append(record)
                 seen.add(marker)
+        self._all_transition_source_records = list(all_records)
+        expanded_records: List[VsmTemperatureScanRecord] = []
+        for record in all_records:
+            expanded_records.extend(_vsm_transition_cycle_records(record))
+        all_records = expanded_records
         self._all_transition_records = all_records
         valid_review_ids = {
             _vsm_transition_review_record_id(record) for record in all_records
@@ -21446,6 +21577,56 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if isinstance(path, Path):
                     sources.append(str(path))
         self._last_sources = list(dict.fromkeys(sources))
+
+    def _migrate_legacy_scan_reviews_to_cycles(self) -> bool:
+        cycles_by_parent: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        group_by_record_id: Dict[str, str] = {}
+        for group_key, records in self._record_groups.items():
+            for record in records:
+                record_id = _vsm_transition_review_record_id(record)
+                group_by_record_id[record_id] = group_key
+                parent_id = getattr(record, "_transition_parent_record_id", None)
+                if isinstance(parent_id, str) and parent_id:
+                    cycles_by_parent.setdefault(parent_id, []).append(record)
+
+        changed = False
+        for parent_id, cycle_records in cycles_by_parent.items():
+            legacy = self._transition_reviews.get(parent_id)
+            if not isinstance(legacy, dict):
+                continue
+            cycle_records.sort(
+                key=lambda record: int(
+                    getattr(record, "_transition_cycle_index", 0) or 0
+                )
+            )
+            cycle_ids = [
+                _vsm_transition_review_record_id(record) for record in cycle_records
+            ]
+            for cycle_record, cycle_id in zip(cycle_records, cycle_ids):
+                if cycle_id in self._transition_reviews:
+                    continue
+                migrated = dict(legacy)
+                migrated.pop("superseded_by_cycle_ids", None)
+                migrated.update(
+                    self._record_review_metadata(
+                        group_by_record_id.get(cycle_id, ""), cycle_record
+                    )
+                )
+                migrated["migrated_from_record_id"] = parent_id
+                migrated["migration_strategy"] = "copied_to_each_cycle"
+                self._transition_reviews[cycle_id] = (
+                    self._clean_transition_review_payload(cycle_id, migrated)
+                )
+                changed = True
+            legacy_updated = dict(legacy)
+            legacy_updated["superseded_by_cycle_ids"] = cycle_ids
+            cleaned_legacy = self._clean_transition_review_payload(
+                parent_id, legacy_updated
+            )
+            if cleaned_legacy != legacy:
+                self._transition_reviews[parent_id] = cleaned_legacy
+                changed = True
+        return changed
 
     def _fallback_vsm_temperature_records(
         self, *, include_hidden: bool = False
@@ -22198,8 +22379,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self,
         group_key: str,
         record: VsmTemperatureScanRecord,
-    ) -> Dict[str, str]:
-        metadata: Dict[str, str] = {
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
             "group_key": group_key,
             "sample": str(getattr(record, "sample", "") or ""),
             "record_label": _record_label_for_display(record) or str(getattr(record, "label", "") or ""),
@@ -22213,6 +22394,15 @@ class TransitionTempsSection(QtWidgets.QWidget):
         source_name = _transition_review_source_name(record)
         if source_name:
             metadata["source_name"] = source_name
+        cycle_index = getattr(record, "_transition_cycle_index", None)
+        cycle_count = getattr(record, "_transition_cycle_count", None)
+        section_indices = getattr(record, "_transition_section_indices", None)
+        if isinstance(cycle_index, int) and cycle_index > 0:
+            metadata["cycle_index"] = cycle_index
+        if isinstance(cycle_count, int) and cycle_count > 0:
+            metadata["cycle_count"] = cycle_count
+        if isinstance(section_indices, tuple):
+            metadata["section_indices"] = list(section_indices)
         return metadata
 
     def _store_review_for_record(
@@ -27733,9 +27923,9 @@ class _VsmTransitionReviewPanel(QtWidgets.QWidget):
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         self.tree = QtWidgets.QTreeWidget(splitter)
-        self.tree.setHeaderLabels(["VSM scan", "Status"])
+        self.tree.setHeaderLabels(["Samples / scans / cycles", "Status"])
         self.tree.setUniformRowHeights(True)
-        self.tree.setRootIsDecorated(False)
+        self.tree.setRootIsDecorated(True)
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setColumnWidth(0, 280)
         self.tree.setColumnWidth(1, 120)
@@ -27778,35 +27968,48 @@ class _VsmTransitionReviewPanel(QtWidgets.QWidget):
                 microwire = group_key
             else:
                 composition, microwire = _microwire_info_from_key(key_tuple)
-            records = sorted(self._section._record_groups.get(group_key, []), key=_record_label_for_display)
+            sample_label = " ".join(
+                part for part in (composition, microwire) if part
+            ) or group_key
+            sample_item = QtWidgets.QTreeWidgetItem([sample_label, ""])
+            self.tree.addTopLevelItem(sample_item)
+            scan_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+            records = sorted(
+                self._section._record_groups.get(group_key, []),
+                key=lambda record: (
+                    _record_label_for_display(record),
+                    int(getattr(record, "_transition_cycle_index", 0) or 0),
+                ),
+            )
             for record in records:
                 record_id = _vsm_transition_review_record_id(record)
                 status = self._section._status_for_record(
                     record,
                     compute_auto=False,
                 )
-                label = " | ".join(
-                    part
-                    for part in (
-                        composition,
-                        microwire,
-                        _record_label_for_display(record),
-                    )
-                    if part
-                )
-                item = QtWidgets.QTreeWidgetItem([label or "VSM scan", status])
+                scan_label = _record_label_for_display(record) or "VSM scan"
+                path = getattr(record, "path", None)
+                scan_key = f"{path!s}\n{scan_label}"
+                scan_item = scan_items.get(scan_key)
+                if scan_item is None:
+                    scan_item = QtWidgets.QTreeWidgetItem([scan_label, ""])
+                    sample_item.addChild(scan_item)
+                    scan_items[scan_key] = scan_item
+                cycle_label = _vsm_transition_cycle_target_label(record)
+                item = QtWidgets.QTreeWidgetItem([cycle_label, status])
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, (group_key, record_id))
                 _apply_transition_status_color(item, status)
-                self.tree.addTopLevelItem(item)
+                scan_item.addChild(item)
                 ref = (group_key, record_id)
                 self._refs.append(ref)
                 self._items[ref] = item
         self.tree.setColumnWidth(0, 280)
         self.tree.setColumnWidth(1, 120)
+        self.tree.expandAll()
         if selected_ref in self._items:
             self.tree.setCurrentItem(self._items[selected_ref])
-        elif self.tree.topLevelItemCount():
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        elif self._refs:
+            self.tree.setCurrentItem(self._items[self._refs[0]])
         else:
             self.preview_panel.update_selection("No VSM temperature scans are available yet.", [], {})
 
@@ -27948,8 +28151,15 @@ def _vsm_transition_cycle_target_label(value: object) -> str:
                 target = f"{int(raw_target[1:])} °C"
             except (TypeError, ValueError):
                 target = raw_target
+    cycle_index = (
+        getattr(record, "_transition_cycle_index", None)
+        if record is not None
+        else None
+    )
     cycle_count = _vsm_transition_cycle_count(record) if record is not None else None
-    if cycle_count == 1:
+    if isinstance(cycle_index, int) and cycle_index > 0:
+        prefix = f"Cycle {cycle_index}"
+    elif cycle_count == 1:
         prefix = "Cycle 1"
     elif cycle_count and cycle_count > 1:
         prefix = f"{cycle_count} cycles"
@@ -27980,12 +28190,13 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
         return records
 
     def _paths(self) -> List[Path]:  # type: ignore[override]
-        return [
+        paths = [
             path
             for record in self._records()
             if isinstance((path := getattr(record, "path", None)), Path)
             and path.exists()
         ]
+        return list(dict.fromkeys(paths))
 
     @staticmethod
     def _review_values(review: Mapping[str, Any]) -> Dict[str, float]:
@@ -28034,6 +28245,8 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
             )
         for record_id, review in reviews.items():
             if record_id in seen or not isinstance(review, Mapping):
+                continue
+            if review.get("superseded_by_cycle_ids"):
                 continue
             values = self._review_values(review)
             path_value = str(review.get("record_path") or "").strip()

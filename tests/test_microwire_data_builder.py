@@ -11891,6 +11891,121 @@ def test_vsm_transition_target_label_counts_actual_cycles() -> None:
     )
 
 
+def test_vsm_transition_records_split_heating_cooling_pairs() -> None:
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+
+    cycles = builder_ui._vsm_transition_cycle_records(record)  # noqa: SLF001
+
+    assert len(cycles) == 2
+    assert [entry["section_index"].unique().tolist() for entry in (cycle.data for cycle in cycles)] == [
+        [0, 1],
+        [2, 3],
+    ]
+    assert [builder_ui._vsm_transition_cycle_target_label(cycle) for cycle in cycles] == [  # noqa: SLF001
+        "Cycle 1 · RT",
+        "Cycle 2 · RT",
+    ]
+    assert len({builder_ui._vsm_transition_review_record_id(cycle) for cycle in cycles}) == 2  # noqa: SLF001
+
+
+def test_vsm_scan_review_is_copied_to_each_cycle_with_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "202601011200-TSCN-a000-RT-00.VSM-TSCN-Data",
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+    scan.path.touch()
+    source = SimpleNamespace(
+        store=SimpleNamespace(
+            load_payload=lambda name: [scan]
+            if name == "vsm_temperature_scan_records"
+            else None
+        ),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        data=MiniDatabaseData(extra={"hidden_paths": []}),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    panel = builder_ui._VsmTransitionReviewPanel(section)  # noqa: SLF001
+    try:
+        parent_id = builder_ui._vsm_transition_review_record_id(scan)  # noqa: SLF001
+        group_key = "Ni50Fe27Ga23|1|1"
+        section._transition_reviews = {  # noqa: SLF001
+            parent_id: section._clean_transition_review_payload(  # noqa: SLF001
+                parent_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    "included": True,
+                    "auto_values_C": {"As": 42.0, "Af": 68.0},
+                    **section._record_review_metadata(group_key, scan),  # noqa: SLF001
+                },
+            )
+        }
+
+        section.refresh_data()
+        workspace.refresh_workspace()
+        panel.refresh_workspace()
+
+        cycles = section._all_transition_records  # noqa: SLF001
+        assert len(cycles) == 2
+        cycle_ids = [
+            builder_ui._vsm_transition_review_record_id(cycle)  # noqa: SLF001
+            for cycle in cycles
+        ]
+        reviews = section.transition_reviews_snapshot()
+        assert reviews[parent_id]["superseded_by_cycle_ids"] == cycle_ids
+        for cycle_index, cycle_id in enumerate(cycle_ids, start=1):
+            assert reviews[cycle_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO
+            assert reviews[cycle_id]["final_values_C"] == {"As": 42.0, "Af": 68.0}
+            assert reviews[cycle_id]["cycle_index"] == cycle_index
+            assert reviews[cycle_id]["migrated_from_record_id"] == parent_id
+            assert reviews[cycle_id]["migration_strategy"] == "copied_to_each_cycle"
+        assert workspace.summary_table.rowCount() == 2
+        assert panel.tree.topLevelItemCount() == 1
+        sample_item = panel.tree.topLevelItem(0)
+        assert sample_item.childCount() == 1
+        assert sample_item.child(0).childCount() == 2
+    finally:
+        panel.close()
+        panel.deleteLater()
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_drop_visible_sample_column_preserves_hidden_sample_values() -> None:
     frame = pd.DataFrame(
         {
