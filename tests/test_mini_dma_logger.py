@@ -17602,7 +17602,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.label_current_sweep_targets_section.text() == "Load targets"
         assert window.label_current_sweep_current_section.text() == "Current sweep"
         assert window.check_current_sweep_return_target.isHidden() is True
-        assert window.check_current_sweep_reverse_current.isHidden() is True
+        assert window.check_current_sweep_reverse_current.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )

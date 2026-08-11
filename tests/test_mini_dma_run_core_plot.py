@@ -8,6 +8,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from data_logging.mini_dma_logger.run_core_plot import (
+    _current_direction_parts,
     _plateau_plot_context,
     _plot_current_resistance,
     _plot_error_trace,
@@ -302,6 +303,42 @@ def test_current_response_panels_share_plateau_colors_and_include_first_overheat
         assert max(max(line.get_ydata()) for line in strain_ax.lines) > 80.0
         assert strain_ax.get_xlim() == pytest.approx(resistance_ax.get_xlim())
         assert strain_ax.get_xlim()[1] > 20.0
+    finally:
+        plt.close(fig)
+
+
+def test_current_direction_parts_preserves_each_increasing_and_decreasing_leg() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": list(range(12)),
+            "current_set_mA": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+        }
+    )
+
+    parts = _current_direction_parts(frame)
+
+    assert [direction for direction, _rows in parts] == [
+        "increasing",
+        "decreasing",
+        "increasing",
+        "decreasing",
+    ]
+    assert [part["current_set_mA"].tolist() for _direction, part in parts] == [
+        [1.0, 2.0, 3.0, 3.0],
+        [3.0, 2.0, 1.0, 1.0],
+        [1.0, 2.0, 3.0, 3.0],
+        [3.0, 2.0, 1.0],
+    ]
+
+
+def test_strain_current_warns_when_saved_recipe_disabled_decreasing_sweeps() -> None:
+    frame = _current_sweep_frame().loc[lambda rows: rows["current_set_mA"].diff().fillna(0).ge(0)].copy()
+    metadata = {"controlled_current_sweep": {"reverse_current": False}}
+    fig, ax = plt.subplots()
+    try:
+        _plot_strain_current(ax, frame, metadata, grouped=True)
+
+        assert "disabled in this saved recipe" in " ".join(text.get_text() for text in ax.texts)
     finally:
         plt.close(fig)
 

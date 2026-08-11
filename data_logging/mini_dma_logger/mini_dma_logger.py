@@ -11434,7 +11434,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_sweep_advanced_panel.setVisible(False)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
-        self.check_current_sweep_reverse_current.setVisible(False)
+        self.check_current_sweep_reverse_current.setToolTip(
+            "Record both increasing- and decreasing-current response at every target. "
+            "Disable this only when a deliberately one-way current sweep is required."
+        )
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
         self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)

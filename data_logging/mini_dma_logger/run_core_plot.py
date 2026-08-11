@@ -665,16 +665,32 @@ def _current_direction_parts(part: pd.DataFrame) -> list[tuple[str, pd.DataFrame
     current = _series(ordered, control_name)
     if current.empty or not current.notna().any():
         return [("increasing", ordered)]
-    maximum = float(current.max())
-    peak = np.isclose(current.to_numpy(dtype=float), maximum, atol=max(0.05, abs(maximum) * 0.002))
-    peak_positions = np.flatnonzero(peak)
-    if not len(peak_positions):
+    values = current.to_numpy(dtype=float)
+    tolerance = max(0.05, float(np.nanmax(np.abs(values))) * 0.002)
+    deltas = np.diff(values)
+    significant = np.flatnonzero(np.abs(deltas) > tolerance)
+    if not len(significant):
         return [("increasing", ordered)]
-    split = int(peak_positions[-1]) + 1
-    parts = [("increasing", ordered.iloc[:split])]
-    if split < len(ordered):
-        parts.append(("decreasing", ordered.iloc[split:]))
-    return [(direction, rows) for direction, rows in parts if len(rows) >= 2]
+
+    direction = "increasing" if deltas[int(significant[0])] > 0.0 else "decreasing"
+    start = 0
+    parts: list[tuple[str, pd.DataFrame]] = []
+    for delta_index in significant[1:]:
+        candidate = "increasing" if deltas[int(delta_index)] > 0.0 else "decreasing"
+        if candidate == direction:
+            continue
+        # Include the turning-point sample in both adjoining legs so each line
+        # remains visually connected without inventing an intermediate value.
+        split = int(delta_index) + 1
+        rows = ordered.iloc[start:split]
+        if len(rows) >= 2:
+            parts.append((direction, rows))
+        start = max(0, split - 1)
+        direction = candidate
+    rows = ordered.iloc[start:]
+    if len(rows) >= 2:
+        parts.append((direction, rows))
+    return parts or [("increasing", ordered)]
 
 
 _DIRECTION_STYLE = {
@@ -711,7 +727,17 @@ def _plot_grouped_current_response(
             )
 
 
-def _direction_legend_handles() -> list[Line2D]:
+def _current_directions(context: _PlateauPlotContext) -> list[str]:
+    present = {
+        direction
+        for group in context.groups
+        for direction, _rows in _current_direction_parts(group.rows)
+    }
+    return [direction for direction in _DIRECTION_STYLE if direction in present]
+
+
+def _direction_legend_handles(directions: list[str] | None = None) -> list[Line2D]:
+    selected = directions or list(_DIRECTION_STYLE)
     return [
         Line2D(
             [0],
@@ -723,7 +749,8 @@ def _direction_legend_handles() -> list[Line2D]:
             markersize=4.0,
             label=style["label"],
         )
-        for style in _DIRECTION_STYLE.values()
+        for direction in selected
+        if (style := _DIRECTION_STYLE.get(direction)) is not None
     ]
 
 
@@ -774,6 +801,25 @@ def _plot_strain_current(
     axis_frame = _plateau_context_frame(context) if context is not None else df
     _set_current_axis_limits(ax, axis_frame, current_name)
     _add_power_per_cm_axis(ax, axis_frame, metadata)
+    if grouped and context is not None and "decreasing" not in _current_directions(context):
+        sweep = metadata.get("controlled_current_sweep")
+        reverse_requested = sweep.get("reverse_current") if isinstance(sweep, dict) else None
+        message = (
+            "Decreasing-current sweeps were disabled in this saved recipe."
+            if reverse_requested is False
+            else "No decreasing-current samples were recorded."
+        )
+        ax.text(
+            0.01,
+            0.02,
+            message,
+            transform=ax.transAxes,
+            fontsize=7.5,
+            color="#b45309",
+            ha="left",
+            va="bottom",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "#fffbeb", "edgecolor": "#f59e0b", "alpha": 0.92},
+        )
     return context
 
 
@@ -1009,7 +1055,7 @@ def _plot_strain_stress(
     ]
     if current_handles:
         ax.legend(
-            handles=[*current_handles, *_direction_legend_handles()],
+            handles=[*current_handles, *_direction_legend_handles(_current_directions(context))],
             fontsize=6.4,
             ncol=2,
             loc="best",
@@ -1077,7 +1123,7 @@ def _plot_phone_summary(
         ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold", loc="left")
         if context is not None:
             fig.legend(
-                handles=_direction_legend_handles(),
+                handles=_direction_legend_handles(_current_directions(context)),
                 fontsize=7.5,
                 loc="center right",
                 bbox_to_anchor=(0.64, 0.825),
@@ -1122,7 +1168,7 @@ def _plot_detail_summary(
         comparison_axes = [axes[0, 1], axes[1, 1]] if resistance_shown else axes[0, 1]
         _add_plateau_colorbar(fig, comparison_axes, context)
         fig.legend(
-            handles=_direction_legend_handles(),
+            handles=_direction_legend_handles(_current_directions(context)),
             fontsize=7.5,
             loc="upper right",
             bbox_to_anchor=(0.90, 0.915),
