@@ -11120,7 +11120,7 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
                 return parts[1]
             return parts[0]
         if len(parts) == 1:
-            return root.name if root.is_dir() else path.stem
+            return path.name if path.is_dir() else path.stem
     parent = path.parent.name
     return parent if parent else path.stem
 
@@ -14915,6 +14915,26 @@ class AnnealingSection(MiniDatabaseSection):
     section_key = "annealing"
     section_title = "Current annealing"
     supported_suffixes = (".txt", ".dat", ".csv", ".tsv")
+
+    def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
+        candidates = super()._collect_candidates()
+        filtered: List[Path] = []
+        session_schemas = {
+            "current_annealing_logger_metadata_v1",
+            "current_annealing_session_v2",
+        }
+        for path in candidates:
+            metadata_path = path.parent / "metadata.json"
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                metadata = None
+            if isinstance(metadata, Mapping) and metadata.get("schema") in session_schemas:
+                data_file = str(metadata.get("data_file") or "measurement.txt").casefold()
+                if path.name.casefold() != data_file:
+                    continue
+            filtered.append(path)
+        return filtered
 
     def __init__(
         self,
@@ -21589,9 +21609,35 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if isinstance(parent_id, str) and parent_id:
                     cycles_by_parent.setdefault(parent_id, []).append(record)
 
+        source_records = list(
+            getattr(self, "_all_transition_source_records", []) or []
+        )
+        source_groups = _group_graph_records_by_key(source_records)
+        legacy_ids_by_parent: Dict[str, List[str]] = {}
+        for stored_id, payload in self._transition_reviews.items():
+            if not isinstance(payload, Mapping) or payload.get(
+                "superseded_by_cycle_ids"
+            ):
+                continue
+            if stored_id in cycles_by_parent:
+                legacy_ids_by_parent.setdefault(stored_id, []).append(stored_id)
+                continue
+            candidates = self._vsm_review_candidates(
+                payload, source_records, source_groups
+            )
+            if len(candidates) != 1:
+                continue
+            parent_id = _vsm_transition_base_record_id(candidates[0])
+            if parent_id in cycles_by_parent:
+                legacy_ids_by_parent.setdefault(parent_id, []).append(stored_id)
+
         changed = False
         for parent_id, cycle_records in cycles_by_parent.items():
-            legacy = self._transition_reviews.get(parent_id)
+            legacy_ids = list(dict.fromkeys(legacy_ids_by_parent.get(parent_id, [])))
+            if len(legacy_ids) != 1:
+                continue
+            legacy_id = legacy_ids[0]
+            legacy = self._transition_reviews.get(legacy_id)
             if not isinstance(legacy, dict):
                 continue
             cycle_records.sort(
@@ -21612,7 +21658,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
                         group_by_record_id.get(cycle_id, ""), cycle_record
                     )
                 )
-                migrated["migrated_from_record_id"] = parent_id
+                migrated["migrated_from_record_id"] = legacy_id
                 migrated["migration_strategy"] = "copied_to_each_cycle"
                 self._transition_reviews[cycle_id] = (
                     self._clean_transition_review_payload(cycle_id, migrated)
@@ -21621,10 +21667,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
             legacy_updated = dict(legacy)
             legacy_updated["superseded_by_cycle_ids"] = cycle_ids
             cleaned_legacy = self._clean_transition_review_payload(
-                parent_id, legacy_updated
+                legacy_id, legacy_updated
             )
             if cleaned_legacy != legacy:
-                self._transition_reviews[parent_id] = cleaned_legacy
+                self._transition_reviews[legacy_id] = cleaned_legacy
                 changed = True
         return changed
 
@@ -28113,22 +28159,8 @@ def _vsm_transition_cycle_count(record: VsmTemperatureScanRecord) -> int | None:
     frame = getattr(record, "data", None)
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return None
-    if "section_index" not in frame.columns or "temperature" not in frame.columns:
-        return None
-    directions: List[str] = []
-    for _section_index, segment in frame.groupby("section_index", sort=False):
-        temperatures = pd.to_numeric(segment["temperature"], errors="coerce").dropna()
-        if len(temperatures.index) < 2:
-            continue
-        delta = float(temperatures.iloc[-1] - temperatures.iloc[0])
-        if math.isclose(delta, 0.0, abs_tol=1e-9):
-            continue
-        directions.append("up" if delta > 0.0 else "down")
-    heating = directions.count("up")
-    cooling = directions.count("down")
-    if heating and cooling:
-        return min(heating, cooling)
-    return max(heating, cooling) or None
+    cycles = _vsm_temperature_cycle_frames(frame)
+    return len(cycles) or None
 
 
 def _vsm_transition_cycle_target_label(value: object) -> str:
@@ -42750,6 +42782,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 section._update_open_sources_enabled()
             except Exception:
                 pass
+        if key == "vsm_temperature_scan" and getattr(section, "_all_records", None):
+            transition_section = getattr(self, "transition_temps_section", None)
+            if isinstance(transition_section, TransitionTempsSection):
+                transition_section.refresh_data()
         status_text = ""
         status_label = getattr(section, "status_label", None)
         if isinstance(status_label, QtWidgets.QLabel):

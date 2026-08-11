@@ -200,6 +200,36 @@ def test_streaming_codec_uses_columnar_dataframe_blobs_without_row_expansion() -
     pd.testing.assert_frame_equal(restored, frame)
 
 
+def test_streaming_codec_dictionary_compresses_repeated_string_columns() -> None:
+    count = 20_000
+    frame = pd.DataFrame(
+        {
+            "phase": pd.Series(
+                ["current_ramp", "stress_hold"] * (count // 2), dtype=object
+            ),
+            "value": np.arange(count, dtype=np.float64),
+        }
+    )
+    blobs: dict[str, bytes] = {}
+
+    def sink(buffer: memoryview) -> tuple[str, int]:
+        raw = bytes(buffer)
+        digest = hashlib.sha256(raw).hexdigest()
+        blobs[digest] = raw
+        return digest, len(raw)
+
+    encoded_text = "".join(safe_codec.iterencode_envelope_with_blobs(frame, sink))
+    restored = safe_codec.decode_envelope(
+        json.loads(encoded_text),
+        blob_resolver=lambda digest, _size: blobs[digest],
+    )
+
+    assert "dictionary-string-v1" in encoded_text
+    assert len(encoded_text) < 4_000
+    assert len(blobs) == 2
+    pd.testing.assert_frame_equal(restored, frame)
+
+
 def test_streaming_codec_accepts_realistic_large_tma_dataframe() -> None:
     rows, columns = 147_079, 15  # 2,206,185 cells; R2 had 2,206,176.
     values = np.arange(rows, dtype=np.float64)

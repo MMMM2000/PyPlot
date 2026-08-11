@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import math
@@ -139,10 +140,20 @@ def resolve_measurement_path(path: str | Path) -> Path:
 
     source = Path(path)
     if source.is_dir():
-        measurement = source / "measurement.txt"
-        if not measurement.is_file():
-            raise ValueError(f"{source}: run folder has no measurement.txt")
-        return measurement
+        metadata_path = source / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict) and metadata.get("data_file"):
+            measurement = source / str(metadata["data_file"])
+            if measurement.is_file():
+                return measurement
+        for name in ("measurement.csv", "measurement.txt"):
+            measurement = source / name
+            if measurement.is_file():
+                return measurement
+        raise ValueError(f"{source}: run folder has no measurement.csv or measurement.txt")
     return source
 
 
@@ -150,7 +161,7 @@ def measurement_display_name(path: str | Path) -> str:
     """Return the human run name for files from either storage layout."""
 
     source = resolve_measurement_path(path)
-    if source.name.casefold() == "measurement.txt":
+    if source.name.casefold() in {"measurement.txt", "measurement.csv"}:
         return source.parent.name
     return source.stem
 
@@ -161,6 +172,36 @@ def load_file(path: str | Path) -> pd.DataFrame:
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
     source = resolve_measurement_path(path)
+
+    if source.name.casefold() == "measurement.csv":
+        session_frame = pd.read_csv(source)
+        required = {"measured_current_mA", "resistance_ohm"}
+        if required.issubset(session_frame.columns):
+            frame = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(
+                        session_frame["measured_current_mA"], errors="coerce"
+                    ),
+                    "R_Ohm": pd.to_numeric(
+                        session_frame["resistance_ohm"], errors="coerce"
+                    ),
+                }
+            )
+            frame = frame.replace([np.inf, -np.inf], np.nan)
+            frame = frame.dropna(subset=["I_mA", "R_Ohm"]).reset_index(drop=True)
+            frame = frame.loc[frame["I_mA"] != 0].reset_index(drop=True)
+            if frame.empty:
+                raise ValueError(f"{source}: no usable samples after filtering zeros")
+            currents = frame["I_mA"].to_numpy(dtype=float)
+            resistances = frame["R_Ohm"].to_numpy(dtype=float)
+            trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(
+                currents, resistances
+            )
+            if trimmed_currents.shape[0] != currents.shape[0]:
+                frame = frame.iloc[: trimmed_currents.shape[0]].copy()
+                frame["I_mA"] = trimmed_currents
+                frame["R_Ohm"] = trimmed_resistances
+            return frame[["I_mA", "R_Ohm"]]
 
     def _read(sep: str | None) -> pd.DataFrame:
         return pd.read_csv(

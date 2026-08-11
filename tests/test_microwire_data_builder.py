@@ -4182,6 +4182,60 @@ def test_filename_parser_extracts_kosice_dat_metadata(tmp_path: Path) -> None:
     assert metadata.setpoint_mA is None
 
 
+def test_annealing_session_v2_folder_is_one_parseable_measurement(tmp_path: Path) -> None:
+    _ensure_qapp()
+    run_dir = tmp_path / "Ni48Fe27Ga23Cu1Co1 1_1 60mA VSM 2loops_run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.csv"
+    pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0],
+            "cycle_index": [1, 1, 2],
+            "measured_current_mA": [1.2, 20.0, 30.0],
+            "voltage_V": [0.08, 1.4, 2.1],
+            "resistance_ohm": [66.7, 70.0, 70.0],
+        }
+    ).to_csv(measurement, index=False)
+    (run_dir / "run_log.txt").write_text("not measurement data\n", encoding="utf-8")
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema": "current_annealing_session_v2",
+                "data_file": "measurement.csv",
+                "composition": "Ni48Fe27Ga23Cu1Co1",
+                "microwire": "1/1",
+                "max_current_mA": 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = _metadata_from_path(measurement, tmp_path)
+    frame = _load_annealing(measurement)
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data.sources = [str(tmp_path)]
+        candidates = section._collect_candidates()
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+    assert metadata.composition_token == "Ni48Fe27Ga23Cu1Co1"
+    assert (metadata.draw_x, metadata.piece_y, metadata.setpoint_mA) == (1, 1, 60)
+    assert metadata.file_name == run_dir.name
+    assert frame["I_mA"].tolist() == pytest.approx([1.2, 20.0, 30.0])
+    assert frame["Cycle"].tolist() == pytest.approx([1.0, 1.0, 2.0])
+    assert candidates == [measurement]
+
+
+def test_sample_from_path_uses_direct_child_run_folder_name(tmp_path: Path) -> None:
+    root = tmp_path / "mini DMA"
+    run = root / "Ni50Fe27Ga23 12_5 iso-stress_run06"
+    run.mkdir(parents=True)
+
+    assert builder_ui._sample_from_path(run, [str(root)]) == run.name
+
+
 def test_split_microwire_key_rejects_non_integral_or_boolean_indices() -> None:
     assert _split_microwire_key(("Ni50Fe27Ga23", 3.25, 4, None)) is None
     assert _split_microwire_key(("Ni50Fe27Ga23", True, 4, None)) is None
@@ -9067,6 +9121,44 @@ def test_deferred_project_section_refreshes_restored_source_controls(
 
         window.close()
 
+
+def test_deferred_vsm_source_load_rebuilds_cycle_transition_records() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+    source_section = window.vsm_temperature_section
+    try:
+        source_section._all_records = [record]  # noqa: SLF001
+
+        window._refresh_loaded_project_section_ui(  # noqa: SLF001
+            "vsm_temperature_scan", source_section
+        )
+
+        cycles = window.transition_temps_section._all_transition_records  # noqa: SLF001
+        assert len(cycles) == 2
+        assert [
+            builder_ui._vsm_transition_cycle_target_label(cycle)  # noqa: SLF001
+            for cycle in cycles
+        ] == ["Cycle 1 · RT", "Cycle 2 · RT"]
+    finally:
+        window._dirty = False
+        window.close()
+
 def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
     _ensure_qapp()
     window = BuilderWindow()
@@ -11889,6 +11981,26 @@ def test_vsm_transition_target_label_counts_actual_cycles() -> None:
         )
         == "Temperature scan · 150 °C"
     )
+
+
+def test_vsm_transition_cycle_count_does_not_count_fields_as_cycles() -> None:
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0] * 2,
+            "field": [5.0] * 4 + [10.0] * 4,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.2, 1.2, 1.2, 0.2],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        label="202601011200-TSCN-a000-RT-00",
+    )
+
+    assert len(builder_ui._vsm_transition_cycle_records(record)) == 1  # noqa: SLF001
+    assert builder_ui._vsm_transition_cycle_target_label(record) == "Cycle 1 · RT"  # noqa: SLF001
 
 
 def test_vsm_transition_records_split_heating_cooling_pairs() -> None:

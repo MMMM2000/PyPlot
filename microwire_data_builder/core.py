@@ -4035,13 +4035,18 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
     logger_metadata: Dict[str, Any] = {}
-    if path.name.casefold() == "measurement.txt":
+    if path.name.casefold() in {"measurement.txt", "measurement.csv"}:
         metadata_path = path.parent / "metadata.json"
         try:
             candidate = json.loads(metadata_path.read_text(encoding="utf-8"))
             if (
                 isinstance(candidate, dict)
-                and candidate.get("schema") == "current_annealing_logger_metadata_v1"
+                and candidate.get("schema") in {
+                    "current_annealing_logger_metadata_v1",
+                    "current_annealing_session_v2",
+                }
+                and str(candidate.get("data_file") or path.name).casefold()
+                == path.name.casefold()
             ):
                 logger_metadata = candidate
                 base = " ".join(
@@ -4070,6 +4075,11 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     xy_match = DRAW_PIECE_AFTER_COMPOSITION_PATTERN.search(identity_tail)
     if xy_match is None:
         xy_match = XY_PATTERN.search(base)
+    if xy_match is None and logger_metadata.get("microwire"):
+        xy_match = re.search(
+            r"(?<!\d)(\d+)\s*[/_-]\s*(\d+)(?!\d)",
+            str(logger_metadata["microwire"]),
+        )
     draw_x: Optional[int] = int(xy_match.group(1)) if xy_match else None
     piece_y: Optional[int] = int(xy_match.group(2)) if xy_match else None
     setpoint_match = SETPOINT_PATTERN.search(base)
@@ -4208,6 +4218,20 @@ def _load_annealing(
 ) -> pd.DataFrame:
     if path.suffix.lower() == ".dat":
         return _trim_annealing_burnthrough(_load_annealing_dat(path))
+
+    if path.name.casefold() == "measurement.csv":
+        session_frame = pd.read_csv(path)
+        required = {"measured_current_mA", "voltage_V", "resistance_ohm"}
+        if required.issubset(session_frame.columns):
+            cycle = session_frame.get("cycle_index")
+            return _trim_annealing_burnthrough(
+                _normalise_annealing_columns(
+                    current_mA=session_frame["measured_current_mA"],
+                    voltage_v=session_frame["voltage_V"],
+                    resistance_ohm=session_frame["resistance_ohm"],
+                    cycle=cycle,
+                )
+            )
 
     try:
         df = pd.read_csv(path, sep=None, engine="python", names=ANNEALING_COLUMNS, header=None)

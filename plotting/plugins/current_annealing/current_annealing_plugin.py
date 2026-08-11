@@ -147,9 +147,16 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     def _is_data_source_path(cls, path: Path) -> bool:
         if cls._is_metadata_sidecar_path(path):
             return False
-        run_measurement = path.parent / "measurement.txt"
-        if run_measurement.is_file() and path.name.casefold() != "measurement.txt":
-            return False
+        run_measurements = [
+            path.parent / name for name in ("measurement.csv", "measurement.txt")
+        ]
+        if any(candidate.is_file() for candidate in run_measurements):
+            try:
+                selected = anneal_core.resolve_measurement_path(path.parent).resolve()
+                if path.resolve() != selected:
+                    return False
+            except Exception:
+                return False
         return path.suffix.lower() in cls._DATA_SUFFIXES
 
     def _candidate_data_paths(self, paths: list[Path]) -> list[Path]:
@@ -171,8 +178,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             if not isinstance(path, Path):
                 continue
             if path.is_dir():
-                direct_measurement = path / "measurement.txt"
-                if direct_measurement.is_file():
+                try:
+                    direct_measurement = anneal_core.resolve_measurement_path(path)
+                except Exception:
+                    direct_measurement = None
+                if direct_measurement is not None and direct_measurement.is_file():
                     _push(direct_measurement)
                     continue
                 try:

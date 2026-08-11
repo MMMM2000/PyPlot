@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import importlib
+import json
 
 import matplotlib
 import numpy as np
@@ -767,6 +768,33 @@ def test_current_annealing_core_loads_logger_run_folder(tmp_path: Path) -> None:
     frame = anneal_core.load_file(run_dir)
 
     assert frame["I_mA"].tolist() == pytest.approx([20.0, 50.0, 100.0])
+    assert anneal_core.resolve_measurement_path(run_dir) == measurement
+    assert anneal_core.measurement_display_name(measurement) == run_dir.name
+
+
+def test_current_annealing_core_loads_session_v2_csv_folder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "Ni48Fe27Ga23Cu1Co1 1_1 60mA VSM 2loops_run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.csv"
+    pd.DataFrame(
+        {
+            "measured_current_mA": [1.2, 20.0, 30.0],
+            "resistance_ohm": [66.7, 70.0, 69.0],
+        }
+    ).to_csv(measurement, index=False)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema": "current_annealing_session_v2",
+                "data_file": "measurement.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(run_dir)
+
+    assert frame["I_mA"].tolist() == pytest.approx([1.2, 20.0, 30.0])
     assert anneal_core.resolve_measurement_path(run_dir) == measurement
     assert anneal_core.measurement_display_name(measurement) == run_dir.name
 
