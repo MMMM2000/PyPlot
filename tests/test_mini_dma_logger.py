@@ -2488,13 +2488,18 @@ def test_isolated_hardware_ownership_interlocks_manual_controls_until_finish(
         window._update_recipe_buttons()
 
         assert window.manual_actions_box.isEnabled() is False
-        assert window.hardware_tab.isEnabled() is False
+        assert window.hardware_tab.isEnabled() is True
+        assert window.label_hardware_ownership.isHidden() is False
+        assert window.button_scale_connect.isEnabled() is False
+        assert window.button_ir_live_camera.isEnabled() is True
         assert window.button_emergency_stop.isEnabled() is True
 
         window._finish_isolated_recipe(state=terminal_state)
 
         assert window.manual_actions_box.isEnabled() is True
         assert window.hardware_tab.isEnabled() is True
+        assert window.label_hardware_ownership.isHidden() is True
+        assert window.button_scale_connect.isEnabled() is True
         assert window.button_emergency_stop.isEnabled() is True
     finally:
         window._isolated_recipe_active = False
@@ -15874,6 +15879,35 @@ def test_mini_dma_live_camera_popup_pause_and_display_throttle(
         dialog.update_frame(frame2)
 
         assert dialog._latest_frame is frame2
+    finally:
+        dialog.close()
+
+
+def test_mini_dma_live_camera_decodes_controller_owned_preview(qtbot) -> None:
+    dialog = mini_dma_mod.MiniDmaThermalCameraDialog()
+    qtbot.addWidget(dialog)
+    preview_json = json.dumps(
+        {
+            "elapsed_ms": 250,
+            "ambient_c": 24.5,
+            "values": [20.0, 21.0, 22.0, 34.0],
+            "unit": "C",
+            "raw_read_us": 10000,
+            "sequence": 4,
+            "flags": 0,
+            "width": 2,
+            "height": 2,
+            "roi_start_col": 0,
+        }
+    )
+
+    try:
+        dialog.update_preview_json(preview_json)
+
+        assert dialog._latest_frame is not None
+        assert dialog._latest_frame.sequence == 4
+        assert dialog.image_label.pixmap() is not None
+        assert "Max 34.00 C" in dialog.stats_label.text()
     finally:
         dialog.close()
 

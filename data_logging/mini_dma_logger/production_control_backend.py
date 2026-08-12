@@ -13,6 +13,7 @@ from dataclasses import fields
 import json
 import math
 import os
+import time
 from typing import Any, Mapping
 
 from .control_process import ControlPolicy, ControlStartRequest, ReadbackValue
@@ -245,6 +246,8 @@ class ProductionTmaBackend:
         self._hardware_preflight: dict[str, ReadbackValue] = {}
         self._ui_log_sequence = 0
         self._ui_log_lines: deque[tuple[int, str]] = deque(maxlen=256)
+        self._ir_preview_key: object | None = None
+        self._ir_preview_json = ""
 
     def _capture_ui_log_line(self, line: str) -> None:
         self._ui_log_sequence += 1
@@ -487,6 +490,46 @@ class ProductionTmaBackend:
             return False, "controller does not support current-hold bypass"
         return setter(bool(enabled))
 
+    def _latest_ir_preview_json(self, window: Any) -> str:
+        """Return one immutable, cached camera frame for latest-value UI IPC."""
+
+        frame = getattr(window, "_latest_ir_frame", None)
+        if frame is None:
+            self._ir_preview_key = None
+            self._ir_preview_json = ""
+            return ""
+        key = (
+            getattr(frame, "sequence", None),
+            getattr(frame, "elapsed_ms", None),
+            id(frame),
+        )
+        if key == self._ir_preview_key:
+            return self._ir_preview_json
+        try:
+            values = tuple(float(value) for value in getattr(frame, "values", ()))
+            width = int(getattr(frame, "width", 0) or 0)
+            height = int(getattr(frame, "height", 0) or 0)
+            if not values or width <= 0 or height <= 0 or len(values) != width * height:
+                return ""
+            payload = {
+                "elapsed_ms": getattr(frame, "elapsed_ms", None),
+                "ambient_c": getattr(frame, "ambient_c", None),
+                "values": [round(value, 4) if math.isfinite(value) else None for value in values],
+                "unit": str(getattr(frame, "unit", "C") or "C"),
+                "raw_read_us": getattr(frame, "raw_read_us", None),
+                "sequence": getattr(frame, "sequence", None),
+                "flags": int(getattr(frame, "flags", 0) or 0),
+                "width": width,
+                "height": height,
+                "roi_start_col": int(getattr(frame, "roi_start_col", 0) or 0),
+            }
+            preview_json = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError, OverflowError):
+            return ""
+        self._ir_preview_key = key
+        self._ir_preview_json = preview_json
+        return preview_json
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]:
         window = self._window
         if window is None:
@@ -519,6 +562,17 @@ class ProductionTmaBackend:
             if terminal_readback.get("stress_mpa") is not None:
                 stress = float(terminal_readback["stress_mpa"])
         snapshot = getattr(window, "_supply_snapshot", {})
+        try:
+            scale_summary = window._scale_signal_buffer.recent_summary(
+                now_s=time.time(),
+                window_s=1.0,
+            )
+        except Exception:
+            scale_summary = None
+        try:
+            ir_snapshot = dict(window._latest_ir_snapshot())
+        except Exception:
+            ir_snapshot = {}
         session_path = getattr(window, "_session_base_path", None)
         stop_metadata_reader = getattr(window, "_session_stop_metadata", None)
         stop_metadata = (
@@ -593,6 +647,15 @@ class ProductionTmaBackend:
                 None if speed_mm_s is None else float(speed_mm_s),
             ),
             ("scale_age_s", window._scale_reading_age_s()),
+            ("scale_raw_g", getattr(window, "_latest_scale_value_g", None)),
+            (
+                "scale_rate_hz",
+                None if scale_summary is None else scale_summary.sample_rate_hz,
+            ),
+            (
+                "scale_std_g",
+                None if scale_summary is None else scale_summary.load_std_g,
+            ),
             ("supply_output_enabled", bool(window._supply_output_enabled)),
             (
                 "supply_setpoint_mA",
@@ -614,6 +677,17 @@ class ProductionTmaBackend:
             ("session_stop_label", stop_metadata.get("label")),
             ("session_stop_detail", stop_metadata.get("detail")),
             ("tic_vin_v", window._last_tic_vin_v),
+            ("tic_position_steps", getattr(window, "_current_position_steps", None)),
+            ("tic_status_text", str(getattr(window, "_tic_status_text", "") or "")),
+            ("position_reference_mm", getattr(window, "_position_reference_mm", None)),
+            ("last_move_target_mm", getattr(window, "_last_move_target_mm", None)),
+            ("ir_preview_json", self._latest_ir_preview_json(window)),
+            ("ir_sample_age_s", ir_snapshot.get("sample_age_s")),
+            ("ir_sample_rate_hz", ir_snapshot.get("sample_rate_hz")),
+            ("ir_frame_min_c", ir_snapshot.get("frame_min_c")),
+            ("ir_frame_mean_c", ir_snapshot.get("frame_mean_c")),
+            ("ir_frame_max_c", ir_snapshot.get("frame_max_c")),
+            ("ir_ambient_c", ir_snapshot.get("ambient_c")),
             ("emergency_reason", self._emergency_reason),
             ("error", self._last_error),
             (

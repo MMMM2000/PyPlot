@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 from PyQt6 import QtWidgets
 
+from experiments.thermal_camera_viewer import ThermalFrame
+
 from data_logging.mini_dma_logger.control_process import (
     BackendFactorySpec,
     ControlBackpressureError,
@@ -860,6 +862,30 @@ def test_production_backend_preserves_run_relative_terminal_readback() -> None:
     assert readback["plot_elapsed_s"] == pytest.approx(88.5)
     assert readback["plot_load_g"] == pytest.approx(0.005)
     backend.close()
+
+
+def test_production_backend_exposes_bounded_latest_thermal_preview() -> None:
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    frame = ThermalFrame(
+        elapsed_ms=125,
+        ambient_c=23.5,
+        values=(20.0, 21.0, 22.0, 23.0),
+        raw_read_us=11000,
+        sequence=7,
+        width=2,
+        height=2,
+    )
+    window = SimpleNamespace(_latest_ir_frame=frame)
+
+    first = backend._latest_ir_preview_json(window)
+    second = backend._latest_ir_preview_json(window)
+    payload = json.loads(first)
+
+    assert second is first
+    assert payload["sequence"] == 7
+    assert payload["width"] == 2
+    assert payload["height"] == 2
+    assert payload["values"] == [20.0, 21.0, 22.0, 23.0]
 
 
 def test_production_backend_exposes_wire_break_terminal_metadata() -> None:

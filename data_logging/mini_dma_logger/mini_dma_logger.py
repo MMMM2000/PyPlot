@@ -8166,6 +8166,33 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
                 pass
         self._render_latest()
 
+    def update_preview_json(self, preview_json: str) -> None:
+        """Render the controller-owned latest frame without taking camera ownership."""
+
+        try:
+            payload = json.loads(str(preview_json))
+            from experiments.thermal_camera_viewer import ThermalFrame
+
+            frame = ThermalFrame(
+                elapsed_ms=payload.get("elapsed_ms"),
+                ambient_c=payload.get("ambient_c"),
+                values=tuple(
+                    math.nan if value is None else float(value)
+                    for value in payload["values"]
+                ),
+                unit=str(payload.get("unit") or "C"),
+                raw_read_us=payload.get("raw_read_us"),
+                sequence=payload.get("sequence"),
+                flags=int(payload.get("flags") or 0),
+                width=int(payload["width"]),
+                height=int(payload["height"]),
+                roi_start_col=int(payload.get("roi_start_col") or 0),
+            )
+        except (ImportError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.stats_label.setText(f"Could not decode controller camera preview: {exc}")
+            return
+        self.update_frame(frame)
+
     def _toggle_display_pause(self) -> None:
         self._display_paused = not self._display_paused
         self.pause_button.setText("Resume view" if self._display_paused else "Pause view")
@@ -8260,6 +8287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_setup_elapsed_offset_s: float | None = None
         self._isolated_session_logging_enabled = False
         self._isolated_last_log_sequence = 0
+        self._isolated_ir_preview_json = ""
         self._isolated_user_stop_requested = False
         self._current_hold_bypass_requested = False
         self._current_hold_bypass_confirmed = False
@@ -8267,6 +8295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_hold_bypass_button: QtWidgets.QPushButton | None = None
         self._current_hold_bypass_status: QtWidgets.QLabel | None = None
         self._isolated_supply_handoff_leases: dict[int, str] = {}
+        self._isolated_hardware_widget_enabled: dict[QtWidgets.QWidget, bool] = {}
         self._recovery_prompt_pending = False
         self._recovery_prompt_visible = False
         self._recovery_action_pending = False
@@ -9624,6 +9653,16 @@ class MainWindow(QtWidgets.QMainWindow):
         hardware_layout = QtWidgets.QVBoxLayout(hardware_tab)
         hardware_layout.setContentsMargins(0, 0, 0, 0)
         hardware_layout.setSpacing(10)
+
+        self.label_hardware_ownership = QtWidgets.QLabel(hardware_tab)
+        self.label_hardware_ownership.setWordWrap(True)
+        self.label_hardware_ownership.setStyleSheet("color: #42a5f5;")
+        self.label_hardware_ownership.setText(
+            "Recipe controller owns the hardware. Live controller readbacks remain visible; "
+            "hardware-changing controls are locked until the recipe finishes."
+        )
+        self.label_hardware_ownership.setVisible(False)
+        hardware_layout.addWidget(self.label_hardware_ownership)
 
         scale_box = self._group_box("Scale")
         scale_box.setSizePolicy(
@@ -17602,6 +17641,8 @@ class MainWindow(QtWidgets.QMainWindow):
             latest_frame = self._latest_ir_frame
         if latest_frame is not None:
             dialog.update_frame(latest_frame)
+        elif self._isolated_ir_preview_json:
+            dialog.update_preview_json(self._isolated_ir_preview_json)
         elif self._ir_thread is None:
             dialog.stats_label.setText("Connect TMA IR logging to the MLX90640 camera to see live frames.")
         else:
@@ -33166,11 +33207,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self.button_stop_recipe.setEnabled(self._automation_active)
         child_owns_hardware = self._isolated_recipe_active
         self.manual_actions_box.setEnabled(not child_owns_hardware)
-        self.hardware_tab.setEnabled(not child_owns_hardware)
+        self._set_isolated_hardware_ui_state(child_owns_hardware)
         self.button_emergency_stop.setEnabled(True)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
+
+    def _set_isolated_hardware_ui_state(self, child_owns_hardware: bool) -> None:
+        """Keep child-owned readbacks visible while interlocking UI hardware actions."""
+
+        self.hardware_tab.setEnabled(True)
+        self.label_hardware_ownership.setVisible(child_owns_hardware)
+        interactive_types = (
+            QtWidgets.QAbstractButton,
+            QtWidgets.QComboBox,
+            QtWidgets.QAbstractSpinBox,
+            QtWidgets.QLineEdit,
+        )
+        interactive: list[QtWidgets.QWidget] = []
+        seen: set[int] = set()
+        for widget_type in interactive_types:
+            for widget in self.hardware_tab.findChildren(widget_type):
+                if id(widget) not in seen:
+                    seen.add(id(widget))
+                    interactive.append(widget)
+        if child_owns_hardware:
+            if not self._isolated_hardware_widget_enabled:
+                self._isolated_hardware_widget_enabled = {
+                    widget: widget.isEnabled() for widget in interactive
+                }
+            for widget in interactive:
+                widget.setEnabled(False)
+            # Opening the bounded child-process camera preview is observational only.
+            self.button_ir_live_camera.setEnabled(True)
+            return
+        for widget, enabled in tuple(self._isolated_hardware_widget_enabled.items()):
+            try:
+                widget.setEnabled(enabled)
+            except RuntimeError:
+                pass
+        self._isolated_hardware_widget_enabled.clear()
 
     def _current_sweep_runtime_editable_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
         return (
@@ -34357,6 +34433,7 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s = readback.get("speed_mm_s")
         supply_current = readback.get("supply_current_mA")
         supply_voltage = readback.get("supply_voltage_V")
+        self._apply_isolated_hardware_status(readback)
         self._set_dashboard_value(
             "load_g",
             "-" if load_g is None else f"{float(load_g):.3f} g",
@@ -34460,6 +34537,92 @@ class MainWindow(QtWidgets.QMainWindow):
         if remaining_s is not None and remaining_s > 0.0:
             progress_text += f" | ETA {_format_duration(remaining_s)}"
         self.recipe_progress.setFormat(progress_text)
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) else None
+
+    def _apply_isolated_hardware_status(self, readback: Mapping[str, object]) -> None:
+        """Mirror child-owned readback into the visible, non-owning Hardware tab."""
+
+        load_g = self._optional_float(readback.get("load_g"))
+        raw_g = self._optional_float(readback.get("scale_raw_g"))
+        scale_rate_hz = self._optional_float(readback.get("scale_rate_hz"))
+        scale_std_g = self._optional_float(readback.get("scale_std_g"))
+        self.label_scale_value.setText(
+            "Controller-owned scale | "
+            f"Applied tensile load: {'-' if load_g is None else f'{load_g:.5f} g'} | "
+            f"Raw: {'-' if raw_g is None else f'{raw_g:.5f} g'} | "
+            f"{'-' if scale_rate_hz is None else f'{scale_rate_hz:.1f} Hz'}, "
+            f"{'-' if scale_std_g is None else f'{scale_std_g:.5f} g std'}"
+        )
+
+        position_mm = self._optional_float(readback.get("position_mm"))
+        position_steps = readback.get("tic_position_steps")
+        position_text = "-" if position_mm is None else f"{position_mm:.4f} mm"
+        steps_text = "-" if position_steps is None else f"{int(position_steps)} steps"
+        self.label_tic_position.setText(
+            f"Controller-owned position: {position_text} ({steps_text})"
+        )
+        tic_status = str(readback.get("tic_status_text") or "").strip()
+        tic_vin = self._optional_float(readback.get("tic_vin_v"))
+        self.label_tic_summary.setText(
+            "Controller-owned motor status | "
+            f"VIN: {'-' if tic_vin is None else f'{tic_vin:.2f} V'}"
+            + (f" | {tic_status}" if tic_status else "")
+        )
+        reference_mm = self._optional_float(readback.get("position_reference_mm"))
+        target_mm = self._optional_float(readback.get("last_move_target_mm"))
+        self.label_reference_status.setText(
+            "Controller-owned reference: "
+            f"{'-' if reference_mm is None else f'{reference_mm:.4f} mm'} | "
+            "Last target: "
+            f"{'-' if target_mm is None else f'{target_mm:.4f} mm'}"
+        )
+
+        current_mA = self._optional_float(readback.get("supply_current_mA"))
+        voltage_v = self._optional_float(readback.get("supply_voltage_V"))
+        supply_hz = self._optional_float(readback.get("supply_effective_hz"))
+        self.label_supply_status.setText("Power supply owned by the dedicated controller.")
+        self.label_supply_cadence.setText(
+            "Effective PSU rate: "
+            f"{'-' if supply_hz is None else f'{supply_hz:.1f} Hz'}"
+        )
+        self.label_supply_live.setText(
+            "Controller readback | Current "
+            f"{'-' if current_mA is None else f'{current_mA:.2f} mA'} | Voltage "
+            f"{'-' if voltage_v is None else f'{voltage_v:.3f} V'}"
+        )
+
+        ir_age = self._optional_float(readback.get("ir_sample_age_s"))
+        ir_rate = self._optional_float(readback.get("ir_sample_rate_hz"))
+        ir_min = self._optional_float(readback.get("ir_frame_min_c"))
+        ir_mean = self._optional_float(readback.get("ir_frame_mean_c"))
+        ir_max = self._optional_float(readback.get("ir_frame_max_c"))
+        ir_ambient = self._optional_float(readback.get("ir_ambient_c"))
+        if any(value is not None for value in (ir_min, ir_mean, ir_max, ir_ambient)):
+            self.label_ir_live.setText(
+                "Controller-owned camera | Min "
+                f"{'-' if ir_min is None else f'{ir_min:.2f} C'} | Mean "
+                f"{'-' if ir_mean is None else f'{ir_mean:.2f} C'} | Max "
+                f"{'-' if ir_max is None else f'{ir_max:.2f} C'} | Ambient "
+                f"{'-' if ir_ambient is None else f'{ir_ambient:.2f} C'} | "
+                f"{'-' if ir_age is None else f'age {ir_age:.2f} s'} | "
+                f"{'-' if ir_rate is None else f'{ir_rate:.1f} Hz'}"
+            )
+            self.label_ir_status.setText(
+                "Camera acquisition and full-rate logging are owned by the dedicated controller."
+            )
+        preview_json = str(readback.get("ir_preview_json") or "")
+        if preview_json:
+            self._isolated_ir_preview_json = preview_json
+        dialog = self._thermal_camera_dialog
+        if preview_json and dialog is not None:
+            dialog.update_preview_json(preview_json)
 
     def _finish_isolated_recipe(
         self,
