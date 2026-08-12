@@ -11005,6 +11005,7 @@ def test_elastocaloric_recipe_builds_timed_strain_jump_with_hysteresis_current(t
         assert window.spin_elastocaloric_hold_mA.isVisibleTo(window.recipe_stack)
         assert window.spin_elastocaloric_stabilize_s.isVisibleTo(window.recipe_stack)
         assert window.spin_elastocaloric_release_record_s.isVisibleTo(window.recipe_stack)
+        assert not window.constant_current_start_row.isVisibleTo(window.recipe_stack)
         assert not window.combo_constant_current_step_basis.isVisibleTo(window.recipe_stack)
         assert not window.spin_constant_current_step_size.isVisibleTo(window.recipe_stack)
         assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == pytest.approx(
@@ -11015,16 +11016,17 @@ def test_elastocaloric_recipe_builds_timed_strain_jump_with_hysteresis_current(t
         assert len(stabilize_steps) == 1
         assert stabilize_steps[0].duration_s == pytest.approx(30.0)
         assert stabilize_steps[0].current_mA == pytest.approx(40.0)
-        assert [step.note for step in recipe_steps[:8]] == [
+        assert [step.note for step in recipe_steps[:7]] == [
             "transition_seek",
             "transition",
             "transition_settle",
             "elastocaloric:austenite_hold_transition",
-            "elastocaloric:start_strain",
             "elastocaloric:pre_pull_baseline",
             "elastocaloric:motion_zero",
             "elastocaloric:pull",
         ]
+        assert stabilize_steps[0].basis is None
+        assert stabilize_steps[0].target_value is None
         assert len(scan_steps) == 2
         assert [(step.target_value, step.note) for step in scan_steps] == [
             (4.0, "elastocaloric:pull"),
@@ -11041,6 +11043,49 @@ def test_elastocaloric_recipe_builds_timed_strain_jump_with_hysteresis_current(t
         assert [step.duration_s for step in scan_steps] == pytest.approx([6.0, 8.0])
         assert "Started elastocaloric effect recipe" in summary
         assert "hold/move at 40.00 mA" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_run_summary_generation_survives_advisory_status_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    generated: list[Path] = []
+
+    def _failing_status(*_args, **_kwargs) -> None:
+        raise PermissionError("transient status replace denial")
+
+    def _generate(target: Path) -> dict[str, Path]:
+        generated.append(Path(target))
+        return {"image_path": Path(target) / "run_summary.png"}
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(mini_dma_mod, "_write_run_summary_status", _failing_status)
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _generate)
+
+    task = mini_dma_mod.RunSummaryTask((run_dir, False))
+    task.start()
+    assert task.done_event.wait(timeout=3.0)
+    task.thread.join(timeout=3.0)
+
+    assert generated == [run_dir]
+    assert task.summary == {"image_path": run_dir / "run_summary.png"}
+    assert task.error is None
+
+
+def test_elastocaloric_transition_seek_path_does_not_require_mechanical_note(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._force_control_profile = lambda: mini_dma_mod.ForceControlProfile.PRAGUE_LEGACY  # type: ignore[method-assign]
+        window._has_fresh_scale_reading = lambda: True  # type: ignore[method-assign]
+        window._current_distribution_value = lambda *_args, **_kwargs: 10.0  # type: ignore[method-assign]
+        window._distribution_target_tolerance = lambda *_args, **_kwargs: 0.5  # type: ignore[method-assign]
+
+        assert window._seek_distribution_target(mini_dma_mod.HSW_BASIS_STRESS_MPA, 10.0, 0.5) is True
     finally:
         _close_test_window(window)
 
@@ -11923,6 +11968,41 @@ def test_elastocaloric_mechanical_scan_traces_command_response_and_record_window
             "record_window_completed",
         ]
         assert all(trace["reason"] == "elastocaloric:pull" for trace in traces)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_elastocaloric_release_returns_exactly_to_captured_baseline(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._session_active = True
+        window._position_reference_mm = 0.0
+        window.spin_initial_length.setValue(30.0)
+        window._active_constant_current_zero_position_mm = 2.0
+        window._current_distribution_value = lambda *_args, **_kwargs: 999.0  # type: ignore[method-assign]
+        window._measurement_effective_position_mm = lambda: 3.2  # type: ignore[method-assign]
+        window._relative_motion_base_mm = lambda: 3.2  # type: ignore[method-assign]
+        window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+        window._write_control_trace = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._tension_motion_sign = lambda: 1.0  # type: ignore[method-assign]
+        step = mini_dma_mod.AutomationStep(
+            "mechanical_scan",
+            target_value=0.0,
+            basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            current_mA=30.0,
+            mechanical_step_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_value=4.0,
+            mechanical_step_speed_mm_s=1.25,
+            duration_s=0.0,
+            note="elastocaloric:release",
+        )
+
+        assert window._handle_mechanical_scan_step(step, 8) is False
+        assert moves == pytest.approx([2.0])
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -27922,6 +28002,37 @@ def test_setup_preload_near_target_uses_single_step_without_backlash_injection(
         _close_test_window(window)
 
 
+def test_setup_preload_endpoint_crossing_is_accepted_without_reverse_chasing() -> None:
+    assert mini_dma_mod.MainWindow._setup_preload_endpoint_reached(
+        21.0,
+        20.0,
+        0.25,
+    )
+    assert mini_dma_mod.MainWindow._setup_preload_endpoint_reached(
+        19.8,
+        20.0,
+        0.25,
+    )
+    assert not mini_dma_mod.MainWindow._setup_preload_endpoint_reached(
+        19.7,
+        20.0,
+        0.25,
+    )
+
+
+def test_setup_preload_endpoint_crossing_locks_prague_settle(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText(mini_dma_mod.GNG_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.GNG_SCALE_TERMINATOR)
+        assert window._setup_preload_uses_locked_settle() is False
+        window._setup_preload_endpoint_crossed = True
+        assert window._setup_preload_uses_locked_settle() is True
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_reverse_correction_uses_fine_step_instead_of_predictive_backlash(
     tmp_path: Path,
     qtbot,
@@ -33738,7 +33849,8 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         payload = json.loads(recipe_path.read_text(encoding="utf-8"))
         elastocaloric = payload["recipe"]["elastocaloric_effect"]
         assert payload["recipe"]["mode"] == mini_dma_mod.ELASTOCALORIC_EFFECT
-        assert elastocaloric["start_strain_pct"] == pytest.approx(0.5)
+        assert elastocaloric["strain_reference"] == "captured_post_austenitization_baseline"
+        assert elastocaloric["start_strain_pct"] == pytest.approx(0.0)
         assert elastocaloric["jump_strain_pct"] == pytest.approx(4.25)
         assert elastocaloric["jump_speed_mm_s"] == pytest.approx(6.0)
         assert elastocaloric["temperature_stabilize_s"] == pytest.approx(45.0)
@@ -33777,7 +33889,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window._load_recipe_from_path(recipe_path)
 
         assert window.combo_recipe_mode.currentData() == mini_dma_mod.ELASTOCALORIC_EFFECT
-        assert window.spin_constant_current_start_target.value() == pytest.approx(0.5)
+        assert window.spin_constant_current_start_target.value() == pytest.approx(0.0)
         assert window.spin_constant_current_end_target.value() == pytest.approx(4.25)
         assert window.spin_constant_current_move_speed_mm_s.value() == pytest.approx(6.0)
         assert window.spin_elastocaloric_stabilize_s.value() == pytest.approx(45.0)

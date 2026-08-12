@@ -5190,31 +5190,43 @@ class RunSummaryTask:
 
     def _run(self) -> None:
         run_dir = self.request[0]
-        _write_run_summary_status(run_dir, state="running")
         try:
+            try:
+                _write_run_summary_status(run_dir, state="running")
+            except OSError:
+                # The status marker is advisory.  DriveFS and virus scanners can
+                # transiently deny its atomic replace; summary generation must
+                # still run and the worker must always signal completion.
+                pass
             from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot
 
             self.summary = generate_core_run_plot(run_dir)
-            _write_run_summary_status(
-                run_dir,
-                state="complete",
-                generated={
-                    name: (run_dir / name).exists()
-                    for name in (
-                        "run_summary.png",
-                        "run_summary_detail.png",
-                        "run_summary.json",
-                        "run_quality.json",
-                    )
-                },
-            )
+            try:
+                _write_run_summary_status(
+                    run_dir,
+                    state="complete",
+                    generated={
+                        name: (run_dir / name).exists()
+                        for name in (
+                            "run_summary.png",
+                            "run_summary_detail.png",
+                            "run_summary.json",
+                            "run_quality.json",
+                        )
+                    },
+                )
+            except OSError:
+                pass
         except Exception as exc:
             self.error = exc
-            _write_run_summary_status(
-                run_dir,
-                state="failed",
-                error=f"{exc.__class__.__name__}: {exc}",
-            )
+            try:
+                _write_run_summary_status(
+                    run_dir,
+                    state="failed",
+                    error=f"{exc.__class__.__name__}: {exc}",
+                )
+            except OSError:
+                pass
         finally:
             self.done_event.set()
 
@@ -8694,6 +8706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_starting_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
         self._setup_preload_ramp_skipped = False
+        self._setup_preload_endpoint_crossed = False
         self._setup_zero_position_mm: float | None = None
         self._setup_return_zero_start_point_index = 0
         self._setup_return_zero_speed_mm_s_value: float | None = None
@@ -11627,6 +11640,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
+        self.constant_current_start_row = constant_current_start_row
         constant_current_form.addRow("Target start", constant_current_start_row)
         self.label_constant_current_start_target_row = constant_current_form.labelForField(
             constant_current_start_row
@@ -21056,9 +21070,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "label_constant_current_start_mA_row", None) is not None:
             self.label_constant_current_start_mA_row.setText("Austenitize" if elastocaloric_mode else "Start")
         if getattr(self, "label_constant_current_start_target_row", None) is not None:
-            self.label_constant_current_start_target_row.setText("Start strain" if elastocaloric_mode else "Target start")
+            self.label_constant_current_start_target_row.setText("Target start")
+            self.label_constant_current_start_target_row.setVisible(not elastocaloric_mode)
+        if hasattr(self, "constant_current_start_row"):
+            self.constant_current_start_row.setVisible(not elastocaloric_mode)
         if getattr(self, "label_constant_current_end_target_row", None) is not None:
-            self.label_constant_current_end_target_row.setText("Jump strain" if elastocaloric_mode else "Target end")
+            self.label_constant_current_end_target_row.setText(
+                "Tensile jump from baseline" if elastocaloric_mode else "Target end"
+            )
         if getattr(self, "label_constant_current_step_size_row", None) is not None:
             self.label_constant_current_step_size_row.setText("Jump size" if elastocaloric_mode else "Step size")
         if getattr(self, "label_constant_current_hold_row", None) is not None:
@@ -25178,7 +25197,6 @@ class MainWindow(QtWidgets.QMainWindow):
             banner = "Iso-current stress-strain"
         elif self._is_elastocaloric_mode(mode):
             self._update_constant_current_basis_ui()
-            start_strain = float(self.spin_constant_current_start_target.value())
             jump_strain = float(self.spin_constant_current_end_target.value())
             current_mA = float(self.spin_constant_current_start_mA.value())
             hold_current_mA = float(self.spin_elastocaloric_hold_mA.value())
@@ -25195,9 +25213,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Plan: elastocaloric effect, current "
                 f"austenitize {_format_compact_unit(current_mA, 'mA', decimals=2)}, "
                 f"hold/move {_format_compact_unit(hold_current_mA, 'mA', decimals=2)}; "
-                f"seek strain {_format_compact_unit(start_strain, '%', decimals=4)}, "
+                "capture the post-austenitization position as relative strain 0%, "
                 f"record baseline {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
-                f"pull to {_format_compact_unit(jump_strain, '%', decimals=4)} in "
+                f"pull by {_format_compact_unit(jump_strain, '%', decimals=4)} in "
                 f"{_format_compact_unit(self.spin_elastocaloric_pull_duration_s.value(), 's', decimals=3)} "
                 f"at {pull_plan.command_speed_mm_s:.3f} mm/s, then release in "
                 f"{_format_compact_unit(self.spin_elastocaloric_release_duration_s.value(), 's', decimals=3)} "
@@ -25316,10 +25334,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _elastocaloric_motion_plan(self, duration_s: float) -> ElastocaloricMotionPlan:
         length_mm = max(0.001, float(self.spin_initial_length.value()))
-        strain_delta_pct = abs(
-            float(self.spin_constant_current_end_target.value())
-            - float(self.spin_constant_current_start_target.value())
-        )
+        strain_delta_pct = abs(float(self.spin_constant_current_end_target.value()))
         distance_mm = length_mm * strain_delta_pct / 100.0
         steps_per_mm = max(1e-9, float(self.spin_steps_per_mm.value()))
         accel_decel = self._tic_accel_decel_mm_s2()
@@ -25346,10 +25361,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pull = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_pull_duration_s.value()))
         release = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_release_duration_s.value()))
-        strain_delta_pct = abs(
-            float(self.spin_constant_current_end_target.value())
-            - float(self.spin_constant_current_start_target.value())
-        )
+        strain_delta_pct = abs(float(self.spin_constant_current_end_target.value()))
         plans = (("pull", pull), ("release", release))
         parts = []
         for name, plan in plans:
@@ -31235,7 +31247,8 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         if self._is_elastocaloric_mode(mode):
             payload["recipe"]["elastocaloric_effect"] = {
-                "start_strain_pct": float(self.spin_constant_current_start_target.value()),
+                "strain_reference": "captured_post_austenitization_baseline",
+                "start_strain_pct": 0.0,
                 "jump_strain_pct": float(self.spin_constant_current_end_target.value()),
                 "jump_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
                 "pre_pull_baseline_s": float(self.spin_elastocaloric_stabilize_s.value()),
@@ -31565,9 +31578,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elastocaloric = recipe.get("elastocaloric_effect")
         if isinstance(elastocaloric, Mapping):
-            self.spin_constant_current_start_target.setValue(
-                float(elastocaloric.get("start_strain_pct", self.spin_constant_current_start_target.value()))
-            )
+            # Elastocaloric strain is always relative to the position captured after
+            # austenitization.  Accept legacy files, but never seek their old absolute
+            # start-strain value.
+            self.spin_constant_current_start_target.setValue(0.0)
             self.spin_constant_current_end_target.setValue(
                 float(elastocaloric.get("jump_strain_pct", self.spin_constant_current_end_target.value()))
             )
@@ -31856,7 +31870,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if step.action == "mechanical_scan":
             current_text = self._automation_current_target_text(step.current_mA)
             if self._is_elastocaloric_mode(self._automation_name):
-                direction = "apply strain jump" if str(step.note or "").endswith(":up") else "release strain"
+                direction = "apply strain jump" if str(step.note or "").endswith(":pull") else "release strain"
                 return f"At {current_text}: {direction} to {target_text}"
             return f"At {current_text}: fixed displacement steps toward {target_text}"
 
@@ -35009,6 +35023,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_starting_length_mm = None
         self._setup_preload_position_mm = None
         self._setup_preload_ramp_skipped = False
+        self._setup_preload_endpoint_crossed = False
         self._setup_zero_position_mm = None
         self._setup_return_zero_start_point_index = 0
         self._setup_return_zero_speed_mm_s_value = None
@@ -36420,6 +36435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
         self._setup_preload_ramp_skipped = False
+        self._setup_preload_endpoint_crossed = False
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
@@ -36939,9 +36955,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return steps, summary, control_interval_ms
 
         if self._is_elastocaloric_mode(mode):
-            start_strain = float(self.spin_constant_current_start_target.value())
             jump_strain = float(self.spin_constant_current_end_target.value())
-            strain_jump_size = abs(jump_strain - start_strain)
+            strain_jump_size = abs(jump_strain)
             pull_duration_s = float(self.spin_elastocaloric_pull_duration_s.value())
             release_duration_s = float(self.spin_elastocaloric_release_duration_s.value())
             pull_plan = self._elastocaloric_motion_plan(pull_duration_s)
@@ -37025,21 +37040,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         note="elastocaloric:austenite_hold_transition",
                     )
                 )
-            steps.append(
-                AutomationStep(
-                    "seek_target",
-                    target_value=start_strain,
-                    basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=hold_current_mA,
-                    note="elastocaloric:start_strain",
-                )
-            )
             if stabilize_s > 0.0:
                 steps.append(
                     AutomationStep(
                         "settle",
-                        target_value=start_strain,
-                        basis=HSW_BASIS_STRAIN_PCT,
                         current_mA=hold_current_mA,
                         duration_s=stabilize_s,
                         note="elastocaloric:pre_pull_baseline",
@@ -37048,7 +37052,7 @@ class MainWindow(QtWidgets.QMainWindow):
             steps.append(
                 AutomationStep(
                     "mark_current_zero",
-                    target_value=start_strain,
+                    target_value=0.0,
                     basis=HSW_BASIS_STRAIN_PCT,
                     current_mA=hold_current_mA,
                     note="elastocaloric:motion_zero",
@@ -37070,7 +37074,7 @@ class MainWindow(QtWidgets.QMainWindow):
             steps.append(
                 AutomationStep(
                     "mechanical_scan",
-                    target_value=start_strain,
+                    target_value=0.0,
                     basis=HSW_BASIS_STRAIN_PCT,
                     current_mA=hold_current_mA,
                     mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
@@ -37083,7 +37087,7 @@ class MainWindow(QtWidgets.QMainWindow):
             summary = (
                 "Started elastocaloric effect recipe: "
                 f"austenitize at {austenitize_current_mA:.2f} mA, hold/move at {hold_current_mA:.2f} mA, "
-                f"strain {start_strain:.4f}% to {jump_strain:.4f}% in {pull_duration_s:.3f} s "
+                f"capture relative strain 0%, pull by {jump_strain:.4f}% in {pull_duration_s:.3f} s "
                 f"({pull_plan.command_speed_mm_s:.4f} mm/s), release in {release_duration_s:.3f} s "
                 f"({release_plan.command_speed_mm_s:.4f} mm/s), record baseline {stabilize_s:.1f} s, "
                 f"record {jump_record_s:.1f} s after jump and {release_record_s:.1f} s after release; "
@@ -37859,7 +37863,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_force_control_profile.setText(text)
 
     def _setup_preload_uses_locked_settle(self) -> bool:
-        return self._using_kern_kcp_scale()
+        return self._using_kern_kcp_scale() or self._setup_preload_endpoint_crossed
+
+    @staticmethod
+    def _setup_preload_endpoint_reached(
+        current_value: float | None,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if current_value is None:
+            return False
+        return float(current_value) >= float(target_value) - abs(float(tolerance))
 
     def _scale_quantization_band_for_basis(self, basis: str) -> float:
         readability_g = self._scale_readability_g()
@@ -38826,6 +38840,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 0.001,
                 config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
             )
+            if str(step.note or "").startswith("elastocaloric:"):
+                zero_position_mm = self._active_constant_current_zero_position_mm
+                if zero_position_mm is not None:
+                    _zero_mm, current_l0_mm, _relative_mm, _relative_strain = (
+                        self._current_relative_position_and_strain(zero_position_mm)
+                    )
+                    if current_l0_mm is not None:
+                        length_mm = max(0.001, float(current_l0_mm))
             return (step_value / 100.0) * length_mm
         return step_value
 
@@ -38852,7 +38874,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     base_strain = self._strain_percent_for_position(self._measurement_effective_position_mm())
                     if base_strain is not None:
                         self._constant_current_step_base_strain_by_note[note_group] = base_strain
-            if note_text.endswith(":down") and note_group:
+            if note_text == "elastocaloric:release":
+                self._active_mechanical_scan_origin_position_mm = self._active_constant_current_zero_position_mm
+            elif note_text.endswith(":down") and note_group:
                 self._active_mechanical_scan_origin_position_mm = (
                     self._constant_current_step_base_position_by_note.get(note_group)
                 )
@@ -38869,6 +38893,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if current_value is None:
                 self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
                 return False
+            if note_text.startswith("elastocaloric:"):
+                _zero_mm, _l0_mm, _relative_mm, relative_strain_pct = self._current_relative_position_and_strain(
+                    self._measurement_effective_position_mm()
+                )
+                if relative_strain_pct is not None:
+                    current_value = relative_strain_pct
             if self._active_mechanical_scan_hold_started_s is None:
                 self._active_mechanical_scan_hold_started_s = time.monotonic()
                 if note_text.startswith("elastocaloric:"):
@@ -39388,12 +39418,33 @@ class MainWindow(QtWidgets.QMainWindow):
             fatigue_leg=step.fatigue_leg,
         )
         tolerance = self._automation_tolerance_for_step(step)
-        try:
-            reached = self._seek_distribution_target(step.basis, desired_value, tolerance)
-        except Exception as exc:
-            self._log(f"Recipe stopped: {exc}")
-            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-            return True
+        setup_preload_endpoint_reached = (
+            step.note == "setup_preload"
+            and elapsed_s >= duration_s
+            and self._setup_preload_endpoint_reached(
+                self._current_distribution_value(step.basis),
+                end_value,
+                tolerance,
+            )
+        )
+        if setup_preload_endpoint_reached:
+            # The preload is a one-way engagement operation. Do not reverse
+            # the motor after the first endpoint crossing: the following
+            # timed settle intentionally holds this mechanical position.
+            reached = True
+            self._setup_preload_endpoint_crossed = True
+            self._record_length_setup_point()
+            self._log(
+                "Setup preload endpoint reached; holding motor position for "
+                "the preload settle period."
+            )
+        else:
+            try:
+                reached = self._seek_distribution_target(step.basis, desired_value, tolerance)
+            except Exception as exc:
+                self._log(f"Recipe stopped: {exc}")
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return True
 
         if elapsed_s >= duration_s and reached:
             self._active_target_ramp_step_index = None
