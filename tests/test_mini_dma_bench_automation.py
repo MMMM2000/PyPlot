@@ -1045,6 +1045,87 @@ def test_mini_dma_bench_plan_stops_session_when_recipe_automation_stops(tmp_path
     assert run_summary["control_trace_stop"]["reason"] == "correction_travel_limit"
 
 
+def test_mini_dma_bench_plan_exits_when_isolated_terminal_metadata_is_persisted(
+    tmp_path: Path,
+) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    run_dir = tmp_path / "logs" / "run01"
+    run_dir.mkdir(parents=True)
+    metadata_path = run_dir / "metadata.json"
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 10,
+                "bench_lock": {"enabled": False},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            return
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = metadata_path
+            self.closed = False
+
+        def set_length_setup_automation_values(self, **_values: object) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            self._automation_active = True
+
+        def close(self) -> None:
+            self.closed = True
+            self._automation_active = False
+
+    window = _FakeWindow()
+
+    def _sleep(_seconds: float) -> None:
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "session_state": "finished",
+                    "stop": {
+                        "reason": "wire_break_or_contact_loss",
+                        "category": "fault",
+                        "label": "Wire break or contact loss",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=lambda **_kwargs: window,
+        sleep_fn=_sleep,
+    )
+
+    assert summary["runs"][0]["status"] == "wire_break"
+    assert window.closed is True
+
+
 def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)

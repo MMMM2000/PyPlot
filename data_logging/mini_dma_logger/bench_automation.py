@@ -696,6 +696,25 @@ def _validated_terminal_status(status: str, metadata_path: str | None) -> str:
     return "completed" if reason == "recipe_completed" or category == "normal" else "stopped"
 
 
+def _persisted_terminal_outcome(metadata_path: str | None) -> str | None:
+    """Return the authoritative terminal outcome once session metadata is final."""
+    if metadata_path is None:
+        return None
+    metadata = _persisted_session_metadata(metadata_path)
+    if metadata is None or str(metadata.get("session_state") or "") != "finished":
+        return None
+    stop = metadata.get("stop")
+    if not isinstance(stop, Mapping):
+        return "incomplete"
+    reason = str(stop.get("reason") or "")
+    category = str(stop.get("category") or "")
+    if reason == "wire_break_or_contact_loss":
+        return "wire_break"
+    if reason == "recipe_completed" or category == "normal":
+        return "completed"
+    return "stopped"
+
+
 def _task_text(window: Any) -> str:
     label = getattr(window, "label_task_status", None)
     text_method = getattr(label, "text", None)
@@ -978,6 +997,10 @@ def _execute_run(
         active_metadata_path = _metadata_path(window)
         if active_metadata_path is not None:
             metadata_path = active_metadata_path
+        persisted_outcome = _persisted_terminal_outcome(metadata_path)
+        if persisted_outcome is not None:
+            status = persisted_outcome
+            break
         guard_event = _check_guardrails(window, guardrails)
         if guard_event is not None:
             guard_events.append(guard_event)
