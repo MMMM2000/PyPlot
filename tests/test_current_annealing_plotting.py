@@ -22,6 +22,50 @@ anneal_plugin_mod = importlib.import_module(
 )
 
 
+def _write_v2_current_annealing_session(root: Path, name: str = "Ni50Fe27Ga23 11_2 80mA") -> Path:
+    run_dir = root / f"{name}_run01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        '{"schema":"current_annealing_session_v2","composition":"Ni50Fe27Ga23",'
+        '"microwire":"11/2","max_current_mA":80,'
+        '"microwire_geometry":{"diameter_um":14.93}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "measurement.csv").write_text(
+        "elapsed_s,timestamp_utc,phase,cycle_index,direction,set_current_mA,"
+        "measured_current_mA,voltage_V,resistance_ohm,power_mW,energy_J,"
+        "current_density_A_mm2,readback_age_s\n"
+        "0.0,2026-08-09T10:00:00Z,current_ramp,1,heating,10,9.8,1.96,200,19.2,0,56,0.01\n"
+        "1.0,2026-08-09T10:00:01Z,current_ramp,1,cooling,5,5.0,1.05,210,5.25,0.01,29,0.01\n",
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_load_file_accepts_v2_session_folder_and_preserves_enriched_columns(tmp_path: Path) -> None:
+    run_dir = _write_v2_current_annealing_session(tmp_path)
+
+    df = anneal_core.load_file(run_dir)
+
+    assert df["I_mA"].tolist() == pytest.approx([9.8, 5.0])
+    assert df["R_Ohm"].tolist() == pytest.approx([200.0, 210.0])
+    assert df["direction"].tolist() == ["heating", "cooling"]
+    assert df["power_mW"].tolist() == pytest.approx([19.2, 5.25])
+    assert df.attrs["wire_diameter_um"] == pytest.approx(14.93)
+    assert anneal_core.current_annealing_source_label(run_dir / "measurement.csv") == run_dir.name
+
+
+def test_current_annealing_plugin_discovers_only_authoritative_v2_measurement(tmp_path: Path) -> None:
+    run_dir = _write_v2_current_annealing_session(tmp_path)
+    (run_dir / "unrelated.csv").write_text("not,current,annealing\n", encoding="utf-8")
+    plugin = _current_annealing_load_plugin()
+
+    loaded = plugin._load_data_from_paths([tmp_path], show_errors=False)  # noqa: SLF001
+
+    assert loaded is True
+    assert plugin._loaded_files == [str((run_dir / "measurement.csv").resolve())]  # noqa: SLF001
+
+
 def test_load_file_trims_burnthrough_point(tmp_path: Path) -> None:
     path = tmp_path / "burn.txt"
     path.write_text("0.01 0.02 2\n0.12 0.24 2\n0.07 0.14 2\n")

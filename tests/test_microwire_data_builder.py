@@ -72,6 +72,48 @@ _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
 
 
+def _write_v2_annealing_session(root: Path) -> Path:
+    run_dir = root / "Ni50Fe27Ga23 11_2 anneal_run01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema": "current_annealing_session_v2",
+                "composition": "Ni50Fe27Ga23",
+                "microwire": "11/2",
+                "max_current_mA": 80,
+                "microwire_geometry": {"diameter_um": 14.93},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "measurement.csv").write_text(
+        "elapsed_s,timestamp_utc,phase,cycle_index,direction,set_current_mA,"
+        "measured_current_mA,voltage_V,resistance_ohm,power_mW,energy_J,"
+        "current_density_A_mm2,readback_age_s\n"
+        "0,2026-08-09T10:00:00Z,current_ramp,1,heating,10,9.8,1.96,200,19.2,0,56,0.01\n"
+        "1,2026-08-09T10:00:01Z,current_ramp,1,cooling,5,5,1.05,210,5.25,0.01,29,0.01\n",
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_builder_loads_v2_current_annealing_run_folder_and_metadata(tmp_path: Path) -> None:
+    run_dir = _write_v2_annealing_session(tmp_path)
+
+    frame = _load_annealing(run_dir)
+    metadata = _metadata_from_path(run_dir, root=tmp_path)
+
+    assert frame["I_mA"].tolist() == pytest.approx([9.8, 5.0])
+    assert frame["R_ohm"].tolist() == pytest.approx([200.0, 210.0])
+    assert frame["power_mW"].tolist() == pytest.approx([19.2, 5.25])
+    assert frame.attrs["wire_diameter_um"] == pytest.approx(14.93)
+    assert metadata.composition_token == "Ni50Fe27Ga23"
+    assert (metadata.draw_x, metadata.piece_y) == (11, 2)
+    assert metadata.setpoint_mA == 80
+    assert metadata.file_name == run_dir.name
+
+
 def test_microscope_key_preserves_decimal_composition_token() -> None:
     parsed = core._microscope_key(Path("Mn58.1Ni4.3Si18.5Sn18.8 3_2 glass.jpg"))
     assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
@@ -582,7 +624,10 @@ def test_vsm_temperature_section_combines_preview_pixmaps_side_by_side(
 
 def test_vsm_temperature_visible_preview_defers_pixmap_render(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+    monkeypatch.setattr(builder_ui.MiniDatabaseSection, "_skip_initial_store_load", True)
     _ensure_qapp()
     section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
     try:

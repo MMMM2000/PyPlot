@@ -157,6 +157,7 @@ from .core import (
     build_fabrication_index,
     _normalise_output_name,
     _metadata_from_path,
+    _current_annealing_session_source,
     _microscope_key,
     _microscope_category,
     _microscope_is_brittle,
@@ -2500,7 +2501,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.root_group)
 
         # Annealing inputs
-        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt, .dat)")
+        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files or run folders")
         anneal_layout = QtWidgets.QVBoxLayout(self.anneal_group)
         self.anneal_list = QtWidgets.QListWidget()
         self.anneal_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2902,7 +2903,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self,
             "Select current-annealing files",
             self._last_anneal_dir,
-            "Current annealing files (*.txt *.dat);;Text files (*.txt);;Data files (*.dat)",
+            "Current annealing files (*.txt *.dat *.csv);;Text files (*.txt);;Data files (*.dat);;Session CSV files (*.csv)",
         )
         if not files:
             return
@@ -2922,12 +2923,20 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         root = Path(folder)
         iterator = root.rglob("*") if self.anneal_recursive.isChecked() else root.glob("*")
         suffixes = {".txt", ".dat"}
-        files = [p for p in iterator if p.is_file() and p.suffix.lower() in suffixes]
+        files = [
+            p
+            for p in iterator
+            if p.is_file()
+            and (
+                p.suffix.lower() in suffixes
+                or (p.name.casefold() == "measurement.csv" and _current_annealing_session_source(p) is not None)
+            )
+        ]
         if not files:
             QtWidgets.QMessageBox.information(
                 self,
                 "Microwire Data Builder",
-                "No current-annealing .txt or .dat files were found in that folder.",
+                "No legacy Current Annealing files or v2 run folders were found there.",
             )
             return
         self._last_anneal_dir = folder

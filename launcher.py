@@ -44,6 +44,10 @@ from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
     launch_experiment_process,
 )
+from plotting.shared.application_identity import (
+    PYPLOT_LAUNCHER_APP_ID,
+    set_windows_app_user_model_id,
+)
 from plotting.shared.qt_settings import create_qsettings
 
 
@@ -8315,6 +8319,7 @@ def main(argv: list[str] | None = None) -> None:
         if os.environ.get(env_key):
             os.environ.pop(env_key, None)
 
+    set_windows_app_user_model_id(PYPLOT_LAUNCHER_APP_ID)
     app = QtWidgets.QApplication([argv_list[0], *qt_args])
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("PyPlot Launcher")

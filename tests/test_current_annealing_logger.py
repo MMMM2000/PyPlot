@@ -259,6 +259,70 @@ class _FailingBrokerClient:
         raise RuntimeError("timed out")
 
 
+def test_automatic_shared_broker_start_routes_to_dedicated_process(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.operation_mode = 2
+    window.supply_profile_id = "shared_hmp_broker"
+    window.is_connected = True
+    called: list[bool] = []
+    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
+    monkeypatch.setattr(window, "_confirm_shared_broker_cadence_start", lambda: True)
+    monkeypatch.setattr(window, "_start_isolated_annealing", lambda: called.append(True) or True)
+
+    window.handle_toggle_process_clicked()
+
+    assert called == [True]
+    assert window.timer_command.isActive() is False
+
+
+def test_isolated_start_failure_restores_idle_controls_and_reports_child_detail(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _FailedProcess:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start_process(self) -> None:
+            raise RuntimeError("generic spawn failure")
+
+        def poll_fault_detail(self) -> tuple[str, str]:
+            return "specific child bootstrap failure", "child traceback"
+
+        def close(self, **_kwargs: object) -> bool:
+            return True
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.operation_mode = 2
+    window.supply_profile_id = "shared_hmp_broker"
+    window.channel_select = 1
+    window.is_connected = True
+    monkeypatch.setattr(logger_mod, "TmaControlProcess", _FailedProcess)
+    monkeypatch.setattr(window, "build_log_path", lambda: str(tmp_path / "annealing.txt"))
+    shown: list[str] = []
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: shown.append(str(message)),
+    )
+    window._set_process_state("connecting")
+
+    started = window._start_isolated_annealing()
+
+    assert started is False
+    assert window.process_running is False
+    assert window.ui.pushButton_start_process.text() == "Start annealing process"
+    assert window._process_state == "failed"
+    assert window.ui.progressBar_process.maximum() == 1
+    assert shown == ["specific child bootstrap failure"]
+
+
 class _FakeHmpDriver:
     instances: list["_FakeHmpDriver"] = []
     responses: dict[tuple[str, int], tuple[object, str] | Exception] = {}
@@ -3125,6 +3189,7 @@ def test_current_annealing_main_releases_closed_windows(qtbot) -> None:
     first = logger_mod.main()
     qtbot.addWidget(first)
     assert first in logger_mod.WINDOWS
+    assert not first.windowIcon().isNull()
 
     first.close()
     first.close()

@@ -43,6 +43,11 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
+from plotting.shared.application_identity import (
+    TMA_LOGGER_APP_ID,
+    experiment_application_icon,
+    set_windows_app_user_model_id,
+)
 from data_logging.shared_power_supply.broker import (
     ROLE_MINI_DMA_CURRENT,
     ROLE_MINI_DMA_MOTOR,
@@ -41122,11 +41127,17 @@ def main(log_dir: str | None = None, *, persist_settings: bool = True) -> QtWidg
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if not isinstance(app, QtWidgets.QApplication):
+        set_windows_app_user_model_id(TMA_LOGGER_APP_ID)
         app = QtWidgets.QApplication(sys.argv)
         owns_app = True
 
     ensure_app_theme(app)
+    icon = experiment_application_icon("tma")
+    if owns_app:
+        app.setApplicationName("TMA Logger")
+        app.setWindowIcon(icon)
     window = MainWindow(log_dir, persist_settings=persist_settings)
+    window.setWindowIcon(icon)
     window.showMaximized()
     WINDOWS.append(window)
 
