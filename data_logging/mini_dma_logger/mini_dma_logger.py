@@ -38928,6 +38928,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             self._active_mechanical_scan_move_pending = False
             self._active_mechanical_scan_hold_started_s = None
+            if note_text.startswith("elastocaloric:"):
+                # Elastocaloric pull/release steps are single, precomputed
+                # displacement jumps. The generic mechanical-scan path is
+                # iterative; re-entering it here would add the same relative
+                # jump again on every later controller tick.
+                self._active_mechanical_scan_step_index = None
+                self._active_mechanical_scan_started_s = 0.0
+                self._active_mechanical_scan_move_count = 0
+                self._active_mechanical_scan_direction = None
+                self._active_mechanical_scan_origin_position_mm = None
+                return True
             return False
 
         current_value = self._current_distribution_value(basis, require_after_last_move=False)

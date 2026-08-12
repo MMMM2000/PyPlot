@@ -11933,18 +11933,22 @@ def test_constant_current_mechanical_scan_uses_fixed_displacement_steps(tmp_path
 def test_elastocaloric_mechanical_scan_traces_command_response_and_record_window(
     tmp_path: Path,
     qtbot,
+    monkeypatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     values = iter([0.0, 4.0, 4.0])
+    monotonic_times = iter([0.0, 0.0, 1.1])
     traces: list[dict[str, object]] = []
+    moves: list[float] = []
     try:
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(monotonic_times, 2.0))
         window._automation_active = True
         window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
         window._session_active = True
         window._last_move_target_mm = 0.0
         window._last_effective_move_target_mm = 0.0
         window._current_distribution_value = lambda *_args, **_kwargs: next(values)  # type: ignore[method-assign]
-        window._move_to_position_mm = lambda _target_mm, **_kwargs: True  # type: ignore[method-assign]
+        window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
         window._record_scheduled_recipe_point = lambda _step: True  # type: ignore[method-assign]
         window._write_control_trace = lambda **kwargs: traces.append(kwargs)  # type: ignore[method-assign]
         window._tension_motion_sign = lambda: 1.0  # type: ignore[method-assign]
@@ -11956,12 +11960,14 @@ def test_elastocaloric_mechanical_scan_traces_command_response_and_record_window
             mechanical_step_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
             mechanical_step_value=4.0,
             mechanical_step_speed_mm_s=1.25,
-            duration_s=0.0,
+            duration_s=1.0,
             note="elastocaloric:pull",
         )
 
         assert window._handle_mechanical_scan_step(step, 4) is False
         assert window._handle_mechanical_scan_step(step, 4) is False
+        assert window._handle_mechanical_scan_step(step, 4) is True
+        assert moves == pytest.approx([1.2])
         assert [trace["result"] for trace in traces] == [
             "command_queued",
             "fresh_response_observed",
@@ -11983,7 +11989,8 @@ def test_elastocaloric_release_returns_exactly_to_captured_baseline(tmp_path: Pa
         window._position_reference_mm = 0.0
         window.spin_initial_length.setValue(30.0)
         window._active_constant_current_zero_position_mm = 2.0
-        window._current_distribution_value = lambda *_args, **_kwargs: 999.0  # type: ignore[method-assign]
+        values = iter([999.0, 0.0])
+        window._current_distribution_value = lambda *_args, **_kwargs: next(values)  # type: ignore[method-assign]
         window._measurement_effective_position_mm = lambda: 3.2  # type: ignore[method-assign]
         window._relative_motion_base_mm = lambda: 3.2  # type: ignore[method-assign]
         window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
@@ -12002,6 +12009,7 @@ def test_elastocaloric_release_returns_exactly_to_captured_baseline(tmp_path: Pa
         )
 
         assert window._handle_mechanical_scan_step(step, 8) is False
+        assert window._handle_mechanical_scan_step(step, 8) is True
         assert moves == pytest.approx([2.0])
     finally:
         window._automation_active = False
