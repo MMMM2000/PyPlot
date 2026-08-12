@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import copy
 import difflib
 import faulthandler
@@ -42,6 +43,15 @@ from typing import (
     Tuple,
     cast,
 )
+
+_TRANSITION_SOURCE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix='transition-source-check',
+)
+
+
+def _check_transition_source_paths(paths: Sequence[str]) -> Dict[str, bool]:
+    return {path: Path(path).exists() for path in paths}
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -1303,6 +1313,8 @@ class _ProjectSectionLoadWorker(QtCore.QObject):
                 raw,
                 strict=True,
             )
+            if self._section_key == 'vsm_temperature_scan':
+                _precompute_vsm_transition_cycles(prepared)
             if diagnostics:
                 raise SafeCodecError(
                     f"Unexpected diagnostics in packaged section {self._section_key}"
@@ -6750,7 +6762,7 @@ def _portable_annealing_review(record: MeasurementRecord) -> Dict[str, Any]:
     from plotting.shared.transition_review import load_review, sidecar_path_for_measurement
     from plotting.shared.transition_review_adapters import current_annealing_review_draft
 
-    path = getattr(record, "path", None)
+    path = getattr(record, 'path', None)
     frame = getattr(record, "dataframe", None)
     if not isinstance(path, Path) or not isinstance(frame, pd.DataFrame) or frame.empty:
         return {}
@@ -11108,6 +11120,11 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
         try:
             if root.is_file() and path.resolve() == root.resolve():
                 return path.stem
+            if root.is_dir() and path.parent.resolve() == root.resolve():
+                # A source may be the sample folder itself (direct measurement
+                # files use the root name), or a collection root containing
+                # one run folder per sample (the child folder is the sample).
+                return path.name if path.is_dir() else root.name
         except Exception:
             pass
         try:
@@ -20308,10 +20325,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
 def _vsm_transition_base_record_id(record: VsmTemperatureScanRecord) -> str:
     path = getattr(record, "path", None)
     if isinstance(path, Path):
-        try:
-            path_text = str(path.resolve())
-        except Exception:
-            path_text = str(path)
+        path_text = os.path.abspath(os.fspath(path))
     else:
         path_text = ""
     parts = [
@@ -20416,8 +20430,15 @@ def _vsm_temperature_cycle_frames(
 def _vsm_transition_cycle_records(
     record: VsmTemperatureScanRecord,
 ) -> List[VsmTemperatureScanRecord]:
+    cached = getattr(record, '_transition_cycle_records_cache', None)
+    if isinstance(cached, tuple) and all(
+        isinstance(item, VsmTemperatureScanRecord) for item in cached
+    ):
+        return list(cached)
     cycles = _vsm_temperature_cycle_frames(getattr(record, "data", pd.DataFrame()))
     if len(cycles) <= 1:
+        setattr(record, '_transition_cycle_count', 1)
+        setattr(record, '_transition_cycle_records_cache', (record,))
         return [record]
     parent_id = _vsm_transition_base_record_id(record)
     cycle_records: List[VsmTemperatureScanRecord] = []
@@ -20434,7 +20455,20 @@ def _vsm_transition_cycle_records(
         setattr(cycle_record, "_transition_section_indices", section_indices)
         setattr(cycle_record, "_transition_parent_record_id", parent_id)
         cycle_records.append(cycle_record)
+    setattr(record, '_transition_cycle_records_cache', tuple(cycle_records))
     return cycle_records
+
+
+def _precompute_vsm_transition_cycles(payload: Mapping[str, Any]) -> None:
+    decoded = payload.get(PROJECT_DECODED_PAYLOADS_KEY)
+    if not isinstance(decoded, Mapping):
+        return
+    records = decoded.get('vsm_temperature_scan_records')
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if isinstance(record, VsmTemperatureScanRecord):
+            _vsm_transition_cycle_records(record)
 
 
 def _vsm_transition_review_is_final(status: str | None) -> bool:
@@ -21188,7 +21222,9 @@ class TransitionTempsSection(QtWidgets.QWidget):
 
         if hasattr(self._vsm_temperature_section, "data_updated"):
             try:
-                self._vsm_temperature_section.data_updated.connect(self.refresh_data)
+                self._vsm_temperature_section.data_updated.connect(
+                    self._handle_source_data_updated
+                )
             except Exception:
                 pass
         QtCore.QTimer.singleShot(0, self.refresh_data)
@@ -21198,6 +21234,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
             self._log_callback(level, message)
         except Exception:
             self.logger.log(level, message)
+
+    def _handle_source_data_updated(self) -> None:
+        if _builder_project_load_active():
+            return
+        self.refresh_data()
 
     def _load_transition_points(self) -> Dict[str, Dict[str, float]]:
         stored = self.data.extra.get(VSM_TRANSITION_VALUES_KEY)
@@ -21439,7 +21480,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
             )
             self.model.set_frame(self._current_frame)
-            self.refresh_data()
+            if not _builder_project_load_active():
+                self.refresh_data()
             return
         columns = [str(column) for column in payload.get("columns", [])] if isinstance(payload.get("columns"), list) else []
         rows = payload.get("rows")
@@ -21464,7 +21506,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
         )
         self._transition_points = self._load_transition_points()
         self._transition_reviews = self._load_transition_reviews()
-        self.refresh_data()
+        if not _builder_project_load_active():
+            self.refresh_data()
 
     def refresh_data(self) -> None:
         previous_order = self._current_column_order()
@@ -25394,9 +25437,10 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 continue
             source_sample = _sample_from_path(Path(path), self.data.sources)
             raw_sample = str(parsed_sample or "").strip() or source_sample
-            parsed_key = _microscope_key(Path(raw_sample))
             source_key = _microscope_key(Path(source_sample))
-            if source_key is not None and parsed_key != source_key:
+            # The run folder is the operator-corrected physical-wire identity.
+            # Keep its exact spelling whenever it identifies a wire.
+            if source_key is not None:
                 raw_sample = source_sample
             sample = raw_sample
             key = _microwire_key_from_path(Path(path), sample or raw_sample)
@@ -27444,6 +27488,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
     """Compact project overview backed by the logger's portable reviewer."""
 
     refreshRequested = QtCore.pyqtSignal()
+    sourceAvailabilityReady = QtCore.pyqtSignal(int, object)
 
     TABLE_COLUMNS = (
         "Sample",
@@ -27472,6 +27517,9 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self._review_callback = review_callback
         self._dialog: QtWidgets.QDialog | None = None
         self._overview_data: List[Dict[str, Any]] = []
+        self._source_availability: Dict[str, bool] = {}
+        self._source_scan_generation = 0
+        self.sourceAvailabilityReady.connect(self._apply_source_availability)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -27544,12 +27592,24 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
             lambda _item: self._open_selected_review()
         )
         header = self.summary_table.horizontalHeader()
-        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column, width in {
+            0: 220,
+            2: 125,
+            3: 125,
+            4: 72,
+            5: 72,
+            6: 72,
+            7: 72,
+            8: 95,
+        }.items():
+            self.summary_table.setColumnWidth(column, width)
         layout.addWidget(self.summary_table, 1)
         self._update_review_buttons()
 
     def _request_refresh(self) -> None:
+        self._source_availability.clear()
         self.show_loading("Loading transition review data...")
         if self.receivers(self.refreshRequested):
             self.refreshRequested.emit()
@@ -27572,6 +27632,104 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
     def _paths(self) -> List[Path]:
         return list(dict.fromkeys(Path(path) for path in self._paths_provider()))
 
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        return os.path.abspath(os.fspath(path))
+
+    def _source_label(self, path: Path | None) -> str:
+        if not isinstance(path, Path):
+            return 'Unavailable'
+        available = self._source_availability.get(self._path_key(path))
+        if available is None:
+            return 'Checking...'
+        return 'Available' if available else 'Unavailable'
+
+    def _available_paths(self) -> List[Path]:
+        return [
+            path
+            for path in self._paths()
+            if self._source_availability.get(self._path_key(path), False)
+        ]
+
+    def _schedule_source_availability(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> None:
+        candidates = list(self._paths())
+        candidates.extend(
+            path for row in rows if isinstance((path := row.get('path')), Path)
+        )
+        path_keys = tuple(dict.fromkeys(self._path_key(path) for path in candidates))
+        unknown = tuple(
+            path for path in path_keys if path not in self._source_availability
+        )
+        self._source_scan_generation += 1
+        generation = self._source_scan_generation
+        if not unknown:
+            self._apply_source_availability(generation, {})
+            return
+        future = _TRANSITION_SOURCE_EXECUTOR.submit(
+            _check_transition_source_paths,
+            unknown,
+        )
+
+        def _finished(result: concurrent.futures.Future[Dict[str, bool]]) -> None:
+            try:
+                availability = result.result()
+            except Exception:
+                availability = {path: False for path in unknown}
+            try:
+                self.sourceAvailabilityReady.emit(generation, availability)
+            except RuntimeError:
+                pass
+
+        future.add_done_callback(_finished)
+
+    def _apply_source_availability(
+        self,
+        generation: int,
+        availability: object,
+    ) -> None:
+        if generation != self._source_scan_generation:
+            return
+        if isinstance(availability, Mapping):
+            self._source_availability.update(
+                {str(path): bool(value) for path, value in availability.items()}
+            )
+        for visual_row in range(self.summary_table.rowCount()):
+            data_index = self._data_index_for_visual_row(visual_row)
+            if data_index is None:
+                continue
+            row = self._overview_data[data_index]
+            path = row.get('path')
+            source = self._source_label(path if isinstance(path, Path) else None)
+            row['source'] = source
+            item = self.summary_table.item(visual_row, 8)
+            if item is not None:
+                item.setText(source)
+        self._update_status_label()
+        self._update_review_buttons()
+
+    def _update_status_label(self) -> None:
+        reviewed = sum(
+            str(row.get('status') or '').casefold()
+            not in {'', 'unreviewed', 'auto candidates', 'needs attention'}
+            for row in self._overview_data
+        )
+        available = sum(
+            row.get('source') == 'Available' for row in self._overview_data
+        )
+        checking = sum(
+            row.get('source') == 'Checking...' for row in self._overview_data
+        )
+        checking_text = f' | {checking} checking source data' if checking else ''
+        self.status_label.setText(
+            f'{len(self._overview_data)} result row(s) in project | '
+            f'{reviewed} reviewed in project | '
+            f'{available} with available source data'
+            f'{checking_text} | {len(self._available_paths())} reviewable run(s)'
+        )
+
     def _overview_rows(self) -> List[Dict[str, Any]]:
         return []
 
@@ -27581,6 +27739,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         return "" if numeric is None else f"{numeric:.3f}".rstrip("0").rstrip(".")
 
     def _populate_table(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self.summary_table.setUpdatesEnabled(False)
         selected = self._selected_row()
         selected_identity = (
             selected.get("record_id"),
@@ -27615,6 +27774,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
                     )
                 self.summary_table.setItem(row_index, column, item)
         self.summary_table.setSortingEnabled(True)
+        self.summary_table.setUpdatesEnabled(True)
         self._apply_filters()
         if selected_identity is not None:
             for visual_row in range(self.summary_table.rowCount()):
@@ -27638,7 +27798,11 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
     def _apply_filters(self, *_args: object) -> None:
         query = self.search_edit.text().strip().casefold()
         status_filter = self.status_filter.currentText().strip().casefold()
-        for row_index, row in enumerate(self._overview_data):
+        for visual_row in range(self.summary_table.rowCount()):
+            data_index = self._data_index_for_visual_row(visual_row)
+            if data_index is None:
+                continue
+            row = self._overview_data[data_index]
             haystack = " ".join(str(value) for value in row.values()).casefold()
             status = str(row.get("status") or "Unreviewed").casefold()
             status_match = (
@@ -27647,28 +27811,35 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
                 or status_filter == status
             )
             self.summary_table.setRowHidden(
-                row_index, bool(query and query not in haystack) or not status_match
+                visual_row, bool(query and query not in haystack) or not status_match
             )
 
-    def _selected_row(self) -> Dict[str, Any] | None:
-        selected = self.summary_table.selectionModel().selectedRows()
-        if not selected:
-            return None
-        item = self.summary_table.item(selected[0].row(), 0)
+    def _data_index_for_visual_row(self, visual_row: int) -> int | None:
+        item = self.summary_table.item(visual_row, 0)
         if item is None:
             return None
         index = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if not isinstance(index, int) or not 0 <= index < len(self._overview_data):
             return None
+        return index
+
+    def _selected_row(self) -> Dict[str, Any] | None:
+        selected = self.summary_table.selectionModel().selectedRows()
+        if not selected:
+            return None
+        index = self._data_index_for_visual_row(selected[0].row())
+        if index is None:
+            return None
         return self._overview_data[index]
 
     def _update_review_buttons(self) -> None:
-        paths = self._paths()
+        paths = self._available_paths()
         selected = self._selected_row()
         selected_path = selected.get("path") if selected else None
         self.review_button.setEnabled(bool(paths))
         self.review_selected_button.setEnabled(
-            isinstance(selected_path, Path) and selected_path.exists()
+            isinstance(selected_path, Path)
+            and self._source_availability.get(self._path_key(selected_path), False)
         )
 
     def refresh_workspace(self) -> None:
@@ -27676,31 +27847,21 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self.refresh_button.setEnabled(True)
         rows = self._overview_rows()
         self._populate_table(rows)
-        paths = self._paths()
-        available = sum(
-            isinstance(row.get("path"), Path) and row["path"].exists()
-            for row in rows
-        )
-        reviewed = sum(
-            str(row.get("status") or "").casefold()
-            not in {"", "unreviewed", "auto candidates", "needs attention"}
-            for row in rows
-        )
-        self.status_label.setText(
-            f"{len(rows)} result row(s) in project | {reviewed} reviewed in project | "
-            f"{available} with available source data | {len(paths)} reviewable run(s)"
-        )
+        self._schedule_source_availability(rows)
+        self._update_status_label()
 
     def _open_selected_review(self) -> None:
         selected = self._selected_row()
         path = selected.get("path") if selected else None
-        if not isinstance(path, Path) or not path.exists():
+        if not isinstance(path, Path) or not self._source_availability.get(
+            self._path_key(path), False
+        ):
             return
         self._review_callback([path])
         self.refresh_workspace()
 
     def _open_review(self) -> None:
-        paths = self._paths()
+        paths = self._available_paths()
         if not paths:
             self.refresh_workspace()
             return
@@ -27735,7 +27896,6 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
             path
             for record in self._records()
             if isinstance((path := getattr(record, "path", None)), Path)
-            and path.exists()
         ]
 
     def _overview_rows(self) -> List[Dict[str, Any]]:
@@ -27799,7 +27959,7 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
                         "Af": values.get(f"Af{loop}"),
                         "Ms": values.get(f"Ms{loop}"),
                         "Mf": values.get(f"Mf{loop}"),
-                        "source": "Available" if path is not None and path.exists() else "Unavailable",
+                        "source": self._source_label(path),
                         "path": path,
                     }
                 )
@@ -27869,7 +28029,6 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
             path
             for record in self._records()
             if isinstance((path := getattr(record, "path", None)), Path)
-            and path.exists()
         ]
 
     def _overview_rows(self) -> List[Dict[str, Any]]:
@@ -27913,7 +28072,7 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
                         "Af": values.get("Af"),
                         "Ms": values.get("Ms"),
                         "Mf": values.get("Mf"),
-                        "source": "Available" if path is not None and path.exists() else "Unavailable",
+                        "source": self._source_label(path),
                         "path": path,
                     }
                 )
@@ -28156,6 +28315,9 @@ _VSM_TRANSITION_SCAN_SUFFIX_RE = re.compile(
 
 
 def _vsm_transition_cycle_count(record: VsmTemperatureScanRecord) -> int | None:
+    cached = getattr(record, "_transition_cycle_count", None)
+    if isinstance(cached, int) and cached > 0:
+        return cached
     frame = getattr(record, "data", None)
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return None
@@ -28226,7 +28388,6 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
             path
             for record in self._records()
             if isinstance((path := getattr(record, "path", None)), Path)
-            and path.exists()
         ]
         return list(dict.fromkeys(paths))
 
@@ -28270,7 +28431,7 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
                     "Af": values.get("Af"),
                     "Ms": values.get("Ms"),
                     "Mf": values.get("Mf"),
-                    "source": "Available" if path is not None and path.exists() else "Unavailable",
+                    "source": self._source_label(path),
                     "path": path,
                     "record_id": record_id,
                 }
@@ -28302,7 +28463,7 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
                     "Af": values.get("Af"),
                     "Ms": values.get("Ms"),
                     "Mf": values.get("Mf"),
-                    "source": "Available" if path is not None and path.exists() else "Unavailable",
+                    "source": self._source_label(path),
                     "path": path,
                     "record_id": record_id,
                 }
@@ -28350,6 +28511,7 @@ class TransitionsSection(QtWidgets.QWidget):
             "annealing": 0,
             "current_density": 0,
             "vsm": 1,
+            "vsm_temperature_scan": 1,
             "transition_temps": 1,
             "dma": 2,
             "mini_dma": 2,
@@ -28378,13 +28540,14 @@ class TransitionsSection(QtWidgets.QWidget):
 
     def _handle_view_changed(self, _index: int) -> None:
         if self._active:
-            self.mark_workspaces_dirty()
             self.request_current_workspace_load()
 
     def request_current_workspace_load(self, *, force: bool = False) -> None:
+        index = self.tab_widget.currentIndex()
         if force:
-            self.mark_workspaces_dirty()
-        self.show_loading("Loading transition review data...")
+            self._dirty_view_indexes.add(index)
+        if index in self._dirty_view_indexes:
+            self.show_loading("Loading transition review data...")
         self.dependencyLoadRequested.emit()
 
     def set_active(self, active: bool, *, refresh: bool = True) -> None:
@@ -39955,7 +40118,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         ):
             return
         self._load_current_deferred_project_sections()
-        self._update_transition_workspace_loading_state(force_refresh=True)
+        self._update_transition_workspace_loading_state()
 
     def _update_transition_workspace_loading_state(
         self, *, force_refresh: bool = False
@@ -40158,7 +40321,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         & (still_deferred if isinstance(still_deferred, set) else set())
                     )
                 ):
-                    transitions.mark_workspaces_dirty()
+                    transitions.mark_workspaces_dirty(section_key)
                     transitions.refresh_current_workspace(force=True)
 
         worker.finished.connect(_import)

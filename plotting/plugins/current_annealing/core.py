@@ -173,6 +173,40 @@ def load_file(path: str | Path) -> pd.DataFrame:
     """
     source = resolve_measurement_path(path)
 
+    # Košice logger exports are labelled, six-column TSV files. They must be
+    # recognised before the legacy headerless three-column reader below;
+    # otherwise Cycle is mistaken for current and Ireal_mA for resistance.
+    if source.suffix.casefold() == '.dat':
+        try:
+            labelled = pd.read_csv(source, sep=r'\s+', engine='python')
+        except (csv.Error, pd.errors.ParserError, UnicodeError):
+            labelled = pd.DataFrame()
+        columns = {str(column).strip().casefold(): column for column in labelled.columns}
+        current_column = columns.get('ireal_ma')
+        resistance_column = columns.get('resistance_ohm')
+        if current_column is not None and resistance_column is not None:
+            frame = pd.DataFrame(
+                {
+                    'I_mA': pd.to_numeric(labelled[current_column], errors='coerce'),
+                    'R_Ohm': pd.to_numeric(labelled[resistance_column], errors='coerce'),
+                }
+            )
+            frame = frame.replace([np.inf, -np.inf], np.nan)
+            frame = frame.dropna(subset=['I_mA', 'R_Ohm']).reset_index(drop=True)
+            frame = frame.loc[frame['I_mA'] != 0].reset_index(drop=True)
+            if frame.empty:
+                raise ValueError(f'{source}: no usable samples after filtering zeros')
+            currents = frame['I_mA'].to_numpy(dtype=float)
+            resistances = frame['R_Ohm'].to_numpy(dtype=float)
+            trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(
+                currents, resistances
+            )
+            if trimmed_currents.shape[0] != currents.shape[0]:
+                frame = frame.iloc[: trimmed_currents.shape[0]].copy()
+                frame['I_mA'] = trimmed_currents
+                frame['R_Ohm'] = trimmed_resistances
+            return frame[['I_mA', 'R_Ohm']]
+
     if source.name.casefold() == "measurement.csv":
         session_frame = pd.read_csv(source)
         required = {"measured_current_mA", "resistance_ohm"}

@@ -517,6 +517,40 @@ def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -
     assert target["final_values"]["As1"] == 84.25
 
 
+def test_review_dialog_draws_heating_and_cooling_as_separate_colours(
+    tmp_path,
+    qtbot,
+) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    current = pd.Series([1.0, 2.0, 3.0, 2.0, 1.0])
+    resistance = pd.Series([10.0, 11.0, 12.0, 9.0, 8.0])
+    frame = pd.DataFrame({'I_mA': current, 'R_ohm': resistance})
+    dialog = PortableTransitionReviewDialog(
+        _review(frame),
+        {
+            'graph': ReviewPlot(
+                current,
+                resistance,
+                'one cycle',
+                'Resistance (ohm)',
+            )
+        },
+        tmp_path / 'transition_review.json',
+    )
+    qtbot.addWidget(dialog)
+
+    heating_x, _heating_y = dialog.heating_curve_item.getData()
+    cooling_x, _cooling_y = dialog.cooling_curve_item.getData()
+    assert heating_x.tolist() == pytest.approx([1.0, 2.0, 3.0])
+    assert cooling_x.tolist() == pytest.approx([3.0, 2.0, 1.0])
+    assert dialog.heating_curve_item.opts['pen'].color().name() == '#ef4444'
+    assert dialog.cooling_curve_item.opts['pen'].color().name() == '#3b82f6'
+
+
 def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) -> None:
     from plotting.shared.transition_review_dialog import (
         PortableTransitionReviewDialog,

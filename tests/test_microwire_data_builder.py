@@ -9211,6 +9211,87 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_transition_source_checks_do_not_block_workspace_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    source = tmp_path / 'run.txt'
+    source.write_text('data', encoding='utf-8')
+    original_check = builder_ui._check_transition_source_paths  # noqa: SLF001
+
+    def _slow_check(paths: tuple[str, ...]) -> dict[str, bool]:
+        time.sleep(0.25)
+        return original_check(paths)
+
+    monkeypatch.setattr(builder_ui, '_check_transition_source_paths', _slow_check)
+    workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
+        'Transitions',
+        'current_annealing',
+        lambda: [source],
+        lambda _paths: 0,
+    )
+    monkeypatch.setattr(
+        workspace,
+        '_overview_rows',
+        lambda: [
+            {
+                'sample': 'Ni50Fe27Ga23 1/1',
+                'run': source.name,
+                'target': 'Cycle 1',
+                'status': 'Unreviewed',
+                'path': source,
+                'source': workspace._source_label(source),  # noqa: SLF001
+            }
+        ],
+    )
+    try:
+        started = time.perf_counter()
+        workspace.refresh_workspace()
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.15
+        assert 'checking source data' in workspace.status_label.text()
+        assert workspace.loading_bar.isHidden()
+        _wait_for_qt(
+            lambda: 'checking source data' not in workspace.status_label.text(),
+            timeout_ms=3000,
+        )
+        assert '1 with available source data' in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_switching_loaded_transition_tabs_does_not_rebuild_clean_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    transitions = window.transitions_section
+    refreshes: list[str] = []
+    try:
+        window.tab_widget.setCurrentWidget(transitions)
+        transitions.set_active(True, refresh=False)
+        transitions._dirty_view_indexes.clear()  # noqa: SLF001
+        monkeypatch.setattr(
+            transitions.vsm_workspace,
+            'refresh_workspace',
+            lambda: refreshes.append('vsm'),
+        )
+
+        transitions.tab_widget.setCurrentIndex(1)
+        QtWidgets.QApplication.processEvents()
+
+        assert refreshes == []
+        assert transitions.vsm_workspace.loading_bar.isHidden()
+    finally:
+        window._dirty = False
+        window.close()
+
+
 def test_annealing_transition_review_defers_dependent_refresh() -> None:
     _ensure_qapp()
     section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
@@ -11981,6 +12062,44 @@ def test_vsm_transition_target_label_counts_actual_cycles() -> None:
         )
         == "Temperature scan · 150 °C"
     )
+
+
+def test_vsm_transition_cycle_precompute_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            'temperature': [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            'field': [5.0] * 8,
+            'signal': [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            'section_index': [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path('202601011200-TSCN-a000-RT-00.VSM-TSCN-Data'),
+        sample='Ni50Fe27Ga23 1_1',
+        data=frame,
+        key=('Ni50Fe27Ga23', 1, 1),
+        label='202601011200-TSCN-a000-RT-00',
+    )
+    calls: list[int] = []
+    original_split = builder_ui._vsm_temperature_cycle_frames  # noqa: SLF001
+
+    def _counted_split(value: pd.DataFrame):
+        calls.append(1)
+        return original_split(value)
+
+    monkeypatch.setattr(builder_ui, '_vsm_temperature_cycle_frames', _counted_split)
+    builder_ui._precompute_vsm_transition_cycles(  # noqa: SLF001
+        {
+            builder_ui.PROJECT_DECODED_PAYLOADS_KEY: {
+                'vsm_temperature_scan_records': [record]
+            }
+        }
+    )
+
+    assert len(builder_ui._vsm_transition_cycle_records(record)) == 2  # noqa: SLF001
+    assert calls == [1]
 
 
 def test_vsm_transition_cycle_count_does_not_count_fields_as_cycles() -> None:

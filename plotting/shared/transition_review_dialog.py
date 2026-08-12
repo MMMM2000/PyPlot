@@ -107,9 +107,16 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.plot_item.showGrid(x=True, y=True, alpha=0.16)
         self.plot_item.setDownsampling(auto=True, mode="peak")
         self.plot_item.setClipToView(True)
-        self.curve_item = self.plot_item.plot(
-            [], [], pen=pg.mkPen("#9ca3af", width=1.4)
+        self.plot_item.addLegend(offset=(10, 10))
+        self.heating_curve_item = self.plot_item.plot(
+            [], [], pen=pg.mkPen('#ef4444', width=1.6), name='Heating'
         )
+        self.cooling_curve_item = self.plot_item.plot(
+            [], [], pen=pg.mkPen('#3b82f6', width=1.6), name='Cooling'
+        )
+        # Retain the former public-ish attribute for callers and tests that use
+        # it, while drawing the two physical sweep directions independently.
+        self.curve_item = self.heating_curve_item
         self._auto_marker_items: dict[str, pg.InfiniteLine] = {}
         self._manual_marker_items: dict[str, pg.InfiniteLine] = {}
         self.plot_widget.scene().sigMouseClicked.connect(self._plot_scene_clicked)
@@ -775,7 +782,8 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         target = self._targets()[self._target_index]
         plot = self.plots.get(str(target.get("target_key") or ""))
         if plot is None:
-            self.curve_item.setData([], [])
+            self.heating_curve_item.setData([], [])
+            self.cooling_curve_item.setData([], [])
             self.plot_item.setTitle("Plot unavailable")
             return
         unit_title = self.review_unit_combo.currentText()
@@ -784,10 +792,20 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         x = pd.to_numeric(plot_x, errors="coerce")
         y = pd.to_numeric(plot_y, errors="coerce")
         valid = x.notna() & y.notna()
-        self.curve_item.setData(
-            x.loc[valid].to_numpy(dtype=float),
-            y.loc[valid].to_numpy(dtype=float),
-        )
+        x_values = x.loc[valid].to_numpy(dtype=float)
+        y_values = y.loc[valid].to_numpy(dtype=float)
+        if x_values.size:
+            peak_index = int(x_values.argmax())
+            heating_end = peak_index + 1
+            self.heating_curve_item.setData(
+                x_values[:heating_end], y_values[:heating_end]
+            )
+            self.cooling_curve_item.setData(
+                x_values[peak_index:], y_values[peak_index:]
+            )
+        else:
+            self.heating_curve_item.setData([], [])
+            self.cooling_curve_item.setData([], [])
         self.plot_item.setLabel("bottom", "Current", units="mA")
         self.plot_item.setLabel("left", plot.y_label)
         self.plot_item.setTitle(plot.title)
@@ -1174,7 +1192,7 @@ def _build_current_annealing_review_dialog(
     plot = ReviewPlot(
         frame["I_mA"],
         frame["R_Ohm"],
-        path.parent.name or path.stem,
+        annealing_core.measurement_display_name(path),
         "Resistance (ohm)",
         unit_series=_current_annealing_cycle_series(frame),
     )

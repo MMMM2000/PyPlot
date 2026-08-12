@@ -56,6 +56,22 @@ def test_load_file_keeps_milliamp_input_without_multiplying_by_1000(tmp_path: Pa
     assert df["I_mA"].tolist() == pytest.approx([2.0, 4.0, 6.0])
 
 
+def test_load_file_reads_labelled_kosice_dat_columns(tmp_path: Path) -> None:
+    path = tmp_path / 'Ni44Fe27Ga23Cu3Co3_1-5.dat'
+    path.write_text(
+        'Cycle\tIset_mA\tIreal_mA\tVoltage_V\tResistance_Ohm\tPower_W\n'
+        '1\t1.00\t1.00\t0.09300\t93.00000\t0.00009\n'
+        '1\t2.00\t1.90\t0.20700\t108.94737\t0.00039\n'
+        '2\t2.00\t1.80\t0.17300\t96.11111\t0.00031\n',
+        encoding='utf-8',
+    )
+
+    frame = anneal_core.load_file(path)
+
+    assert frame['I_mA'].tolist() == pytest.approx([1.0, 1.9, 1.8])
+    assert frame['R_Ohm'].tolist() == pytest.approx([93.0, 108.94737, 96.11111])
+
+
 def test_load_file_uses_filename_target_to_keep_amp_input_in_physical_range(tmp_path: Path) -> None:
     path = tmp_path / "amp_input_80mA.txt"
     path.write_text("0.02 0.1 100\n0.04 0.2 110\n0.08 0.3 120\n")
