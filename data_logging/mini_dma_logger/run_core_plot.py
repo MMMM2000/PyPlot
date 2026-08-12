@@ -915,6 +915,62 @@ def _plot_temperature(
     return True
 
 
+def _is_elastocaloric_frame(df: pd.DataFrame) -> bool:
+    if "recipe_mode" not in df or df["recipe_mode"].dropna().empty:
+        return False
+    return "elastocaloric" in str(df["recipe_mode"].dropna().mode().iloc[0]).casefold()
+
+
+def _temperature_source(
+    df: pd.DataFrame,
+    sidecar_df: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, str] | None:
+    for source, names in (
+        (sidecar_df if sidecar_df is not None else pd.DataFrame(), ("object_c_apparent", "frame_max_c")),
+        (df, ("ir_object_c_apparent", "frame_max_c")),
+    ):
+        if source.empty:
+            continue
+        for name in names:
+            if name in source and _series(source, name).notna().any():
+                return source, name
+    return None
+
+
+def _plot_elastocaloric_temperature_strain(
+    ax: Axes,
+    df: pd.DataFrame,
+    sidecar_df: pd.DataFrame | None,
+) -> bool:
+    selected = _temperature_source(df, sidecar_df)
+    if selected is None:
+        return False
+    source, temp_name = selected
+    motion_time = _series(df, "elapsed_s")
+    strain = _series(df, "strain_pct")
+    motion_mask = motion_time.notna() & strain.notna()
+    thermal_time = _series(source, "elapsed_s")
+    temperature = _series(source, temp_name)
+    thermal_mask = thermal_time.notna() & temperature.notna()
+    if motion_mask.sum() < 2 or not thermal_mask.any():
+        return False
+    motion_order = np.argsort(motion_time[motion_mask].to_numpy(dtype=float))
+    motion_x = motion_time[motion_mask].to_numpy(dtype=float)[motion_order]
+    motion_y = strain[motion_mask].to_numpy(dtype=float)[motion_order]
+    thermal_x = thermal_time[thermal_mask].to_numpy(dtype=float)
+    thermal_y = temperature[thermal_mask].to_numpy(dtype=float)
+    within = (thermal_x >= motion_x[0]) & (thermal_x <= motion_x[-1])
+    if not within.any():
+        return False
+    thermal_x = thermal_x[within]
+    thermal_y = thermal_y[within]
+    interpolated_strain = np.interp(thermal_x, motion_x, motion_y)
+    interpolated_strain, thermal_y = _decimate(interpolated_strain, thermal_y)
+    ax.plot(interpolated_strain, thermal_y, color="#dc2626", lw=1.25)
+    _style_axis(ax, "Temperature max vs strain", "Strain (%)", "Temperature (C)")
+    return True
+
+
 def _selected_current_levels(context: _PlateauPlotContext) -> list[float]:
     maxima = [
         float(_series(group.rows, "current_set_mA").max())
@@ -1095,7 +1151,11 @@ def _plot_phone_summary(
     _add_banner(fig, run_dir, metadata, quality, df)
     ax_main = fig.add_subplot(grid[:, :2])
     mode = str(df["recipe_mode"].dropna().mode().iloc[0]) if "recipe_mode" in df and not df["recipe_mode"].dropna().empty else ""
-    if "constant_current" in mode:
+    if "elastocaloric" in mode:
+        if not _plot_elastocaloric_temperature_strain(ax_main, df, temperature):
+            _plot_strain_stress(ax_main, df, metadata)
+        ax_main.set_title("Main result: elastocaloric temperature-strain response", fontsize=13, fontweight="bold")
+    elif "constant_current" in mode:
         _plot_strain_stress(ax_main, df, metadata)
         ax_main.set_title("Main result: stress-strain loop", fontsize=13, fontweight="bold")
     else:
@@ -1136,9 +1196,14 @@ def _plot_detail_summary(
     fig.subplots_adjust(left=0.07, right=0.96, top=0.82, bottom=0.07, hspace=0.48, wspace=0.30)
     fig.patch.set_facecolor("white")
     _add_banner(fig, run_dir, metadata, quality, df)
+    elastocaloric = _is_elastocaloric_frame(df)
     _plot_stress_time(axes[0, 0], df, time_axis, metadata)
-    context = _plateau_plot_context(df, metadata)
-    _plot_strain_current(axes[0, 1], df, metadata, grouped=True, context=context)
+    context = None if elastocaloric else _plateau_plot_context(df, metadata)
+    if elastocaloric:
+        if not _plot_elastocaloric_temperature_strain(axes[0, 1], df, temperature):
+            _plot_strain_stress(axes[0, 1], df, metadata)
+    else:
+        _plot_strain_current(axes[0, 1], df, metadata, grouped=True, context=context)
     _plot_current_resistance(axes[1, 0], df, time_axis)
     resistance_shown = not _plot_temperature(axes[1, 1], df, time_axis, temperature)
     if resistance_shown:

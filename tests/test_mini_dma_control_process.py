@@ -1104,6 +1104,7 @@ def test_production_backend_real_window_starts_next_run_without_child_dialog(
 
         assert created
         child = created[0]
+        assert child.spin_initial_length.value() == pytest.approx(57.522)
         assert child._automation_active is True
         assert child._session_active is True
         assert child.edit_log_name.text() == "existing_sample_run02"

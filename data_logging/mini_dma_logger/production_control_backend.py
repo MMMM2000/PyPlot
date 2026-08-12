@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import fields
 import json
+import math
 import os
 from typing import Any, Mapping
 
@@ -312,6 +313,11 @@ class ProductionTmaBackend:
                     f"profile ({request.policy.value} vs {captured_profile})."
                 )
         starting_length = payload.get("starting_length_mm")
+        if isinstance(starting_length, (int, float)) and math.isfinite(float(starting_length)):
+            starting_length_value = float(starting_length)
+            length_widget = getattr(self._window, "spin_initial_length", None)
+            if starting_length_value > 0.0 and length_widget is not None:
+                length_widget.setValue(starting_length_value)
         steps, _summary, _interval_ms = self._window._build_automation_recipe()
         if not self._window._preflight_recipe_hardware(steps, show_progress=False):
             log_output = getattr(self._window, "log_output", None)

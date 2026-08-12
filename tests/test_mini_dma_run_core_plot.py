@@ -11,6 +11,7 @@ from data_logging.mini_dma_logger.run_core_plot import (
     _current_direction_parts,
     _plateau_plot_context,
     _plot_current_resistance,
+    _plot_elastocaloric_temperature_strain,
     _plot_error_trace,
     _plot_resistance_current,
     _plot_strain_current,
@@ -104,6 +105,30 @@ def test_generate_core_run_plot_writes_png_and_summary(tmp_path: Path) -> None:
     assert summary["hold_span_count"] == 1
     assert summary["quality"]["stress_error_rms_mpa"] == pytest.approx(3.1091263510)
     assert summary["hidden_fault_tail_points"] == 0
+
+
+def test_elastocaloric_summary_interpolates_temperature_against_strain() -> None:
+    measurement = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0],
+            "recipe_mode": ["elastocaloric_effect"] * 3,
+            "strain_pct": [0.0, 4.0, 0.0],
+        }
+    )
+    temperature = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 0.5, 1.0, 1.5, 2.0],
+            "object_c_apparent": [20.0, 18.0, 16.0, 19.0, 20.0],
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        assert _plot_elastocaloric_temperature_strain(ax, measurement, temperature) is True
+        assert ax.get_xlabel() == "Strain (%)"
+        assert ax.get_ylabel() == "Temperature (C)"
+        assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 2.0, 4.0, 2.0, 0.0])
+    finally:
+        plt.close(fig)
 
 
 def test_generate_core_run_plot_recovers_shifted_control_trace_row(tmp_path: Path) -> None:

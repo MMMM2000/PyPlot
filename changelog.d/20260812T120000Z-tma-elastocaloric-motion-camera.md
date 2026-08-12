@@ -1,0 +1,1 @@
+TMA: make the elastocaloric recipe duration-driven, support separate austenitization and hysteresis-hold currents, require a fresh 64 Hz MLX90640 stream, and add temperature-versus-strain run summaries with acceleration-aware motion feasibility.

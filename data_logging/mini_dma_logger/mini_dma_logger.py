@@ -1977,6 +1977,71 @@ class AutomationStep:
 
 
 @dataclass(frozen=True, slots=True)
+class ElastocaloricMotionPlan:
+    distance_mm: float
+    requested_duration_s: float
+    command_speed_mm_s: float
+    expected_duration_s: float
+    minimum_duration_s: float
+    expected_camera_frames: float
+    feasible: bool
+
+
+def plan_elastocaloric_motion(
+    *,
+    distance_mm: float,
+    requested_duration_s: float,
+    accel_mm_s2: float,
+    decel_mm_s2: float,
+    max_speed_mm_s: float,
+    camera_rate_hz: float = 64.0,
+) -> ElastocaloricMotionPlan:
+    """Translate an operator-facing move duration into a Tic speed limit.
+
+    The calculation includes acceleration and deceleration, so short moves do
+    not pretend that the requested maximum velocity is reached instantly.
+    """
+
+    distance = abs(float(distance_mm))
+    requested = max(0.0, float(requested_duration_s))
+    accel = max(1e-12, float(accel_mm_s2))
+    decel = max(1e-12, float(decel_mm_s2))
+    max_speed = max(1e-12, abs(float(max_speed_mm_s)))
+    rate_hz = max(0.0, float(camera_rate_hz))
+    if distance <= 0.0:
+        return ElastocaloricMotionPlan(0.0, requested, 0.0, 0.0, 0.0, 0.0, True)
+
+    reciprocal_accel_sum = (1.0 / accel) + (1.0 / decel)
+    triangular_peak_speed = math.sqrt((2.0 * distance) / reciprocal_accel_sum)
+    minimum_speed_limited_duration = (
+        triangular_peak_speed * reciprocal_accel_sum
+        if triangular_peak_speed <= max_speed
+        else (distance / max_speed) + (0.5 * max_speed * reciprocal_accel_sum)
+    )
+    feasible = requested + 1e-9 >= minimum_speed_limited_duration
+    if feasible:
+        # For a trapezoidal profile, T = distance / v + K*v where
+        # K = 0.5*(1/a + 1/d). The smaller root is the requested speed cap.
+        k = 0.5 * reciprocal_accel_sum
+        discriminant = max(0.0, (requested * requested) - (4.0 * k * distance))
+        command_speed = (requested - math.sqrt(discriminant)) / (2.0 * k)
+        command_speed = min(max_speed, max(1e-12, command_speed))
+        expected_duration = requested
+    else:
+        command_speed = min(max_speed, triangular_peak_speed)
+        expected_duration = minimum_speed_limited_duration
+    return ElastocaloricMotionPlan(
+        distance_mm=distance,
+        requested_duration_s=requested,
+        command_speed_mm_s=command_speed,
+        expected_duration_s=expected_duration,
+        minimum_duration_s=minimum_speed_limited_duration,
+        expected_camera_frames=expected_duration * rate_hz,
+        feasible=feasible,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class CurrentSweepLoadLimitPlan:
     basis: str
     requested_targets: tuple[float, ...]
@@ -9858,8 +9923,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_max_speed.setSingleStep(100_000)
         self.spin_tic_max_speed.setValue(DEFAULT_TIC_MAX_SPEED)
         self.spin_tic_max_speed.setToolTip(
-            "Canonical Tic runtime max speed in microsteps per 10000 s. "
-            "Preflight applies and verifies it before every recipe."
+            "Canonical idle/restored Tic max speed in microsteps per 10000 s. "
+            "Preflight applies and verifies it before every recipe. Position moves then write their own "
+            "command-specific speed immediately before the target, so this is not the speed ceiling for "
+            "a recipe move."
         )
         self.spin_tic_max_speed.setReadOnly(True)
         motion_advanced_form.addRow("Tic max speed", self.spin_tic_max_speed)
@@ -9870,7 +9937,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_max_accel.setValue(DEFAULT_TIC_MAX_ACCEL)
         self.spin_tic_max_accel.setToolTip(
             "Canonical Tic runtime max acceleration in microsteps per 100 s^2. "
-            "The same 1/8-step profile is enforced in Prague and Košice."
+            "The same 1/8-step profile is enforced in Prague and Košice. Unlike the idle max-speed value, "
+            "this acceleration directly limits how quickly a short move can reach its requested speed."
         )
         self.spin_tic_max_accel.setReadOnly(True)
         motion_advanced_form.addRow("Tic max acceleration", self.spin_tic_max_accel)
@@ -11565,9 +11633,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_elastocaloric_stabilize_s = CompactDoubleSpinBox(automation_box)
         self.spin_elastocaloric_stabilize_s.setDecimals(1)
         self.spin_elastocaloric_stabilize_s.setRange(0.0, 3600.0)
-        self.spin_elastocaloric_stabilize_s.setValue(30.0)
+        self.spin_elastocaloric_stabilize_s.setValue(10.0)
         self.spin_elastocaloric_stabilize_s.setSuffix(" s")
-        constant_current_form.addRow("Temperature stabilize", self.spin_elastocaloric_stabilize_s)
+        constant_current_form.addRow("Pre-pull baseline", self.spin_elastocaloric_stabilize_s)
         self.label_elastocaloric_stabilize_row = constant_current_form.labelForField(
             self.spin_elastocaloric_stabilize_s
         )
@@ -11579,6 +11647,30 @@ class MainWindow(QtWidgets.QMainWindow):
         constant_current_form.addRow("Record after release", self.spin_elastocaloric_release_record_s)
         self.label_elastocaloric_release_record_row = constant_current_form.labelForField(
             self.spin_elastocaloric_release_record_s
+        )
+        self.spin_elastocaloric_pull_duration_s = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_pull_duration_s.setDecimals(3)
+        self.spin_elastocaloric_pull_duration_s.setRange(0.010, 300.0)
+        self.spin_elastocaloric_pull_duration_s.setValue(3.0)
+        self.spin_elastocaloric_pull_duration_s.setSuffix(" s")
+        constant_current_form.addRow("Pull duration", self.spin_elastocaloric_pull_duration_s)
+        self.label_elastocaloric_pull_duration_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_pull_duration_s
+        )
+        self.spin_elastocaloric_release_duration_s = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_release_duration_s.setDecimals(3)
+        self.spin_elastocaloric_release_duration_s.setRange(0.010, 300.0)
+        self.spin_elastocaloric_release_duration_s.setValue(3.0)
+        self.spin_elastocaloric_release_duration_s.setSuffix(" s")
+        constant_current_form.addRow("Release duration", self.spin_elastocaloric_release_duration_s)
+        self.label_elastocaloric_release_duration_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_release_duration_s
+        )
+        self.label_elastocaloric_motion_plan = QtWidgets.QLabel(automation_box)
+        self.label_elastocaloric_motion_plan.setWordWrap(True)
+        constant_current_form.addRow("Motion feasibility", self.label_elastocaloric_motion_plan)
+        self.label_elastocaloric_motion_plan_row = constant_current_form.labelForField(
+            self.label_elastocaloric_motion_plan
         )
         self.spin_constant_current_move_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_move_speed_mm_s.setDecimals(3)
@@ -11619,6 +11711,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_start_mA_row = constant_current_form.labelForField(
             constant_current_start_mA_row
         )
+        self.spin_elastocaloric_hold_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_hold_mA.setDecimals(2)
+        self.spin_elastocaloric_hold_mA.setRange(MIN_RECIPE_CURRENT_MA, 5000.0)
+        self.spin_elastocaloric_hold_mA.setValue(MIN_RECIPE_CURRENT_MA)
+        self.spin_elastocaloric_hold_mA.setSuffix(" mA")
+        elastocaloric_hold_row, self.label_elastocaloric_hold_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_elastocaloric_hold_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_elastocaloric_hold_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        constant_current_form.addRow("Austenite hold", elastocaloric_hold_row)
+        self.label_elastocaloric_hold_mA_row = constant_current_form.labelForField(elastocaloric_hold_row)
         self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_mA.setDecimals(2)
         self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
@@ -11876,6 +11982,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
             self.spin_elastocaloric_release_record_s,
+            self.spin_elastocaloric_pull_duration_s,
+            self.spin_elastocaloric_release_duration_s,
+            self.spin_elastocaloric_hold_mA,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
             self.spin_constant_current_start_mA,
@@ -12378,6 +12487,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
             self.spin_elastocaloric_release_record_s,
+            self.spin_elastocaloric_pull_duration_s,
+            self.spin_elastocaloric_release_duration_s,
+            self.spin_elastocaloric_hold_mA,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
             self.spin_constant_current_start_mA,
@@ -18384,6 +18496,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_start_density.setText(
             self._current_density_text(float(self.spin_constant_current_start_mA.value()))
         )
+        self.label_elastocaloric_hold_density.setText(
+            self._current_density_text(float(self.spin_elastocaloric_hold_mA.value()))
+        )
         self.label_constant_current_end_density.setText(
             self._current_density_text(float(self.spin_constant_current_end_mA.value()))
         )
@@ -20830,13 +20945,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_constant_current_move_speed_mm_s",
             "spin_elastocaloric_stabilize_s",
             "spin_elastocaloric_release_record_s",
+            "spin_elastocaloric_pull_duration_s",
+            "spin_elastocaloric_release_duration_s",
+            "spin_elastocaloric_hold_mA",
+            "label_elastocaloric_motion_plan",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                if widget_name.startswith("spin_elastocaloric"):
+                if widget_name.startswith("spin_elastocaloric") or widget_name == "label_elastocaloric_motion_plan":
                     widget.setVisible(elastocaloric_mode)
                 elif widget_name == "spin_constant_current_step_size":
                     widget.setVisible(not fixed_strain_mode)
+                elif widget_name == "spin_constant_current_move_speed_mm_s":
+                    widget.setVisible(not stress_ramp_mode and not elastocaloric_mode)
                 else:
                     widget.setVisible(not stress_ramp_mode)
         for label_name in (
@@ -20852,6 +20973,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_constant_current_step_speed_row",
             "label_elastocaloric_stabilize_row",
             "label_elastocaloric_release_record_row",
+            "label_elastocaloric_pull_duration_row",
+            "label_elastocaloric_release_duration_row",
+            "label_elastocaloric_hold_mA_row",
+            "label_elastocaloric_motion_plan_row",
         ):
             label = getattr(self, label_name, None)
             if label is not None:
@@ -20859,6 +20984,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     label.setVisible(elastocaloric_mode)
                 elif label_name == "label_constant_current_step_size_row":
                     label.setVisible(not fixed_strain_mode)
+                elif label_name == "label_constant_current_step_speed_row":
+                    label.setVisible(not stress_ramp_mode and not elastocaloric_mode)
                 else:
                     label.setVisible(not stress_ramp_mode)
         if hasattr(self, "spin_constant_current_stress_ramp_rate_mpa_s"):
@@ -20875,7 +21002,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if label is not None:
                 label.setVisible(not elastocaloric_mode)
         if getattr(self, "label_constant_current_start_mA_row", None) is not None:
-            self.label_constant_current_start_mA_row.setText("Current" if elastocaloric_mode else "Start")
+            self.label_constant_current_start_mA_row.setText("Austenitize" if elastocaloric_mode else "Start")
         if getattr(self, "label_constant_current_start_target_row", None) is not None:
             self.label_constant_current_start_target_row.setText("Start strain" if elastocaloric_mode else "Target start")
         if getattr(self, "label_constant_current_end_target_row", None) is not None:
@@ -20895,6 +21022,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_step_size.setDecimals(4)
             self.spin_constant_current_step_size.setSuffix(" mm")
         self.spin_constant_current_step_size.blockSignals(False)
+        if elastocaloric_mode:
+            self._refresh_elastocaloric_motion_plan_label()
 
     def _update_distribution_basis_ui(self) -> None:
         suffix, decimals = self._distribution_units()
@@ -25000,17 +25129,27 @@ class MainWindow(QtWidgets.QMainWindow):
             start_strain = float(self.spin_constant_current_start_target.value())
             jump_strain = float(self.spin_constant_current_end_target.value())
             current_mA = float(self.spin_constant_current_start_mA.value())
+            hold_current_mA = float(self.spin_elastocaloric_hold_mA.value())
+            pull_plan = self._elastocaloric_motion_plan(
+                float(self.spin_elastocaloric_pull_duration_s.value())
+            )
+            release_plan = self._elastocaloric_motion_plan(
+                float(self.spin_elastocaloric_release_duration_s.value())
+            )
             transition_load = self._load_equivalent_text(
                 float(self.spin_constant_current_transition_stress_mpa.value())
             )
             summary = (
                 "Plan: elastocaloric effect, current "
-                f"{_format_compact_unit(current_mA, 'mA', decimals=2)}; "
+                f"austenitize {_format_compact_unit(current_mA, 'mA', decimals=2)}, "
+                f"hold/move {_format_compact_unit(hold_current_mA, 'mA', decimals=2)}; "
                 f"seek strain {_format_compact_unit(start_strain, '%', decimals=4)}, "
-                f"stabilize temperature {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
-                f"jump to {_format_compact_unit(jump_strain, '%', decimals=4)} at "
-                f"{_format_compact_unit(self.spin_constant_current_move_speed_mm_s.value(), 'mm/s', decimals=3)}, "
-                "then release in one step."
+                f"record baseline {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
+                f"pull to {_format_compact_unit(jump_strain, '%', decimals=4)} in "
+                f"{_format_compact_unit(self.spin_elastocaloric_pull_duration_s.value(), 's', decimals=3)} "
+                f"at {pull_plan.command_speed_mm_s:.3f} mm/s, then release in "
+                f"{_format_compact_unit(self.spin_elastocaloric_release_duration_s.value(), 's', decimals=3)} "
+                f"at {release_plan.command_speed_mm_s:.3f} mm/s."
             )
             summary += (
                 " Current transition ramps at "
@@ -25122,6 +25261,63 @@ class MainWindow(QtWidgets.QMainWindow):
         if accel_mm_s2 <= 0.0 or decel_mm_s2 <= 0.0:
             return None
         return accel_mm_s2, decel_mm_s2
+
+    def _elastocaloric_motion_plan(self, duration_s: float) -> ElastocaloricMotionPlan:
+        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        strain_delta_pct = abs(
+            float(self.spin_constant_current_end_target.value())
+            - float(self.spin_constant_current_start_target.value())
+        )
+        distance_mm = length_mm * strain_delta_pct / 100.0
+        steps_per_mm = max(1e-9, float(self.spin_steps_per_mm.value()))
+        accel_decel = self._tic_accel_decel_mm_s2()
+        if accel_decel is None:
+            accel_decel = (
+                float(self.spin_tic_max_accel.value()) / 100.0 / steps_per_mm,
+                float(self.spin_tic_max_decel.value()) / 100.0 / steps_per_mm,
+            )
+        # Position commands write their own max-speed immediately before the
+        # target. The persistent Tic max-speed is therefore only the idle
+        # profile, not the ceiling for an elastocaloric jump.
+        max_speed_mm_s = float(self.spin_constant_current_move_speed_mm_s.maximum())
+        return plan_elastocaloric_motion(
+            distance_mm=distance_mm,
+            requested_duration_s=duration_s,
+            accel_mm_s2=accel_decel[0],
+            decel_mm_s2=accel_decel[1],
+            max_speed_mm_s=max_speed_mm_s,
+            camera_rate_hz=64.0,
+        )
+
+    def _refresh_elastocaloric_motion_plan_label(self) -> None:
+        if not hasattr(self, "label_elastocaloric_motion_plan"):
+            return
+        pull = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_pull_duration_s.value()))
+        release = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_release_duration_s.value()))
+        strain_delta_pct = abs(
+            float(self.spin_constant_current_end_target.value())
+            - float(self.spin_constant_current_start_target.value())
+        )
+        plans = (("pull", pull), ("release", release))
+        parts = []
+        for name, plan in plans:
+            effective_strain_rate = strain_delta_pct / max(plan.expected_duration_s, 1e-9)
+            parts.append(
+                f"{name} {plan.distance_mm:.3f} mm, {plan.command_speed_mm_s:.3f} mm/s, "
+                f"{effective_strain_rate:.2f} %/s, about {plan.expected_camera_frames:.0f} camera frames"
+            )
+        feasible = all(plan.feasible for _name, plan in plans)
+        if feasible:
+            self.label_elastocaloric_motion_plan.setStyleSheet("color: palette(text);")
+            self.label_elastocaloric_motion_plan.setText("; ".join(parts) + ".")
+        else:
+            minimum_s = max(plan.minimum_duration_s for _name, plan in plans)
+            self.label_elastocaloric_motion_plan.setStyleSheet("color: #d97706; font-weight: 600;")
+            self.label_elastocaloric_motion_plan.setText(
+                "; ".join(parts)
+                + f". Requested duration is not achievable with the configured Tic acceleration/speed; "
+                f"use at least {minimum_s:.3f} s."
+            )
 
     def _motion_profile_duration_s(self, distance_mm: float, speed_mm_s: float) -> float | None:
         accel_decel = self._tic_accel_decel_mm_s2()
@@ -30416,6 +30612,43 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return self._tic_motor_power_ok is not False
 
+    def _recipe_requires_ir_camera(self) -> bool:
+        mode = str(self.combo_recipe_mode.currentData() or self._automation_name or "")
+        return self._is_elastocaloric_mode(mode)
+
+    def _ensure_ir_camera_ready_for_recipe(self) -> tuple[bool, str]:
+        if not self._ir_enabled():
+            return False, "Elastocaloric recipes require IR acquisition; enable the IR camera."
+        if str(self.combo_ir_sensor.currentData() or "") != IR_SENSOR_MLX90640:
+            return False, "Elastocaloric recipes require the MLX90640 camera mode."
+        if int(self.combo_ir_rate.currentData() or 0) != 7:
+            return False, "Elastocaloric recipes require the MLX90640 64 Hz camera rate."
+        if not str(self.combo_ir_port.currentData() or "").strip():
+            return False, "Select the MLX90640 serial port before starting the elastocaloric recipe."
+        if self._ir_thread is None and not self._connect_ir_thermometer(show_errors=False):
+            return False, "The MLX90640 acquisition worker could not be started."
+        deadline_s = time.monotonic() + 3.0
+        snapshot: dict[str, object] = {}
+        frame: object | None = None
+        while time.monotonic() < deadline_s:
+            snapshot = self._latest_ir_snapshot()
+            with self._ir_state_lock:
+                frame = self._latest_ir_frame
+            age_s = snapshot.get("sample_age_s")
+            if (
+                snapshot.get("sensor_type") == IR_SENSOR_MLX90640
+                and frame is not None
+                and isinstance(age_s, (int, float))
+                and float(age_s) <= 0.5
+            ):
+                return True, "PASS: MLX90640 camera is streaming fresh 64 Hz frames."
+            time.sleep(0.025)
+        status_label = getattr(self, "label_ir_status", None)
+        detail = str(status_label.text()).strip() if status_label is not None else ""
+        return False, "MLX90640 did not provide a fresh calibrated frame within 3 s." + (
+            f" Last status: {detail}" if detail else ""
+        )
+
     def _recipe_preflight_needs_progress(self, steps: Sequence[AutomationStep]) -> bool:
         if self._manual_auto_connect_progress is not None:
             return False
@@ -30424,6 +30657,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self._recipe_requires_supply(steps) and not supply_ready)
             or (self._recipe_requires_scale(steps) and self._scale_thread is None)
             or (self._recipe_requires_tic(steps) and self._tic_motor_power_ok is not True)
+            or (self._recipe_requires_ir_camera() and self._ir_thread is None)
         )
 
     def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
@@ -30431,7 +30665,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_shared_broker_bench_defaults_for_tic_preflight()
             self._apply_direct_hmp_bench_defaults_for_tic_preflight()
         started_progress = False
-        preflight_steps = 4
+        preflight_steps = 5 if self._recipe_requires_ir_camera() else 4
         if show_progress and self._recipe_preflight_needs_progress(steps):
             started_progress = True
             self._show_manual_auto_connect_progress()
@@ -30506,6 +30740,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 with self._scale_state_lock:
                     latest_raw_g = self._latest_scale_value_g
                 self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
+            if self._recipe_requires_ir_camera():
+                self._set_manual_auto_connect_progress("Checking thermal camera...", 4, preflight_steps)
+                camera_ok, camera_message = self._ensure_ir_camera_ready_for_recipe()
+                self._log(f"Recipe preflight: {camera_message}")
+                if not camera_ok:
+                    issues.append(camera_message.replace("FAIL: ", "", 1))
             if not issues:
                 self._set_manual_auto_connect_progress("Recipe hardware ready.", preflight_steps, preflight_steps)
                 return True
@@ -30945,10 +31185,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "start_strain_pct": float(self.spin_constant_current_start_target.value()),
                 "jump_strain_pct": float(self.spin_constant_current_end_target.value()),
                 "jump_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
+                "pre_pull_baseline_s": float(self.spin_elastocaloric_stabilize_s.value()),
                 "temperature_stabilize_s": float(self.spin_elastocaloric_stabilize_s.value()),
+                "pull_duration_s": float(self.spin_elastocaloric_pull_duration_s.value()),
+                "release_duration_s": float(self.spin_elastocaloric_release_duration_s.value()),
                 "record_after_jump_s": float(self.spin_constant_current_hold_s.value()),
                 "record_after_release_s": float(self.spin_elastocaloric_release_record_s.value()),
+                "austenitize_current_mA": float(self.spin_constant_current_start_mA.value()),
+                "hold_current_mA": float(self.spin_elastocaloric_hold_mA.value()),
                 "current_mA": float(self.spin_constant_current_start_mA.value()),
+                "camera_required": True,
+                "camera_rate_hz": 64.0,
                 "transition_enabled": True,
                 "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
                 "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
@@ -31282,8 +31529,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     0.0,
                     float(
                         elastocaloric.get(
-                            "temperature_stabilize_s",
-                            self.spin_elastocaloric_stabilize_s.value(),
+                            "pre_pull_baseline_s",
+                            elastocaloric.get(
+                                "temperature_stabilize_s",
+                                self.spin_elastocaloric_stabilize_s.value(),
+                            ),
+                        )
+                    ),
+                )
+            )
+            self.spin_elastocaloric_pull_duration_s.setValue(
+                max(
+                    0.010,
+                    float(elastocaloric.get("pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())),
+                )
+            )
+            self.spin_elastocaloric_release_duration_s.setValue(
+                max(
+                    0.010,
+                    float(
+                        elastocaloric.get(
+                            "release_duration_s",
+                            elastocaloric.get("pull_duration_s", self.spin_elastocaloric_release_duration_s.value()),
                         )
                     ),
                 )
@@ -31305,8 +31572,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     ),
                 )
             )
-            self.spin_constant_current_start_mA.setValue(
-                float(elastocaloric.get("current_mA", self.spin_constant_current_start_mA.value()))
+            austenitize_current = max(
+                MIN_RECIPE_CURRENT_MA,
+                float(
+                    elastocaloric.get(
+                        "austenitize_current_mA",
+                        elastocaloric.get("current_mA", self.spin_constant_current_start_mA.value()),
+                    )
+                ),
+            )
+            self.spin_constant_current_start_mA.setValue(austenitize_current)
+            self.spin_elastocaloric_hold_mA.setValue(
+                max(
+                    MIN_RECIPE_CURRENT_MA,
+                    float(elastocaloric.get("hold_current_mA", austenitize_current)),
+                )
             )
             self.check_constant_current_transition_enabled.setChecked(True)
             self.spin_constant_current_transition_stress_mpa.setValue(
@@ -36449,11 +36729,19 @@ class MainWindow(QtWidgets.QMainWindow):
             start_strain = float(self.spin_constant_current_start_target.value())
             jump_strain = float(self.spin_constant_current_end_target.value())
             strain_jump_size = abs(jump_strain - start_strain)
-            jump_speed_mm_s = float(self.spin_constant_current_move_speed_mm_s.value())
+            pull_duration_s = float(self.spin_elastocaloric_pull_duration_s.value())
+            release_duration_s = float(self.spin_elastocaloric_release_duration_s.value())
+            pull_plan = self._elastocaloric_motion_plan(pull_duration_s)
+            release_plan = self._elastocaloric_motion_plan(release_duration_s)
             jump_record_s = max(0.0, float(self.spin_constant_current_hold_s.value()))
             release_record_s = max(0.0, float(self.spin_elastocaloric_release_record_s.value()))
             stabilize_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
-            current_mA = self._recipe_current_setpoint_mA(float(self.spin_constant_current_start_mA.value()))
+            austenitize_current_mA = self._recipe_current_setpoint_mA(
+                float(self.spin_constant_current_start_mA.value())
+            )
+            hold_current_mA = self._recipe_current_setpoint_mA(
+                float(self.spin_elastocaloric_hold_mA.value())
+            )
             transition_stress_mpa = float(self.spin_constant_current_transition_stress_mpa.value())
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
@@ -36462,6 +36750,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Set a non-zero elastocaloric strain jump.")
             if transition_rate_mA_s <= 0.0:
                 raise ValueError("Set a non-zero current-transition ramp rate.")
+            if hold_current_mA > austenitize_current_mA:
+                raise ValueError("Austenite hold current cannot exceed the austenitization current.")
+            if not pull_plan.feasible or not release_plan.feasible:
+                minimum_s = max(pull_plan.minimum_duration_s, release_plan.minimum_duration_s)
+                raise ValueError(
+                    "The requested elastocaloric pull/release duration is not achievable with the "
+                    f"configured Tic acceleration and speed. Use at least {minimum_s:.3f} s, or validate "
+                    "a faster Tic profile in a separate hardware campaign."
+                )
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             transition_start_mA = self._recipe_current_setpoint_mA(MIN_RECIPE_CURRENT_MA)
             steps.append(
@@ -36479,7 +36776,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value=transition_stress_mpa,
                     basis=HSW_BASIS_STRESS_MPA,
                     current_start_mA=transition_start_mA,
-                    current_end_mA=current_mA,
+                    current_end_mA=austenitize_current_mA,
                     current_ramp_rate_mA_s=transition_rate_mA_s,
                     current_hold_enabled=transition_hold_enabled,
                     current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
@@ -36494,9 +36791,25 @@ class MainWindow(QtWidgets.QMainWindow):
                         "settle",
                         target_value=transition_stress_mpa,
                         basis=HSW_BASIS_STRESS_MPA,
-                        current_mA=current_mA,
+                        current_mA=austenitize_current_mA,
                         duration_s=transition_settle_s,
                         note="transition_settle",
+                    )
+                )
+            if abs(hold_current_mA - austenitize_current_mA) > 1e-9:
+                steps.append(
+                    AutomationStep(
+                        "sweep_current",
+                        target_value=transition_stress_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_start_mA=austenitize_current_mA,
+                        current_end_mA=hold_current_mA,
+                        current_ramp_rate_mA_s=transition_rate_mA_s,
+                        current_hold_enabled=transition_hold_enabled,
+                        current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                        current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                        current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                        note="elastocaloric:austenite_hold_transition",
                     )
                 )
             steps.append(
@@ -36504,8 +36817,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     "seek_target",
                     target_value=start_strain,
                     basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=current_mA,
-                    note="start",
+                    current_mA=hold_current_mA,
+                    note="elastocaloric:start_strain",
                 )
             )
             if stabilize_s > 0.0:
@@ -36514,9 +36827,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         "settle",
                         target_value=start_strain,
                         basis=HSW_BASIS_STRAIN_PCT,
-                        current_mA=current_mA,
+                        current_mA=hold_current_mA,
                         duration_s=stabilize_s,
-                        note="temperature_stabilize",
+                        note="elastocaloric:pre_pull_baseline",
                     )
                 )
             steps.append(
@@ -36524,8 +36837,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     "mark_current_zero",
                     target_value=start_strain,
                     basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=current_mA,
-                    note="1:zero",
+                    current_mA=hold_current_mA,
+                    note="elastocaloric:motion_zero",
                 )
             )
             steps.append(
@@ -36533,12 +36846,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     "mechanical_scan",
                     target_value=jump_strain,
                     basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=current_mA,
+                    current_mA=hold_current_mA,
                     mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                     mechanical_step_value=strain_jump_size,
-                    mechanical_step_speed_mm_s=jump_speed_mm_s,
+                    mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
                     duration_s=jump_record_s,
-                    note="1:up",
+                    note="elastocaloric:pull",
                 )
             )
             steps.append(
@@ -36546,18 +36859,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     "mechanical_scan",
                     target_value=start_strain,
                     basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=current_mA,
+                    current_mA=hold_current_mA,
                     mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                     mechanical_step_value=strain_jump_size,
-                    mechanical_step_speed_mm_s=jump_speed_mm_s,
+                    mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
                     duration_s=release_record_s,
-                    note="1:down",
+                    note="elastocaloric:release",
                 )
             )
             summary = (
                 "Started elastocaloric effect recipe: "
-                f"current {current_mA:.2f} mA, strain {start_strain:.4f}% to {jump_strain:.4f}% "
-                f"in one jump at {jump_speed_mm_s:.4f} mm/s, stabilize {stabilize_s:.1f} s, "
+                f"austenitize at {austenitize_current_mA:.2f} mA, hold/move at {hold_current_mA:.2f} mA, "
+                f"strain {start_strain:.4f}% to {jump_strain:.4f}% in {pull_duration_s:.3f} s "
+                f"({pull_plan.command_speed_mm_s:.4f} mm/s), release in {release_duration_s:.3f} s "
+                f"({release_plan.command_speed_mm_s:.4f} mm/s), record baseline {stabilize_s:.1f} s, "
                 f"record {jump_record_s:.1f} s after jump and {release_record_s:.1f} s after release; "
                 f"{clock_summary}."
             )
@@ -40125,6 +40440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_step_size", self.spin_constant_current_step_size.value())
         self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
         self.settings.setValue("elastocaloric_stabilize_s", self.spin_elastocaloric_stabilize_s.value())
+        self.settings.setValue("elastocaloric_pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())
+        self.settings.setValue("elastocaloric_release_duration_s", self.spin_elastocaloric_release_duration_s.value())
+        self.settings.setValue("elastocaloric_hold_mA", self.spin_elastocaloric_hold_mA.value())
         self.settings.setValue(
             "elastocaloric_release_record_s",
             self.spin_elastocaloric_release_record_s.value(),
@@ -40906,7 +41224,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_step_size.setValue(float(self.settings.value("constant_current_step_size", 0.01)))
         self.spin_constant_current_hold_s.setValue(float(self.settings.value("constant_current_hold_s", 1.0)))
         self.spin_elastocaloric_stabilize_s.setValue(
-            max(0.0, float(self.settings.value("elastocaloric_stabilize_s", 30.0)))
+            max(0.0, float(self.settings.value("elastocaloric_stabilize_s", 10.0)))
+        )
+        self.spin_elastocaloric_pull_duration_s.setValue(
+            max(0.010, float(self.settings.value("elastocaloric_pull_duration_s", 3.0)))
+        )
+        self.spin_elastocaloric_release_duration_s.setValue(
+            max(0.010, float(self.settings.value("elastocaloric_release_duration_s", 3.0)))
+        )
+        self.spin_elastocaloric_hold_mA.setValue(
+            max(MIN_RECIPE_CURRENT_MA, float(self.settings.value("elastocaloric_hold_mA", MIN_RECIPE_CURRENT_MA)))
         )
         self.spin_elastocaloric_release_record_s.setValue(
             max(0.0, float(self.settings.value("elastocaloric_release_record_s", 10.0)))
