@@ -21302,7 +21302,6 @@ class TransitionTempsSection(QtWidgets.QWidget):
             final_values = dict(auto_values)
         elif status in {
             TRANSITION_REVIEW_STATUS_NO_TRANSITION,
-            TRANSITION_REVIEW_STATUS_EXCLUDED,
         }:
             final_values = {}
             manual_values = {}
@@ -22528,7 +22527,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
             TRANSITION_REVIEW_STATUS_NO_TRANSITION,
             TRANSITION_REVIEW_STATUS_EXCLUDED,
         }:
-            payload["included"] = False
+            payload['included'] = False
+            if status == TRANSITION_REVIEW_STATUS_EXCLUDED and cleaned:
+                payload['manual_values_C'] = cleaned
+                payload['final_values_C'] = cleaned
         self._transition_reviews[record_id] = self._clean_transition_review_payload(record_id, payload)
         self._pending_preview_record_id = record_id
         self._schedule_transition_state_store()
@@ -28362,6 +28364,158 @@ def _vsm_transition_cycle_target_label(value: object) -> str:
     return " · ".join(part for part in (prefix, target) if part)
 
 
+def _build_shared_vsm_transition_editor(
+    section: TransitionTempsSection,
+    grouped_records: Sequence[Tuple[str, VsmTemperatureScanRecord]],
+    parent: QtWidgets.QWidget,
+) -> QtWidgets.QDialog:
+    from plotting.shared.transition_review import (
+        atomic_write_review,
+        dataframe_fingerprint,
+        load_review,
+        make_review,
+        make_target,
+        sidecar_path_for_measurement,
+        source_file_entry,
+    )
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    if not grouped_records:
+        raise ValueError('No VSM temperature cycles are available for review.')
+    path = Path(grouped_records[0][1].path)
+    combined_frames: List[pd.DataFrame] = []
+    for cycle_number, (_group_key, record) in enumerate(grouped_records, start=1):
+        frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
+        if not frame.empty:
+            tagged = frame.copy()
+            tagged['__review_cycle'] = cycle_number
+            combined_frames.append(tagged)
+    if not combined_frames:
+        raise ValueError(f'VSM temperature data are empty: {path}')
+    fingerprint = dataframe_fingerprint(
+        pd.concat(combined_frames, ignore_index=True, sort=False),
+        namespace='vsm_temperature_review',
+    )
+    reviews = section.transition_reviews_snapshot()
+    targets: List[Dict[str, Any]] = []
+    plots: Dict[str, Any] = {}
+    record_by_key: Dict[str, Tuple[str, VsmTemperatureScanRecord]] = {}
+    processor = _get_vsm_temp_processor(section.logger)
+    if processor is None:
+        raise RuntimeError('VSM temperature scan parser is unavailable.')
+
+    for group_key, record in grouped_records:
+        record_id = _vsm_transition_review_record_id(record)
+        cycle_index = int(getattr(record, '_transition_cycle_index', 1) or 1)
+        target_key = f'cycle:{cycle_index}'
+        record_by_key[target_key] = (group_key, record)
+        stored = reviews.get(record_id, {})
+        status = str(stored.get('status') or TRANSITION_REVIEW_STATUS_UNREVIEWED)
+        auto_values = section._auto_values_for_record(record)
+        manual_values = _clean_vsm_transition_values(stored.get('manual_values_C'))
+        final_values = _clean_vsm_transition_values(stored.get('final_values_C'))
+        if status in {
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        } and not manual_values:
+            manual_values = dict(final_values)
+        chosen_values = final_values or manual_values
+        cleared: List[str] = []
+        if _vsm_transition_review_is_final(status):
+            cleared = [
+                label for label in TRANSITION_TEMP_LABELS if label not in chosen_values
+            ]
+        target = make_target(
+            family='vsm_temperature',
+            measurement_fingerprint=fingerprint,
+            target_key=target_key,
+            status=status,
+            auto_values=auto_values,
+            manual_values=manual_values,
+            final_values=final_values,
+            cleared_labels=cleared,
+        )
+        target['display_label'] = _vsm_transition_cycle_target_label(record)
+        targets.append(target)
+
+        series = processor._build_series(record.data.copy())
+        prepared = processor._prepare_series(series) if series else []
+        plot_frames = [item.frame for item in prepared if not item.frame.empty]
+        if not plot_frames:
+            raise ValueError(f'No plottable VSM temperature trace: {path}')
+        plot_frame = pd.concat(plot_frames, ignore_index=True)
+        plots[target_key] = ReviewPlot(
+            pd.to_numeric(plot_frame['temperature'], errors='coerce'),
+            pd.to_numeric(plot_frame['signal'], errors='coerce'),
+            f'{record.sample or path.stem} · {_vsm_transition_cycle_target_label(record)}',
+            'Signal X (emu)',
+            x_label='Temperature',
+            x_unit='°C',
+            value_unit='°C',
+        )
+
+    sample_name = str(grouped_records[0][1].sample or '').strip()
+    draft = make_review(
+        family='vsm_temperature',
+        measurement_fingerprint=fingerprint,
+        targets=targets,
+        source_files=[source_file_entry(path)] if path.is_file() else [],
+        sample={'sample': sample_name},
+    )
+    sidecar = sidecar_path_for_measurement(path, family='vsm_temperature')
+    payload = draft
+    if sidecar.exists():
+        loaded = load_review(sidecar)
+        if loaded.get('measurement_fingerprint') != fingerprint:
+            raise ValueError('Existing VSM review belongs to different measurement content.')
+        loaded_keys = {
+            str(target.get('target_key') or '') for target in loaded.get('targets', [])
+        }
+        if loaded_keys == set(record_by_key):
+            payload = loaded
+            labels = {
+                str(target.get('target_key') or ''): target.get('display_label')
+                for target in draft.get('targets', [])
+            }
+            for target in payload.get('targets', []):
+                target['display_label'] = labels.get(str(target.get('target_key') or ''), '')
+
+    def save_review(saved_payload: Mapping[str, Any]) -> None:
+        atomic_write_review(sidecar, saved_payload)
+        for target in saved_payload.get('targets', []):
+            target_key = str(target.get('target_key') or '')
+            record_ref = record_by_key.get(target_key)
+            if record_ref is None:
+                continue
+            group_key, record = record_ref
+            status = str(target.get('status') or TRANSITION_REVIEW_STATUS_UNREVIEWED)
+            values = _clean_vsm_transition_values(target.get('final_values'))
+            section._store_review_for_record(
+                group_key,
+                record,
+                status,
+                values=values,
+                included=(
+                    status in {
+                        TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                        TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                    }
+                    and bool(values)
+                ),
+            )
+
+    return PortableTransitionReviewDialog(
+        payload,
+        plots,
+        sidecar,
+        parent,
+        save_callback=save_review,
+    )
+
+
 class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
     def __init__(
         self,
@@ -28471,29 +28625,82 @@ class _VsmTransitionWorkspace(_PortableTransitionReviewWorkspace):
         return rows
 
     def _review(self, paths: Sequence[Path]) -> int:
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("VSM transition review")
-        dialog.resize(1250, 760)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        panel = _VsmTransitionReviewPanel(self._section, dialog)
-        layout.addWidget(panel, 1)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Close, dialog
+        from plotting.shared.transition_review import sidecar_path_for_measurement
+        from plotting.shared.transition_review_dialog import (
+            PortableTransitionReviewQueueDialog,
+            ReviewQueueEntry,
         )
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        panel.refresh_workspace()
-        first_path = Path(paths[0]) if paths else None
-        if first_path is not None:
-            for group_key, records in self._section._record_groups.items():
-                for record in records:
-                    if getattr(record, "path", None) == first_path:
-                        panel._select_ref(
-                            (group_key, _vsm_transition_review_record_id(record))
-                        )
-                        break
+
+        selected = {os.path.abspath(os.fspath(Path(path))) for path in paths}
+        group_for_record: Dict[str, str] = {}
+        for group_key, records in self._section._record_groups.items():
+            for record in records:
+                group_for_record[_vsm_transition_review_record_id(record)] = group_key
+        grouped: Dict[str, List[Tuple[str, VsmTemperatureScanRecord]]] = {}
+        for record in self._records():
+            path = getattr(record, 'path', None)
+            if not isinstance(path, Path):
+                continue
+            if selected and os.path.abspath(os.fspath(path)) not in selected:
+                continue
+            record_id = _vsm_transition_review_record_id(record)
+            group_key = group_for_record.get(record_id)
+            if group_key is None:
+                continue
+            grouped.setdefault(_vsm_transition_base_record_id(record), []).append(
+                (group_key, record)
+            )
+
+        entries: List[Any] = []
+        for records in grouped.values():
+            records.sort(
+                key=lambda item: int(
+                    getattr(item[1], '_transition_cycle_index', 1) or 1
+                )
+            )
+            first = records[0][1]
+            path = Path(first.path)
+            sample_label = str(first.sample or '').strip() or 'Unknown sample'
+            run_label = _record_label_for_display(first) or path.stem
+            sidecar = sidecar_path_for_measurement(
+                path, family='vsm_temperature'
+            )
+            entries.append(
+                ReviewQueueEntry(
+                    sample_label=sample_label,
+                    run_label=run_label,
+                    saved=sidecar.exists(),
+                    builder=lambda owner, selected_records=tuple(records): _build_shared_vsm_transition_editor(
+                        self._section, selected_records, owner
+                    ),
+                )
+            )
+        if not entries:
+            return 0
+        dialog = PortableTransitionReviewQueueDialog(entries, self)
+        dialog.setWindowTitle('VSM transition review')
         dialog.exec()
-        return 1
+        return dialog.completed_count
+
+_TAB_DATA_STATE_COLORS = {
+    'current': '#22c55e',
+    'stale': '#f59e0b',
+    'loading': '#f59e0b',
+    'error': '#ef4444',
+}
+
+
+def _tab_data_state_icon(state: str) -> QtGui.QIcon:
+    pixmap = QtGui.QPixmap(12, 12)
+    pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    painter.setPen(QtCore.Qt.PenStyle.NoPen)
+    painter.setBrush(QtGui.QColor(_TAB_DATA_STATE_COLORS.get(state, '#9ca3af')))
+    painter.drawEllipse(2, 2, 8, 8)
+    painter.end()
+    return QtGui.QIcon(pixmap)
+
 
 class TransitionsSection(QtWidgets.QWidget):
     section_title = "Transitions"
@@ -28527,6 +28734,8 @@ class TransitionsSection(QtWidgets.QWidget):
         self.tab_widget.addTab(self.annealing_workspace, "Annealing")
         self.tab_widget.addTab(self.vsm_workspace, "VSM")
         self.tab_widget.addTab(self.dma_workspace, "TMA")
+        for index in range(self.tab_widget.count()):
+            self._set_tab_data_state(index, 'stale', 'Refresh needed')
         for workspace in (
             self.annealing_workspace,
             self.vsm_workspace,
@@ -28542,11 +28751,27 @@ class TransitionsSection(QtWidgets.QWidget):
         if self._active:
             self.request_current_workspace_load()
 
+    def _set_tab_data_state(self, index: int, state: str, detail: str) -> None:
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        self.tab_widget.setTabIcon(index, _tab_data_state_icon(state))
+        labels = {
+            'current': 'Up to date',
+            'stale': 'Refresh needed',
+            'loading': 'Loading',
+            'error': 'Load failed',
+        }
+        summary = labels.get(state, state)
+        self.tab_widget.setTabToolTip(
+            index, f'{summary}: {detail}' if detail else summary
+        )
+
     def request_current_workspace_load(self, *, force: bool = False) -> None:
         index = self.tab_widget.currentIndex()
         if force:
             self._dirty_view_indexes.add(index)
         if index in self._dirty_view_indexes:
+            self._set_tab_data_state(index, 'loading', 'Loading transition data')
             self.show_loading("Loading transition review data...")
         self.dependencyLoadRequested.emit()
 
@@ -28573,6 +28798,7 @@ class TransitionsSection(QtWidgets.QWidget):
             update(message, [], {})
 
     def show_load_error(self, message: str) -> None:
+        self._set_tab_data_state(self.tab_widget.currentIndex(), 'error', message)
         widget = self.tab_widget.currentWidget()
         show = getattr(widget, "show_load_error", None)
         if callable(show):
@@ -28583,10 +28809,13 @@ class TransitionsSection(QtWidgets.QWidget):
     def mark_workspaces_dirty(self, view: str | None = None) -> None:
         if view is None:
             self._dirty_view_indexes = set(range(self.tab_widget.count()))
+            for index in self._dirty_view_indexes:
+                self._set_tab_data_state(index, 'stale', 'Source data changed')
             return
         index = self._view_aliases.get(str(view).strip().lower())
         if index is not None:
             self._dirty_view_indexes.add(index)
+            self._set_tab_data_state(index, 'stale', 'Source data changed')
 
     def refresh_current_workspace(self, *, force: bool = False) -> None:
         index = self.tab_widget.currentIndex()
@@ -28597,6 +28826,7 @@ class TransitionsSection(QtWidgets.QWidget):
         if callable(refresher):
             refresher()
         self._dirty_view_indexes.discard(index)
+        self._set_tab_data_state(index, 'current', 'Table matches current project data')
 
     def show_view(self, view: str) -> None:
         index = self._view_aliases.get(str(view).strip().lower())
@@ -39727,6 +39957,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._project_load_in_progress = False
         self._project_package_generation = 0
         self._deferred_project_section_pending: Set[str] = set()
+        self._section_load_errors: Set[str] = set()
         self._deferred_project_section_threads: List[Tuple[QtCore.QThread, QtCore.QObject]] = []
         self._auto_open_in_progress = False
         self._project_load_thread: QtCore.QThread | None = None
@@ -39938,6 +40169,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         finally:
             MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
         assembly.attach_compare_section(self.compare_section)
+        self._initialize_builder_tab_status()
 
         self.fabrication_section.sources_changed.connect(
             self._handle_fabrication_sources_changed
@@ -40092,7 +40324,79 @@ class BuilderWindow(QtWidgets.QMainWindow):
             button.setToolTip(tooltip)
             button.clicked.connect(partial(self.show_transitions_view, view))
 
-    def show_transitions_view(self, view: str = "annealing") -> None:
+    def _initialize_builder_tab_status(self) -> None:
+        self._builder_tab_manual_states: Dict[QtWidgets.QWidget, Tuple[str, str]] = {}
+        for index in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(index)
+            if widget is self.transitions_section:
+                self._set_builder_tab_state(
+                    widget, 'stale', 'Open the tab to load its current summary'
+                )
+            else:
+                self._set_builder_tab_state(
+                    widget, 'current', 'View matches current in-memory data'
+                )
+
+    def _set_builder_tab_state(
+        self, widget: QtWidgets.QWidget | None, state: str, detail: str
+    ) -> None:
+        if widget is None:
+            return
+        index = self.tab_widget.indexOf(widget)
+        if index < 0:
+            return
+        self.tab_widget.setTabIcon(index, _tab_data_state_icon(state))
+        labels = {
+            'current': 'Up to date',
+            'stale': 'Refresh needed',
+            'loading': 'Loading',
+            'error': 'Load failed',
+        }
+        summary = labels.get(state, state)
+        self.tab_widget.setTabToolTip(
+            index, f'{summary}: {detail}' if detail else summary
+        )
+
+    def _tab_section_keys(self, widget: QtWidgets.QWidget) -> Set[str]:
+        if widget is getattr(self, 'transitions_section', None):
+            return self._active_transition_project_section_keys()
+        if widget is getattr(self, 'assembly_section', None):
+            return {'assemble'}
+        return {key for key, section in self.sections.items() if section is widget}
+
+    def _refresh_builder_tab_states(self) -> None:
+        pending = set(getattr(self, '_deferred_project_section_pending', set()) or set())
+        deferred = set(getattr(self, '_deferred_project_section_keys', set()) or set())
+        errors = set(getattr(self, '_section_load_errors', set()) or set())
+        for index in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(index)
+            keys = self._tab_section_keys(widget)
+            if keys & errors:
+                self._set_builder_tab_state(widget, 'error', 'Section load failed')
+            elif keys & pending:
+                self._set_builder_tab_state(widget, 'loading', 'Loading section data')
+            elif keys & deferred:
+                self._set_builder_tab_state(widget, 'stale', 'Not loaded yet')
+            elif widget is getattr(self, 'transitions_section', None):
+                inner = widget.tab_widget.currentIndex()
+                if inner in widget._dirty_view_indexes:
+                    self._set_builder_tab_state(
+                        widget, 'stale', 'Current transition summary needs refresh'
+                    )
+                else:
+                    self._set_builder_tab_state(
+                        widget, 'current', 'Current transition summary is up to date'
+                    )
+            else:
+                manual = getattr(self, '_builder_tab_manual_states', {}).get(widget)
+                if manual is not None:
+                    self._set_builder_tab_state(widget, manual[0], manual[1])
+                else:
+                    self._set_builder_tab_state(
+                        widget, 'current', 'View matches current in-memory data'
+                    )
+
+    def show_transitions_view(self, view: str = 'annealing') -> None:
         transitions = getattr(self, "transitions_section", None)
         if isinstance(transitions, TransitionsSection):
             transitions.show_view(view)
@@ -40101,6 +40405,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.tab_widget.setCurrentIndex(index)
 
     def _handle_builder_tab_changed(self, _index: int) -> None:
+        current_widget = self.tab_widget.currentWidget()
+        manual_states = getattr(self, '_builder_tab_manual_states', {})
+        manual_states.pop(current_widget, None)
         self._load_current_deferred_project_sections()
         transitions = getattr(self, "transitions_section", None)
         if not isinstance(transitions, TransitionsSection):
@@ -40109,6 +40416,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         transitions.set_active(active, refresh=False)
         if active:
             self._update_transition_workspace_loading_state()
+        self._refresh_builder_tab_states()
 
     def _handle_transition_workspace_load_requested(self) -> None:
         transitions = getattr(self, "transitions_section", None)
@@ -40140,9 +40448,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             )
         )
         if waiting:
+            self._set_builder_tab_state(
+                transitions, 'loading', 'Loading transition dependencies'
+            )
             transitions.show_loading("Loading transition review data...")
             return
         transitions.refresh_current_workspace(force=force_refresh)
+        self._refresh_builder_tab_states()
 
     def _invalidate_deferred_project_loads(self) -> int:
         """Invalidate results/loaders tied to the previously active package."""
@@ -40246,6 +40558,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         ):
             return
         pending.add(section_key)
+        self._section_load_errors.discard(section_key)
+        self._refresh_builder_tab_states()
         self._update_project_actions()
         generation = int(getattr(self, "_project_package_generation", 0))
         thread = QtCore.QThread(self)
@@ -40287,8 +40601,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 )
                 transaction.commit_memory_only()
                 self._deferred_project_section_keys.discard(section_key)
+                self._section_load_errors.discard(section_key)
                 self.logger.info("Loaded deferred project section %s", section_key)
             except Exception:
+                self._section_load_errors.add(section_key)
                 if transaction is not None and not transaction.finished:
                     transaction.rollback()
                 self.logger.exception("Failed to load deferred project section %s", section_key)
@@ -40309,7 +40625,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     )
                 pending.discard(section_key)
                 self._update_project_actions()
-                transitions = getattr(self, "transitions_section", None)
+                self._section_load_errors.add(section_key)
+                self._refresh_builder_tab_states()
+                transitions = getattr(self, 'transitions_section', None)
                 transition_dependencies = self._active_transition_project_section_keys()
                 still_deferred = getattr(self, "_deferred_project_section_keys", set())
                 if (
@@ -40353,6 +40671,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         def _thread_finished() -> None:
             pending.discard(section_key)
             self._update_project_actions()
+            self._refresh_builder_tab_states()
 
         thread.finished.connect(_thread_finished)
         refs = getattr(self, "_deferred_project_section_threads", None)
@@ -41158,6 +41477,28 @@ class BuilderWindow(QtWidgets.QMainWindow):
             compare = getattr(self, "compare_section", None)
             if isinstance(compare, CompareSection):
                 compare.invalidate_source_caches()
+            transitions = getattr(self, 'transitions_section', None)
+            if isinstance(transitions, TransitionsSection):
+                transitions.mark_workspaces_dirty(key)
+                self._set_builder_tab_state(
+                    transitions, 'stale', 'A transition source changed'
+                )
+            for dependent in (
+                getattr(self, 'assembly_section', None),
+                getattr(self, 'compare_section', None),
+            ):
+                if isinstance(dependent, QtWidgets.QWidget):
+                    self._builder_tab_manual_states.setdefault(dependent, (
+                        'stale', 'Source data changed; refresh this view'
+                    ))
+                    self._set_builder_tab_state(
+                        dependent, 'stale', 'Source data changed; refresh this view'
+                    )
+            section = self.sections.get(key)
+            if isinstance(section, QtWidgets.QWidget):
+                self._set_builder_tab_state(
+                    section, 'current', 'View matches current in-memory data'
+                )
         self._mark_dirty()
         self._update_project_actions()
 
@@ -42705,6 +43046,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     self._deferred_project_section_keys = (
                         set(package_index.sections) - loaded_keys
                     )
+                self._section_load_errors.clear()
+                self._refresh_builder_tab_states()
                 self._update_project_title()
                 refresh_started_s = time.perf_counter()
                 self._refresh_sections_after_project_load()

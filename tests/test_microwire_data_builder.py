@@ -8976,6 +8976,12 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.dma_workspace.review_button.text() == "Review all..."
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
+        for index in range(window.tab_widget.count()):
+            assert not window.tab_widget.tabIcon(index).isNull()
+            assert window.tab_widget.tabToolTip(index)
+        for index in range(transitions.tab_widget.count()):
+            assert not transitions.tab_widget.tabIcon(index).isNull()
+            assert transitions.tab_widget.tabToolTip(index)
 
         window.show_transitions_view("vsm")
         assert window.tab_widget.currentWidget() is transitions
@@ -9087,6 +9093,7 @@ def test_transition_workspace_refresh_requests_current_deferred_dependencies(
         assert transitions.vsm_workspace.loading_bar.isHidden()
         assert transitions.vsm_workspace.refresh_button.isEnabled()
         assert "Click Refresh to try again" in transitions.vsm_workspace.status_label.text()
+        assert transitions.tab_widget.tabToolTip(1).startswith('Load failed:')
     finally:
         window._dirty = False
         window.close()
@@ -11927,6 +11934,57 @@ def test_vsm_transition_workspace_lists_saved_reviews_without_loaded_scans() -> 
     finally:
         workspace.close()
         workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_shared_editor_uses_portable_design_and_real_cycles(tmp_path: Path) -> None:
+    _ensure_qapp()
+    path = tmp_path / '202601011200-TSCN-a000-RT-00.VSM-TSCN-Data'
+    path.write_text('synthetic VSM fixture', encoding='utf-8')
+    frame = pd.DataFrame(
+        {
+            'temperature': [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            'field': [5.0] * 8,
+            'signal': [0.0, 1.0, 1.0, 0.0, 0.2, 1.2, 1.2, 0.2],
+            'section_index': [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=path,
+        sample='Ni50Fe27Ga23 1_1',
+        data=frame,
+        key=('Ni50Fe27Ga23', 1, 1),
+        label=path.stem,
+    )
+    cycles = builder_ui._vsm_transition_cycle_records(record)  # noqa: SLF001
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[record],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section, logging.getLogger('test'), lambda *_args: None
+    )
+    section._record_groups = {'sample': cycles}  # noqa: SLF001
+    try:
+        editor = builder_ui._build_shared_vsm_transition_editor(  # noqa: SLF001
+            section,
+            [('sample', cycle) for cycle in cycles],
+            section,
+        )
+        assert editor.target_list.count() == 2
+        assert editor.values_box.title() == 'Transition choices (°C)'
+        assert editor.plot_item.getAxis('bottom').labelText == 'Temperature'
+        editor.target_list.setCurrentRow(1)
+        assert editor._target_index == 1  # noqa: SLF001
+        assert editor.heating_curve_item.getData()[1][0] == pytest.approx(0.2)
+    finally:
+        if 'editor' in locals():
+            editor.close()
+            editor.deleteLater()
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()

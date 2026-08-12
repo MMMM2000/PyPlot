@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -37,10 +38,15 @@ class ReviewPlot:
     derives_transition_strain: bool = False
     strain_reference: Mapping[str, Any] | None = None
     unit_series: Mapping[str, tuple[pd.Series, pd.Series]] | None = None
+    x_label: str = 'Current'
+    x_unit: str = 'mA'
+    value_unit: str = 'mA'
 
 
 class PortableTransitionReviewDialog(QtWidgets.QDialog):
     """Edit all targets in one portable review record."""
+
+    advanceRequested = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -48,11 +54,14 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         plots: Mapping[str, ReviewPlot],
         sidecar_path: Path,
         parent: QtWidgets.QWidget | None = None,
+        save_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.payload = copy.deepcopy(dict(payload))
         self.plots = dict(plots)
         self.sidecar_path = Path(sidecar_path)
+        self._save_callback = save_callback
+        self._queue_mode = False
         self._loading = False
         self._target_index = -1
         self.setWindowTitle("Transition review")
@@ -246,7 +255,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         return self.payload.setdefault("targets", [])
 
     def _target_display_label(self, target: Mapping[str, Any]) -> str:
-        metadata = target.get("target")
+        display_label = str(target.get('display_label') or '').strip()
+        if display_label:
+            return display_label
+        metadata = target.get('target')
         if isinstance(metadata, Mapping):
             stress = metadata.get("stress_mpa")
             load = metadata.get("load_g")
@@ -279,6 +291,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 for label in available
                 if label[:-1] in {"As", "Af", "Ms", "Mf"} and label[-1:].isdigit()
             }
+            plot = self.plots.get(str(target.get('target_key') or ''))
+            if plot is not None:
+                for title in (plot.unit_series or {}):
+                    match = re.fullmatch(r'Cycle\s+(\d+)', str(title))
+                    if match is not None:
+                        loop_numbers.add(int(match.group(1)))
             if not loop_numbers:
                 loop_numbers = {1, 2}
             for loop in loop_numbers:
@@ -583,6 +601,24 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             self._target_ready(target) for target in self._targets()
         )
 
+    def _navigation_row_ready(self, row: int) -> bool:
+        if row < 0 or row >= len(self._navigation_items):
+            return False
+        target_index, unit_index = self._navigation_items[row]
+        target = self._targets()[target_index]
+        units = self._review_units_for_target(target)
+        if unit_index < 0 or unit_index >= len(units):
+            return False
+        for label in units[unit_index][1]:
+            choice = self._initial_choice(target, label)
+            if choice is None:
+                return False
+            if choice == 'manual':
+                manual = target.get('manual_values')
+                if not isinstance(manual, Mapping) or label not in manual:
+                    return False
+        return True
+
     def _update_decision_summary(self) -> None:
         choices = list(self._choices.values())
         pending = sum(choice is None for choice in choices)
@@ -608,7 +644,11 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         elif self._current_target_ready() and not self._all_targets_ready():
             text += " Review the remaining target(s) before saving."
         self.decision_summary.setText(text)
-        self.save_button.setEnabled(self._all_targets_ready())
+        self.save_button.setEnabled(
+            self._current_target_ready()
+            if self._queue_mode
+            else self._all_targets_ready()
+        )
 
     def _target_controls_changed(self, *_args: object) -> None:
         if self._loading:
@@ -806,9 +846,13 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         else:
             self.heating_curve_item.setData([], [])
             self.cooling_curve_item.setData([], [])
-        self.plot_item.setLabel("bottom", "Current", units="mA")
+        self.plot_item.setLabel('bottom', plot.x_label, units=plot.x_unit)
         self.plot_item.setLabel("left", plot.y_label)
         self.plot_item.setTitle(plot.title)
+        self.values_box.setTitle(f'Transition choices ({plot.value_unit})')
+        self.manual_graph_hint.setText(
+            f'{plot.value_unit} \N{MIDDLE DOT} or click graph'
+        )
         auto = (
             target.get("auto_values")
             if isinstance(target.get("auto_values"), Mapping)
@@ -883,14 +927,30 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             return
         self._set_manual_plot_value(float(event.xdata))
 
+    def _write_review(self) -> None:
+        self.payload['review_revision'] = int(
+            self.payload.get('review_revision', 0) or 0
+        ) + 1
+        self.payload['updated_utc'] = utc_now_text()
+        if self._save_callback is not None:
+            self._save_callback(copy.deepcopy(self.payload))
+        else:
+            atomic_write_review(self.sidecar_path, self.payload)
+
     def _save_and_accept(self) -> None:
         self._store_target_controls()
         self._update_decision_summary()
-        if not self._all_targets_ready():
+        ready = (
+            self._current_target_ready()
+            if self._queue_mode
+            else self._all_targets_ready()
+        )
+        if not ready:
             return
-        self.payload["review_revision"] = int(self.payload.get("review_revision", 0) or 0) + 1
-        self.payload["updated_utc"] = utc_now_text()
-        atomic_write_review(self.sidecar_path, self.payload)
+        self._write_review()
+        if self._queue_mode:
+            self.advanceRequested.emit()
+            return
         self.accept()
 
 
@@ -1036,11 +1096,12 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             self._update_status(f"Could not load {entry.label}: {exc}")
             return None
         editor.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        editor._queue_mode = True  # noqa: SLF001
         editor.target_panel.hide()
         editor.heading.setText(
             f"{entry.label} · saves {editor.sidecar_path.name} beside this measurement"
         )
-        editor.save_button.setText("Save current run")
+        editor.save_button.setText('Save and continue')
         for button_box in editor.findChildren(QtWidgets.QDialogButtonBox):
             cancel_button = button_box.button(
                 QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -1049,6 +1110,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                 cancel_button.hide()
         editor.accepted.connect(
             lambda selected_index=run_index: self._editor_saved(selected_index)
+        )
+        editor.advanceRequested.connect(
+            lambda selected_index=run_index: self._advance_editor(selected_index)
         )
         self.editor_layout.addWidget(editor, 1)
         editor.hide()
@@ -1092,6 +1156,16 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                 max(int(navigation_row), 0), editor.target_list.count() - 1
             )
             editor.target_list.setCurrentRow(navigation_row)
+            final_unit = navigation_row == editor.target_list.count() - 1
+            next_kind = (
+                'target'
+                if editor.payload.get('experiment_family') == 'tma'
+                else 'cycle'
+            )
+            editor.save_button.setText(
+                'Save run and next' if final_unit else f'Save and next {next_kind}'
+            )
+            editor._update_decision_summary()  # noqa: SLF001
         editor.show()
         self._update_status(self.entries[run_index].label)
 
@@ -1122,6 +1196,29 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             self._show_editor(run_index, 0)
             return
         self._show_editor(run_index, int(navigation_row))
+
+    def _advance_editor(self, run_index: int) -> None:
+        editor = self._editors.get(run_index)
+        if editor is None:
+            return
+        current_row = max(editor.target_list.currentRow(), 0)
+        run_item = self._run_items[run_index]
+        if current_row < run_item.childCount():
+            run_item.child(current_row).setText(1, 'Saved')
+        next_row = current_row + 1
+        if next_row < editor.target_list.count():
+            self.tree.setCurrentItem(run_item.child(next_row))
+            self._update_status(
+                f'Saved cycle/target {current_row + 1} of {editor.target_list.count()}.'
+            )
+            return
+        if not editor._all_targets_ready():  # noqa: SLF001
+            for row in range(editor.target_list.count()):
+                if not editor._navigation_row_ready(row):  # noqa: SLF001
+                    self.tree.setCurrentItem(run_item.child(row))
+                    self._update_status('Review the remaining cycle/target before completing this run.')
+                    return
+        self._editor_saved(run_index)
 
     def _editor_saved(self, run_index: int) -> None:
         self._saved_indices.add(run_index)

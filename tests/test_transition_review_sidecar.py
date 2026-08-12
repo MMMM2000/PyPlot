@@ -973,6 +973,68 @@ def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> N
     assert dialog._editors[1].target_list.currentRow() == 1  # noqa: SLF001
 
 
+def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> None:
+    from PyQt6 import QtCore
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        PortableTransitionReviewQueueDialog,
+        ReviewPlot,
+        ReviewQueueEntry,
+    )
+
+    frame = pd.DataFrame(
+        {'I_mA': [10.0, 20.0, 10.0], 'R_Ohm': [100.0, 90.0, 101.0]}
+    )
+    fingerprint = dataframe_fingerprint(frame, namespace='stable-cycle-review')
+    target = make_target(
+        family='current_annealing',
+        measurement_fingerprint=fingerprint,
+        target_key='graph',
+        status='manual_adjusted',
+        manual_values={'As1': 12.0, 'Af1': 18.0},
+        final_values={'As1': 12.0, 'Af1': 18.0},
+        cleared_labels=('Ms1', 'Mf1'),
+    )
+    payload = make_review(
+        family='current_annealing',
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    plot = ReviewPlot(
+        frame['I_mA'], frame['R_Ohm'], 'Two cycles', 'Resistance (ohm)',
+        unit_series={
+            'Cycle 1': (frame['I_mA'], frame['R_Ohm']),
+            'Cycle 2': (
+                pd.Series([11.0, 21.0, 11.0]),
+                pd.Series([200.0, 180.0, 201.0]),
+            ),
+        },
+    )
+
+    def build(parent):
+        return PortableTransitionReviewDialog(
+            payload, {'graph': plot}, tmp_path / 'review.json', parent
+        )
+
+    queue = PortableTransitionReviewQueueDialog(
+        [ReviewQueueEntry('Sample', 'Run', build)]
+    )
+    qtbot.addWidget(queue)
+    queue.show()
+    qtbot.wait(20)
+    editor = queue._editors[0]  # noqa: SLF001
+    run_item = queue._run_items[0]  # noqa: SLF001
+    assert run_item.childCount() == 2
+    assert editor.save_button.text() == 'Save and next cycle'
+    assert editor.save_button.isEnabled()
+    qtbot.mouseClick(editor.save_button, QtCore.Qt.MouseButton.LeftButton)
+    qtbot.wait(20)
+    assert queue.completed_count == 0
+    assert queue.tree.currentItem() is run_item.child(1)
+    assert editor._active_unit_labels == ['As2', 'Af2', 'Ms2', 'Mf2']  # noqa: SLF001
+    assert editor.heating_curve_item.getData()[1][0] == 200.0
+
+
 def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> None:
     from plotting.shared import transition_review_dialog as review_dialog
 

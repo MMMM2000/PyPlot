@@ -21,7 +21,7 @@ import pandas as pd
 SCHEMA_NAME = "microwire_transition_review"
 SCHEMA_VERSION = 1
 SIDECAR_NAME = "transition_review.json"
-EXPERIMENT_FAMILIES = {"current_annealing", "tma"}
+EXPERIMENT_FAMILIES = {'current_annealing', 'tma', 'vsm_temperature'}
 REVIEW_STATUSES = {
     "unreviewed",
     "accepted_auto",
@@ -145,8 +145,8 @@ def make_target(
         "status": status,
         "included": status in INCLUDED_STATUSES,
         "analysis_included": status in ANALYSIS_INCLUDED_STATUSES,
-        "quantity": "current",
-        "unit": "mA",
+        'quantity': 'temperature' if family == 'vsm_temperature' else 'current',
+        'unit': 'degC' if family == 'vsm_temperature' else 'mA',
         "auto_values": _finite_values(auto_values),
         "manual_values": _finite_values(manual_values),
         "final_values": _finite_values(final_values),
@@ -226,8 +226,10 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
         cleaned["status"] = status
         cleaned["included"] = status in INCLUDED_STATUSES
         cleaned["analysis_included"] = status in ANALYSIS_INCLUDED_STATUSES
-        cleaned["quantity"] = "current"
-        cleaned["unit"] = "mA"
+        cleaned['quantity'] = (
+            'temperature' if family == 'vsm_temperature' else 'current'
+        )
+        cleaned['unit'] = 'degC' if family == 'vsm_temperature' else 'mA'
         for key in ("auto_values", "manual_values", "final_values"):
             cleaned[key] = _finite_values(raw.get(key))
         if status == "no_transition":
@@ -308,7 +310,7 @@ def sidecar_path_for_measurement(path: Path, *, family: str) -> Path:
     if family == "tma":
         run_dir = source if source.is_dir() or not source.suffix else source.parent
         return run_dir / SIDECAR_NAME
-    if family != "current_annealing":
+    if family not in {'current_annealing', 'vsm_temperature'}:
         raise TransitionReviewError(f"Unsupported experiment family: {family!r}")
     if source.name.casefold() == "measurement.txt":
         return source.parent / SIDECAR_NAME
