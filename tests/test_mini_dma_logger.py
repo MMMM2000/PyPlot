@@ -11096,6 +11096,76 @@ def test_elastocaloric_camera_preflight_accepts_fresh_64_hz_frame(tmp_path: Path
         _close_test_window(window)
 
 
+def test_elastocaloric_runtime_stops_when_camera_stream_becomes_stale(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    stops: list[dict[str, object]] = []
+    traces: list[dict[str, object]] = []
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._ir_thread = object()
+        with window._ir_state_lock:
+            window._latest_ir_frame = object()
+        window._latest_ir_snapshot = lambda: {  # type: ignore[method-assign]
+            "sensor_type": mini_dma_mod.IR_SENSOR_MLX90640,
+            "sample_age_s": 0.75,
+        }
+        window._write_control_trace = lambda **kwargs: traces.append(kwargs)  # type: ignore[method-assign]
+        window._stop_auto_ramp = lambda **kwargs: stops.append(kwargs)  # type: ignore[method-assign]
+
+        assert window._elastocaloric_camera_interlock_active() is True
+        assert stops == [
+            {
+                "log_completion": False,
+                "offer_recovery": False,
+                "stop_reason": "thermal_camera_loss",
+                "stop_detail": (
+                    "Elastocaloric recipe stopped because the mandatory MLX90640 camera "
+                    "stream is not fresh (last calibrated frame age 0.750 s)."
+                ),
+            }
+        ]
+        assert traces[0]["decision"] == "thermal_camera_interlock"
+        assert traces[0]["reason"] == "mlx90640_stream_stale"
+    finally:
+        window._automation_active = False
+        window._ir_thread = None
+        _close_test_window(window)
+
+
+def test_elastocaloric_runtime_accepts_fresh_camera_stream(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._ir_thread = object()
+        with window._ir_state_lock:
+            window._latest_ir_frame = object()
+        window._latest_ir_snapshot = lambda: {  # type: ignore[method-assign]
+            "sensor_type": mini_dma_mod.IR_SENSOR_MLX90640,
+            "sample_age_s": 0.01,
+        }
+
+        assert window._elastocaloric_camera_interlock_active() is False
+    finally:
+        window._automation_active = False
+        window._ir_thread = None
+        _close_test_window(window)
+
+
+def test_non_elastocaloric_runtime_does_not_require_camera_stream(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._ir_thread = None
+
+        assert window._elastocaloric_camera_interlock_active() is False
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_iso_current_stress_ramp_recipe_builds_target_ramps_with_transition(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
@@ -11812,6 +11882,49 @@ def test_constant_current_mechanical_scan_uses_fixed_displacement_steps(tmp_path
         assert moves == pytest.approx([0.01, 0.02, 0.03])
         assert len(records) == 3
     finally:
+        _close_test_window(window)
+
+
+def test_elastocaloric_mechanical_scan_traces_command_response_and_record_window(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    values = iter([0.0, 4.0, 4.0])
+    traces: list[dict[str, object]] = []
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._session_active = True
+        window._last_move_target_mm = 0.0
+        window._last_effective_move_target_mm = 0.0
+        window._current_distribution_value = lambda *_args, **_kwargs: next(values)  # type: ignore[method-assign]
+        window._move_to_position_mm = lambda _target_mm, **_kwargs: True  # type: ignore[method-assign]
+        window._record_scheduled_recipe_point = lambda _step: True  # type: ignore[method-assign]
+        window._write_control_trace = lambda **kwargs: traces.append(kwargs)  # type: ignore[method-assign]
+        window._tension_motion_sign = lambda: 1.0  # type: ignore[method-assign]
+        step = mini_dma_mod.AutomationStep(
+            "mechanical_scan",
+            target_value=4.0,
+            basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            current_mA=20.0,
+            mechanical_step_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_value=4.0,
+            mechanical_step_speed_mm_s=1.25,
+            duration_s=0.0,
+            note="elastocaloric:pull",
+        )
+
+        assert window._handle_mechanical_scan_step(step, 4) is False
+        assert window._handle_mechanical_scan_step(step, 4) is False
+        assert [trace["result"] for trace in traces] == [
+            "command_queued",
+            "fresh_response_observed",
+            "record_window_completed",
+        ]
+        assert all(trace["reason"] == "elastocaloric:pull" for trace in traces)
+    finally:
+        window._automation_active = False
         _close_test_window(window)
 
 

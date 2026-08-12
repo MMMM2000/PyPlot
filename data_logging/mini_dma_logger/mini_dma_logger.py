@@ -5498,6 +5498,8 @@ class MiniDmaAutomationController:
         if host._recipe_motor_power_interlock_active():
             host._request_recipe_pause_for_motor_power_loss()
             return
+        if host._elastocaloric_camera_interlock_active():
+            return
         if host._automation_index >= len(host._automation_steps):
             if not host._is_ui_thread():
                 # Completion stops the control loop.  Queue it asynchronously so
@@ -20674,20 +20676,29 @@ class MainWindow(QtWidgets.QMainWindow):
         return str(mode if mode is not None else self.combo_recipe_mode.currentData() or "") in CURRENT_SWEEP_MODES
 
     def _is_constant_current_strain_sweep_mode(self, mode: str | None = None) -> bool:
+        if mode is not None:
+            return str(mode) == CONSTANT_CURRENT_STRAIN_SWEEP
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
-        return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRAIN_SWEEP
+        return str(default_mode or "") == CONSTANT_CURRENT_STRAIN_SWEEP
 
     def _is_constant_current_stress_ramp_mode(self, mode: str | None = None) -> bool:
+        if mode is not None:
+            return str(mode) == CONSTANT_CURRENT_STRESS_RAMP
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
-        return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRESS_RAMP
+        return str(default_mode or "") == CONSTANT_CURRENT_STRESS_RAMP
 
     def _is_elastocaloric_mode(self, mode: str | None = None) -> bool:
+        if mode is not None:
+            return str(mode) == ELASTOCALORIC_EFFECT
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
-        return str(mode if mode is not None else default_mode or "") == ELASTOCALORIC_EFFECT
+        return str(default_mode or "") == ELASTOCALORIC_EFFECT
 
     def _is_iso_current_mode(self, mode: str | None = None) -> bool:
-        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
-        return str(mode if mode is not None else default_mode or "") in {
+        if mode is not None:
+            selected_mode = mode
+        else:
+            selected_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(selected_mode or "") in {
             CONSTANT_CURRENT_STRAIN_SWEEP,
             CONSTANT_CURRENT_STRESS_RAMP,
             ELASTOCALORIC_EFFECT,
@@ -28169,6 +28180,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "manual_session_stop": ("operator", "Manual session stop"),
             "emergency_stop": ("operator", "Emergency stop"),
             "wire_break_or_contact_loss": ("fault", "Wire break or contact loss"),
+            "thermal_camera_loss": ("fault", "Thermal camera stream lost"),
             "mechanical_load_loss": ("fault", "Mechanical load loss or slack"),
             "correction_travel_limit": ("fault", "Correction travel limit"),
             "automation_timeout": ("fault", "Bench automation timeout"),
@@ -35182,6 +35194,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recipe_motor_power_loss_since_s = now_s
         return now_s - self._recipe_motor_power_loss_since_s >= TIC_MOTOR_POWER_RECIPE_PAUSE_S
 
+    def _elastocaloric_camera_interlock_active(self) -> bool:
+        """Stop an elastocaloric run if its mandatory camera stream is lost."""
+
+        if not self._automation_active or not self._is_elastocaloric_mode(self._automation_name):
+            return False
+        snapshot = self._latest_ir_snapshot()
+        age_s = snapshot.get("sample_age_s")
+        with self._ir_state_lock:
+            frame_available = self._latest_ir_frame is not None
+        stream_fresh = (
+            self._ir_thread is not None
+            and snapshot.get("sensor_type") == IR_SENSOR_MLX90640
+            and frame_available
+            and isinstance(age_s, (int, float))
+            and math.isfinite(float(age_s))
+            and float(age_s) <= 0.5
+        )
+        if stream_fresh:
+            return False
+        age_text = "unavailable" if not isinstance(age_s, (int, float)) else f"{float(age_s):.3f} s"
+        detail = (
+            "Elastocaloric recipe stopped because the mandatory MLX90640 camera "
+            f"stream is not fresh (last calibrated frame age {age_text})."
+        )
+        self._log(detail)
+        self._write_control_trace(
+            decision="thermal_camera_interlock",
+            result="stopped",
+            reason="mlx90640_stream_stale",
+        )
+        self._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=False,
+            stop_reason="thermal_camera_loss",
+            stop_detail=detail,
+        )
+        return True
+
     def _request_recipe_pause_for_motor_power_loss(self) -> None:
         if self._recipe_motor_power_pause_pending or self._automation_paused:
             return
@@ -38821,6 +38871,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
             if self._active_mechanical_scan_hold_started_s is None:
                 self._active_mechanical_scan_hold_started_s = time.monotonic()
+                if note_text.startswith("elastocaloric:"):
+                    self._write_control_trace(
+                        decision="elastocaloric_motion_event",
+                        basis=basis,
+                        target_value=target_value,
+                        current_value=float(current_value),
+                        result="fresh_response_observed",
+                        reason=note_text,
+                    )
                 if hold_s > 0.0:
                     return False
             if not self._record_scheduled_recipe_point(step):
@@ -38828,6 +38887,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             if hold_s > 0.0 and time.monotonic() - self._active_mechanical_scan_hold_started_s < hold_s:
                 return False
+            if note_text.startswith("elastocaloric:"):
+                self._write_control_trace(
+                    decision="elastocaloric_motion_event",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=float(current_value),
+                    result="record_window_completed",
+                    reason=note_text,
+                )
             self._active_mechanical_scan_move_pending = False
             self._active_mechanical_scan_hold_started_s = None
             return False
@@ -38878,6 +38946,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._move_to_position_mm(target_mm, chain_from_last_target=True, speed_mm_s=speed_mm_s):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
+        if note_text.startswith("elastocaloric:"):
+            self._write_control_trace(
+                decision="elastocaloric_motion_event",
+                basis=basis,
+                target_value=target_value,
+                current_value=float(current_value),
+                command_speed_mm_s=speed_mm_s,
+                target_mm=target_mm,
+                result="command_queued",
+                reason=note_text,
+            )
         self._active_mechanical_scan_move_count += 1
         self._active_mechanical_scan_move_pending = True
         self._active_mechanical_scan_hold_started_s = None
