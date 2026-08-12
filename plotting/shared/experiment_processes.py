@@ -78,9 +78,15 @@ def build_experiment_process_command(
     executable: Path | None = None,
 ) -> list[str]:
     requested_executable = Path(sys.executable) if executable is None else executable
+    # Both TMA and Current Annealing start authoritative multiprocessing
+    # children.  A pythonw parent can fail during Windows spawn reconstruction
+    # before the child target has a chance to publish its fault detail.  Keep
+    # these controller-owning experiment parents on the console interpreter;
+    # CREATE_NO_WINDOW below still prevents a visible console window.
+    controller_process_tags = {"tma", "current_annealing"}
     python_exe = (
         control_python_executable(requested_executable)
-        if spec.resource_tag == "tma"
+        if spec.resource_tag in controller_process_tags
         else gui_python_executable(requested_executable)
     )
     if getattr(sys, "frozen", False):

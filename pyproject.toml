@@ -65,3 +65,5 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 addopts = "--capture=sys"
+testpaths = ["tests"]
+norecursedirs = ["artifacts", ".git", ".venv"]

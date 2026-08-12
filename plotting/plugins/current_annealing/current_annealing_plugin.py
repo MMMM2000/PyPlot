@@ -136,6 +136,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     def _is_data_source_path(cls, path: Path) -> bool:
         if cls._is_metadata_sidecar_path(path):
             return False
+        if path.name.casefold() == "measurement.csv":
+            return anneal_core.current_annealing_session_metadata(path) is not None
+        if path.suffix.lower() in {".csv", ".tsv"} and anneal_core.current_annealing_session_metadata(path) is not None:
+            return False
         return path.suffix.lower() in cls._DATA_SUFFIXES
 
     def _candidate_data_paths(self, paths: list[Path]) -> list[Path]:
@@ -156,7 +160,16 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         for path in paths:
             if not isinstance(path, Path):
                 continue
+            if path.is_file() and path.name.casefold() == "metadata.json":
+                resolved = anneal_core.resolve_current_annealing_source(path)
+                if resolved != path:
+                    _push(resolved)
+                continue
             if path.is_dir():
+                resolved = anneal_core.resolve_current_annealing_source(path)
+                if resolved != path:
+                    _push(resolved)
+                    continue
                 try:
                     children = sorted(path.rglob("*"), key=lambda item: str(item))
                 except Exception:
@@ -240,7 +253,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
         window_module = window_api()
-        title = format_annealing_title(Path(path_str).stem)
+        title = format_annealing_title(anneal_core.current_annealing_source_label(path_str))
         wire_diameter_um = self._wire_diameter_um_for_frame(df)
         try:
             fig, _ = anneal_core.plot_one(
@@ -279,7 +292,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         descriptor = window_module.TabDescriptor(
             kind="current_annealing",
             title=ax.get_title() if ax else title,
-            root_label=Path(path_str).name,
+            root_label=anneal_core.current_annealing_source_label(path_str),
             x_label=ax.get_xlabel() if ax else "Current [mA]",
             y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
             canvas=canvas,
@@ -292,7 +305,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 "wire_diameter_um": wire_diameter_um,
             },
         )
-        self.host.tab_widget.addTab(tab, Path(path_str).name)
+        self.host.tab_widget.addTab(tab, anneal_core.current_annealing_source_label(path_str))
         self.host._register_plot_tab(tab, canvas, ax, descriptor)
         self._plot_tabs.append(tab)
         return tab

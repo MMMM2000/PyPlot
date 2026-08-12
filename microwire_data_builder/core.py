@@ -4030,7 +4030,49 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _current_annealing_session_source(path: Path) -> tuple[Path, dict[str, Any]] | None:
+    try:
+        from plotting.plugins.current_annealing import core as annealing_core
+    except ImportError:
+        return None
+    resolved = annealing_core.resolve_current_annealing_source(path)
+    metadata = annealing_core.current_annealing_session_metadata(resolved)
+    if metadata is None:
+        return None
+    return resolved, metadata
+
+
 def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementMetadata:
+    session = _current_annealing_session_source(path)
+    if session is not None:
+        source, payload = session
+        stat = source.stat()
+        timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        composition = str(payload.get("composition") or source.parent.name).strip()
+        microwire = str(payload.get("microwire") or "").strip()
+        xy_match = XY_PATTERN.search(re.sub(r"[/\\-]+", "_", microwire))
+        setpoint_value = payload.get("max_current_mA")
+        try:
+            setpoint = int(round(float(setpoint_value)))
+        except (TypeError, ValueError):
+            setpoint = None
+        run_name = source.parent.name
+        relpath = (
+            os.fspath(source.relative_to(root))
+            if root and source.is_relative_to(root)
+            else source.as_posix()
+        )
+        return MeasurementMetadata(
+            composition_token=composition,
+            draw_x=int(xy_match.group(1)) if xy_match else None,
+            piece_y=int(xy_match.group(2)) if xy_match else None,
+            setpoint_mA=setpoint,
+            alt_variant=bool(ALT_VARIANT_PATTERN.search(run_name)),
+            measurement_id=_hash_file(source),
+            file_name=run_name,
+            relpath=relpath,
+            timestamp_mtime_utc=timestamp,
+        )
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
@@ -4183,6 +4225,15 @@ def _load_annealing(
     *,
     expected_setpoint_mA: Optional[float] = None,
 ) -> pd.DataFrame:
+    session = _current_annealing_session_source(path)
+    if session is not None:
+        source, _metadata = session
+        from plotting.plugins.current_annealing import core as annealing_core
+
+        frame = annealing_core.load_file(source).rename(columns={"R_Ohm": "R_ohm"})
+        if "Cycle" in frame.columns:
+            frame["Cycle"] = pd.to_numeric(frame["Cycle"], errors="coerce")
+        return _trim_annealing_burnthrough(frame)
     if path.suffix.lower() == ".dat":
         return _trim_annealing_burnthrough(_load_annealing_dat(path))
 

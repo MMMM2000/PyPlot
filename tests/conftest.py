@@ -18,7 +18,13 @@ def _configure_qt_headless_defaults() -> None:
 def _configure_qsettings_isolation() -> None:
     raw_root = os.environ.get("PYTEST_QSETTINGS_ROOT", "").strip()
     if not raw_root:
-        return
+        raw_root = str(
+            Path.cwd()
+            / "artifacts"
+            / "pytest-qsettings"
+            / f"process-{os.getpid()}"
+        )
+        os.environ["PYTEST_QSETTINGS_ROOT"] = raw_root
     from PyQt6 import QtCore
 
     settings_root = Path(raw_root)
@@ -56,12 +62,18 @@ def pytest_configure() -> None:
             or os.environ.get("TMP")
             or tempfile.gettempdir()
         )
-        tmp_root = Path(base_tmp)
         isolated_temp = os.environ.get("PYPLOT_TEST_TEMP_ISOLATED") == "1"
-        if os.name == "nt" and not isolated_temp and len(str(tmp_root.resolve())) > 60:
-            tmp_root = Path("C:/tmp")
-        if not isolated_temp and tmp_root.name != "pyplot-tests":
-            tmp_root = tmp_root / "pyplot-tests"
+        if os.name == "nt" and not isolated_temp:
+            tmp_root = (
+                Path.cwd()
+                / "artifacts"
+                / "pytest-runtime"
+                / f"process-{os.getpid()}"
+            )
+        else:
+            tmp_root = Path(base_tmp)
+            if not isolated_temp and tmp_root.name != "pyplot-tests":
+                tmp_root = tmp_root / "pyplot-tests"
         tmp_root.mkdir(parents=True, exist_ok=True)
         os.environ["TMPDIR"] = str(tmp_root)
         os.environ["TEMP"] = str(tmp_root)

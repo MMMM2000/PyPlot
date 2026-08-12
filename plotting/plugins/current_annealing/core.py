@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import math
@@ -31,6 +32,93 @@ from plotting.shared.transition_analysis import (
     fit_tangent_transition,
 )
 from plotting.shared.toolkit import format_annealing_title
+
+
+CURRENT_ANNEALING_SESSION_SCHEMA = "current_annealing_session_v2"
+
+
+def current_annealing_session_metadata(path: str | Path) -> dict[str, Any] | None:
+    """Return validated metadata for a v2 Current Annealing run source."""
+
+    source = Path(path)
+    run_dir = source if source.is_dir() else source.parent
+    metadata_path = run_dir / "metadata.json"
+    measurement_path = run_dir / "measurement.csv"
+    if not metadata_path.is_file() or not measurement_path.is_file():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != CURRENT_ANNEALING_SESSION_SCHEMA:
+        return None
+    return payload
+
+
+def resolve_current_annealing_source(path: str | Path) -> Path:
+    """Resolve a run directory/metadata sidecar to its authoritative CSV."""
+
+    source = Path(path)
+    if source.is_dir() and current_annealing_session_metadata(source) is not None:
+        return source / "measurement.csv"
+    if source.name.casefold() == "metadata.json" and current_annealing_session_metadata(source) is not None:
+        return source.parent / "measurement.csv"
+    return source
+
+
+def current_annealing_source_label(path: str | Path) -> str:
+    source = resolve_current_annealing_source(path)
+    if current_annealing_session_metadata(source) is not None:
+        return source.parent.name
+    return source.stem
+
+
+def _load_session_measurement(path: Path, metadata: dict[str, Any]) -> pd.DataFrame:
+    raw = pd.read_csv(path)
+    required = {"measured_current_mA", "voltage_V", "resistance_ohm"}
+    missing = required.difference(raw.columns)
+    if missing:
+        raise ValueError(f"{path}: missing Current Annealing session columns {sorted(missing)}")
+    frame = pd.DataFrame(
+        {
+            "I_mA": pd.to_numeric(raw["measured_current_mA"], errors="coerce"),
+            "V_V": pd.to_numeric(raw["voltage_V"], errors="coerce"),
+            "R_Ohm": pd.to_numeric(raw["resistance_ohm"], errors="coerce"),
+        }
+    )
+    optional_columns = {
+        "elapsed_s": "elapsed_s",
+        "timestamp_utc": "timestamp_utc",
+        "phase": "phase",
+        "cycle_index": "Cycle",
+        "direction": "direction",
+        "set_current_mA": "set_current_mA",
+        "power_mW": "power_mW",
+        "energy_J": "energy_J",
+        "current_density_A_mm2": "current_density_A_mm2",
+        "readback_age_s": "readback_age_s",
+    }
+    for source_name, target_name in optional_columns.items():
+        if source_name in raw.columns:
+            frame[target_name] = raw[source_name]
+    frame = frame.replace([np.inf, -np.inf], np.nan)
+    frame = frame.dropna(subset=["I_mA", "R_Ohm"]).reset_index(drop=True)
+    frame = frame.loc[frame["I_mA"] != 0].reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(f"{path}: no usable Current Annealing session samples")
+    frame["I_A"] = frame["I_mA"] / 1000.0
+    geometry = metadata.get("microwire_geometry")
+    if isinstance(geometry, dict):
+        diameter_um = geometry.get("diameter_um")
+        try:
+            diameter = float(diameter_um)
+        except (TypeError, ValueError):
+            diameter = math.nan
+        if math.isfinite(diameter) and diameter > 0.0:
+            frame.attrs["wire_diameter_um"] = diameter
+    frame.attrs["current_annealing_session_metadata"] = metadata
+    frame.attrs["source_run_dir"] = str(path.parent)
+    return frame
 
 # Defaults
 OUTPUT_DIR = os.getcwd()
@@ -134,11 +222,18 @@ def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
     return 1000.0 if raw_max <= 1.2 else 1.0
 
 
-def load_file(path: str) -> pd.DataFrame:
+def load_file(path: str | Path) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
+    resolved = resolve_current_annealing_source(path)
+    session_metadata = current_annealing_session_metadata(resolved)
+    if session_metadata is not None:
+        return _load_session_measurement(resolved, session_metadata)
+
+    path = str(resolved)
+
     def _read(sep: str | None) -> pd.DataFrame:
         return pd.read_csv(
             path,

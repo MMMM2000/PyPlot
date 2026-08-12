@@ -8087,6 +8087,7 @@ def test_tma_close_stops_all_periodic_timers_and_releases_windows_retention(
 ) -> None:
     window = mini_dma_mod.main(log_dir=str(tmp_path), persist_settings=False)
     assert isinstance(window, mini_dma_mod.MainWindow)
+    assert not window.windowIcon().isNull()
     qtbot.addWidget(window)
     timer_names = (
         "_source_provenance_poll_timer",

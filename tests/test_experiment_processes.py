@@ -45,6 +45,28 @@ def test_experiment_process_uses_console_interpreter_for_child_spawning(
     assert control_python_executable(pythonw) == python
 
 
+@pytest.mark.parametrize("resource_tag", ["tma", "current_annealing"])
+def test_controller_experiment_command_uses_console_interpreter(
+    resource_tag: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.touch()
+    pythonw.touch()
+    monkeypatch.setattr(sys, "platform", "win32")
+    spec = ExperimentProcessSpec(
+        display_name=resource_tag,
+        module=f"example.{resource_tag}",
+        resource_tag=resource_tag,
+    )
+
+    command = build_experiment_process_command(spec, executable=pythonw)
+
+    assert command == [str(python), "-m", f"example.{resource_tag}"]
+
+
 def test_experiment_process_command_uses_launcher_entrypoint_when_frozen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

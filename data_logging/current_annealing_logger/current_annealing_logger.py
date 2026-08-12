@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import ctypes
+import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,11 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
+from plotting.shared.application_identity import (
+    CURRENT_ANNEALING_LOGGER_APP_ID,
+    experiment_application_icon,
+    set_windows_app_user_model_id,
+)
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
@@ -45,6 +51,15 @@ from data_logging.shared_power_supply.protocol import (
     broker_failure_diagnostic,
     start_broker_server,
 )
+from data_logging.mini_dma_logger.control_process import (
+    BackendFactorySpec,
+    ControlEventKind,
+    ControlPolicy,
+    ControlSessionIdentity,
+    ControlStartRequest,
+    TmaControlProcess,
+)
+from .session import next_run_directory
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from data_logging.source_provenance import (
     CAPTURE_PENDING,
@@ -873,6 +888,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
+        self._annealing_control_process: TmaControlProcess | None = None
+        self._annealing_control_identity: ControlSessionIdentity | None = None
+        self._annealing_control_last_sample_sequence = 0
+        self._annealing_control_run_dir: Path | None = None
+        self._annealing_control_timer = QtCore.QTimer(self)
+        self._annealing_control_timer.setInterval(50)
+        self._annealing_control_timer.timeout.connect(
+            self._poll_annealing_control_process,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._sleep_guard: Any = None
         self.is_connected = False
@@ -5292,6 +5317,222 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._samples_current:
             self._redraw_segments()
 
+    def _isolated_annealing_enabled(self) -> bool:
+        """Use process isolation where the broker can arbitrate ownership."""
+
+        return self.operation_mode == 2 and self._using_shared_broker()
+
+    def _isolated_annealing_config(self, run_dir: Path) -> dict[str, Any]:
+        output_path = str(run_dir / "measurement.csv")
+        metadata = self._metadata_payload(output_path)
+        metadata["controller"] = {
+            "mode": "dedicated_process",
+            "authoritative_owner": "current_annealing_control_process",
+            "ui_role": "immutable_snapshot_consumer",
+        }
+        reverse = self._reverse_to_zero_after_max_enabled()
+        loops = self.ui.spinBox_loops.value() if hasattr(self.ui, "spinBox_loops") else 1
+        infinite = (
+            bool(self.ui.checkBox_infinite_loops.isChecked())
+            if hasattr(self.ui, "checkBox_infinite_loops")
+            else False
+        )
+        voltage_action = str(getattr(self, "max_voltage_action", MAX_VOLTAGE_DEFAULT_ACTION))
+        # A modal question cannot be authoritative across a UI/process boundary.
+        # Preserve the safe historical default (reverse) for isolated runs.
+        effective_voltage_action = "reverse" if voltage_action == "ask" else voltage_action
+        return {
+            "run_dir": str(run_dir),
+            "metadata": metadata,
+            "broker_host": self._shared_broker_host(),
+            "broker_port": self._shared_broker_port(),
+            "channel": self._shared_broker_channel(),
+            "requested_hz": self._requested_hmp_readback_hz(),
+            "voltage_limit_V": self._voltage_limit_value(),
+            "voltage_limit_action": effective_voltage_action,
+            "start_current_mA": float(getattr(self, "start_current_mA", 1.0)),
+            "max_current_mA": float(getattr(self, "max_current_mA", 10.0)),
+            "ramp_rate_mA_s": float(getattr(self, "current_step_mA", 1.0)),
+            "reverse_enabled": reverse,
+            "loops": max(1, int(loops or 1)),
+            "infinite_loops": infinite,
+            "diameter_um": self._diameter_um(),
+            "minimum_contact_current_mA": self._minimum_plottable_current_mA(),
+            "contact_loss_samples": 6,
+            "max_readback_age_s": 2.5,
+        }
+
+    def _start_isolated_annealing(self) -> bool:
+        self._sync_runtime_settings()
+        base_output = Path(self.build_log_path())
+        run_dir = next_run_directory(base_output.parent, base_output.stem)
+        identity = ControlSessionIdentity(uuid.uuid4().hex, 1)
+        request = ControlStartRequest(
+            identity=identity,
+            policy=ControlPolicy.PRAGUE,
+            control_interval_s=0.02,
+            snapshot_interval_s=0.10,
+            parent_heartbeat_timeout_s=2.0,
+            config_json=json.dumps(self._isolated_annealing_config(run_dir)),
+        )
+        process = TmaControlProcess(
+            heartbeat_interval_s=0.10,
+            backend_factory_spec=BackendFactorySpec(
+                module="data_logging.current_annealing_logger.process_backend",
+                factory="create_current_annealing_backend",
+            ),
+        )
+        try:
+            process.start_process()
+            process.wait_until_ready(timeout_s=10.0)
+            process.start_session(request)
+        except Exception as exc:
+            child_detail, child_traceback = process.poll_fault_detail()
+            detail = child_detail.strip() or str(exc)
+            if child_traceback.strip():
+                LOGGER.error(
+                    "Dedicated Current Annealing controller startup failed: %s\n%s",
+                    detail,
+                    child_traceback,
+                )
+            process.close(timeout_s=1.0, force=True)
+            self.process_running = False
+            self.ui.pushButton_start_process.setText("Start annealing process")
+            self._restore_idle_controls()
+            self._set_process_state("failed", detail)
+            self._show_status_message(
+                f"Dedicated Current Annealing controller did not start: {detail}",
+                timeout_ms=0,
+            )
+            QtWidgets.QMessageBox.critical(self, "Current Annealing controller", detail)
+            return False
+        self._annealing_control_process = process
+        self._annealing_control_identity = identity
+        self._annealing_control_last_sample_sequence = 0
+        self._annealing_control_run_dir = run_dir
+        self.process_running = True
+        self._last_run_error = ""
+        self._reset_sample_buffers()
+        self.init_graph_window()
+        self._set_process_controls_enabled(False)
+        self.ui.pushButton_start_process.setText("Stop annealing process")
+        if hasattr(self.ui, "progressBar_process"):
+            self.ui.progressBar_process.setMaximum(0 if self._isolated_config_infinite() else 1000)
+            self.ui.progressBar_process.setValue(0)
+        if hasattr(self.ui, "pushButton_reverse_now"):
+            self.ui.pushButton_reverse_now.setEnabled(True)
+        if hasattr(self.ui, "pushButton_update_running_recipe"):
+            self.ui.pushButton_update_running_recipe.setEnabled(True)
+            self.ui.pushButton_update_running_recipe.setVisible(True)
+        self._set_process_state(
+            "finite-running" if not self._isolated_config_infinite() else "infinite-running"
+        )
+        self._show_status_message(
+            f"Dedicated Current Annealing controller starting; run folder: {run_dir}",
+            timeout_ms=15000,
+        )
+        self._annealing_control_timer.start()
+        self._update_mode_action_state()
+        return True
+
+    def _isolated_config_infinite(self) -> bool:
+        return (
+            bool(self.ui.checkBox_infinite_loops.isChecked())
+            if hasattr(self.ui, "checkBox_infinite_loops")
+            else False
+        )
+
+    def _update_isolated_annealing_progress(self, values: Mapping[str, Any]) -> None:
+        progress = getattr(self.ui, "progressBar_process", None)
+        if not isinstance(progress, QtWidgets.QProgressBar) or self._isolated_config_infinite():
+            return
+        try:
+            cycle = max(1, int(values.get("cycle_index") or 1))
+            setpoint = float(values.get("set_current_mA") or 0.0)
+            start = float(getattr(self, "start_current_mA", 0.0) or 0.0)
+            maximum = float(getattr(self, "max_current_mA", start) or start)
+            loops = max(1, int(self.ui.spinBox_loops.value()))
+            direction = str(values.get("direction") or "heating")
+        except (TypeError, ValueError):
+            return
+        span = max(1e-9, maximum - start)
+        leg = min(1.0, max(0.0, (setpoint - start) / span))
+        if self._reverse_to_zero_after_max_enabled():
+            within_cycle = 0.5 * leg if direction == "heating" else 0.5 + 0.5 * (1.0 - leg)
+        else:
+            within_cycle = leg
+        fraction = min(1.0, max(0.0, ((cycle - 1) + within_cycle) / loops))
+        progress.setMaximum(1000)
+        progress.setValue(round(1000.0 * fraction))
+
+    def _poll_annealing_control_process(self) -> None:
+        process = self._annealing_control_process
+        if process is None:
+            return
+        snapshot = process.poll_latest_snapshot()
+        if snapshot is not None and snapshot.identity == self._annealing_control_identity:
+            values = dict(snapshot.readback)
+            self._update_isolated_annealing_progress(values)
+            try:
+                self._shared_broker_effective_hz = float(
+                    values.get("effective_hz") or self._shared_broker_effective_hz
+                )
+            except (TypeError, ValueError):
+                pass
+            self._update_hmp_cadence_label()
+            try:
+                sample_sequence = int(values.get("sample_sequence") or 0)
+            except (TypeError, ValueError):
+                sample_sequence = 0
+            if sample_sequence > self._annealing_control_last_sample_sequence:
+                self._annealing_control_last_sample_sequence = sample_sequence
+                try:
+                    current_mA = float(values.get("measured_current_mA"))
+                    voltage = float(values.get("voltage_V"))
+                    resistance = float(values.get("resistance_ohm"))
+                    self.current_current_set = float(values.get("set_current_mA")) / 1000.0
+                    self.current_current_read = current_mA / 1000.0
+                    self.current_voltage = voltage
+                    self.current_resistance = resistance
+                    self.curr_value_x = current_mA
+                    self.curr_value_y = resistance
+                    self._display_ui_value("lcd_current_mA", f"{current_mA:.1f}")
+                    self._display_ui_value("label_live_voltage", f"{voltage:.2f}")
+                    self._display_ui_value("label_set_current", f"{self.current_current_set * 1000.0:.1f}")
+                    self._append_measurement_sample(current_mA, resistance, voltage)
+                except (TypeError, ValueError):
+                    pass
+        terminal: tuple[str, str] | None = None
+        for event in process.poll_events():
+            if event.kind is ControlEventKind.RECIPE_COMPLETE:
+                terminal = ("completed", event.detail or "Run complete.")
+            elif event.kind is ControlEventKind.STOPPED:
+                terminal = ("idle", event.detail or "Stopped by operator.")
+            elif event.kind in (ControlEventKind.FAULT, ControlEventKind.EMERGENCY):
+                terminal = ("failed", event.detail or "Dedicated controller faulted.")
+        if terminal is None and not process.is_alive():
+            detail, trace = process.poll_fault_detail()
+            terminal = ("failed", detail or trace or f"Controller exited with code {process.exitcode}.")
+        if terminal is not None:
+            self._finish_isolated_annealing_ui(*terminal)
+
+    def _finish_isolated_annealing_ui(self, final_state: str, detail: str) -> None:
+        process = self._annealing_control_process
+        self._annealing_control_timer.stop()
+        self._annealing_control_process = None
+        self._annealing_control_identity = None
+        self.process_running = False
+        if process is not None:
+            process.close(timeout_s=2.0, force=False)
+        self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
+        self._update_hmp_cadence_label()
+        self._display_ui_value("label_set_current", "0")
+        self.ui.pushButton_start_process.setText("Start annealing process")
+        self._restore_idle_controls()
+        self._set_process_state(final_state, detail)
+        self._show_status_message(detail, timeout_ms=0 if final_state == "failed" else 15000)
+        self._update_mode_action_state()
+
     def handle_toggle_process_clicked(self):
         if not self.process_running:
             if self.operation_mode == 0:
@@ -5315,6 +5556,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             if not self._confirm_shared_broker_cadence_start():
                 self._show_status_message("Annealing start cancelled; shared PSU rate was not accepted.")
+                return
+            if self._isolated_annealing_enabled():
+                self._start_isolated_annealing()
                 return
             self.process_running = True
             self._last_run_error = ""
@@ -5437,10 +5681,27 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 pass
         else:
+            if self._annealing_control_process is not None and self._annealing_control_identity is not None:
+                try:
+                    self._annealing_control_process.stop(self._annealing_control_identity)
+                    self._set_process_state("stopping", "Stopping dedicated Current Annealing controller.")
+                except Exception as exc:
+                    self._annealing_control_process.emergency_stop()
+                    self._show_status_message(
+                        f"Normal stop failed; emergency stop requested: {exc}", timeout_ms=0
+                    )
+                return
             self.stop_annealing("Stopped by user.", show_dialog=False)
     def handle_pushButton_reverse_now_clicked(self):
         """Immediately ramp current down toward zero."""
         if not self.process_running:
+            return
+        if self._annealing_control_process is not None and self._annealing_control_identity is not None:
+            self._annealing_control_process.update_config(
+                self._annealing_control_identity,
+                json.dumps({"force_reverse": True}),
+            )
+            self._show_status_message("Requested immediate cooling ramp in the dedicated controller.")
             return
         self._set_current_ramp_direction(-1.0)
         self.line_color = "b"
@@ -5455,6 +5716,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._sync_runtime_settings()
         self._store_loop_preferences()
+        if self._annealing_control_process is not None and self._annealing_control_identity is not None:
+            self._annealing_control_process.update_config(
+                self._annealing_control_identity,
+                json.dumps(
+                    {
+                        "max_current_mA": float(self.max_current_mA),
+                        "ramp_rate_mA_s": float(self.current_step_mA),
+                    }
+                ),
+            )
+            self._show_status_message("Sent updated recipe limits to the dedicated controller.")
+            return
         if getattr(self, "operation_mode", 2) != 2:
             self.update_time_estimate()
             self._show_status_message("Updated running settings.")
@@ -6823,6 +7096,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.timer, self.handle_update_serial_response_label),
             (self.time_timer, self.update_time_estimate),
             (self.timer_command, self.handle_send_new_command),
+            (self._annealing_control_timer, self._poll_annealing_control_process),
             (self._fabrication_poll_timer, self._poll_fabrication_tasks),
             (self._source_provenance_poll_timer, self._poll_source_provenance_capture),
             (self._delay_timer, self._finish_simple_delay),
@@ -6850,6 +7124,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_in_progress = True
         try:
             self._window_closing = True
+            process = self._annealing_control_process
+            if process is not None:
+                try:
+                    process.emergency_stop()
+                    process.close(timeout_s=2.0, force=True)
+                finally:
+                    self._annealing_control_process = None
+                    self._annealing_control_identity = None
             self._closing_safe_end = True
             try:
                 if self.ser_mcu.isOpen():
@@ -6937,6 +7219,7 @@ def main() -> QtWidgets.QWidget:
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if app is None:
+        set_windows_app_user_model_id(CURRENT_ANNEALING_LOGGER_APP_ID)
         qt_app = QtWidgets.QApplication(sys.argv)
         owns_app = True
     else:
@@ -6945,7 +7228,12 @@ def main() -> QtWidgets.QWidget:
     ensure_app_theme(qt_app)
     _apply_app_font_to_matplotlib(qt_app)
 
+    icon = experiment_application_icon("current_annealing")
+    if owns_app:
+        qt_app.setApplicationName("Current Annealing Logger")
+        qt_app.setWindowIcon(icon)
     window = MainWindow()
+    window.setWindowIcon(icon)
     window.showMaximized()
     WINDOWS.append(window)
 
