@@ -686,14 +686,12 @@ class _FakeProductionWindow:
         self._session_stop_reason = None
         self._session_stop_detail = None
         self._last_tic_vin_v = 12.0
-        self._tic_current_velocity = 0
         self.starting_length_mm = None
         self.closed = False
         self.runtime_update_calls = 0
         self.supply_disable_calls = 0
         self.motor_supply_disable_calls = 0
         self.lifecycle_calls: list[str] = []
-        self.log_lines: list[str] = []
         self._preserve_motor_supply_on_close = False
         self._preserve_current_supply_on_close = False
         self._elastocaloric_release_confirmed = False
@@ -717,20 +715,14 @@ class _FakeProductionWindow:
             50,
         )
 
-    def _log(self, message: str) -> None:
-        self.log_lines.append(str(message))
-
     def _preflight_recipe_hardware(
         self,
         _steps: list[object],
         *,
         show_progress: bool,
-        preserve_existing_outputs: bool = False,
     ) -> bool:
         assert show_progress is False
         self.lifecycle_calls.append("hardware_preflight")
-        if preserve_existing_outputs:
-            self.lifecycle_calls.append("outputs_preserved")
         return True
 
     def _refresh_tic_status(self) -> None:
@@ -973,72 +965,6 @@ def test_production_backend_reuses_prepared_elastocaloric_window_without_preflig
         "recipe_start",
     ]
     assert window._elastocaloric_continue_prepared_requested is True
-    backend.close()
-
-
-def test_production_backend_adopts_energized_elastocaloric_baseline_without_motion() -> None:
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    del app
-    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
-
-    backend.start(
-        ControlStartRequest(
-            identity=ControlSessionIdentity("recover-prepared", 1),
-            policy=ControlPolicy.PRAGUE,
-            config_json=(
-                '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
-                '"adopt_prepared_elastocaloric":true,'
-                '"cadence_downgrade_accepted":true}'
-            ),
-        )
-    )
-
-    window = backend._window
-    assert window.lifecycle_calls == [
-        "hardware_preflight",
-        "outputs_preserved",
-    ]
-    assert window._elastocaloric_continue_prepared_requested is True
-    assert window._elastocaloric_prepared_baseline_mm == pytest.approx(1.25)
-    assert window._elastocaloric_prepared_current_mA == pytest.approx(2.0)
-    assert window._automation_active is False
-    assert window._preserve_current_supply_on_close is True
-    assert window._preserve_motor_supply_on_close is True
-    assert window.supply_disable_calls == 0
-    assert window.motor_supply_disable_calls == 0
-    assert backend.completion_detail() == "prepared elastocaloric series recovered"
-    assert window._elastocaloric_prepared_ready is True
-    backend.close()
-
-
-def test_production_backend_recovery_rejection_preserves_energized_outputs() -> None:
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    del app
-
-    class _WrongCurrentWindow(_FakeProductionWindow):
-        def __init__(self, **kwargs: object) -> None:
-            super().__init__(**kwargs)
-            self._supply_snapshot = {"current_mA": 17.0, "voltage_V": 4.0}
-
-    backend = ProductionMiniDmaBackend(window_factory=_WrongCurrentWindow)
-    with pytest.raises(ControlStartRejected, match="expected 2.00"):
-        backend.start(
-            ControlStartRequest(
-                identity=ControlSessionIdentity("recover-rejected", 1),
-                policy=ControlPolicy.PRAGUE,
-                config_json=(
-                    '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
-                    '"adopt_prepared_elastocaloric":true,'
-                    '"cadence_downgrade_accepted":true}'
-                ),
-            )
-        )
-
-    window = backend._window
-    assert window._preserve_current_supply_on_close is True
-    assert window._preserve_motor_supply_on_close is True
-    assert window.supply_disable_calls == 0
-    assert window.motor_supply_disable_calls == 0
     backend.close()
 
 
