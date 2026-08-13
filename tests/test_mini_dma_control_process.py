@@ -692,6 +692,8 @@ class _FakeProductionWindow:
         self.motor_supply_disable_calls = 0
         self.lifecycle_calls: list[str] = []
         self._preserve_motor_supply_on_close = False
+        self._preserve_current_supply_on_close = False
+        self._elastocaloric_release_confirmed = False
         self._control_process_log_sink = None
         self.spin_initial_length = QtWidgets.QDoubleSpinBox()
         self.spin_initial_length.setValue(57.25)
@@ -756,6 +758,9 @@ class _FakeProductionWindow:
 
     def _current_effective_load_g(self) -> float:
         return 0.5
+
+    def _is_elastocaloric_mode(self, mode: str | None = None) -> bool:
+        return mode == "elastocaloric_effect"
 
     def _current_distribution_value(self, basis: str) -> float:
         assert basis == "stress_mpa"
@@ -861,6 +866,30 @@ def test_production_backend_preserves_run_relative_terminal_readback() -> None:
     assert readback["stress_mpa"] == pytest.approx(0.16)
     assert readback["plot_elapsed_s"] == pytest.approx(88.5)
     assert readback["plot_load_g"] == pytest.approx(0.005)
+    backend.close()
+
+
+def test_production_backend_preserves_elastocaloric_current_after_confirmed_release() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    request = ControlStartRequest(
+        identity=_identity(),
+        policy=ControlPolicy.PRAGUE,
+        config_json=(
+            '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+            '"output_collision_action":"replace",'
+            '"cadence_downgrade_accepted":true}'
+        ),
+    )
+
+    backend.start(request)
+    backend._window._automation_name = "elastocaloric_effect"
+    backend._window._elastocaloric_release_confirmed = True
+    backend._window._automation_active = False
+
+    assert backend.completion_detail() == "production recipe completed"
+    assert backend._window._preserve_current_supply_on_close is True
     backend.close()
 
 

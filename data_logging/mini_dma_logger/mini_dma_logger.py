@@ -5525,6 +5525,22 @@ class MiniDmaAutomationController:
                 return
             is_recovery = host._is_recovery_mode()
             is_calibration = host._is_calibration_mode(host._automation_name)
+            if (
+                host._is_elastocaloric_mode(host._automation_name)
+                and not host._elastocaloric_release_confirmed
+            ):
+                detail = (
+                    "Elastocaloric recipe reached its final step without a confirmed "
+                    "return to the captured baseline."
+                )
+                host._log(f"Recipe stopped: {detail}")
+                host._stop_auto_ramp(
+                    log_completion=False,
+                    offer_recovery=True,
+                    stop_reason="elastocaloric_release_unconfirmed",
+                    stop_detail=detail,
+                )
+                return
             if is_calibration and host._session_active:
                 host._finalize_calibration_report()
             recovery_return_duration_s = host._setup_return_duration_s() if is_calibration else None
@@ -5546,6 +5562,10 @@ class MiniDmaAutomationController:
                 keep_progress=True,
                 stop_reason=completion_reason,
                 stop_detail=completion_detail,
+                preserve_current_output=(
+                    host._is_elastocaloric_mode(host._automation_name)
+                    and host._elastocaloric_release_confirmed
+                ),
             )
             host._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and host._session_active:
@@ -8315,6 +8335,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_action_pending = False
         self._recovery_prompt_generation = 0
         self._preserve_motor_supply_on_close = False
+        self._preserve_current_supply_on_close = False
+        self._developer_preserve_elastocaloric_current_on_close = False
         self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
@@ -8782,6 +8804,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_mechanical_scan_move_pending = False
         self._active_mechanical_scan_direction: float | None = None
         self._active_mechanical_scan_origin_position_mm: float | None = None
+        self._active_mechanical_scan_target_position_mm: float | None = None
+        self._elastocaloric_release_confirmed = False
         self._last_recipe_mode = "ramp"
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -8948,6 +8972,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.action_current_hold_bypass is not None:
             self.action_current_hold_bypass.triggered.connect(
                 self._show_current_hold_bypass_dialog
+            )
+        self.action_preserve_elastocaloric_current = developer_menu.addAction(
+            "Keep elastocaloric CH4 on after normal close"
+        )
+        if self.action_preserve_elastocaloric_current is not None:
+            self.action_preserve_elastocaloric_current.setCheckable(True)
+            self.action_preserve_elastocaloric_current.setToolTip(
+                "Development-only, non-persistent override. It applies only to an idle "
+                "elastocaloric window after a confirmed return to its captured baseline. "
+                "Fault, emergency, and active-recipe close paths still turn the output off."
+            )
+            self.action_preserve_elastocaloric_current.toggled.connect(
+                self._set_developer_elastocaloric_current_preservation
+            )
+
+    def _set_developer_elastocaloric_current_preservation(self, enabled: bool) -> None:
+        self._developer_preserve_elastocaloric_current_on_close = bool(enabled)
+        if hasattr(self, "label_elastocaloric_preservation_status"):
+            self.label_elastocaloric_preservation_status.setVisible(bool(enabled))
+        if enabled:
+            self._log(
+                "Development override armed: an idle elastocaloric window may close without "
+                "changing CH4 only after a confirmed baseline return. Fault and emergency "
+                "paths remain fail-safe."
             )
 
     def _show_current_hold_bypass_dialog(self) -> None:
@@ -11618,6 +11666,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         constant_current_page = QtWidgets.QWidget(self.recipe_stack)
         constant_current_form = QtWidgets.QFormLayout(constant_current_page)
+        constant_current_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         self.combo_constant_current_start_basis = QtWidgets.QComboBox(automation_box)
         for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT):
             self.combo_constant_current_start_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
@@ -11694,6 +11743,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_stabilize_row = constant_current_form.labelForField(
             self.spin_elastocaloric_stabilize_s
         )
+        self.spin_elastocaloric_repetitions = QtWidgets.QSpinBox(automation_box)
+        self.spin_elastocaloric_repetitions.setRange(1, 100)
+        self.spin_elastocaloric_repetitions.setValue(1)
+        self.spin_elastocaloric_repetitions.setSuffix(" measurements")
+        self.spin_elastocaloric_repetitions.setToolTip(
+            "Prepare the austenitic baseline once, then repeat pull, hold, release, "
+            "and baseline recording without ramping the current again."
+        )
+        constant_current_form.addRow("Measurements", self.spin_elastocaloric_repetitions)
+        self.label_elastocaloric_repetitions_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_repetitions
+        )
         self.spin_elastocaloric_release_record_s = CompactDoubleSpinBox(automation_box)
         self.spin_elastocaloric_release_record_s.setDecimals(1)
         self.spin_elastocaloric_release_record_s.setRange(0.0, 3600.0)
@@ -11723,7 +11784,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_elastocaloric_motion_plan = QtWidgets.QLabel(automation_box)
         self.label_elastocaloric_motion_plan.setWordWrap(True)
-        constant_current_form.addRow("Motion feasibility", self.label_elastocaloric_motion_plan)
+        self.label_elastocaloric_motion_plan.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.label_elastocaloric_motion_plan_heading = QtWidgets.QLabel(
+            "Motion feasibility", automation_box
+        )
+        motion_heading_font = self.label_elastocaloric_motion_plan_heading.font()
+        motion_heading_font.setBold(True)
+        self.label_elastocaloric_motion_plan_heading.setFont(motion_heading_font)
+        constant_current_form.addRow("", self.label_elastocaloric_motion_plan_heading)
+        self.label_elastocaloric_motion_plan_heading_row = constant_current_form.labelForField(
+            self.label_elastocaloric_motion_plan_heading
+        )
+        constant_current_form.addRow("", self.label_elastocaloric_motion_plan)
         self.label_elastocaloric_motion_plan_row = constant_current_form.labelForField(
             self.label_elastocaloric_motion_plan
         )
@@ -11762,6 +11836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_constant_current_start_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.constant_current_start_mA_row = constant_current_start_mA_row
         constant_current_form.addRow("Start", constant_current_start_mA_row)
         self.label_constant_current_start_mA_row = constant_current_form.labelForField(
             constant_current_start_mA_row
@@ -11778,8 +11853,18 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_elastocaloric_hold_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.elastocaloric_hold_row = elastocaloric_hold_row
         constant_current_form.addRow("Austenite hold", elastocaloric_hold_row)
         self.label_elastocaloric_hold_mA_row = constant_current_form.labelForField(elastocaloric_hold_row)
+        self.label_elastocaloric_preservation_status = QtWidgets.QLabel(
+            "Development override armed: CH4 is preserved on idle close only after a "
+            "confirmed baseline return. Faults and emergencies still turn it off.",
+            automation_box,
+        )
+        self.label_elastocaloric_preservation_status.setWordWrap(True)
+        self.label_elastocaloric_preservation_status.setStyleSheet("color: #d97706;")
+        self.label_elastocaloric_preservation_status.setVisible(False)
+        constant_current_form.addRow("", self.label_elastocaloric_preservation_status)
         self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_mA.setDecimals(2)
         self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
@@ -11792,6 +11877,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_constant_current_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.constant_current_end_mA_row = constant_current_end_mA_row
         constant_current_form.addRow("End", constant_current_end_mA_row)
         self.label_constant_current_end_mA_row = constant_current_form.labelForField(constant_current_end_mA_row)
         self.spin_constant_current_step_mA = CompactDoubleSpinBox(automation_box)
@@ -11806,6 +11892,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_constant_current_step_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.constant_current_step_mA_row = constant_current_step_mA_row
         constant_current_form.addRow("Step", constant_current_step_mA_row)
         self.label_constant_current_step_mA_row = constant_current_form.labelForField(constant_current_step_mA_row)
         self.label_constant_current_first_overheating_section = QtWidgets.QLabel(
@@ -11947,7 +12034,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_constant_current_first_overheating_hold_on_error,
         )
         constant_transition_header = QtWidgets.QWidget(automation_box)
-        constant_transition_header_layout = QtWidgets.QHBoxLayout(constant_transition_header)
+        constant_transition_header_layout = QtWidgets.QVBoxLayout(constant_transition_header)
         constant_transition_header_layout.setContentsMargins(0, 0, 0, 0)
         constant_transition_header_layout.setSpacing(8)
         self.button_constant_current_transition_details = QtWidgets.QToolButton(constant_transition_header)
@@ -11965,7 +12052,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        constant_transition_header_layout.addWidget(self.label_constant_current_transition_summary, stretch=1)
+        constant_transition_header_layout.addWidget(self.label_constant_current_transition_summary)
         constant_current_form.addRow("", constant_transition_header)
         self.constant_current_transition_panel = QtWidgets.QWidget(automation_box)
         constant_current_transition_form = QtWidgets.QFormLayout(self.constant_current_transition_panel)
@@ -12036,6 +12123,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_step_size,
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_repetitions,
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
@@ -12541,6 +12629,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_step_size,
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_repetitions,
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
@@ -21010,6 +21099,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_constant_current_step_size",
             "spin_constant_current_move_speed_mm_s",
             "spin_elastocaloric_stabilize_s",
+            "spin_elastocaloric_repetitions",
             "spin_elastocaloric_release_record_s",
             "spin_elastocaloric_pull_duration_s",
             "spin_elastocaloric_release_duration_s",
@@ -21038,10 +21128,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_constant_current_step_size_row",
             "label_constant_current_step_speed_row",
             "label_elastocaloric_stabilize_row",
+            "label_elastocaloric_repetitions_row",
             "label_elastocaloric_release_record_row",
             "label_elastocaloric_pull_duration_row",
             "label_elastocaloric_release_duration_row",
             "label_elastocaloric_hold_mA_row",
+            "label_elastocaloric_motion_plan_heading",
             "label_elastocaloric_motion_plan_row",
         ):
             label = getattr(self, label_name, None)
@@ -21059,7 +21151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ramp_rate_label = getattr(self, "label_constant_current_stress_ramp_rate_row", None)
         if ramp_rate_label is not None:
             ramp_rate_label.setVisible(stress_ramp_mode)
-        for widget_name in ("spin_constant_current_end_mA", "spin_constant_current_step_mA"):
+        for widget_name in ("constant_current_end_mA_row", "constant_current_step_mA_row"):
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.setVisible(not elastocaloric_mode)
@@ -21069,6 +21161,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 label.setVisible(not elastocaloric_mode)
         if getattr(self, "label_constant_current_start_mA_row", None) is not None:
             self.label_constant_current_start_mA_row.setText("Austenitize" if elastocaloric_mode else "Start")
+        if hasattr(self, "label_elastocaloric_preservation_status"):
+            self.label_elastocaloric_preservation_status.setVisible(
+                elastocaloric_mode and self._developer_preserve_elastocaloric_current_on_close
+            )
         if getattr(self, "label_constant_current_start_target_row", None) is not None:
             self.label_constant_current_start_target_row.setText("Target start")
             self.label_constant_current_start_target_row.setVisible(not elastocaloric_mode)
@@ -31257,6 +31353,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "release_duration_s": float(self.spin_elastocaloric_release_duration_s.value()),
                 "record_after_jump_s": float(self.spin_constant_current_hold_s.value()),
                 "record_after_release_s": float(self.spin_elastocaloric_release_record_s.value()),
+                "measurement_count": int(self.spin_elastocaloric_repetitions.value()),
                 "austenitize_current_mA": float(self.spin_constant_current_start_mA.value()),
                 "hold_current_mA": float(self.spin_elastocaloric_hold_mA.value()),
                 "current_mA": float(self.spin_constant_current_start_mA.value()),
@@ -31647,6 +31744,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         elastocaloric.get("current_mA", self.spin_constant_current_start_mA.value()),
                     )
                 ),
+            )
+            self.spin_elastocaloric_repetitions.setValue(
+                max(1, int(elastocaloric.get("measurement_count", 1)))
             )
             self.spin_constant_current_start_mA.setValue(austenitize_current)
             self.spin_elastocaloric_hold_mA.setValue(
@@ -33556,6 +33656,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_mechanical_scan_move_pending = False
         self._active_mechanical_scan_direction = None
         self._active_mechanical_scan_origin_position_mm = None
+        self._active_mechanical_scan_target_position_mm = None
+        self._elastocaloric_release_confirmed = False
         self._constant_current_step_base_position_by_note.clear()
         self._constant_current_step_base_strain_by_note.clear()
         self._active_constant_current_zero_position_mm = None
@@ -34934,6 +35036,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_auto_ramp(self) -> None:
         self._recipe_terminal_readback = None
+        self._preserve_current_supply_on_close = False
+        self._elastocaloric_release_confirmed = False
         if (
             self._control_process_enabled
             and not self._controller_process_mode
@@ -35012,6 +35116,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_mechanical_scan_move_pending = False
         self._active_mechanical_scan_direction = None
         self._active_mechanical_scan_origin_position_mm = None
+        self._active_mechanical_scan_target_position_mm = None
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
@@ -36286,6 +36391,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_reason: str | None = None,
         stop_detail: str | None = None,
         stop_origin: str | None = None,
+        preserve_current_output: bool = False,
     ) -> None:
         resolved_origin = stop_origin or self._stop_origin_from_caller()
         if not self._is_ui_thread():
@@ -36301,6 +36407,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     stop_reason=stop_reason,
                     stop_detail=stop_detail,
                     stop_origin=resolved_origin,
+                    preserve_current_output=preserve_current_output,
                 )
             )
             return
@@ -36340,7 +36447,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = False
         self._automation_paused = True
         self._record_session_stop_stage("automation_fenced")
-        if self._supply_output_enabled:
+        preserve_current_output = bool(
+            preserve_current_output
+            and resolved_reason == "recipe_completed"
+            and self._is_elastocaloric_mode(self._automation_name)
+            and self._elastocaloric_release_confirmed
+        )
+        self._preserve_current_supply_on_close = preserve_current_output
+        if self._supply_output_enabled and not preserve_current_output:
             try:
                 self._disable_supply_output()
                 self._record_session_stop_stage("supply_disabled")
@@ -36348,6 +36462,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._supply_output_enabled = False
                 self._record_session_stop_stage("supply_disable_failed", error=exc)
                 self._log(f"Recipe stop could not disable supply output: {exc}")
+        elif preserve_current_output:
+            self._record_session_stop_stage("current_output_preserved_at_elastocaloric_baseline")
+            self._log(
+                "Elastocaloric measurement completed at the confirmed baseline; "
+                "CH4 remains at the configured austenite-hold current."
+            )
         else:
             self._record_session_stop_stage("supply_already_disabled")
         try:
@@ -36964,6 +37084,7 @@ class MainWindow(QtWidgets.QMainWindow):
             jump_record_s = max(0.0, float(self.spin_constant_current_hold_s.value()))
             release_record_s = max(0.0, float(self.spin_elastocaloric_release_record_s.value()))
             stabilize_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+            repetitions = max(1, int(self.spin_elastocaloric_repetitions.value()))
             austenitize_current_mA = self._recipe_current_setpoint_mA(
                 float(self.spin_constant_current_start_mA.value())
             )
@@ -37058,32 +37179,44 @@ class MainWindow(QtWidgets.QMainWindow):
                     note="elastocaloric:motion_zero",
                 )
             )
-            steps.append(
-                AutomationStep(
-                    "mechanical_scan",
-                    target_value=jump_strain,
-                    basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=hold_current_mA,
-                    mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
-                    mechanical_step_value=strain_jump_size,
-                    mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
-                    duration_s=jump_record_s,
-                    note="elastocaloric:pull",
+            for repetition_index in range(repetitions):
+                repetition_number = repetition_index + 1
+                note_suffix = "" if repetitions == 1 else f":{repetition_number}"
+                if repetition_index > 0 and stabilize_s > 0.0:
+                    steps.append(
+                        AutomationStep(
+                            "settle",
+                            current_mA=hold_current_mA,
+                            duration_s=stabilize_s,
+                            note=f"elastocaloric:pre_pull_baseline{note_suffix}",
+                        )
+                    )
+                steps.append(
+                    AutomationStep(
+                        "mechanical_scan",
+                        target_value=jump_strain,
+                        basis=HSW_BASIS_STRAIN_PCT,
+                        current_mA=hold_current_mA,
+                        mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                        mechanical_step_value=strain_jump_size,
+                        mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
+                        duration_s=jump_record_s,
+                        note=f"elastocaloric:pull{note_suffix}",
+                    )
                 )
-            )
-            steps.append(
-                AutomationStep(
-                    "mechanical_scan",
-                    target_value=0.0,
-                    basis=HSW_BASIS_STRAIN_PCT,
-                    current_mA=hold_current_mA,
-                    mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
-                    mechanical_step_value=strain_jump_size,
-                    mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
-                    duration_s=release_record_s,
-                    note="elastocaloric:release",
+                steps.append(
+                    AutomationStep(
+                        "mechanical_scan",
+                        target_value=0.0,
+                        basis=HSW_BASIS_STRAIN_PCT,
+                        current_mA=hold_current_mA,
+                        mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                        mechanical_step_value=strain_jump_size,
+                        mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
+                        duration_s=release_record_s,
+                        note=f"elastocaloric:release{note_suffix}",
+                    )
                 )
-            )
             summary = (
                 "Started elastocaloric effect recipe: "
                 f"austenitize at {austenitize_current_mA:.2f} mA, hold/move at {hold_current_mA:.2f} mA, "
@@ -37091,6 +37224,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"({pull_plan.command_speed_mm_s:.4f} mm/s), release in {release_duration_s:.3f} s "
                 f"({release_plan.command_speed_mm_s:.4f} mm/s), record baseline {stabilize_s:.1f} s, "
                 f"record {jump_record_s:.1f} s after jump and {release_record_s:.1f} s after release; "
+                f"{repetitions} measurement{'s' if repetitions != 1 else ''}; "
                 f"{clock_summary}."
             )
             summary += (
@@ -38857,6 +38991,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         note_text = str(step.note or "")
+        is_elastocaloric = note_text.startswith("elastocaloric:")
+        is_elastocaloric_pull = note_text.startswith("elastocaloric:pull")
+        is_elastocaloric_release = note_text.startswith("elastocaloric:release")
         note_group = note_text.split(":", 1)[0] if note_text else ""
         if self._active_mechanical_scan_step_index != step_index:
             self._active_mechanical_scan_step_index = step_index
@@ -38865,6 +39002,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_mechanical_scan_hold_started_s = None
             self._active_mechanical_scan_move_pending = False
             self._active_mechanical_scan_direction = None
+            self._active_mechanical_scan_target_position_mm = None
             if note_text.endswith(":up") and note_group:
                 self._constant_current_step_base_position_by_note.setdefault(
                     note_group,
@@ -38874,7 +39012,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     base_strain = self._strain_percent_for_position(self._measurement_effective_position_mm())
                     if base_strain is not None:
                         self._constant_current_step_base_strain_by_note[note_group] = base_strain
-            if note_text == "elastocaloric:release":
+            if is_elastocaloric:
                 self._active_mechanical_scan_origin_position_mm = self._active_constant_current_zero_position_mm
             elif note_text.endswith(":down") and note_group:
                 self._active_mechanical_scan_origin_position_mm = (
@@ -38893,15 +39031,55 @@ class MainWindow(QtWidgets.QMainWindow):
             if current_value is None:
                 self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
                 return False
-            if note_text.startswith("elastocaloric:"):
+            if is_elastocaloric:
                 _zero_mm, _l0_mm, _relative_mm, relative_strain_pct = self._current_relative_position_and_strain(
                     self._measurement_effective_position_mm()
                 )
                 if relative_strain_pct is not None:
                     current_value = relative_strain_pct
+                target_mm = self._active_mechanical_scan_target_position_mm
+                if target_mm is None:
+                    self._log("Recipe stopped because the elastocaloric motion target was lost.")
+                    self._stop_auto_ramp(
+                        log_completion=False,
+                        offer_recovery=True,
+                        stop_reason="elastocaloric_motion_target_lost",
+                    )
+                    return True
+                if self._has_unconfirmed_motion_command():
+                    self._log_waiting_for_feedback(
+                        "Waiting for the elastocaloric motor command to be confirmed."
+                    )
+                    return False
+                actual_mm = float(self._current_position_mm)
+                tolerance_mm = max(self._motor_step_mm() * 1.5, 0.002)
+                if abs(actual_mm - target_mm) > tolerance_mm:
+                    step_mm = max(self._mechanical_step_mm_for_step(step), tolerance_mm)
+                    speed_mm_s = max(
+                        self._minimum_held_speed_mm_s(),
+                        float(step.mechanical_step_speed_mm_s or 0.05),
+                    )
+                    timeout_s = max(5.0, 4.0 * step_mm / speed_mm_s + 2.0)
+                    if time.monotonic() - self._active_mechanical_scan_started_s > timeout_s:
+                        detail = (
+                            "Elastocaloric motion did not reach its commanded position: "
+                            f"target {target_mm:.6f} mm, readback {actual_mm:.6f} mm."
+                        )
+                        self._log(f"Recipe stopped: {detail}")
+                        self._stop_auto_ramp(
+                            log_completion=False,
+                            offer_recovery=True,
+                            stop_reason="elastocaloric_motion_unconfirmed",
+                            stop_detail=detail,
+                        )
+                        return True
+                    self._log_waiting_for_feedback(
+                        "Waiting for the elastocaloric motor target to be confirmed by readback."
+                    )
+                    return False
             if self._active_mechanical_scan_hold_started_s is None:
                 self._active_mechanical_scan_hold_started_s = time.monotonic()
-                if note_text.startswith("elastocaloric:"):
+                if is_elastocaloric:
                     self._write_control_trace(
                         decision="elastocaloric_motion_event",
                         basis=basis,
@@ -38917,7 +39095,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             if hold_s > 0.0 and time.monotonic() - self._active_mechanical_scan_hold_started_s < hold_s:
                 return False
-            if note_text.startswith("elastocaloric:"):
+            if is_elastocaloric:
                 self._write_control_trace(
                     decision="elastocaloric_motion_event",
                     basis=basis,
@@ -38928,7 +39106,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             self._active_mechanical_scan_move_pending = False
             self._active_mechanical_scan_hold_started_s = None
-            if note_text.startswith("elastocaloric:"):
+            if is_elastocaloric:
                 # Elastocaloric pull/release steps are single, precomputed
                 # displacement jumps. The generic mechanical-scan path is
                 # iterative; re-entering it here would add the same relative
@@ -38938,12 +39116,60 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._active_mechanical_scan_move_count = 0
                 self._active_mechanical_scan_direction = None
                 self._active_mechanical_scan_origin_position_mm = None
+                self._active_mechanical_scan_target_position_mm = None
+                if is_elastocaloric_release:
+                    self._elastocaloric_release_confirmed = True
                 return True
             return False
 
         current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
             self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
+            return False
+
+        if is_elastocaloric:
+            origin_mm = self._active_mechanical_scan_origin_position_mm
+            if origin_mm is None:
+                self._log("Recipe stopped because no elastocaloric baseline position was captured.")
+                self._stop_auto_ramp(
+                    log_completion=False,
+                    offer_recovery=True,
+                    stop_reason="elastocaloric_baseline_missing",
+                )
+                return True
+            step_mm = self._mechanical_step_mm_for_step(step)
+            tension_sign = self._tension_motion_sign()
+            target_mm = origin_mm + tension_sign * step_mm if is_elastocaloric_pull else origin_mm
+            speed_mm_s = max(
+                self._minimum_held_speed_mm_s(), float(step.mechanical_step_speed_mm_s or 0.05)
+            )
+            if not self._move_to_position_mm(
+                target_mm,
+                chain_from_last_target=False,
+                speed_mm_s=speed_mm_s,
+            ):
+                self._stop_auto_ramp(
+                    log_completion=False,
+                    offer_recovery=True,
+                    stop_reason="elastocaloric_motion_command_rejected",
+                )
+                return True
+            self._active_mechanical_scan_target_position_mm = target_mm
+            self._active_mechanical_scan_move_count += 1
+            self._active_mechanical_scan_move_pending = True
+            self._active_mechanical_scan_hold_started_s = None
+            if is_elastocaloric_pull:
+                self._elastocaloric_release_confirmed = False
+            self._write_control_trace(
+                decision="elastocaloric_motion_event",
+                basis=basis,
+                target_value=target_value,
+                current_value=float(current_value),
+                command_speed_mm_s=speed_mm_s,
+                target_mm=target_mm,
+                result="command_queued",
+                reason=note_text,
+            )
             return False
 
         if self._active_mechanical_scan_direction is None:
@@ -38959,6 +39185,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_mechanical_scan_move_pending = False
             self._active_mechanical_scan_direction = None
             self._active_mechanical_scan_origin_position_mm = None
+            self._active_mechanical_scan_target_position_mm = None
             return True
 
         step_mm = self._mechanical_step_mm_for_step(step)
@@ -39020,6 +39247,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if base_strain is not None:
                 self._constant_current_step_base_strain_by_note[note_group] = base_strain
         self._active_constant_current_zero_position_mm = zero_position_mm
+        if note_text.startswith("elastocaloric:"):
+            self._elastocaloric_release_confirmed = False
         self._active_constant_current_zero_current_mA = (
             None if step.current_mA is None else self._recipe_current_setpoint_mA(float(step.current_mA))
         )
@@ -40467,13 +40696,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
-        new_dir = QtWidgets.QFileDialog.getExistingDirectory(
+        dialog = QtWidgets.QFileDialog(
             self,
             "Select output folder",
             start_dir,
         )
-        if new_dir:
-            self.edit_log_dir.setText(new_dir)
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
+        # The native Windows shell folder picker can synchronously enumerate
+        # cloud-backed DriveFS paths and make the whole TMA window appear
+        # frozen. The Qt dialog keeps that work inside the application event
+        # loop and remains responsive on the restructured Praha data tree.
+        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selectedFiles()
+        if selected:
+            self.edit_log_dir.setText(str(selected[0]))
 
     def _open_log_dir(self) -> None:
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir()).expanduser()
@@ -40744,6 +40983,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_step_size", self.spin_constant_current_step_size.value())
         self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
         self.settings.setValue("elastocaloric_stabilize_s", self.spin_elastocaloric_stabilize_s.value())
+        self.settings.setValue("elastocaloric_repetitions", self.spin_elastocaloric_repetitions.value())
         self.settings.setValue("elastocaloric_pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())
         self.settings.setValue("elastocaloric_release_duration_s", self.spin_elastocaloric_release_duration_s.value())
         self.settings.setValue("elastocaloric_hold_mA", self.spin_elastocaloric_hold_mA.value())
@@ -41530,6 +41770,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_elastocaloric_stabilize_s.setValue(
             max(0.0, float(self.settings.value("elastocaloric_stabilize_s", 10.0)))
         )
+        self.spin_elastocaloric_repetitions.setValue(
+            max(1, int(self.settings.value("elastocaloric_repetitions", 1)))
+        )
         self.spin_elastocaloric_pull_duration_s.setValue(
             max(0.010, float(self.settings.value("elastocaloric_pull_duration_s", 3.0)))
         )
@@ -41691,6 +41934,20 @@ class MainWindow(QtWidgets.QMainWindow):
             timer.stop()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        close_during_active_recipe = bool(
+            self._automation_active or self._isolated_recipe_active
+        )
+        preserve_current_output = bool(
+            not close_during_active_recipe
+            and self._is_elastocaloric_mode()
+            and (
+                self._preserve_current_supply_on_close
+                or (
+                    self._developer_preserve_elastocaloric_current_on_close
+                    and self._elastocaloric_release_confirmed
+                )
+            )
+        )
         self._window_closing = True
         self._stop_periodic_callbacks_for_close()
         if self._isolated_recipe_active and self._production_control_process is not None:
@@ -41745,9 +42002,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._release_session_source_provenance()
         self._release_experiment_sleep_guard()
         self._disconnect_supply(
-            preserve_motor_output=self._preserve_motor_supply_on_close
+            preserve_motor_output=self._preserve_motor_supply_on_close,
+            preserve_current_output=preserve_current_output,
         )
         self._preserve_motor_supply_on_close = False
+        self._preserve_current_supply_on_close = False
         self._stop_owned_shared_broker()
         self._async_run_log_writer.stop(timeout_s=0.5)
         self._stop_periodic_callbacks_for_close()

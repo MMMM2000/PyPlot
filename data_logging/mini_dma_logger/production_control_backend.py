@@ -733,6 +733,25 @@ class ProductionTmaBackend:
             # Normal recipe completion has the same motor-supply policy as an
             # operator Stop: preserve the separately configured motor channel.
             self._window._preserve_motor_supply_on_close = True
+            is_elastocaloric_mode = getattr(
+                self._window,
+                "_is_elastocaloric_mode",
+                None,
+            )
+            if (
+                callable(is_elastocaloric_mode)
+                and is_elastocaloric_mode(
+                    getattr(self._window, "_automation_name", None)
+                )
+                and bool(
+                    getattr(
+                        self._window,
+                        "_elastocaloric_release_confirmed",
+                        False,
+                    )
+                )
+            ):
+                self._window._preserve_current_supply_on_close = True
             self._stopped = True
             return "production recipe completed"
         return None
