@@ -2041,6 +2041,27 @@ def plan_elastocaloric_motion(
     )
 
 
+def required_elastocaloric_acceleration_mm_s2(
+    *,
+    distance_mm: float,
+    requested_duration_s: float,
+    max_speed_mm_s: float,
+) -> float | None:
+    """Return the symmetric acceleration needed for a requested move duration."""
+
+    distance = abs(float(distance_mm))
+    duration = max(0.0, float(requested_duration_s))
+    max_speed = max(1e-12, abs(float(max_speed_mm_s)))
+    if distance <= 0.0:
+        return 0.0
+    if duration <= distance / max_speed:
+        return None
+    triangular_peak_speed = (2.0 * distance) / duration
+    if triangular_peak_speed <= max_speed:
+        return (4.0 * distance) / (duration * duration)
+    return (max_speed * max_speed) / ((max_speed * duration) - distance)
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentSweepLoadLimitPlan:
     basis: str
@@ -11801,6 +11822,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_release_duration_row = constant_current_form.labelForField(
             self.spin_elastocaloric_release_duration_s
         )
+        self.check_elastocaloric_release_matches_pull = QtWidgets.QCheckBox(
+            "Same as pull duration",
+            automation_box,
+        )
+        self.check_elastocaloric_release_matches_pull.setChecked(True)
+        self.check_elastocaloric_release_matches_pull.setToolTip(
+            "Keep release duration synchronized with pull duration. Uncheck to use asymmetric timing."
+        )
+        constant_current_form.addRow("", self.check_elastocaloric_release_matches_pull)
+        self.label_elastocaloric_release_matches_pull_row = constant_current_form.labelForField(
+            self.check_elastocaloric_release_matches_pull
+        )
         self.spin_elastocaloric_accel = QtWidgets.QSpinBox(automation_box)
         self.spin_elastocaloric_accel.setRange(DEFAULT_TIC_MAX_ACCEL, 2_000_000)
         self.spin_elastocaloric_accel.setSingleStep(100_000)
@@ -12699,6 +12732,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_recipe_mode_ui
         )
         self.check_constant_current_transition_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
+        self.check_elastocaloric_release_matches_pull.toggled.connect(
+            self._sync_elastocaloric_release_duration
+        )
+        self.spin_elastocaloric_pull_duration_s.valueChanged.connect(
+            self._sync_elastocaloric_release_duration
+        )
+        self.spin_elastocaloric_release_duration_s.valueChanged.connect(
+            self._sync_elastocaloric_release_duration
+        )
+        self._sync_elastocaloric_release_duration()
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
@@ -12946,6 +12989,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda point: point.strain_pct,
             ),
             PlotChannel(
+                "elastocaloric_strain_path_pct",
+                "Sequential strain path (%)",
+                "#22c55e",
+                lambda point: point.strain_pct,
+            ),
+            PlotChannel(
                 "stress_mpa",
                 "Stress (MPa)",
                 "#a78bfa",
@@ -13172,14 +13221,42 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._read_dashboard_plot_tile_settings(index, mode)
                     for index in range(len(self._plot_tiles))
                 ]
+                if self._is_elastocaloric_mode(mode) and len(settings) >= 4:
+                    third = settings[2]
+                    if (
+                        third.get("x") == "elapsed_s"
+                        and "temperature_c" in {third.get("y_left"), third.get("y_right")}
+                    ):
+                        third["y_left"] = "temperature_c"
+                        third["y_right"] = ""
+                    fourth = settings[3]
+                    if (
+                        fourth.get("x") == "strain_pct"
+                        and fourth.get("y_left") == "temperature_c"
+                    ):
+                        fourth["x"] = "elastocaloric_strain_path_pct"
                 self._dashboard_plot_settings_by_mode[mode_key] = [dict(values) for values in settings]
                 return settings
+            if self._is_elastocaloric_mode(mode):
+                return self._elastocaloric_dashboard_plot_settings()
         if self._settings_have_dashboard_plot_values(None):
             return [
                 self._read_dashboard_plot_tile_settings(index, None)
                 for index in range(len(self._plot_tiles))
             ]
         return [self._default_dashboard_plot_settings(index) for index in range(len(self._plot_tiles))]
+
+    def _elastocaloric_dashboard_plot_settings(self) -> list[dict[str, object]]:
+        channels = (
+            ("elapsed_s", "load_g", "stress_mpa"),
+            ("elapsed_s", "position_mm", "strain_pct"),
+            ("elapsed_s", "temperature_c", ""),
+            ("elastocaloric_strain_path_pct", "temperature_c", ""),
+        )
+        return [
+            {"visible": True, "x": x_key, "y_left": y_left, "y_right": y_right}
+            for x_key, y_left, y_right in channels
+        ]
 
     def _read_dashboard_plot_tile_settings(self, index: int, mode: str | None = None) -> dict[str, object]:
         defaults = self._default_dashboard_plot_settings(index)
@@ -21142,13 +21219,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_elastocaloric_release_record_s",
             "spin_elastocaloric_pull_duration_s",
             "spin_elastocaloric_release_duration_s",
+            "check_elastocaloric_release_matches_pull",
             "spin_elastocaloric_accel",
             "spin_elastocaloric_hold_mA",
             "label_elastocaloric_motion_plan",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                if widget_name.startswith("spin_elastocaloric") or widget_name == "label_elastocaloric_motion_plan":
+                if (
+                    widget_name.startswith("spin_elastocaloric")
+                    or widget_name.startswith("check_elastocaloric")
+                    or widget_name == "label_elastocaloric_motion_plan"
+                ):
                     widget.setVisible(elastocaloric_mode)
                 elif widget_name == "spin_constant_current_step_size":
                     widget.setVisible(not fixed_strain_mode)
@@ -21172,6 +21254,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_elastocaloric_release_record_row",
             "label_elastocaloric_pull_duration_row",
             "label_elastocaloric_release_duration_row",
+            "label_elastocaloric_release_matches_pull_row",
             "label_elastocaloric_accel_row",
             "label_elastocaloric_hold_mA_row",
             "label_elastocaloric_motion_plan_heading",
@@ -25494,6 +25577,17 @@ class MainWindow(QtWidgets.QMainWindow):
             camera_rate_hz=64.0,
         )
 
+    def _sync_elastocaloric_release_duration(self, *_args: object) -> None:
+        if not hasattr(self, "check_elastocaloric_release_matches_pull"):
+            return
+        matches_pull = self.check_elastocaloric_release_matches_pull.isChecked()
+        self.spin_elastocaloric_release_duration_s.setEnabled(not matches_pull)
+        if matches_pull:
+            self.spin_elastocaloric_release_duration_s.setValue(
+                self.spin_elastocaloric_pull_duration_s.value()
+            )
+        self._refresh_elastocaloric_motion_plan_label()
+
     def _refresh_elastocaloric_motion_plan_label(self) -> None:
         if not hasattr(self, "label_elastocaloric_motion_plan"):
             return
@@ -25522,11 +25616,32 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         else:
             minimum_s = max(plan.minimum_duration_s for _name, plan in plans)
+            requested_plans = (
+                (pull, float(self.spin_elastocaloric_pull_duration_s.value())),
+                (release, float(self.spin_elastocaloric_release_duration_s.value())),
+            )
+            required_accelerations = [
+                required_elastocaloric_acceleration_mm_s2(
+                    distance_mm=plan.distance_mm,
+                    requested_duration_s=requested_s,
+                    max_speed_mm_s=float(self.spin_constant_current_move_speed_mm_s.maximum()),
+                )
+                for plan, requested_s in requested_plans
+            ]
+            finite_required = [value for value in required_accelerations if value is not None]
+            acceleration_guidance = ""
+            if len(finite_required) == len(required_accelerations):
+                required_tic_units = max(finite_required) * 100.0 * steps_per_mm
+                rounded_tic_units = int(math.ceil(required_tic_units / 1000.0) * 1000.0)
+                acceleration_guidance = (
+                    f", or use at least about {rounded_tic_units} Tic units "
+                    "for the requested duration (before safety margin)"
+                )
             self.label_elastocaloric_motion_plan.setStyleSheet("color: #d97706; font-weight: 600;")
             self.label_elastocaloric_motion_plan.setText(
                 "; ".join(parts)
                 + f". Requested duration is not achievable with the configured Tic acceleration/speed; "
-                f"use at least {minimum_s:.3f} s."
+                f"use at least {minimum_s:.3f} s{acceleration_guidance}."
             )
 
     def _motion_profile_duration_s(self, distance_mm: float, speed_mm_s: float) -> float | None:
@@ -31426,6 +31541,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "temperature_stabilize_s": float(self.spin_elastocaloric_stabilize_s.value()),
                 "pull_duration_s": float(self.spin_elastocaloric_pull_duration_s.value()),
                 "release_duration_s": float(self.spin_elastocaloric_release_duration_s.value()),
+                "release_duration_matches_pull": bool(
+                    self.check_elastocaloric_release_matches_pull.isChecked()
+                ),
                 "motion_accel_tic_units": int(self.spin_elastocaloric_accel.value()),
                 "record_after_jump_s": float(self.spin_constant_current_hold_s.value()),
                 "record_after_release_s": float(self.spin_elastocaloric_release_record_s.value()),
@@ -31784,6 +31902,23 @@ class MainWindow(QtWidgets.QMainWindow):
                     float(elastocaloric.get("pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())),
                 )
             )
+            release_matches_pull = bool(
+                elastocaloric.get(
+                    "release_duration_matches_pull",
+                    math.isclose(
+                        float(
+                            elastocaloric.get(
+                                "release_duration_s",
+                                elastocaloric.get("pull_duration_s", 3.0),
+                            )
+                        ),
+                        float(elastocaloric.get("pull_duration_s", 3.0)),
+                        rel_tol=0.0,
+                        abs_tol=0.0005,
+                    ),
+                )
+            )
+            self.check_elastocaloric_release_matches_pull.setChecked(release_matches_pull)
             self.spin_elastocaloric_release_duration_s.setValue(
                 max(
                     0.010,
@@ -31795,6 +31930,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ),
                 )
             )
+            self._sync_elastocaloric_release_duration()
             self.spin_elastocaloric_accel.setValue(
                 int(
                     elastocaloric.get(
@@ -36368,8 +36504,17 @@ class MainWindow(QtWidgets.QMainWindow):
         x_values: list[float] = []
         y_values: list[float] = []
         previous_elapsed_s: float | None = None
-        for point in points:
-            x_value = x_channel.getter(point)
+        sequential_strain = (
+            self._elastocaloric_sequential_strain_values(points)
+            if x_channel.key == "elastocaloric_strain_path_pct"
+            else None
+        )
+        for point_index, point in enumerate(points):
+            x_value = (
+                sequential_strain[point_index]
+                if sequential_strain is not None
+                else x_channel.getter(point)
+            )
             y_value = y_channel.getter(point)
             if x_value is None or y_value is None:
                 continue
@@ -36386,6 +36531,104 @@ class MainWindow(QtWidgets.QMainWindow):
             y_values.append(float(y_value))
             previous_elapsed_s = elapsed_s
         return x_values, y_values
+
+    def _elastocaloric_sequential_strain_values(
+        self,
+        points: Sequence[MeasurementPoint],
+    ) -> list[float | None]:
+        """Lay pull and release legs consecutively while retaining strain tick meaning."""
+
+        finite_strains = [
+            float(point.strain_pct)
+            for point in points
+            if point.strain_pct is not None and math.isfinite(float(point.strain_pct))
+        ]
+        target_peaks = [
+            abs(float(point.automation_target_value))
+            for point in points
+            if point.automation_basis == HSW_BASIS_STRAIN_PCT
+            and point.automation_target_value is not None
+            and math.isfinite(float(point.automation_target_value))
+        ]
+        peak_strain = (
+            max(target_peaks)
+            if target_peaks
+            else max(finite_strains, default=0.0)
+        )
+        if peak_strain <= 0.0:
+            return [
+                None if point.strain_pct is None else float(point.strain_pct)
+                for point in points
+            ]
+        cycle_offset = 0.0
+        leg = "pull"
+        seen_release = False
+        values: list[float | None] = []
+        for point in points:
+            strain = point.strain_pct
+            if strain is None or not math.isfinite(float(strain)):
+                values.append(None)
+                continue
+            target = point.automation_target_value
+            if (
+                point.automation_phase == "mechanical_scan"
+                and point.automation_basis == HSW_BASIS_STRAIN_PCT
+                and target is not None
+            ):
+                next_leg = "release" if abs(float(target)) < peak_strain * 0.5 else "pull"
+                if next_leg == "pull" and seen_release:
+                    cycle_offset += 2.0 * peak_strain
+                    seen_release = False
+                elif next_leg == "release":
+                    seen_release = True
+                leg = next_leg
+            relative_strain = max(0.0, min(peak_strain, float(strain)))
+            if leg == "release":
+                values.append(cycle_offset + (2.0 * peak_strain) - relative_strain)
+            else:
+                values.append(cycle_offset + relative_strain)
+        return values
+
+    def _elastocaloric_strain_path_ticks(
+        self,
+        points: Sequence[MeasurementPoint],
+    ) -> list[tuple[float, str]]:
+        target_peaks = [
+            abs(float(point.automation_target_value))
+            for point in points
+            if point.automation_basis == HSW_BASIS_STRAIN_PCT
+            and point.automation_target_value is not None
+            and math.isfinite(float(point.automation_target_value))
+        ]
+        finite_strains = [
+            float(point.strain_pct)
+            for point in points
+            if point.strain_pct is not None and math.isfinite(float(point.strain_pct))
+        ]
+        peak_strain = (
+            max(target_peaks)
+            if target_peaks
+            else max(finite_strains, default=0.0)
+        )
+        if peak_strain <= 0.0:
+            return []
+        path_values = self._elastocaloric_sequential_strain_values(points)
+        max_path = max((float(value) for value in path_values if value is not None), default=0.0)
+        cycle_count = max(1, int(math.ceil(max_path / (2.0 * peak_strain) - 1e-9)))
+        ticks: list[tuple[float, str]] = []
+        for cycle_index in range(cycle_count):
+            offset = cycle_index * 2.0 * peak_strain
+            for fraction, strain_value in (
+                (0.0, 0.0),
+                (0.5, peak_strain / 2.0),
+                (1.0, peak_strain),
+                (1.5, peak_strain / 2.0),
+                (2.0, 0.0),
+            ):
+                tick = (offset + fraction * peak_strain, f"{strain_value:g}")
+                if not ticks or tick[0] != ticks[-1][0]:
+                    ticks.append(tick)
+        return ticks
 
     def _time_axis_display_for_points(
         self,
@@ -37416,35 +37659,56 @@ class MainWindow(QtWidgets.QMainWindow):
                             current_mA=hold_current_mA,
                             note="elastocaloric:continued_motion_zero",
                         ),
-                        AutomationStep(
-                            "mechanical_scan",
-                            target_value=jump_strain,
-                            basis=HSW_BASIS_STRAIN_PCT,
-                            current_mA=hold_current_mA,
-                            mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
-                            mechanical_step_value=strain_jump_size,
-                            mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
-                            duration_s=jump_record_s,
-                            note="elastocaloric:continued_pull",
-                        ),
-                        AutomationStep(
-                            "mechanical_scan",
-                            target_value=0.0,
-                            basis=HSW_BASIS_STRAIN_PCT,
-                            current_mA=hold_current_mA,
-                            mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
-                            mechanical_step_value=strain_jump_size,
-                            mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
-                            duration_s=release_record_s,
-                            note="elastocaloric:continued_release",
-                        ),
                     ]
                 )
+                for repetition_index in range(repetitions):
+                    repetition_number = repetition_index + 1
+                    note_suffix = "" if repetitions == 1 else f":{repetition_number}"
+                    if repetition_index > 0 and stabilize_s > 0.0:
+                        steps.append(
+                            AutomationStep(
+                                "settle",
+                                current_mA=hold_current_mA,
+                                duration_s=stabilize_s,
+                                note=(
+                                    "elastocaloric:continued_pre_pull_baseline"
+                                    f"{note_suffix}"
+                                ),
+                            )
+                        )
+                    steps.extend(
+                        [
+                            AutomationStep(
+                                "mechanical_scan",
+                                target_value=jump_strain,
+                                basis=HSW_BASIS_STRAIN_PCT,
+                                current_mA=hold_current_mA,
+                                mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                                mechanical_step_value=strain_jump_size,
+                                mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
+                                duration_s=jump_record_s,
+                                note=f"elastocaloric:continued_pull{note_suffix}",
+                            ),
+                            AutomationStep(
+                                "mechanical_scan",
+                                target_value=0.0,
+                                basis=HSW_BASIS_STRAIN_PCT,
+                                current_mA=hold_current_mA,
+                                mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                                mechanical_step_value=strain_jump_size,
+                                mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
+                                duration_s=release_record_s,
+                                note=f"elastocaloric:continued_release{note_suffix}",
+                            ),
+                        ]
+                    )
                 summary = (
                     "Continued prepared elastocaloric series: fresh baseline "
                     f"{stabilize_s:.1f} s, pull {jump_strain:.4f}% in "
                     f"{pull_duration_s:.3f} s, release in {release_duration_s:.3f} s; "
-                    f"hold current {hold_current_mA:.2f} mA; {clock_summary}."
+                    f"hold current {hold_current_mA:.2f} mA; "
+                    f"{repetitions} measurement{'s' if repetitions != 1 else ''}; "
+                    f"{clock_summary}."
                 )
                 return steps, summary, control_interval_ms
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
@@ -40919,6 +41183,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 left_color=y_left_channel.color,
                 right_color=y_right_channel.color if y_right_channel is not None else "#f59e0b",
             )
+            bottom_axis = bundle.plot_item.getAxis("bottom")
+            if x_channel.key == "elastocaloric_strain_path_pct":
+                bottom_axis.setTicks(
+                    [self._elastocaloric_strain_path_ticks(display_points)]
+                )
+            else:
+                bottom_axis.setTicks(None)
             self._set_pyqtgraph_curve_style(
                 bundle.left_curve,
                 y_left_channel.color,
@@ -41349,6 +41620,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("elastocaloric_repetitions", self.spin_elastocaloric_repetitions.value())
         self.settings.setValue("elastocaloric_pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())
         self.settings.setValue("elastocaloric_release_duration_s", self.spin_elastocaloric_release_duration_s.value())
+        self.settings.setValue(
+            "elastocaloric_release_duration_matches_pull",
+            self.check_elastocaloric_release_matches_pull.isChecked(),
+        )
         self.settings.setValue("elastocaloric_motion_accel", self.spin_elastocaloric_accel.value())
         self.settings.setValue("elastocaloric_hold_mA", self.spin_elastocaloric_hold_mA.value())
         self.settings.setValue(
@@ -42140,9 +42415,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_elastocaloric_pull_duration_s.setValue(
             max(0.010, float(self.settings.value("elastocaloric_pull_duration_s", 3.0)))
         )
+        self.check_elastocaloric_release_matches_pull.setChecked(
+            bool(
+                self.settings.value(
+                    "elastocaloric_release_duration_matches_pull",
+                    True,
+                    type=bool,
+                )
+            )
+        )
         self.spin_elastocaloric_release_duration_s.setValue(
             max(0.010, float(self.settings.value("elastocaloric_release_duration_s", 3.0)))
         )
+        self._sync_elastocaloric_release_duration()
         self.spin_elastocaloric_accel.setValue(
             max(
                 DEFAULT_TIC_MAX_ACCEL,

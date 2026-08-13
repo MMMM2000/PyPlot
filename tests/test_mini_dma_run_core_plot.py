@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
@@ -11,6 +12,7 @@ from data_logging.mini_dma_logger.run_core_plot import (
     _current_direction_parts,
     _plateau_plot_context,
     _plot_current_resistance,
+    _plot_elastocaloric_cycle_average,
     _plot_elastocaloric_temperature_strain,
     _plot_error_trace,
     _plot_resistance_current,
@@ -113,6 +115,9 @@ def test_elastocaloric_summary_interpolates_temperature_against_strain() -> None
             "elapsed_s": [0.0, 1.0, 2.0],
             "recipe_mode": ["elastocaloric_effect"] * 3,
             "strain_pct": [0.0, 4.0, 0.0],
+            "automation_phase": ["mechanical_scan"] * 3,
+            "automation_basis": ["strain_pct"] * 3,
+            "automation_target_value": [4.0, 4.0, 0.0],
         }
     )
     temperature = pd.DataFrame(
@@ -124,9 +129,76 @@ def test_elastocaloric_summary_interpolates_temperature_against_strain() -> None
     fig, ax = plt.subplots()
     try:
         assert _plot_elastocaloric_temperature_strain(ax, measurement, temperature) is True
-        assert ax.get_xlabel() == "Strain (%)"
+        assert ax.get_xlabel() == "Strain path: pull then release (%)"
         assert ax.get_ylabel() == "Temperature (C)"
-        assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 2.0, 4.0, 2.0, 0.0])
+        assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 2.0, 4.0, 6.0, 8.0])
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["0", "2", "4", "2", "0"]
+    finally:
+        plt.close(fig)
+
+
+def test_elastocaloric_cycle_average_aligns_and_baselines_repetitions() -> None:
+    measurement_records: list[dict[str, object]] = []
+    for cycle_start in (2.0, 12.0, 22.0):
+        measurement_records.extend(
+            [
+                {
+                    "elapsed_s": cycle_start,
+                    "recipe_mode": "elastocaloric_effect",
+                    "strain_pct": 0.0,
+                    "automation_phase": "mechanical_scan",
+                    "automation_basis": "strain_pct",
+                    "automation_target_value": 4.0,
+                },
+                {
+                    "elapsed_s": cycle_start + 2.0,
+                    "recipe_mode": "elastocaloric_effect",
+                    "strain_pct": 4.0,
+                    "automation_phase": "mechanical_scan",
+                    "automation_basis": "strain_pct",
+                    "automation_target_value": 4.0,
+                },
+                {
+                    "elapsed_s": cycle_start + 5.0,
+                    "recipe_mode": "elastocaloric_effect",
+                    "strain_pct": 4.0,
+                    "automation_phase": "mechanical_scan",
+                    "automation_basis": "strain_pct",
+                    "automation_target_value": 0.0,
+                },
+                {
+                    "elapsed_s": cycle_start + 7.0,
+                    "recipe_mode": "elastocaloric_effect",
+                    "strain_pct": 0.0,
+                    "automation_phase": "mechanical_scan",
+                    "automation_basis": "strain_pct",
+                    "automation_target_value": 0.0,
+                },
+            ]
+        )
+    measurement = pd.DataFrame.from_records(measurement_records)
+    times = np.arange(0.0, 32.0, 0.1)
+    temperatures = np.full_like(times, 20.0)
+    for cycle_start, drift in ((2.0, 0.0), (12.0, 0.3), (22.0, -0.2)):
+        relative = times - cycle_start
+        active = (relative >= 0.0) & (relative <= 9.0)
+        temperatures[active] = 20.0 + drift - np.exp(-((relative[active] - 1.0) ** 2))
+        baseline = (relative >= -1.0) & (relative < 0.0)
+        temperatures[baseline] = 20.0 + drift
+    temperature = pd.DataFrame(
+        {"elapsed_s": times, "object_c_apparent": temperatures}
+    )
+
+    fig, ax = plt.subplots()
+    try:
+        assert _plot_elastocaloric_cycle_average(ax, measurement, temperature) is True
+        assert "n=3" in ax.get_title()
+        assert ax.get_xlabel() == "Time from pull start (s)"
+        assert ax.get_ylabel() == "ΔT from pre-pull baseline (C)"
+        mean_line = next(line for line in ax.lines if line.get_label() == "cycle mean")
+        mean_values = np.asarray(mean_line.get_ydata(), dtype=float)
+        assert float(np.min(mean_values)) < -0.9
+        assert float(np.max(np.abs(mean_values[:20]))) < 0.05
     finally:
         plt.close(fig)
 

@@ -13,3 +13,6 @@
 - Recognize prepared-series pull/release step names as real elastocaloric motion legs, preventing the post-baseline jump from collapsing to a zero-step move and aborting the retained current.
 - Clear the previous terminal dashboard immediately and show the fresh-baseline state as soon as **Run next jump** is requested.
 - Ignore queued snapshots and events from the previous prepared-series run so the dashboard follows and plots the newly requested jump instead of immediately returning to the old completed display.
+- Give elastocaloric runs dedicated temperature-vs-time and sequential pull-then-release temperature-vs-strain dashboard views, and report the concrete acceleration needed when a requested move duration is infeasible.
+- Honor the configured measurement count for prepared-series runs instead of always performing one jump, and add a cycle-aligned, per-baseline-corrected mean elastocaloric temperature response with a one-standard-deviation band to multi-cycle run summaries.
+- Add a saved **Same as pull duration** option that keeps elastocaloric release timing synchronized unless asymmetric motion is explicitly requested.

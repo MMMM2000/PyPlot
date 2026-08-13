@@ -937,6 +937,69 @@ def _temperature_source(
     return None
 
 
+def _elastocaloric_motion_path(
+    df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, float, list[float]] | None:
+    motion_time = _series(df, "elapsed_s")
+    strain = _series(df, "strain_pct")
+    mask = motion_time.notna() & strain.notna()
+    if mask.sum() < 2:
+        return None
+    rows = df.loc[mask].copy()
+    rows["_elapsed"] = motion_time[mask]
+    rows["_strain"] = strain[mask]
+    rows = rows.sort_values("_elapsed", kind="stable")
+    target = _series(rows, "automation_target_value")
+    basis = rows.get("automation_basis", pd.Series("", index=rows.index)).astype(str)
+    phase = rows.get("automation_phase", pd.Series("", index=rows.index)).astype(str)
+    target_peaks = target[basis.eq("strain_pct")].abs().dropna().to_numpy(dtype=float)
+    strain_values = rows["_strain"].to_numpy(dtype=float)
+    peak_strain = (
+        float(np.nanmax(target_peaks))
+        if target_peaks.size
+        else float(np.nanmax(strain_values))
+    )
+    if not math.isfinite(peak_strain) or peak_strain <= 0.0:
+        return None
+
+    cycle_offset = 0.0
+    leg = "pull"
+    seen_release = False
+    previous_pull_active = False
+    pull_starts: list[float] = []
+    path: list[float] = []
+    for row_index, row in rows.iterrows():
+        row_target = _float_or_none(row.get("automation_target_value"))
+        is_mechanical_strain = (
+            str(row.get("automation_phase", "")) == "mechanical_scan"
+            and str(row.get("automation_basis", "")) == "strain_pct"
+            and row_target is not None
+        )
+        pull_active = bool(is_mechanical_strain and abs(row_target or 0.0) >= peak_strain * 0.5)
+        if pull_active and not previous_pull_active:
+            pull_starts.append(float(row["_elapsed"]))
+        previous_pull_active = pull_active
+        if is_mechanical_strain:
+            next_leg = "pull" if pull_active else "release"
+            if next_leg == "pull" and seen_release:
+                cycle_offset += 2.0 * peak_strain
+                seen_release = False
+            elif next_leg == "release":
+                seen_release = True
+            leg = next_leg
+        relative_strain = float(np.clip(float(row["_strain"]), 0.0, peak_strain))
+        if leg == "release":
+            path.append(cycle_offset + 2.0 * peak_strain - relative_strain)
+        else:
+            path.append(cycle_offset + relative_strain)
+    return (
+        rows["_elapsed"].to_numpy(dtype=float),
+        np.asarray(path, dtype=float),
+        peak_strain,
+        pull_starts,
+    )
+
+
 def _plot_elastocaloric_temperature_strain(
     ax: Axes,
     df: pd.DataFrame,
@@ -946,17 +1009,15 @@ def _plot_elastocaloric_temperature_strain(
     if selected is None:
         return False
     source, temp_name = selected
-    motion_time = _series(df, "elapsed_s")
-    strain = _series(df, "strain_pct")
-    motion_mask = motion_time.notna() & strain.notna()
+    motion_path = _elastocaloric_motion_path(df)
+    if motion_path is None:
+        return False
+    motion_x, motion_y, peak_strain, pull_starts = motion_path
     thermal_time = _series(source, "elapsed_s")
     temperature = _series(source, temp_name)
     thermal_mask = thermal_time.notna() & temperature.notna()
-    if motion_mask.sum() < 2 or not thermal_mask.any():
+    if not thermal_mask.any():
         return False
-    motion_order = np.argsort(motion_time[motion_mask].to_numpy(dtype=float))
-    motion_x = motion_time[motion_mask].to_numpy(dtype=float)[motion_order]
-    motion_y = strain[motion_mask].to_numpy(dtype=float)[motion_order]
     thermal_x = thermal_time[thermal_mask].to_numpy(dtype=float)
     thermal_y = temperature[thermal_mask].to_numpy(dtype=float)
     within = (thermal_x >= motion_x[0]) & (thermal_x <= motion_x[-1])
@@ -964,10 +1025,111 @@ def _plot_elastocaloric_temperature_strain(
         return False
     thermal_x = thermal_x[within]
     thermal_y = thermal_y[within]
-    interpolated_strain = np.interp(thermal_x, motion_x, motion_y)
-    interpolated_strain, thermal_y = _decimate(interpolated_strain, thermal_y)
-    ax.plot(interpolated_strain, thermal_y, color="#dc2626", lw=1.25)
-    _style_axis(ax, "Temperature max vs strain", "Strain (%)", "Temperature (C)")
+    interpolated_path = np.interp(thermal_x, motion_x, motion_y)
+    interpolated_path, thermal_y = _decimate(interpolated_path, thermal_y)
+    ax.plot(interpolated_path, thermal_y, color="#dc2626", lw=1.25)
+    cycle_count = max(1, len(pull_starts))
+    tick_positions: list[float] = []
+    tick_labels: list[str] = []
+    for cycle_index in range(cycle_count):
+        offset = cycle_index * 2.0 * peak_strain
+        for fraction, label_value in (
+            (0.0, 0.0),
+            (0.5, peak_strain / 2.0),
+            (1.0, peak_strain),
+            (1.5, peak_strain / 2.0),
+            (2.0, 0.0),
+        ):
+            position = offset + fraction * peak_strain
+            if not tick_positions or position != tick_positions[-1]:
+                tick_positions.append(position)
+                tick_labels.append(f"{label_value:g}")
+    ax.set_xticks(tick_positions, tick_labels)
+    _style_axis(
+        ax,
+        "Temperature max vs sequential strain",
+        "Strain path: pull then release (%)",
+        "Temperature (C)",
+    )
+    return True
+
+
+def _plot_elastocaloric_cycle_average(
+    ax: Axes,
+    df: pd.DataFrame,
+    sidecar_df: pd.DataFrame | None,
+) -> bool:
+    selected = _temperature_source(df, sidecar_df)
+    motion_path = _elastocaloric_motion_path(df)
+    if selected is None or motion_path is None:
+        return False
+    source, temp_name = selected
+    _motion_time, _path, _peak_strain, pull_starts = motion_path
+    if len(pull_starts) < 2:
+        return False
+    thermal_time = _series(source, "elapsed_s")
+    temperature = _series(source, temp_name)
+    mask = thermal_time.notna() & temperature.notna()
+    times = thermal_time[mask].to_numpy(dtype=float)
+    values = temperature[mask].to_numpy(dtype=float)
+    if len(times) < 4:
+        return False
+    order = np.argsort(times)
+    times = times[order]
+    values = values[order]
+    cycle_durations = [
+        pull_starts[index + 1] - pull_starts[index]
+        for index in range(len(pull_starts) - 1)
+    ]
+    cycle_durations.append(float(times[-1]) - pull_starts[-1])
+    common_duration = min(cycle_durations)
+    if common_duration <= 0.0:
+        return False
+    baseline_s = min(1.0, max(0.2, common_duration * 0.1))
+    relative_time = np.linspace(-baseline_s, common_duration, 400)
+    profiles: list[np.ndarray] = []
+    for pull_start in pull_starts:
+        baseline_mask = (times >= pull_start - baseline_s) & (times < pull_start)
+        if not baseline_mask.any():
+            continue
+        window_mask = (
+            (times >= pull_start - baseline_s)
+            & (times <= pull_start + common_duration)
+        )
+        if window_mask.sum() < 3:
+            continue
+        baseline = float(np.mean(values[baseline_mask]))
+        profile = np.interp(
+            relative_time,
+            times[window_mask] - pull_start,
+            values[window_mask] - baseline,
+        )
+        profiles.append(profile)
+        ax.plot(relative_time, profile, color="#94a3b8", lw=0.7, alpha=0.35)
+    if len(profiles) < 2:
+        ax.clear()
+        return False
+    profile_array = np.vstack(profiles)
+    mean_profile = np.mean(profile_array, axis=0)
+    spread = np.std(profile_array, axis=0, ddof=1)
+    ax.fill_between(
+        relative_time,
+        mean_profile - spread,
+        mean_profile + spread,
+        color="#38bdf8",
+        alpha=0.18,
+        label="mean ± 1 SD",
+    )
+    ax.plot(relative_time, mean_profile, color="#0369a1", lw=2.0, label="cycle mean")
+    ax.axvline(0.0, color="#111827", lw=0.8, ls="--", alpha=0.7)
+    ax.axhline(0.0, color="#64748b", lw=0.6, alpha=0.6)
+    _style_axis(
+        ax,
+        f"Cycle-aligned elastocaloric ΔT (n={len(profiles)})",
+        "Time from pull start (s)",
+        "ΔT from pre-pull baseline (C)",
+    )
+    ax.legend(fontsize=8, loc="best")
     return True
 
 
@@ -1209,7 +1371,10 @@ def _plot_detail_summary(
     if resistance_shown:
         _plot_resistance_current(axes[1, 1], df, metadata, context=context)
     _plot_error_trace(axes[2, 0], df, trace, time_axis)
-    _plot_strain_stress(axes[2, 1], df, metadata)
+    if not elastocaloric or not _plot_elastocaloric_cycle_average(
+        axes[2, 1], df, temperature
+    ):
+        _plot_strain_stress(axes[2, 1], df, metadata)
     if context is not None:
         comparison_axes = [axes[0, 1], axes[1, 1]] if resistance_shown else axes[0, 1]
         _add_plateau_colorbar(fig, comparison_axes, context)

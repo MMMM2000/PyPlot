@@ -85,6 +85,25 @@ def test_elastocaloric_motion_plan_accounts_for_acceleration(
         assert plan.expected_duration_s == pytest.approx(plan.minimum_duration_s)
 
 
+def test_required_elastocaloric_acceleration_matches_triangular_profile() -> None:
+    required = mini_dma_mod.required_elastocaloric_acceleration_mm_s2(
+        distance_mm=2.87,
+        requested_duration_s=2.0,
+        max_speed_mm_s=50.0,
+    )
+
+    assert required == pytest.approx(2.87)
+    plan = mini_dma_mod.plan_elastocaloric_motion(
+        distance_mm=2.87,
+        requested_duration_s=2.0,
+        accel_mm_s2=required,
+        decel_mm_s2=required,
+        max_speed_mm_s=50.0,
+    )
+    assert plan.feasible is True
+    assert plan.minimum_duration_s == pytest.approx(2.0)
+
+
 def _write_synthetic_builder_package(path: Path, *rows: Mapping[str, object]) -> None:
     columns = list(dict.fromkeys(key for row in rows for key in row))
     project_package.write_project_package(
@@ -8318,6 +8337,92 @@ def _calibration_point(
     )
 
 
+def test_elastocaloric_strain_path_places_release_to_the_right(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        strains_and_targets = (
+            (0.0, 7.0),
+            (3.5, 7.0),
+            (7.0, 7.0),
+            (7.0, 0.0),
+            (3.5, 0.0),
+            (0.0, 0.0),
+        )
+        points = [
+            dataclasses.replace(
+                _calibration_point(
+                    position_mm=strain / 100.0,
+                    load_g=1.0,
+                    phase="mechanical_scan",
+                    strain_pct=strain,
+                ),
+                elapsed_s=float(index),
+                automation_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+                automation_target_value=target,
+                ir_temperature_c=20.0 + index,
+            )
+            for index, (strain, target) in enumerate(strains_and_targets)
+        ]
+
+        path = window._elastocaloric_sequential_strain_values(points)
+        assert path == pytest.approx([0.0, 3.5, 7.0, 7.0, 10.5, 14.0])
+        assert window._elastocaloric_strain_path_ticks(points) == [
+            (0.0, "0"),
+            (3.5, "3.5"),
+            (7.0, "7"),
+            (10.5, "3.5"),
+            (14.0, "0"),
+        ]
+        x_channel = window._plot_channel("elastocaloric_strain_path_pct")
+        y_channel = window._plot_channel("temperature_c")
+        assert x_channel is not None
+        assert y_channel is not None
+        x_values, y_values = window._plot_xy_values(points, x_channel, y_channel)
+        assert x_values == pytest.approx(path)
+        assert y_values == pytest.approx([20.0, 21.0, 22.0, 23.0, 24.0, 25.0])
+    finally:
+        _close_test_window(window)
+
+
+def test_elastocaloric_dashboard_defaults_to_temperature_views(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        settings = window._elastocaloric_dashboard_plot_settings()
+
+        assert settings[2] == {
+            "visible": True,
+            "x": "elapsed_s",
+            "y_left": "temperature_c",
+            "y_right": "",
+        }
+        assert settings[3] == {
+            "visible": True,
+            "x": "elastocaloric_strain_path_pct",
+            "y_left": "temperature_c",
+            "y_right": "",
+        }
+    finally:
+        _close_test_window(window)
+
+
+def test_elastocaloric_release_duration_can_follow_pull_duration(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert window.check_elastocaloric_release_matches_pull.isChecked() is True
+        assert window.spin_elastocaloric_release_duration_s.isEnabled() is False
+
+        window.spin_elastocaloric_pull_duration_s.setValue(1.8)
+        assert window.spin_elastocaloric_release_duration_s.value() == pytest.approx(1.8)
+
+        window.check_elastocaloric_release_matches_pull.setChecked(False)
+        assert window.spin_elastocaloric_release_duration_s.isEnabled() is True
+        window.spin_elastocaloric_release_duration_s.setValue(2.1)
+        window.spin_elastocaloric_pull_duration_s.setValue(1.7)
+        assert window.spin_elastocaloric_release_duration_s.value() == pytest.approx(2.1)
+    finally:
+        _close_test_window(window)
+
+
 def test_forever_fatigue_bounds_retained_measurements_but_preserves_total_count(
     tmp_path: Path,
     qtbot,
@@ -11100,6 +11205,7 @@ def test_elastocaloric_recipe_builds_timed_strain_jump_with_hysteresis_current(t
         window.spin_constant_current_start_mA.setValue(50.0)
         window.spin_elastocaloric_hold_mA.setValue(40.0)
         window.spin_elastocaloric_pull_duration_s.setValue(3.0)
+        window.check_elastocaloric_release_matches_pull.setChecked(False)
         window.spin_elastocaloric_release_duration_s.setValue(3.5)
         window.spin_elastocaloric_accel.setValue(400_000)
         window.spin_elastocaloric_stabilize_s.setValue(30.0)
@@ -20791,7 +20897,7 @@ def test_isolated_elastocaloric_completion_retains_prepared_controller(
         _close_test_window(window)
 
 
-def test_prepared_elastocaloric_continuation_builds_one_fresh_baseline_jump_release(
+def test_prepared_elastocaloric_continuation_honors_measurement_count(
     tmp_path: Path, qtbot
 ) -> None:
     window = _build_window(tmp_path, qtbot)
@@ -20803,7 +20909,7 @@ def test_prepared_elastocaloric_continuation_builds_one_fresh_baseline_jump_rele
         window.spin_constant_current_start_mA.setValue(30.0)
         window.spin_elastocaloric_hold_mA.setValue(30.0)
         window.spin_elastocaloric_stabilize_s.setValue(30.0)
-        window.spin_elastocaloric_repetitions.setValue(9)
+        window.spin_elastocaloric_repetitions.setValue(3)
         window._elastocaloric_continue_prepared_requested = True
 
         steps, summary, _interval_ms = window._build_automation_recipe()
@@ -20813,19 +20919,35 @@ def test_prepared_elastocaloric_continuation_builds_one_fresh_baseline_jump_rele
             "mark_current_zero",
             "mechanical_scan",
             "mechanical_scan",
+            "settle",
+            "mechanical_scan",
+            "mechanical_scan",
+            "settle",
+            "mechanical_scan",
+            "mechanical_scan",
         ]
         assert [step.note for step in steps] == [
             "elastocaloric:continued_pre_pull_baseline",
             "elastocaloric:continued_motion_zero",
-            "elastocaloric:continued_pull",
-            "elastocaloric:continued_release",
+            "elastocaloric:continued_pull:1",
+            "elastocaloric:continued_release:1",
+            "elastocaloric:continued_pre_pull_baseline:2",
+            "elastocaloric:continued_pull:2",
+            "elastocaloric:continued_release:2",
+            "elastocaloric:continued_pre_pull_baseline:3",
+            "elastocaloric:continued_pull:3",
+            "elastocaloric:continued_release:3",
         ]
         assert steps[0].target_value is None
         assert steps[0].basis is None
         assert steps[0].duration_s == pytest.approx(30.0)
-        assert [step.target_value for step in steps[2:]] == pytest.approx([1.5, 0.0])
+        scan_steps = [step for step in steps if step.action == "mechanical_scan"]
+        assert [step.target_value for step in scan_steps] == pytest.approx(
+            [1.5, 0.0, 1.5, 0.0, 1.5, 0.0]
+        )
         assert not any(step.action in {"seek_target", "sweep_current"} for step in steps)
         assert "Continued prepared elastocaloric series" in summary
+        assert "3 measurements" in summary
     finally:
         _close_test_window(window)
 
@@ -34385,6 +34507,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_elastocaloric_stabilize_s.setValue(45.0)
         window.spin_elastocaloric_repetitions.setValue(4)
         window.spin_elastocaloric_pull_duration_s.setValue(2.5)
+        window.check_elastocaloric_release_matches_pull.setChecked(False)
         window.spin_elastocaloric_release_duration_s.setValue(3.5)
         window.spin_elastocaloric_accel.setValue(400_000)
         window.spin_constant_current_hold_s.setValue(7.0)
@@ -34409,6 +34532,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert elastocaloric["measurement_count"] == 4
         assert elastocaloric["pull_duration_s"] == pytest.approx(2.5)
         assert elastocaloric["release_duration_s"] == pytest.approx(3.5)
+        assert elastocaloric["release_duration_matches_pull"] is False
         assert elastocaloric["motion_accel_tic_units"] == 400_000
         assert elastocaloric["record_after_jump_s"] == pytest.approx(7.0)
         assert elastocaloric["record_after_release_s"] == pytest.approx(9.0)
@@ -34451,6 +34575,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_elastocaloric_repetitions.value() == 4
         assert window.spin_elastocaloric_pull_duration_s.value() == pytest.approx(2.5)
         assert window.spin_elastocaloric_release_duration_s.value() == pytest.approx(3.5)
+        assert window.check_elastocaloric_release_matches_pull.isChecked() is False
         assert window.spin_elastocaloric_accel.value() == 400_000
         assert window.spin_constant_current_hold_s.value() == pytest.approx(7.0)
         assert window.spin_elastocaloric_release_record_s.value() == pytest.approx(9.0)
