@@ -20657,6 +20657,54 @@ def test_iso_current_settle_advances_after_timed_recovery_even_if_target_is_nois
         _close_test_window(window)
 
 
+def test_continued_elastocaloric_pull_and_release_use_retained_baseline(
+    tmp_path: Path, qtbot
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+        window._active_constant_current_zero_position_mm = 0.16
+        window._current_relative_position_and_strain = (  # type: ignore[method-assign]
+            lambda _position: (0.16, 41.0, 0.0, 0.0)
+        )
+        window._current_distribution_value = lambda *_args, **_kwargs: 0.0  # type: ignore[method-assign]
+        window._move_to_position_mm = (  # type: ignore[method-assign]
+            lambda target_mm, **_kwargs: moves.append(target_mm) or True
+        )
+        window._write_control_trace = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._tension_motion_sign = lambda: -1.0  # type: ignore[method-assign]
+        pull = mini_dma_mod.AutomationStep(
+            "mechanical_scan",
+            target_value=2.0,
+            basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_value=2.0,
+            mechanical_step_speed_mm_s=0.3,
+            note="elastocaloric:continued_pull",
+        )
+        release = mini_dma_mod.AutomationStep(
+            "mechanical_scan",
+            target_value=0.0,
+            basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_basis=mini_dma_mod.HSW_BASIS_STRAIN_PCT,
+            mechanical_step_value=2.0,
+            mechanical_step_speed_mm_s=0.3,
+            note="elastocaloric:continued_release",
+        )
+
+        assert window._handle_mechanical_scan_step(pull, 1) is False
+        window._active_mechanical_scan_step_index = None
+        window._active_mechanical_scan_move_pending = False
+        assert window._handle_mechanical_scan_step(release, 2) is False
+
+        assert moves == pytest.approx([-0.66, 0.16])
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_elastocaloric_completion_retains_prepared_controller(
     tmp_path: Path,
     qtbot,

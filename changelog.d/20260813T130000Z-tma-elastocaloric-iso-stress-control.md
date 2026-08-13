@@ -10,3 +10,5 @@
 - Add recipe-scoped elastocaloric acceleration (default 200000 Tic units) with feasibility reporting and automatic restoration of the normal 100000-unit idle profile after each run.
 - Preserve CH4 through both automation teardown and session-file finalization, and publish the prepared state only after a fresh CH4 output-state/current readback confirms it is really on.
 - Treat a rejected **Run next jump** precondition as a non-mutating command rejection instead of a controller fault, so it cannot trigger the emergency path that turns off CH3.
+- Recognize prepared-series pull/release step names as real elastocaloric motion legs, preventing the post-baseline jump from collapsing to a zero-step move and aborting the retained current.
+- Clear the previous terminal dashboard immediately and show the fresh-baseline state as soon as **Run next jump** is requested.

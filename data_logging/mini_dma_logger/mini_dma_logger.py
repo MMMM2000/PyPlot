@@ -34491,6 +34491,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_recipe_buttons()
             return
         self._production_control_identity = identity
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
         self._isolated_recipe_active = True
         self._isolated_recipe_paused = False
         self._isolated_command_pending = "start"
@@ -34506,6 +34509,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_paused = False
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         self._automation_phase = "starting_prepared_jump"
+        baseline_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+        progress_text = (
+            f"Next jump: recording fresh {baseline_s:.1f} s baseline"
+            if baseline_s > 0.0
+            else "Next jump: starting strain jump"
+        )
+        self.recipe_progress.setRange(0, 1000)
+        self.recipe_progress.setValue(0)
+        self.recipe_progress.setFormat(progress_text)
+        task_label = self._dashboard_value_labels.get("task")
+        if task_label is not None:
+            task_label.setText(progress_text)
+        self.label_control_process_status.setStyleSheet("color: #2563eb;")
+        self.label_control_process_status.setText(f"Controller: {progress_text}.")
+        self.label_control_process_status.setVisible(True)
         self._control_process_poll_timer.start()
         self._log("Starting the next jump from the retained prepared baseline.")
         self._update_recipe_buttons()
@@ -39322,8 +39340,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         note_text = str(step.note or "")
         is_elastocaloric = note_text.startswith("elastocaloric:")
-        is_elastocaloric_pull = note_text.startswith("elastocaloric:pull")
-        is_elastocaloric_release = note_text.startswith("elastocaloric:release")
+        is_elastocaloric_pull = note_text.startswith(
+            ("elastocaloric:pull", "elastocaloric:continued_pull")
+        )
+        is_elastocaloric_release = note_text.startswith(
+            ("elastocaloric:release", "elastocaloric:continued_release")
+        )
         note_group = note_text.split(":", 1)[0] if note_text else ""
         if self._active_mechanical_scan_step_index != step_index:
             self._active_mechanical_scan_step_index = step_index
