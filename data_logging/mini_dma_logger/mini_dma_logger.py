@@ -34491,6 +34491,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_recipe_buttons()
             return
         self._production_control_identity = identity
+        self._production_control_snapshot = None
         self._isolated_terminal_readback = None
         self._isolated_terminal_state = None
         self._isolated_terminal_task = ""
@@ -34505,6 +34506,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_user_stop_requested = False
         self._session_points = []
         self._live_plot_points = []
+        self._last_dashboard_plot_refresh_s = None
+        self._refresh_plots()
         self._automation_active = True
         self._automation_paused = False
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
@@ -34569,6 +34572,16 @@ class MainWindow(QtWidgets.QMainWindow):
             else ("", "")
         )
         snapshot = process.poll_latest_snapshot()
+        expected_identity = self._production_control_identity
+        if (
+            snapshot is not None
+            and expected_identity is not None
+            and getattr(snapshot, "identity", expected_identity) != expected_identity
+        ):
+            self._log(
+                "Ignored a stale control-process snapshot from the previous session."
+            )
+            snapshot = None
         if snapshot is not None:
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
@@ -34716,6 +34729,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
         for event in process.poll_events():
+            if (
+                expected_identity is not None
+                and getattr(event, "identity", None) is not None
+                and getattr(event, "identity", None) != expected_identity
+            ):
+                continue
             if event.kind is ControlEventKind.COMMAND_REJECTED:
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None

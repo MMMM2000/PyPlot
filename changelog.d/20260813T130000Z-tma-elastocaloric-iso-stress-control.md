@@ -12,3 +12,4 @@
 - Treat a rejected **Run next jump** precondition as a non-mutating command rejection instead of a controller fault, so it cannot trigger the emergency path that turns off CH3.
 - Recognize prepared-series pull/release step names as real elastocaloric motion legs, preventing the post-baseline jump from collapsing to a zero-step move and aborting the retained current.
 - Clear the previous terminal dashboard immediately and show the fresh-baseline state as soon as **Run next jump** is requested.
+- Ignore queued snapshots and events from the previous prepared-series run so the dashboard follows and plots the newly requested jump instead of immediately returning to the old completed display.

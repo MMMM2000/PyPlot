@@ -1943,6 +1943,55 @@ class _FakeIsolatedControlProcess:
         return True
 
 
+def test_isolated_poll_ignores_terminal_snapshot_from_previous_session(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    process.start_process()
+    current_identity = mini_dma_mod.ControlSessionIdentity("current-jump", 2)
+    stale_identity = mini_dma_mod.ControlSessionIdentity("previous-jump", 1)
+    window._production_control_process = process  # type: ignore[assignment]
+    window._production_control_identity = current_identity
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._automation_phase = "starting_prepared_jump"
+    process.next_snapshot = SimpleNamespace(
+        identity=stale_identity,
+        state=mini_dma_mod.ControlState.STOPPED,
+        sequence=50,
+        monotonic_s=time.monotonic(),
+        tick_count=50,
+        last_command_sequence=1,
+        last_command_result="accepted",
+        last_command_detail="previous jump completed",
+        policy=mini_dma_mod.ControlPolicy.PRAGUE,
+        owner_pid=process.pid,
+        dropped_event_count=0,
+        readback={
+            "automation_active": False,
+            "task": "Recipe completed (final values)",
+        },
+    )
+
+    try:
+        window._poll_production_control_process()
+
+        assert process.closed is False
+        assert window._production_control_process is process
+        assert window._production_control_identity == current_identity
+        assert window._isolated_recipe_active is True
+        assert window._automation_active is True
+        assert window._production_control_snapshot is None
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        window._production_control_process = None
+        window._production_control_identity = None
+        _close_test_window(window)
+
+
 def test_momentary_current_hold_bypass_button_tracks_press_and_release(
     tmp_path: Path,
     qtbot,
