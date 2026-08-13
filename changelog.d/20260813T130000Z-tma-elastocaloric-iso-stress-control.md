@@ -13,3 +13,4 @@
 - Recognize prepared-series pull/release step names as real elastocaloric motion legs, preventing the post-baseline jump from collapsing to a zero-step move and aborting the retained current.
 - Clear the previous terminal dashboard immediately and show the fresh-baseline state as soon as **Run next jump** is requested.
 - Ignore queued snapshots and events from the previous prepared-series run so the dashboard follows and plots the newly requested jump instead of immediately returning to the old completed display.
+- Add a developer-gated **Recover prepared series** action inside the elastocaloric current settings. After an app restart it adopts already-on CH4/CH3 without changing either output or moving the motor, verifies fresh stationary hardware state, and uses the actual position/stress as the next jump baseline.

@@ -335,6 +335,14 @@ class ProductionTmaBackend:
             length_widget = getattr(self._window, "spin_initial_length", None)
             if starting_length_value > 0.0 and length_widget is not None:
                 length_widget.setValue(starting_length_value)
+        if bool(payload.get("adopt_prepared_elastocaloric", False)):
+            try:
+                self._start_adopted_elastocaloric(request)
+            except ControlStartRejected:
+                raise
+            except Exception as exc:
+                raise ControlStartRejected(str(exc)) from exc
+            return
         steps, _summary, _interval_ms = self._window._build_automation_recipe()
         if not self._window._preflight_recipe_hardware(steps, show_progress=False):
             log_output = getattr(self._window, "log_output", None)
@@ -411,6 +419,77 @@ class ProductionTmaBackend:
                 or "controller process did not start the recipe"
             )
             raise RuntimeError(detail)
+        self._started = True
+        self._stopped = False
+
+    def _start_adopted_elastocaloric(self, request: ControlStartRequest) -> None:
+        """Adopt a still-energized released specimen after a visible-app restart."""
+
+        window = self._require_window()
+        window._preserve_current_supply_on_close = True
+        window._preserve_motor_supply_on_close = True
+        window._elastocaloric_continue_prepared_requested = True
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+        if not window._preflight_recipe_hardware(
+            steps,
+            show_progress=False,
+            preserve_existing_outputs=True,
+        ):
+            raise RuntimeError(
+                str(getattr(window, "_controller_process_error", "")).strip()
+                or "prepared-series hardware verification failed"
+            )
+        current_channel = window._current_sweep_supply_channel()
+        if current_channel is None:
+            raise RuntimeError("the elastocaloric current channel is not configured")
+        if window._supply_channel_output_state(current_channel) is not True:
+            raise RuntimeError(
+                f"CH{current_channel} is not already ON; recovery will not change it"
+            )
+        supply_snapshot = window._refresh_supply_snapshot(force=True)
+        measured_current = supply_snapshot.get("current_mA")
+        expected_current = float(window.spin_elastocaloric_hold_mA.value())
+        if (
+            measured_current is None
+            or abs(float(measured_current) - expected_current) > 0.5
+        ):
+            actual = "unavailable" if measured_current is None else f"{float(measured_current):.2f} mA"
+            raise RuntimeError(
+                f"energized CH{current_channel} current is {actual}, expected "
+                f"{expected_current:.2f} +/- 0.50 mA"
+            )
+        window._refresh_tic_status()
+        if getattr(window, "_tic_current_velocity", None) != 0:
+            raise RuntimeError("the Tic motor is not confirmed stationary")
+        prepared_position = float(window._current_position_mm)
+        if not math.isfinite(prepared_position):
+            raise RuntimeError("the Tic motor position is unavailable")
+        if not window._has_fresh_scale_reading():
+            raise RuntimeError("scale feedback is not fresh")
+        prepared_stress = window._current_distribution_value("stress_mpa")
+        if prepared_stress is None or not math.isfinite(float(prepared_stress)):
+            raise RuntimeError("the current specimen stress is unavailable")
+        ir_snapshot = window._latest_ir_snapshot()
+        ir_age_s = ir_snapshot.get("sample_age_s")
+        if ir_age_s is None or float(ir_age_s) > 1.0:
+            raise RuntimeError("thermal-camera feedback is not fresh")
+        window._elastocaloric_prepared_baseline_mm = prepared_position
+        window._elastocaloric_prepared_current_mA = expected_current
+        window._elastocaloric_prepared_output_confirmed = True
+        window._elastocaloric_prepared_ready = True
+        window._supply_output_enabled = True
+        window._controller_process_prior_run_preflight_complete = True
+        window._controller_process_hardware_preflight_complete = True
+        window._log(
+            "Recovered energized elastocaloric baseline without motor motion: "
+            f"position {prepared_position:.6f} mm, stress {float(prepared_stress):.3f} MPa, "
+            f"current {float(measured_current):.2f} mA."
+        )
+        window._start_auto_ramp()
+        self._drain_events()
+        if not window._automation_active:
+            raise RuntimeError("recovered elastocaloric jump did not start")
+        self._hardware_preflight = _hardware_preflight_readback(window)
         self._started = True
         self._stopped = False
 

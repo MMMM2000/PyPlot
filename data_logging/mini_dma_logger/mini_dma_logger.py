@@ -8349,6 +8349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preserve_motor_supply_on_close = False
         self._preserve_current_supply_on_close = False
         self._elastocaloric_prepared_ready = False
+        self._elastocaloric_recovery_start_requested = False
         self._elastocaloric_prepared_baseline_mm: float | None = None
         self._elastocaloric_prepared_current_mA: float | None = None
         self._elastocaloric_prepared_output_confirmed = False
@@ -9009,6 +9010,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._developer_preserve_elastocaloric_current_on_close = bool(enabled)
         if hasattr(self, "label_elastocaloric_preservation_status"):
             self.label_elastocaloric_preservation_status.setVisible(bool(enabled))
+        if hasattr(self, "button_recover_elastocaloric_series"):
+            self._update_recipe_buttons()
         if enabled:
             self._log(
                 "Development override armed: an idle elastocaloric window may close without "
@@ -11897,6 +11900,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_preservation_status.setStyleSheet("color: #d97706;")
         self.label_elastocaloric_preservation_status.setVisible(False)
         constant_current_form.addRow("", self.label_elastocaloric_preservation_status)
+        self.button_recover_elastocaloric_series = QtWidgets.QPushButton(
+            "Recover prepared series", automation_box
+        )
+        self.button_recover_elastocaloric_series.setToolTip(
+            "Adopt an already energized elastocaloric specimen after an app restart. "
+            "This verifies CH4, CH3, motor, scale, stress, and camera without changing "
+            "either PSU output or moving the motor before a fresh baseline."
+        )
+        self.button_recover_elastocaloric_series.clicked.connect(
+            self._recover_prepared_elastocaloric_series
+        )
+        self.button_recover_elastocaloric_series.setVisible(False)
+        constant_current_form.addRow("", self.button_recover_elastocaloric_series)
         self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_mA.setDecimals(2)
         self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
@@ -21205,6 +21221,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "label_elastocaloric_preservation_status"):
             self.label_elastocaloric_preservation_status.setVisible(
                 elastocaloric_mode and self._developer_preserve_elastocaloric_current_on_close
+            )
+        if hasattr(self, "button_recover_elastocaloric_series"):
+            self.button_recover_elastocaloric_series.setVisible(
+                elastocaloric_mode
+                and self._developer_preserve_elastocaloric_current_on_close
             )
         if getattr(self, "label_constant_current_start_target_row", None) is not None:
             self.label_constant_current_start_target_row.setText("Target start")
@@ -30875,7 +30896,13 @@ class MainWindow(QtWidgets.QMainWindow):
             or (self._recipe_requires_ir_camera() and self._ir_thread is None)
         )
 
-    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
+    def _preflight_recipe_hardware(
+        self,
+        steps: Sequence[AutomationStep],
+        *,
+        show_progress: bool = False,
+        preserve_existing_outputs: bool = False,
+    ) -> bool:
         if self._recipe_requires_tic(steps):
             self._apply_shared_broker_bench_defaults_for_tic_preflight()
             self._apply_direct_hmp_bench_defaults_for_tic_preflight()
@@ -30896,8 +30923,20 @@ class MainWindow(QtWidgets.QMainWindow):
             if not issues and self._recipe_uses_explicit_current(steps) and not self._ensure_current_sweep_channel_limit():
                 issues.append("Current-sweep channel limit could not be updated for the active recipe current range.")
             self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
-            if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
-                issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
+            if not issues and self._motor_supply_enabled():
+                motor_channel = self._motor_supply_channel()
+                if preserve_existing_outputs:
+                    if (
+                        motor_channel is None
+                        or self._supply_channel_output_state(motor_channel) is not True
+                    ):
+                        issues.append(
+                            "Motor supply channel is not already ON; prepared recovery will not change it."
+                        )
+                elif not self._enable_motor_supply_output():
+                    issues.append(
+                        "Motor supply channel could not be enabled. Check the HMP channel wiring/settings."
+                    )
             self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
             if self._recipe_requires_tic(steps) and not self.check_tic_native_usb.isChecked():
                 issues.append(
@@ -33423,6 +33462,26 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             else "Start recipe"
         )
+        elastocaloric_mode = self._is_elastocaloric_mode(
+            self.combo_recipe_mode.currentData()
+        )
+        recovery_visible = bool(
+            elastocaloric_mode
+            and self._developer_preserve_elastocaloric_current_on_close
+        )
+        self.button_recover_elastocaloric_series.setVisible(recovery_visible)
+        self.button_recover_elastocaloric_series.setEnabled(
+            recovery_visible
+            and not self._automation_active
+            and not self._isolated_recipe_active
+            and not self._elastocaloric_prepared_ready
+            and self._production_control_process is None
+            and self._scale_thread is None
+            and self._ir_thread is None
+            and self._supply_controller is None
+            and self._tic_command_dispatcher is None
+            and self._tic_controller is None
+        )
         child_owns_hardware = bool(
             self._isolated_recipe_active or self._elastocaloric_prepared_ready
         )
@@ -34164,6 +34223,155 @@ class MainWindow(QtWidgets.QMainWindow):
         self._first_overheating_preflight_decision = None
         self._update_recipe_buttons()
 
+    def _recover_prepared_elastocaloric_series(self) -> None:
+        """Adopt an energized post-recipe specimen without changing PSU outputs."""
+
+        if not self._is_elastocaloric_mode(self.combo_recipe_mode.currentData()):
+            return
+        if not self._developer_preserve_elastocaloric_current_on_close:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Enable Developer > Keep elastocaloric CH4 on after normal close "
+                "before recovering a prepared series.",
+            )
+            return
+        if self._automation_active or self._isolated_recipe_active or self._session_active:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Stop the active recipe or manual session before recovering a prepared series.",
+            )
+            return
+        if any(
+            item is not None
+            for item in (
+                self._scale_thread,
+                self._ir_thread,
+                self._supply_controller,
+                self._tic_command_dispatcher,
+                self._tic_controller,
+            )
+        ):
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Prepared-series recovery must be the first hardware action after launch. "
+                "Do not use Auto-connect first.",
+            )
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Recover prepared elastocaloric series",
+            "Use this only when CH4 is still ON at the configured hold current, CH3 is "
+            "still ON, and the motor and specimen have not moved since the confirmed "
+            "release.\n\nThe dedicated controller will connect without changing either "
+            "output, verify the energized state, adopt the current stationary position and "
+            "measured stress as the baseline, then perform one jump and exact release.\n\n"
+            "Continue?",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            _steps, _summary, interval_ms = self._build_automation_recipe()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if not self._confirm_current_sweep_load_limit_plan():
+            return
+        if not self._using_shared_broker_supply():
+            shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
+            if shared_index < 0:
+                QtWidgets.QMessageBox.critical(
+                    self, APP_NAME, "Prepared recovery requires the shared HMP broker profile."
+                )
+                return
+            self.combo_supply_profile.setCurrentIndex(shared_index)
+        self._sync_stale_log_name_from_sample()
+        if not self._preflight_isolated_session_output():
+            return
+        process = self._create_production_control_process()
+        try:
+            process.start_process()
+            process.wait_until_ready(timeout_s=10.0)
+        except Exception as exc:
+            self._rollback_isolated_controller_startup(process, exc)
+            return
+        payload = json.loads(
+            capture_window_configuration(
+                self,
+                starting_length_mm=None,
+                cadence_downgrade_accepted=True,
+            )
+        )
+        payload["adopt_prepared_elastocaloric"] = True
+        config_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        self._production_control_generation += 1
+        identity = ControlSessionIdentity(
+            session_id=f"tma-{uuid4()}",
+            generation=self._production_control_generation,
+        )
+        policy = (
+            ControlPolicy.KOSICE
+            if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
+            else ControlPolicy.PRAGUE
+        )
+        try:
+            start_sequence = process.start_session(
+                ControlStartRequest(
+                    identity=identity,
+                    policy=policy,
+                    control_interval_s=min(0.01, max(0.001, interval_ms / 1000.0)),
+                    snapshot_interval_s=0.10,
+                    parent_heartbeat_timeout_s=2.0,
+                    config_json=config_json,
+                )
+            )
+        except Exception as exc:
+            process.close(timeout_s=2.0)
+            QtWidgets.QMessageBox.critical(
+                self, APP_NAME, f"Prepared-series recovery could not start: {exc}"
+            )
+            return
+        self._production_control_process = process
+        self._production_control_identity = identity
+        self._production_control_snapshot = None
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
+        self._isolated_recipe_active = True
+        self._isolated_recipe_paused = False
+        self._isolated_command_pending = "start"
+        self._isolated_pending_sequence = start_sequence
+        self._isolated_command_deadline_s = time.monotonic() + TMA_START_ACK_TIMEOUT_S
+        self._isolated_last_plot_elapsed_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
+        self._session_points = []
+        self._live_plot_points = []
+        self._last_dashboard_plot_refresh_s = None
+        self._refresh_plots()
+        self._automation_active = True
+        self._automation_paused = False
+        self._automation_name = ELASTOCALORIC_EFFECT
+        self._automation_phase = "starting_recovered_series"
+        self._elastocaloric_recovery_start_requested = True
+        self.recipe_progress.setRange(0, 1000)
+        self.recipe_progress.setValue(0)
+        self.recipe_progress.setFormat("Recovering energized prepared series")
+        self.label_control_process_status.setStyleSheet("color: #2563eb;")
+        self.label_control_process_status.setText(
+            "Controller: verifying energized prepared specimen without changing PSU outputs."
+        )
+        self.label_control_process_status.setVisible(True)
+        self._control_process_poll_timer.start()
+        self._log("Starting guarded recovery of the energized prepared series.")
+        self._update_recipe_buttons()
+
     def _start_isolated_auto_ramp(self) -> None:
         if self._isolated_recipe_active:
             return
@@ -34632,9 +34840,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Control-process command rejected: {detail}")
                 if (
                     rejected_command == "start"
-                    and self._automation_phase == "starting_prepared_jump"
+                    and self._automation_phase
+                    in {"starting_prepared_jump", "starting_recovered_series"}
                 ):
+                    recovery_rejected = (
+                        self._automation_phase == "starting_recovered_series"
+                    )
                     self._elastocaloric_prepared_ready = False
+                    self._elastocaloric_recovery_start_requested = False
                     self._automation_active = False
                     self._isolated_recipe_active = False
                     process.close(timeout_s=2.0)
@@ -34642,8 +34855,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._production_control_identity = None
                     self.label_control_process_status.setStyleSheet("color: #b91c1c;")
                     self.label_control_process_status.setText(
-                        "Controller: next jump rejected; preparation is no longer valid. "
-                        f"{detail}"
+                        (
+                            "Controller: prepared recovery rejected; outputs were preserved. "
+                            if recovery_rejected
+                            else "Controller: next jump rejected; preparation is no longer valid. "
+                        )
+                        + detail
                     )
                     self.label_control_process_status.setVisible(True)
                     self._update_recipe_buttons()
@@ -35070,6 +35287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_paused = False
         self._automation_steps = []
         self._automation_index = 0
+        self._elastocaloric_recovery_start_requested = False
         self._elastocaloric_prepared_ready = retain_prepared_controller
         if not retain_prepared_controller:
             self._production_control_process = None

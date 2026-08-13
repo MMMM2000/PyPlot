@@ -20791,6 +20791,51 @@ def test_isolated_elastocaloric_completion_retains_prepared_controller(
         _close_test_window(window)
 
 
+def test_recover_prepared_series_starts_nonmutating_adoption_request(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    assert window.button_recover_elastocaloric_series.isHidden() is True
+    window._set_developer_elastocaloric_current_preservation(True)
+    window._update_recipe_buttons()
+    assert window.button_recover_elastocaloric_series.isHidden() is False
+    assert window.button_recover_elastocaloric_series.parent() is not window.recipe_action_footer
+    window._build_automation_recipe = lambda: ([], "recovered jump", 10)  # type: ignore[method-assign]
+    window._confirm_current_sweep_load_limit_plan = lambda: True  # type: ignore[method-assign]
+    window._using_shared_broker_supply = lambda: True  # type: ignore[method-assign]
+    window._sync_stale_log_name_from_sample = lambda: None  # type: ignore[method-assign]
+    window._preflight_isolated_session_output = lambda: True  # type: ignore[method-assign]
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: mini_dma_mod.QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+
+    try:
+        window._recover_prepared_elastocaloric_series()
+
+        assert process.started is True
+        assert len(process.requests) == 1
+        payload = json.loads(process.requests[0].config_json)
+        assert payload["adopt_prepared_elastocaloric"] is True
+        assert window._isolated_recipe_active is True
+        assert window._automation_phase == "starting_recovered_series"
+        assert window.recipe_progress.format() == "Recovering energized prepared series"
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        window._production_control_process = None
+        window._production_control_identity = None
+        process.close()
+        _close_test_window(window)
+
+
 def test_prepared_elastocaloric_continuation_builds_one_fresh_baseline_jump_release(
     tmp_path: Path, qtbot
 ) -> None:
