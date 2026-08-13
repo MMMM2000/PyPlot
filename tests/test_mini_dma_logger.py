@@ -12121,31 +12121,33 @@ def test_elastocaloric_developer_close_preservation_requires_confirmed_baseline(
     ]
 
 
-def test_output_folder_picker_uses_responsive_non_native_dialog(
+def test_output_folder_picker_uses_direct_path_entry_without_cloud_enumeration(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     selected = tmp_path / "Praha" / "data"
-    observed: list[bool] = []
+    observed: list[tuple[str, str]] = []
 
-    def _exec(dialog: QtWidgets.QFileDialog) -> int:
-        observed.append(
-            dialog.testOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
-        )
-        return int(QtWidgets.QDialog.DialogCode.Accepted)
+    def _get_text(
+        _parent: QtWidgets.QWidget,
+        title: str,
+        prompt: str,
+        _echo_mode: QtWidgets.QLineEdit.EchoMode,
+        initial: str,
+    ) -> tuple[str, bool]:
+        observed.append((title, prompt))
+        assert initial == window.edit_log_dir.text()
+        return f'  "{selected}"  ', True
 
-    monkeypatch.setattr(QtWidgets.QFileDialog, "exec", _exec)
-    monkeypatch.setattr(
-        QtWidgets.QFileDialog,
-        "selectedFiles",
-        lambda _dialog: [str(selected)],
-    )
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", _get_text)
     try:
         window._choose_log_dir()
 
-        assert observed == [True]
+        assert observed
+        assert observed[0][0] == "Set output folder"
+        assert "cloud-backed" in observed[0][1]
         assert window.edit_log_dir.text() == str(selected)
     finally:
         _close_test_window(window)

@@ -40696,23 +40696,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
-        dialog = QtWidgets.QFileDialog(
+        selected, accepted = QtWidgets.QInputDialog.getText(
             self,
-            "Select output folder",
+            "Set output folder",
+            "Output folder path:\n"
+            "Enter or paste the full path. This avoids enumerating cloud-backed "
+            "folders, which can freeze while Google Drive is syncing or moving files.",
+            QtWidgets.QLineEdit.EchoMode.Normal,
             start_dir,
         )
-        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
-        # The native Windows shell folder picker can synchronously enumerate
-        # cloud-backed DriveFS paths and make the whole TMA window appear
-        # frozen. The Qt dialog keeps that work inside the application event
-        # loop and remains responsive on the restructured Praha data tree.
-        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+        if not accepted:
             return
-        selected = dialog.selectedFiles()
+        selected = str(selected).strip().strip('"')
         if selected:
-            self.edit_log_dir.setText(str(selected[0]))
+            self.edit_log_dir.setText(selected)
 
     def _open_log_dir(self) -> None:
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir()).expanduser()
