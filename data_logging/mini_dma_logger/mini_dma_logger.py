@@ -34275,13 +34275,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        try:
-            _steps, _summary, interval_ms = self._build_automation_recipe()
-        except ValueError as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
-            return
-        if not self._confirm_current_sweep_load_limit_plan():
-            return
+        interval_ms = 10
         if not self._using_shared_broker_supply():
             shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
             if shared_index < 0:
@@ -34290,9 +34284,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
             self.combo_supply_profile.setCurrentIndex(shared_index)
-        self._sync_stale_log_name_from_sample()
-        if not self._preflight_isolated_session_output():
-            return
         process = self._create_production_control_process()
         try:
             process.start_process()
@@ -34362,7 +34353,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._elastocaloric_recovery_start_requested = True
         self.recipe_progress.setRange(0, 1000)
         self.recipe_progress.setValue(0)
-        self.recipe_progress.setFormat("Recovering energized prepared series")
+        self.recipe_progress.setFormat("Verifying energized prepared series")
         self.label_control_process_status.setStyleSheet("color: #2563eb;")
         self.label_control_process_status.setText(
             "Controller: verifying energized prepared specimen without changing PSU outputs."
@@ -35228,6 +35219,9 @@ class MainWindow(QtWidgets.QMainWindow):
         session_stop_label = str(final_readback.get("session_stop_label") or "")
         session_stop_detail = str(final_readback.get("session_stop_detail") or "")
         wire_break_terminal = session_stop_reason == "wire_break_or_contact_loss"
+        recovery_adopted = bool(
+            final_readback.get("elastocaloric_recovery_adopted", False)
+        )
         metadata_fault = session_stop_category == "fault"
         terminal_fault = state in {ControlState.FAULTED, ControlState.EMERGENCY} or metadata_fault
         retain_prepared_controller = bool(
@@ -35244,11 +35238,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if wire_break_terminal:
             terminal_task = "Wire break or contact loss (final values)"
         elif state is ControlState.STOPPED:
-            terminal_task = (
-                "Recipe stopped (final values)"
-                if user_stop_requested
-                else "Recipe completed (final values)"
-            )
+            if recovery_adopted:
+                terminal_task = "Prepared series recovered"
+            else:
+                terminal_task = (
+                    "Recipe stopped (final values)"
+                    if user_stop_requested
+                    else "Recipe completed (final values)"
+                )
         elif state is ControlState.EMERGENCY:
             terminal_task = "Emergency stop (final values)"
         else:
@@ -35345,7 +35342,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if retain_prepared_controller:
             self.label_control_process_status.setText(
-                "Controller: prepared at the confirmed baseline; CH4 held for the next jump."
+                (
+                    "Controller: energized prepared series recovered; ready for the next jump."
+                    if recovery_adopted
+                    else "Controller: prepared at the confirmed baseline; CH4 held for the next jump."
+                )
             )
         self.label_control_process_status.setVisible(
             terminal_fault or retain_prepared_controller

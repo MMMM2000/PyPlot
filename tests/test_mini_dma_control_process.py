@@ -997,15 +997,17 @@ def test_production_backend_adopts_energized_elastocaloric_baseline_without_moti
     assert window.lifecycle_calls == [
         "hardware_preflight",
         "outputs_preserved",
-        "recipe_start",
     ]
     assert window._elastocaloric_continue_prepared_requested is True
     assert window._elastocaloric_prepared_baseline_mm == pytest.approx(1.25)
     assert window._elastocaloric_prepared_current_mA == pytest.approx(2.0)
+    assert window._automation_active is False
     assert window._preserve_current_supply_on_close is True
     assert window._preserve_motor_supply_on_close is True
     assert window.supply_disable_calls == 0
     assert window.motor_supply_disable_calls == 0
+    assert backend.completion_detail() == "prepared elastocaloric series recovered"
+    assert window._elastocaloric_prepared_ready is True
     backend.close()
 
 

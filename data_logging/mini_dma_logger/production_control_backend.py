@@ -477,18 +477,16 @@ class ProductionTmaBackend:
         window._elastocaloric_prepared_current_mA = expected_current
         window._elastocaloric_prepared_output_confirmed = True
         window._elastocaloric_prepared_ready = True
+        window._elastocaloric_release_confirmed = True
+        window._elastocaloric_recovery_adopted = True
         window._supply_output_enabled = True
-        window._controller_process_prior_run_preflight_complete = True
-        window._controller_process_hardware_preflight_complete = True
+        window._automation_name = "elastocaloric_effect"
+        window._automation_phase = "prepared_recovered"
         window._log(
             "Recovered energized elastocaloric baseline without motor motion: "
             f"position {prepared_position:.6f} mm, stress {float(prepared_stress):.3f} MPa, "
             f"current {float(measured_current):.2f} mA."
         )
-        window._start_auto_ramp()
-        self._drain_events()
-        if not window._automation_active:
-            raise RuntimeError("recovered elastocaloric jump did not start")
         self._hardware_preflight = _hardware_preflight_readback(window)
         self._started = True
         self._stopped = False
@@ -746,6 +744,10 @@ class ProductionTmaBackend:
                 bool(getattr(window, "_elastocaloric_prepared_ready", False)),
             ),
             (
+                "elastocaloric_recovery_adopted",
+                bool(getattr(window, "_elastocaloric_recovery_adopted", False)),
+            ),
+            (
                 "elastocaloric_prepared_output_confirmed",
                 bool(
                     getattr(
@@ -949,6 +951,10 @@ class ProductionTmaBackend:
                         "was not freshly confirmed; prepared continuation was rejected."
                     )
             self._stopped = True
+            if bool(
+                getattr(self._window, "_elastocaloric_recovery_adopted", False)
+            ):
+                return "prepared elastocaloric series recovered"
             return "production recipe completed"
         return None
 

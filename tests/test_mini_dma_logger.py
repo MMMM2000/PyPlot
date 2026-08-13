@@ -20791,6 +20791,47 @@ def test_isolated_elastocaloric_completion_retains_prepared_controller(
         _close_test_window(window)
 
 
+def test_recovered_elastocaloric_controller_becomes_idle_run_next_jump(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    process.start_process()
+    window._production_control_process = process  # type: ignore[assignment]
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={
+                "elastocaloric_recovery_adopted": True,
+                "elastocaloric_prepared_ready": True,
+                "elastocaloric_prepared_output_confirmed": True,
+                "elastocaloric_release_confirmed": True,
+                "preserve_current_supply_on_close": True,
+                "position_mm": 1.25,
+            },
+        )
+
+        assert process.closed is False
+        assert window._production_control_process is process
+        assert window._elastocaloric_prepared_ready is True
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+        assert window.button_start_recipe.text() == "Run next jump"
+        assert window._isolated_terminal_task == "Prepared series recovered"
+        assert "ready for the next jump" in window.label_control_process_status.text()
+    finally:
+        window._production_control_process = None
+        window._elastocaloric_prepared_ready = False
+        process.close()
+        _close_test_window(window)
+
+
 def test_recover_prepared_series_starts_nonmutating_adoption_request(
     tmp_path: Path,
     qtbot,
@@ -20805,11 +20846,19 @@ def test_recover_prepared_series_starts_nonmutating_adoption_request(
     window._update_recipe_buttons()
     assert window.button_recover_elastocaloric_series.isHidden() is False
     assert window.button_recover_elastocaloric_series.parent() is not window.recipe_action_footer
-    window._build_automation_recipe = lambda: ([], "recovered jump", 10)  # type: ignore[method-assign]
-    window._confirm_current_sweep_load_limit_plan = lambda: True  # type: ignore[method-assign]
+    window._build_automation_recipe = (  # type: ignore[method-assign]
+        lambda: pytest.fail("recovery must not build or start a recipe")
+    )
+    window._confirm_current_sweep_load_limit_plan = (  # type: ignore[method-assign]
+        lambda: pytest.fail("recovery must not confirm a recipe load plan")
+    )
     window._using_shared_broker_supply = lambda: True  # type: ignore[method-assign]
-    window._sync_stale_log_name_from_sample = lambda: None  # type: ignore[method-assign]
-    window._preflight_isolated_session_output = lambda: True  # type: ignore[method-assign]
+    window._sync_stale_log_name_from_sample = (  # type: ignore[method-assign]
+        lambda: pytest.fail("recovery must not prepare recipe output")
+    )
+    window._preflight_isolated_session_output = (  # type: ignore[method-assign]
+        lambda: pytest.fail("recovery must not inspect or create recipe output")
+    )
     window._create_production_control_process = lambda: process  # type: ignore[method-assign]
     monkeypatch.setattr(
         mini_dma_mod.QtWidgets.QMessageBox,
@@ -20826,7 +20875,7 @@ def test_recover_prepared_series_starts_nonmutating_adoption_request(
         assert payload["adopt_prepared_elastocaloric"] is True
         assert window._isolated_recipe_active is True
         assert window._automation_phase == "starting_recovered_series"
-        assert window.recipe_progress.format() == "Recovering energized prepared series"
+        assert window.recipe_progress.format() == "Verifying energized prepared series"
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
