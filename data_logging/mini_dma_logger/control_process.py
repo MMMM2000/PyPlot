@@ -36,6 +36,10 @@ class ControlState(str, Enum):
     FAULTED = "faulted"
 
 
+class ControlStartRejected(RuntimeError):
+    """A non-mutating idle start precondition failed."""
+
+
 class ControlCommandKind(str, Enum):
     START = "start"
     PAUSE = "pause"
@@ -582,6 +586,9 @@ class _ControlProcessRuntime:
         if request.identity.generation <= previous_generation:
             self._reject("start generation is stale", identity=command.identity)
             return
+        previous_identity = self._identity
+        previous_request = self._request
+        previous_state = self._state
         self._identity = request.identity
         self._request = request
         self._highest_generation_by_session[request.identity.session_id] = (
@@ -589,7 +596,22 @@ class _ControlProcessRuntime:
         )
         self._tick_count = 0
         self._backend.set_current_hold_bypass(False)
-        self._backend.start(request)
+        try:
+            self._backend.start(request)
+        except ControlStartRejected as exc:
+            self._identity = previous_identity
+            self._request = previous_request
+            self._state = previous_state
+            if previous_generation:
+                self._highest_generation_by_session[request.identity.session_id] = (
+                    previous_generation
+                )
+            else:
+                self._highest_generation_by_session.pop(
+                    request.identity.session_id, None
+                )
+            self._reject(str(exc), identity=command.identity)
+            return
         self._state = ControlState.RUNNING
         self._accept_command("recipe started")
         now_s = time.monotonic()
@@ -992,6 +1014,7 @@ __all__ = [
     "ControlSnapshot",
     "ControlStartRequest",
     "ControlState",
+    "ControlStartRejected",
     "TmaControlProcess",
     "SimulatedBackendConfig",
     "SimulatedControlBackend",

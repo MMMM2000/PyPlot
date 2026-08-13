@@ -23,6 +23,7 @@ from data_logging.mini_dma_logger.control_process import (
     ControlPolicy,
     ControlSessionIdentity,
     ControlSnapshot,
+    ControlStartRejected,
     ControlStartRequest,
     ControlState,
     MiniDmaControlProcess,
@@ -694,9 +695,18 @@ class _FakeProductionWindow:
         self._preserve_motor_supply_on_close = False
         self._preserve_current_supply_on_close = False
         self._elastocaloric_release_confirmed = False
+        self._elastocaloric_prepared_ready = False
+        self._elastocaloric_prepared_baseline_mm = None
+        self._elastocaloric_prepared_current_mA = None
+        self._elastocaloric_continue_prepared_requested = False
         self._control_process_log_sink = None
         self.spin_initial_length = QtWidgets.QDoubleSpinBox()
         self.spin_initial_length.setValue(57.25)
+        self.spin_elastocaloric_hold_mA = QtWidgets.QDoubleSpinBox()
+        self.spin_elastocaloric_hold_mA.setValue(2.0)
+        self.spin_steps_per_mm = QtWidgets.QDoubleSpinBox()
+        self.spin_steps_per_mm.setRange(1.0, 100000.0)
+        self.spin_steps_per_mm.setValue(800.0)
 
     def _build_automation_recipe(self) -> tuple[list[object], str, int]:
         return (
@@ -714,6 +724,25 @@ class _FakeProductionWindow:
         assert show_progress is False
         self.lifecycle_calls.append("hardware_preflight")
         return True
+
+    def _refresh_tic_status(self) -> None:
+        return None
+
+    def _refresh_supply_snapshot(self, *, force: bool = False) -> dict[str, float | None]:
+        assert force is True
+        return dict(self._supply_snapshot)
+
+    def _current_sweep_supply_channel(self) -> int:
+        return 4
+
+    def _supply_channel_output_state(self, _channel: int) -> bool:
+        return True
+
+    def _has_fresh_scale_reading(self) -> bool:
+        return True
+
+    def _latest_ir_snapshot(self) -> dict[str, float]:
+        return {"sample_age_s": 0.01}
 
     def set_length_setup_automation_values(
         self,
@@ -890,6 +919,92 @@ def test_production_backend_preserves_elastocaloric_current_after_confirmed_rele
 
     assert backend.completion_detail() == "production recipe completed"
     assert backend._window._preserve_current_supply_on_close is True
+    readback = dict(backend.readback())
+    assert readback["elastocaloric_release_confirmed"] is True
+    assert readback["preserve_current_supply_on_close"] is True
+    backend.close()
+
+
+def test_production_backend_reuses_prepared_elastocaloric_window_without_preflight() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace","cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+    window = backend._window
+    window._automation_active = False
+    window._session_active = False
+    window._elastocaloric_prepared_ready = True
+    window._elastocaloric_prepared_baseline_mm = 1.25
+    window._elastocaloric_prepared_current_mA = 2.0
+    backend._stopped = True
+
+    backend.start(
+        ControlStartRequest(
+            identity=ControlSessionIdentity("prepared-next", 2),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},'
+                '"continue_prepared_elastocaloric":true}'
+            ),
+        )
+    )
+
+    assert backend._window is window
+    assert window.lifecycle_calls == [
+        "hardware_preflight",
+        "recipe_start",
+        "recipe_start",
+    ]
+    assert window._elastocaloric_continue_prepared_requested is True
+    backend.close()
+
+
+def test_prepared_elastocaloric_rejection_does_not_trigger_output_shutdown() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace","cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+    window = backend._window
+    window._automation_active = False
+    window._session_active = False
+    window._elastocaloric_prepared_ready = True
+    window._elastocaloric_prepared_baseline_mm = 1.25
+    window._elastocaloric_prepared_current_mA = 30.0
+    window.spin_elastocaloric_hold_mA.setValue(30.0)
+    backend._stopped = True
+
+    with pytest.raises(ControlStartRejected, match="CH4 current"):
+        backend.start(
+            ControlStartRequest(
+                identity=ControlSessionIdentity("prepared-rejected", 2),
+                policy=ControlPolicy.PRAGUE,
+                config_json=(
+                    '{"schema_version":1,"widgets":{},'
+                    '"continue_prepared_elastocaloric":true}'
+                ),
+            )
+        )
+
+    assert window.supply_disable_calls == 0
+    assert window.motor_supply_disable_calls == 0
     backend.close()
 
 

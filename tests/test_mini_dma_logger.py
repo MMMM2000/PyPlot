@@ -2015,6 +2015,35 @@ def test_process_owned_momentary_bypass_resumes_hold_and_restores_logic(
         _close_test_window(window)
 
 
+@pytest.mark.parametrize(
+    "recipe_mode",
+    [
+        mini_dma_mod.CURRENT_SWEEP_STRESS,
+        mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP,
+        mini_dma_mod.ELASTOCALORIC_EFFECT,
+    ],
+)
+def test_process_owned_momentary_bypass_is_available_to_every_current_hold_recipe(
+    tmp_path: Path,
+    qtbot,
+    recipe_mode: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_active = True
+        window._session_active = True
+        window._automation_paused = False
+        window._automation_name = recipe_mode
+
+        accepted, detail = window._set_current_hold_bypass_active(True)
+
+        assert accepted is True
+        assert detail == "current-hold bypass active"
+        assert window._current_hold_bypass_active is True
+    finally:
+        _close_test_window(window)
+
+
 def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
     tmp_path: Path,
     qtbot,
@@ -2196,6 +2225,54 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         assert window._isolated_recipe_active is False
         assert window._current_position_mm == pytest.approx(1.25)
     finally:
+        _close_test_window(window)
+
+
+def test_visible_ui_receives_elastocaloric_current_preservation_confirmation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    process.start_process()
+    identity = mini_dma_mod.ControlSessionIdentity("elastocaloric-preserve", 1)
+    window._production_control_process = process  # type: ignore[assignment]
+    window._production_control_identity = identity
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    process.next_snapshot = SimpleNamespace(
+        identity=identity,
+        state=mini_dma_mod.ControlState.RUNNING,
+        sequence=1,
+        monotonic_s=time.monotonic(),
+        tick_count=1,
+        last_command_sequence=0,
+        last_command_result="",
+        last_command_detail="",
+        policy=mini_dma_mod.ControlPolicy.PRAGUE,
+        owner_pid=process.pid,
+        dropped_event_count=0,
+        readback={
+            "automation_active": True,
+            "automation_phase": "release",
+            "automation_index": 0,
+            "automation_completed": 0,
+            "automation_total": 1,
+            "task": "synthetic elastocaloric release",
+            "elastocaloric_release_confirmed": True,
+            "preserve_current_supply_on_close": True,
+        },
+    )
+
+    try:
+        window._poll_production_control_process()
+        assert window._elastocaloric_release_confirmed is True
+        assert window._preserve_current_supply_on_close is True
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        window._production_control_process = None
+        window._production_control_identity = None
         _close_test_window(window)
 
 
@@ -10975,6 +11052,7 @@ def test_elastocaloric_recipe_builds_timed_strain_jump_with_hysteresis_current(t
         window.spin_elastocaloric_hold_mA.setValue(40.0)
         window.spin_elastocaloric_pull_duration_s.setValue(3.0)
         window.spin_elastocaloric_release_duration_s.setValue(3.5)
+        window.spin_elastocaloric_accel.setValue(400_000)
         window.spin_elastocaloric_stabilize_s.setValue(30.0)
         window.spin_elastocaloric_repetitions.setValue(3)
         window.spin_constant_current_hold_s.setValue(6.0)
@@ -11096,7 +11174,7 @@ def test_elastocaloric_transition_seek_path_does_not_require_mechanical_note(tmp
     try:
         window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
         window._force_control_profile = lambda: mini_dma_mod.ForceControlProfile.PRAGUE_LEGACY  # type: ignore[method-assign]
-        window._has_fresh_scale_reading = lambda: True  # type: ignore[method-assign]
+        window._has_fresh_scale_reading = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
         window._current_distribution_value = lambda *_args, **_kwargs: 10.0  # type: ignore[method-assign]
         window._distribution_target_tolerance = lambda *_args, **_kwargs: 0.5  # type: ignore[method-assign]
 
@@ -12044,6 +12122,7 @@ def test_elastocaloric_normal_completion_preserves_current_only_after_confirmed_
     try:
         window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
         window._automation_active = True
+        window._session_active = True
         window._supply_output_enabled = True
         window._elastocaloric_release_confirmed = True
         window._disable_supply_output = lambda: disabled.append(True)  # type: ignore[method-assign]
@@ -12052,6 +12131,11 @@ def test_elastocaloric_normal_completion_preserves_current_only_after_confirmed_
             log_completion=False,
             stop_reason="recipe_completed",
             stop_detail="Recipe completed.",
+            preserve_current_output=True,
+        )
+        window._stop_session(
+            reason="recipe_completed",
+            detail="Recipe completed.",
             preserve_current_output=True,
         )
 
@@ -20358,6 +20442,7 @@ def test_iso_current_one_milliamp_low_stress_backlash_acceptance_completes_trans
     window._current_sweep_ramp_hold_started_s = 100.0
     window._current_sweep_ramp_hold_seek_accepted_since_s = 100.0
     window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._current_sweep_endpoint_recovered = lambda _step: True  # type: ignore[method-assign]
     window._current_distribution_value = lambda *_args, **_kwargs: 6.8  # type: ignore[method-assign]
     window._maybe_record_scheduled_point = lambda **_kwargs: True  # type: ignore[method-assign]
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 102.0)
@@ -20569,6 +20654,181 @@ def test_iso_current_settle_advances_after_timed_recovery_even_if_target_is_nois
         assert attempts["count"] == 2
     finally:
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_elastocaloric_completion_retains_prepared_controller(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    process.start_process()
+    window._production_control_process = process  # type: ignore[assignment]
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={
+                "elastocaloric_prepared_ready": True,
+                "elastocaloric_prepared_output_confirmed": True,
+                "elastocaloric_release_confirmed": True,
+                "preserve_current_supply_on_close": True,
+                "position_mm": 1.25,
+            },
+        )
+
+        assert process.closed is False
+        assert window._production_control_process is process
+        assert window._elastocaloric_prepared_ready is True
+        assert window.button_start_recipe.text() == "Run next jump"
+        assert window.manual_actions_box.isEnabled() is False
+    finally:
+        window._production_control_process = None
+        window._elastocaloric_prepared_ready = False
+        process.close()
+        _close_test_window(window)
+
+
+def test_prepared_elastocaloric_continuation_builds_one_fresh_baseline_jump_release(
+    tmp_path: Path, qtbot
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_constant_current_end_target.setValue(1.5)
+        window.spin_initial_length.setValue(30.0)
+        window.spin_constant_current_start_mA.setValue(30.0)
+        window.spin_elastocaloric_hold_mA.setValue(30.0)
+        window.spin_elastocaloric_stabilize_s.setValue(30.0)
+        window.spin_elastocaloric_repetitions.setValue(9)
+        window._elastocaloric_continue_prepared_requested = True
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        assert [step.action for step in steps] == [
+            "settle",
+            "mark_current_zero",
+            "mechanical_scan",
+            "mechanical_scan",
+        ]
+        assert [step.note for step in steps] == [
+            "elastocaloric:continued_pre_pull_baseline",
+            "elastocaloric:continued_motion_zero",
+            "elastocaloric:continued_pull",
+            "elastocaloric:continued_release",
+        ]
+        assert steps[0].target_value is None
+        assert steps[0].basis is None
+        assert steps[0].duration_s == pytest.approx(30.0)
+        assert [step.target_value for step in steps[2:]] == pytest.approx([1.5, 0.0])
+        assert not any(step.action in {"seek_target", "sweep_current"} for step in steps)
+        assert "Continued prepared elastocaloric series" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_elastocaloric_transition_settle_restarts_until_target_is_recovered(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    target_recovered = [False]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    window._seek_distribution_target = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: target_recovered[0]
+    )
+    window._elastocaloric_camera_interlock_active = (  # type: ignore[method-assign]
+        lambda: False
+    )
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.ELASTOCALORIC_EFFECT
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=1.0,
+            note="transition_settle",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+        assert window._automation_index == 0
+        assert window._active_timed_step_index is None
+
+        target_recovered[0] = True
+        now_s[0] = 101.0
+        window._handle_auto_ramp_tick()
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+
+        now_s[0] = 102.2
+        window._handle_auto_ramp_tick()
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_endpoint_waits_for_measured_current_and_post_endpoint_scale_samples(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    measured_mA = [27.7]
+    post_endpoint_signal: list[mini_dma_mod.ScaleControlSignal | None] = [None]
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=30.0,
+        current_ramp_rate_mA_s=5.0,
+        current_hold_enabled=True,
+    )
+    window._active_current_sweep_step_index = 2
+    window._refresh_supply_snapshot = (  # type: ignore[method-assign]
+        lambda **_kwargs: {"current_mA": measured_mA[0]}
+    )
+    window._supply_current_resolution_mA = lambda: 0.2  # type: ignore[method-assign]
+    window._latest_scale_sample_time_s = lambda: 500.0  # type: ignore[method-assign]
+    window._scale_control_signal_for_basis = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: post_endpoint_signal[0]
+    )
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (0.0, 0.0, 0.5, 0.0)
+    )
+
+    try:
+        assert window._current_sweep_endpoint_recovered(step) is False
+        assert window._current_sweep_endpoint_scale_start_s is None
+
+        measured_mA[0] = 30.0
+        assert window._current_sweep_endpoint_recovered(step) is False
+        assert window._current_sweep_endpoint_scale_start_s == pytest.approx(500.0)
+
+        post_endpoint_signal[0] = mini_dma_mod.ScaleControlSignal(
+            value=20.0,
+            latest_value=20.0,
+            noise=0.0,
+            slope_per_s=0.0,
+            sample_count=3,
+            timestamp_s=500.5,
+        )
+        assert window._current_sweep_endpoint_recovered(step) is True
+    finally:
         _close_test_window(window)
 
 
@@ -33247,6 +33507,46 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
         _close_test_window(window)
 
 
+def test_elastocaloric_transition_hold_uses_iso_stress_correction_policy(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(41.0)
+    window.spin_diameter.setValue(0.03)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_distribution_nudge_mm.setValue(0.01)
+    window._calibrated_stiffness_g_per_mm = 72.0
+    window._calibrated_stiffness_length_mm = 41.0
+
+    try:
+        steps_by_mode: dict[str, float] = {}
+        for mode in (mini_dma_mod.CURRENT_SWEEP_STRESS, mini_dma_mod.ELASTOCALORIC_EFFECT):
+            window._automation_name = mode
+            window._set_automation_context(
+                phase="current_hold",
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=20.0,
+                plateau_index=1,
+            )
+            seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+            steps_by_mode[mode] = window._predictive_seek_step_mm(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                error_value=30.0,
+                tolerance=0.1,
+                seek_key=seek_key,
+            )
+
+        assert steps_by_mode[mini_dma_mod.ELASTOCALORIC_EFFECT] == pytest.approx(
+            steps_by_mode[mini_dma_mod.CURRENT_SWEEP_STRESS]
+        )
+        assert steps_by_mode[mini_dma_mod.ELASTOCALORIC_EFFECT] > window.spin_distribution_nudge_mm.value()
+        assert window._seek_uses_processed_scale_signal() is True
+        assert window._current_sweep_freezes_live_stiffness() is True
+    finally:
+        _close_test_window(window)
+
+
 def test_flat_seek_feedback_continues_for_shape_memory_plateau(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
@@ -33989,6 +34289,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_elastocaloric_repetitions.setValue(4)
         window.spin_elastocaloric_pull_duration_s.setValue(2.5)
         window.spin_elastocaloric_release_duration_s.setValue(3.5)
+        window.spin_elastocaloric_accel.setValue(400_000)
         window.spin_constant_current_hold_s.setValue(7.0)
         window.spin_elastocaloric_release_record_s.setValue(9.0)
         window.spin_constant_current_start_mA.setValue(50.0)
@@ -34011,6 +34312,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert elastocaloric["measurement_count"] == 4
         assert elastocaloric["pull_duration_s"] == pytest.approx(2.5)
         assert elastocaloric["release_duration_s"] == pytest.approx(3.5)
+        assert elastocaloric["motion_accel_tic_units"] == 400_000
         assert elastocaloric["record_after_jump_s"] == pytest.approx(7.0)
         assert elastocaloric["record_after_release_s"] == pytest.approx(9.0)
         assert elastocaloric["current_mA"] == pytest.approx(50.0)
@@ -34032,6 +34334,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_elastocaloric_repetitions.setValue(1)
         window.spin_elastocaloric_pull_duration_s.setValue(1.0)
         window.spin_elastocaloric_release_duration_s.setValue(1.0)
+        window.spin_elastocaloric_accel.setValue(100_000)
         window.spin_constant_current_hold_s.setValue(1.0)
         window.spin_elastocaloric_release_record_s.setValue(1.0)
         window.spin_constant_current_start_mA.setValue(5.0)
@@ -34051,6 +34354,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_elastocaloric_repetitions.value() == 4
         assert window.spin_elastocaloric_pull_duration_s.value() == pytest.approx(2.5)
         assert window.spin_elastocaloric_release_duration_s.value() == pytest.approx(3.5)
+        assert window.spin_elastocaloric_accel.value() == 400_000
         assert window.spin_constant_current_hold_s.value() == pytest.approx(7.0)
         assert window.spin_elastocaloric_release_record_s.value() == pytest.approx(9.0)
         assert window.spin_constant_current_start_mA.value() == pytest.approx(50.0)

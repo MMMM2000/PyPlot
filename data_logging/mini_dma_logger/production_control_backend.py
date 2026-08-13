@@ -16,7 +16,12 @@ import os
 import time
 from typing import Any, Mapping
 
-from .control_process import ControlPolicy, ControlStartRequest, ReadbackValue
+from .control_process import (
+    ControlPolicy,
+    ControlStartRejected,
+    ControlStartRequest,
+    ReadbackValue,
+)
 
 
 CONFIG_SCHEMA_VERSION = 1
@@ -263,6 +268,15 @@ class ProductionTmaBackend:
         from PyQt6 import QtWidgets
         from .mini_dma_logger import MainWindow
 
+        if bool(payload.get("continue_prepared_elastocaloric", False)):
+            try:
+                self._start_prepared_elastocaloric(request, payload)
+            except ControlStartRejected:
+                raise
+            except Exception as exc:
+                raise ControlStartRejected(str(exc)) from exc
+            return
+
         self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         factory = self._window_factory or MainWindow
         self._window = factory(
@@ -397,6 +411,55 @@ class ProductionTmaBackend:
                 or "controller process did not start the recipe"
             )
             raise RuntimeError(detail)
+        self._started = True
+        self._stopped = False
+
+    def _start_prepared_elastocaloric(
+        self,
+        request: ControlStartRequest,
+        payload: Mapping[str, object],
+    ) -> None:
+        window = self._require_window()
+        if not self._stopped or bool(window._automation_active):
+            raise RuntimeError("prepared elastocaloric controller is not idle")
+        if not bool(getattr(window, "_elastocaloric_prepared_ready", False)):
+            raise RuntimeError("the previous run did not leave a reusable prepared baseline")
+        prepared_position = getattr(window, "_elastocaloric_prepared_baseline_mm", None)
+        prepared_current = getattr(window, "_elastocaloric_prepared_current_mA", None)
+        if prepared_position is None or prepared_current is None:
+            raise RuntimeError("prepared baseline readback is incomplete")
+        _apply_window_configuration(window, payload)
+        requested_current = float(window.spin_elastocaloric_hold_mA.value())
+        if abs(requested_current - float(prepared_current)) > 0.05:
+            raise RuntimeError(
+                "prepared continuation cannot change the hold current "
+                f"({prepared_current:.2f} mA prepared, {requested_current:.2f} mA requested)"
+            )
+        window._refresh_tic_status()
+        position_tolerance_mm = 1.0 / max(1.0, float(window.spin_steps_per_mm.value()))
+        if abs(float(window._current_position_mm) - float(prepared_position)) > position_tolerance_mm:
+            raise RuntimeError(
+                "motor is no longer at the confirmed prepared baseline position"
+            )
+        supply_snapshot = window._refresh_supply_snapshot(force=True)
+        supply_current = supply_snapshot.get("current_mA")
+        if supply_current is None or abs(float(supply_current) - float(prepared_current)) > 0.5:
+            raise RuntimeError(
+                "CH4 current is not confirmed at the prepared hold setpoint"
+            )
+        if not window._has_fresh_scale_reading():
+            raise RuntimeError("scale feedback is not fresh for the next jump")
+        ir_snapshot = window._latest_ir_snapshot()
+        ir_age_s = ir_snapshot.get("sample_age_s")
+        if ir_age_s is None or float(ir_age_s) > 1.0:
+            raise RuntimeError("thermal-camera feedback is not fresh for the next jump")
+        window._elastocaloric_continue_prepared_requested = True
+        window._controller_process_prior_run_preflight_complete = True
+        window._controller_process_hardware_preflight_complete = True
+        window._start_auto_ramp()
+        self._drain_events()
+        if not window._automation_active:
+            raise RuntimeError("prepared elastocaloric jump did not start")
         self._started = True
         self._stopped = False
 
@@ -592,6 +655,32 @@ class ProductionTmaBackend:
                 bool(getattr(window, "_current_hold_bypass_active", False)),
             ),
             (
+                "elastocaloric_release_confirmed",
+                bool(getattr(window, "_elastocaloric_release_confirmed", False)),
+            ),
+            (
+                "preserve_current_supply_on_close",
+                bool(getattr(window, "_preserve_current_supply_on_close", False)),
+            ),
+            (
+                "elastocaloric_prepared_ready",
+                bool(getattr(window, "_elastocaloric_prepared_ready", False)),
+            ),
+            (
+                "elastocaloric_prepared_output_confirmed",
+                bool(
+                    getattr(
+                        window,
+                        "_elastocaloric_prepared_output_confirmed",
+                        False,
+                    )
+                ),
+            ),
+            (
+                "elastocaloric_prepared_baseline_mm",
+                getattr(window, "_elastocaloric_prepared_baseline_mm", None),
+            ),
+            (
                 "current_hold_fluctuation_classification",
                 str(
                     getattr(
@@ -751,7 +840,35 @@ class ProductionTmaBackend:
                     )
                 )
             ):
-                self._window._preserve_current_supply_on_close = True
+                channel = self._window._current_sweep_supply_channel()
+                output_on = (
+                    None
+                    if channel is None
+                    else self._window._supply_channel_output_state(channel)
+                )
+                supply_snapshot = self._window._refresh_supply_snapshot(force=True)
+                measured_current = supply_snapshot.get("current_mA")
+                prepared_current = getattr(
+                    self._window, "_elastocaloric_prepared_current_mA", None
+                )
+                if prepared_current is None:
+                    prepared_current = getattr(
+                        self._window, "_supply_last_setpoint_mA", None
+                    )
+                output_confirmed = bool(
+                    output_on is True
+                    and measured_current is not None
+                    and prepared_current is not None
+                    and abs(float(measured_current) - float(prepared_current)) <= 0.5
+                )
+                self._window._elastocaloric_prepared_output_confirmed = output_confirmed
+                self._window._elastocaloric_prepared_ready = output_confirmed
+                self._window._preserve_current_supply_on_close = output_confirmed
+                if not output_confirmed:
+                    self._capture_ui_log_line(
+                        "Elastocaloric release returned to baseline, but CH4 output/current "
+                        "was not freshly confirmed; prepared continuation was rejected."
+                    )
             self._stopped = True
             return "production recipe completed"
         return None

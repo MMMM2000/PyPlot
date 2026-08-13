@@ -5569,7 +5569,11 @@ class MiniDmaAutomationController:
             )
             host._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and host._session_active:
-                host._stop_session(reason="recipe_completed", detail="Recipe completed.")
+                host._stop_session(
+                    reason="recipe_completed",
+                    detail="Recipe completed.",
+                    preserve_current_output=host._preserve_current_supply_on_close,
+                )
             if not is_recovery and return_to_origin:
                 host._pending_recovery_return_duration_s = recovery_return_duration_s
                 host._start_recovery_position_origin()
@@ -5781,6 +5785,14 @@ class MiniDmaAutomationController:
             host._record_length_setup_point()
         current_sweep_timed_settle = host._settle_uses_timed_target_recovery()
         if setup_settle_phase:
+            current_sweep_timed_settle = False
+        if (
+            host._is_elastocaloric_mode(host._automation_name)
+            and step.note == "transition_settle"
+        ):
+            # The pre-pull baseline freezes the motor. Do not admit that phase
+            # until the final-current stress target has remained accepted for
+            # the configured transition-settle duration.
             current_sweep_timed_settle = False
         if not settle_target_reached and not current_sweep_timed_settle:
             host._reset_timed_step_state()
@@ -8336,6 +8348,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_prompt_generation = 0
         self._preserve_motor_supply_on_close = False
         self._preserve_current_supply_on_close = False
+        self._elastocaloric_prepared_ready = False
+        self._elastocaloric_prepared_baseline_mm: float | None = None
+        self._elastocaloric_prepared_current_mA: float | None = None
+        self._elastocaloric_prepared_output_confirmed = False
+        self._elastocaloric_continue_prepared_requested = False
         self._developer_preserve_elastocaloric_current_on_close = False
         self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
@@ -8702,6 +8719,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_hold_fluctuation_classification = "inactive"
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
         self._current_sweep_endpoint_seek_accepted_step_index: int | None = None
+        self._current_sweep_endpoint_scale_start_s: float | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
         self._current_sweep_ramp_hold_entry_signed_error: float | None = None
         self._current_sweep_ramp_hold_entry_pause_band: float | None = None
@@ -9007,8 +9025,9 @@ class MainWindow(QtWidgets.QMainWindow):
             dialog.installEventFilter(self)
             layout = QtWidgets.QVBoxLayout(dialog)
             explanation = QtWidgets.QLabel(
-                "Press and hold to bypass only the current-ramp stress hold. "
-                "Release restores normal hold logic immediately. All motor, "
+                "Press and hold to bypass pause-for-target-recovery in any TMA recipe. "
+                "The override has no effect in phases without a current hold. Release "
+                "restores normal hold logic immediately. All motor, "
                 "load, current, voltage, continuity, stale-data, and emergency "
                 "limits remain active."
             )
@@ -11782,6 +11801,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_release_duration_row = constant_current_form.labelForField(
             self.spin_elastocaloric_release_duration_s
         )
+        self.spin_elastocaloric_accel = QtWidgets.QSpinBox(automation_box)
+        self.spin_elastocaloric_accel.setRange(DEFAULT_TIC_MAX_ACCEL, 2_000_000)
+        self.spin_elastocaloric_accel.setSingleStep(100_000)
+        self.spin_elastocaloric_accel.setValue(200_000)
+        self.spin_elastocaloric_accel.setSuffix(" Tic units")
+        self.spin_elastocaloric_accel.setToolTip(
+            "Acceleration used only for the elastocaloric pull and release. "
+            "The normal Tic acceleration is restored when the measurement ends."
+        )
+        constant_current_form.addRow("Acceleration", self.spin_elastocaloric_accel)
+        self.label_elastocaloric_accel_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_accel
+        )
         self.label_elastocaloric_motion_plan = QtWidgets.QLabel(automation_box)
         self.label_elastocaloric_motion_plan.setWordWrap(True)
         self.label_elastocaloric_motion_plan.setTextInteractionFlags(
@@ -12127,6 +12159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
+            self.spin_elastocaloric_accel,
             self.spin_elastocaloric_hold_mA,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
@@ -12633,6 +12666,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
+            self.spin_elastocaloric_accel,
             self.spin_elastocaloric_hold_mA,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
@@ -19969,7 +20003,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity_per_mm: float | None,
     ) -> float | None:
         if (
-            not self._is_current_sweep_mode(self._automation_name)
+            not self._uses_current_sweep_force_control(self._automation_name)
             or self._automation_phase != "target_ramp"
             or self._automation_step_note == "setup_preload"
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -20778,6 +20812,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_current_sweep_mode(self, mode: str | None = None) -> bool:
         return str(mode if mode is not None else self.combo_recipe_mode.currentData() or "") in CURRENT_SWEEP_MODES
 
+    def _uses_current_sweep_force_control(self, mode: str | None = None) -> bool:
+        return self._is_current_sweep_mode(mode) or self._is_elastocaloric_mode(mode)
+
     def _is_constant_current_strain_sweep_mode(self, mode: str | None = None) -> bool:
         if mode is not None:
             return str(mode) == CONSTANT_CURRENT_STRAIN_SWEEP
@@ -20811,7 +20848,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._using_kern_kcp_scale() and self._is_iso_current_mode(mode)
 
     def _seek_uses_processed_scale_signal(self) -> bool:
-        return self._is_current_sweep_mode(self._automation_name) or self._kern_iso_current_uses_processed_seek_signal(
+        return self._uses_current_sweep_force_control(
+            self._automation_name
+        ) or self._kern_iso_current_uses_processed_seek_signal(
             self._automation_name
         )
 
@@ -21103,6 +21142,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_elastocaloric_release_record_s",
             "spin_elastocaloric_pull_duration_s",
             "spin_elastocaloric_release_duration_s",
+            "spin_elastocaloric_accel",
             "spin_elastocaloric_hold_mA",
             "label_elastocaloric_motion_plan",
         ):
@@ -21132,6 +21172,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_elastocaloric_release_record_row",
             "label_elastocaloric_pull_duration_row",
             "label_elastocaloric_release_duration_row",
+            "label_elastocaloric_accel_row",
             "label_elastocaloric_hold_mA_row",
             "label_elastocaloric_motion_plan_heading",
             "label_elastocaloric_motion_plan_row",
@@ -21459,7 +21500,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else float(self.spin_calibration_preload_nudge_mm.value())
             )
             return abs(float(value))
-        if self._is_current_sweep_mode(self._automation_name):
+        if self._uses_current_sweep_force_control(self._automation_name):
             return self._seek_speed_limited_step_mm(
                 self._automation_basis,
                 self._motion_speed_for_current_context(manual_jog=False),
@@ -21537,12 +21578,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_freezes_live_stiffness(self) -> bool:
         return (
-            self._is_current_sweep_mode(self._automation_name)
+            self._uses_current_sweep_force_control(self._automation_name)
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         )
 
     def _current_sweep_blocks_live_seek_stiffness_learning(self) -> bool:
-        if not self._is_current_sweep_mode(self._automation_name):
+        if not self._uses_current_sweep_force_control(self._automation_name):
             return False
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             return False
@@ -21580,7 +21621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not valid_stiffness:
             return None
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            self._uses_current_sweep_force_control(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._automation_phase != "target_ramp"
         ):
@@ -21778,7 +21819,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float] | None = None,
     ) -> float:
         if not (
-            self._is_current_sweep_mode(self._automation_name)
+            self._uses_current_sweep_force_control(self._automation_name)
             and self._automation_phase in {"target_ramp", "current", "current_hold", "current_limit_unwind"}
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -21970,7 +22011,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._seek_step_mm(error_value, tolerance, basis=basis)
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
-            if self._is_current_sweep_mode(self._automation_name):
+            if self._uses_current_sweep_force_control(self._automation_name):
                 return self._seek_speed_limited_step_mm(
                     basis,
                     self._motion_speed_for_current_context(manual_jog=False),
@@ -22002,7 +22043,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 self._motion_speed_for_current_context(manual_jog=False),
             )
-        elif self._is_current_sweep_mode(self._automation_name) or self._is_iso_current_stress_target_ramp(basis):
+        elif self._uses_current_sweep_force_control(
+            self._automation_name
+        ) or self._is_iso_current_stress_target_ramp(basis):
             correction_caps = [self._current_sweep_max_correction_mm()]
             stress_cap_mm = self._current_sweep_max_stress_correction_mm(
                 basis,
@@ -22064,7 +22107,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _use_backlash_compensation_for_current_recipe(self) -> bool:
         if self._is_calibration_mode(self._automation_name):
             return False
-        if self._is_current_sweep_mode(self._automation_name):
+        if self._uses_current_sweep_force_control(self._automation_name):
             return False
         return True
 
@@ -22466,7 +22509,7 @@ class MainWindow(QtWidgets.QMainWindow):
         filtered_signal: ScaleControlSignal | None,
     ) -> bool:
         if (
-            not self._is_current_sweep_mode(self._automation_name)
+            not self._uses_current_sweep_force_control(self._automation_name)
             or self._automation_phase != "current_hold"
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
         ):
@@ -22686,7 +22729,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._scale_control_signal_for_basis(
             basis,
-            trend_aware=self._is_current_sweep_mode(self._automation_name),
+            trend_aware=self._uses_current_sweep_force_control(self._automation_name),
         )
 
     def _current_sweep_hold_cycle_center_state(
@@ -22713,7 +22756,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_phase != "current_hold"
             and not hold_active
         ) or (
-            not self._is_current_sweep_mode(self._automation_name)
+            not self._uses_current_sweep_force_control(self._automation_name)
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or self._current_sweep_ramp_hold_scale_started_s is None
         ):
@@ -22925,7 +22968,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return min(base_speed, self._setup_slack_speed_mm_s())
         if (
             (
-                self._is_current_sweep_mode(self._automation_name)
+                self._uses_current_sweep_force_control(self._automation_name)
                 or self._is_constant_current_stress_ramp_mode(self._automation_name)
             )
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
@@ -22999,7 +23042,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._setup_preload_ramp_rate_for_current_value(basis, current_value, target_value)
         if self._active_target_ramp_rate_value_s is not None:
             return abs(float(self._active_target_ramp_rate_value_s))
-        if self._is_current_sweep_mode(self._automation_name) and basis in {
+        if self._uses_current_sweep_force_control(self._automation_name) and basis in {
             HSW_BASIS_LOAD_G,
             HSW_BASIS_STRESS_MPA,
             HSW_BASIS_STRAIN_PCT,
@@ -23035,7 +23078,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if (
             (
-                self._is_current_sweep_mode(self._automation_name)
+                self._uses_current_sweep_force_control(self._automation_name)
                 or self._is_constant_current_stress_ramp_mode(self._automation_name)
             )
             and not self._is_iso_current_stress_target_ramp(basis)
@@ -23105,7 +23148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return max(self._motor_step_mm(), abs(float(nudge_mm)))
         if (
             (
-                self._is_current_sweep_mode(self._automation_name)
+                self._uses_current_sweep_force_control(self._automation_name)
                 or self._is_iso_current_stress_target_ramp(basis)
             )
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
@@ -23181,7 +23224,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._end_zero_fallback_armed:
             return False
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            self._uses_current_sweep_force_control(self._automation_name)
             and self._automation_phase not in {"current", "current_hold"}
         ):
             return False
@@ -23263,7 +23306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            self._uses_current_sweep_force_control(self._automation_name)
             and self._automation_phase == "current_hold"
         ):
             return True
@@ -23691,7 +23734,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and self._is_current_sweep_mode(self._automation_name)
+            and self._uses_current_sweep_force_control(self._automation_name)
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         ):
             return self._seek_distribution_target_kosice(basis, target_value, tolerance)
@@ -24146,7 +24189,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if filtered_signal is not None:
             noise_component = filtered_signal.noise * self._current_sweep_hold_noise_sigma()
             if (
-                self._is_current_sweep_mode(self._automation_name)
+                self._uses_current_sweep_force_control(self._automation_name)
                 or self._kern_iso_current_uses_processed_seek_signal(self._automation_name)
             ):
                 noise_component = self._current_sweep_bounded_noise_band(
@@ -24576,7 +24619,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current_hold_correction_reason = "current_hold_reversal_single_step"
             if (
                 filtered_signal is not None
-                and self._is_current_sweep_mode(self._automation_name)
+                and self._uses_current_sweep_force_control(self._automation_name)
                 and self._automation_phase in {"current", "current_hold"}
             ):
                 reversal_sign = math.copysign(1.0, delta_value)
@@ -25433,12 +25476,11 @@ class MainWindow(QtWidgets.QMainWindow):
         strain_delta_pct = abs(float(self.spin_constant_current_end_target.value()))
         distance_mm = length_mm * strain_delta_pct / 100.0
         steps_per_mm = max(1e-9, float(self.spin_steps_per_mm.value()))
-        accel_decel = self._tic_accel_decel_mm_s2()
-        if accel_decel is None:
-            accel_decel = (
-                float(self.spin_tic_max_accel.value()) / 100.0 / steps_per_mm,
-                float(self.spin_tic_max_decel.value()) / 100.0 / steps_per_mm,
-            )
+        selected_accel = float(self.spin_elastocaloric_accel.value())
+        accel_decel = (
+            selected_accel / 100.0 / steps_per_mm,
+            selected_accel / 100.0 / steps_per_mm,
+        )
         # Position commands write their own max-speed immediately before the
         # target. The persistent Tic max-speed is therefore only the idle
         # profile, not the ceiling for an elastocaloric jump.
@@ -25458,6 +25500,10 @@ class MainWindow(QtWidgets.QMainWindow):
         pull = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_pull_duration_s.value()))
         release = self._elastocaloric_motion_plan(float(self.spin_elastocaloric_release_duration_s.value()))
         strain_delta_pct = abs(float(self.spin_constant_current_end_target.value()))
+        steps_per_mm = max(1e-9, float(self.spin_steps_per_mm.value()))
+        acceleration_mm_s2 = (
+            float(self.spin_elastocaloric_accel.value()) / 100.0 / steps_per_mm
+        )
         plans = (("pull", pull), ("release", release))
         parts = []
         for name, plan in plans:
@@ -25469,7 +25515,11 @@ class MainWindow(QtWidgets.QMainWindow):
         feasible = all(plan.feasible for _name, plan in plans)
         if feasible:
             self.label_elastocaloric_motion_plan.setStyleSheet("color: palette(text);")
-            self.label_elastocaloric_motion_plan.setText("; ".join(parts) + ".")
+            self.label_elastocaloric_motion_plan.setText(
+                "; ".join(parts)
+                + f"; acceleration {acceleration_mm_s2:.3f} mm/s² "
+                f"({self.spin_elastocaloric_accel.value()} Tic units)."
+            )
         else:
             minimum_s = max(plan.minimum_duration_s for _name, plan in plans)
             self.label_elastocaloric_motion_plan.setStyleSheet("color: #d97706; font-weight: 600;")
@@ -27144,7 +27194,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._automation_basis == HSW_BASIS_STRESS_MPA
             ):
                 return self._setup_motion_speed_cap_mm_s()
-            if self._is_current_sweep_mode(self._automation_name) or self._is_constant_current_stress_ramp_mode(
+            if self._uses_current_sweep_force_control(
+                self._automation_name
+            ) or self._is_constant_current_stress_ramp_mode(
                 self._automation_name
             ):
                 return max(
@@ -29413,6 +29465,7 @@ class MainWindow(QtWidgets.QMainWindow):
         *_args: object,
         reason: str | None = None,
         detail: str | None = None,
+        preserve_current_output: bool = False,
     ) -> None:
         if not self._is_ui_thread():
             self._call_on_ui_thread_sync(
@@ -29421,6 +29474,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "_stop_session",
                     reason=reason,
                     detail=detail,
+                    preserve_current_output=preserve_current_output,
                 )
             )
             return
@@ -29528,7 +29582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         point_count = self._session_point_count()
         _stop_category, stop_label = self._session_stop_label(self._session_stop_reason)
         self.label_session_status.setText(f"Session saved ({point_count} point(s)); {stop_label}")
-        if self._supply_output_enabled:
+        if self._supply_output_enabled and not preserve_current_output:
             self._disable_supply_output()
         self._ui_refresh_timer.stop()
         self._clear_run_zero_load_scale_reference()
@@ -30985,8 +31039,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"decel {values.get('max_decel')}"
         )
 
-    def _apply_tic_motion_limits(self) -> tuple[bool, str]:
-        targets = self._selected_tic_motion_limits()
+    def _apply_tic_motion_limit_targets(
+        self, targets: Mapping[str, int]
+    ) -> tuple[bool, str]:
         try:
             self._refresh_tic_status()
         except Exception:
@@ -31037,12 +31092,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_tic_settings_summary()
         return True, f"PASS: Tic motion limits {self._format_tic_motion_limits(targets)}."
 
+    def _apply_tic_motion_limits(self) -> tuple[bool, str]:
+        return self._apply_tic_motion_limit_targets(
+            self._selected_tic_motion_limits()
+        )
+
+    def _apply_elastocaloric_motion_limits(self) -> tuple[bool, str]:
+        acceleration = int(self.spin_elastocaloric_accel.value())
+        targets = self._selected_tic_motion_limits()
+        targets["max_accel"] = acceleration
+        targets["max_decel"] = acceleration
+        return self._apply_tic_motion_limit_targets(targets)
+
     def _restore_idle_tic_motion_limits(self) -> None:
         if self._automation_active or self._motor_step_calibration_active:
             return
         manual_timer = getattr(self, "_manual_jog_timer", None)
         if manual_timer is not None and manual_timer.isActive():
             return
+        if self._tic_command_dispatcher is not None:
+            if not self._stop_tic_dispatcher():
+                self._log(
+                    "Tic idle motion-limit restore skipped because the command "
+                    "worker did not release its hardware call."
+                )
+                return
+            self._release_tic_device_lock()
         ok, message = self._apply_tic_motion_limits()
         if ok:
             self._log(f"Restored Tic idle motion limits: {message.removeprefix('PASS: ')}")
@@ -31351,6 +31426,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "temperature_stabilize_s": float(self.spin_elastocaloric_stabilize_s.value()),
                 "pull_duration_s": float(self.spin_elastocaloric_pull_duration_s.value()),
                 "release_duration_s": float(self.spin_elastocaloric_release_duration_s.value()),
+                "motion_accel_tic_units": int(self.spin_elastocaloric_accel.value()),
                 "record_after_jump_s": float(self.spin_constant_current_hold_s.value()),
                 "record_after_release_s": float(self.spin_elastocaloric_release_record_s.value()),
                 "measurement_count": int(self.spin_elastocaloric_repetitions.value()),
@@ -31717,6 +31793,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             elastocaloric.get("pull_duration_s", self.spin_elastocaloric_release_duration_s.value()),
                         )
                     ),
+                )
+            )
+            self.spin_elastocaloric_accel.setValue(
+                int(
+                    elastocaloric.get(
+                        "motion_accel_tic_units",
+                        self.spin_elastocaloric_accel.value(),
+                    )
                 )
             )
             self.spin_constant_current_hold_s.setValue(
@@ -33331,7 +33415,17 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.button_pause_recipe.setEnabled(self._automation_active)
             self.button_stop_recipe.setEnabled(self._automation_active)
-        child_owns_hardware = self._isolated_recipe_active
+        self.button_start_recipe.setText(
+            "Run next jump"
+            if (
+                self._elastocaloric_prepared_ready
+                and self._is_elastocaloric_mode(self.combo_recipe_mode.currentData())
+            )
+            else "Start recipe"
+        )
+        child_owns_hardware = bool(
+            self._isolated_recipe_active or self._elastocaloric_prepared_ready
+        )
         self.manual_actions_box.setEnabled(not child_owns_hardware)
         self._set_isolated_hardware_ui_state(child_owns_hardware)
         self.button_emergency_stop.setEnabled(True)
@@ -34093,6 +34187,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._confirm_current_sweep_load_limit_plan():
             self._log("Recipe start cancelled at the applied-load cap confirmation.")
             return
+        if (
+            self._elastocaloric_prepared_ready
+            and self._production_control_process is not None
+            and self._is_elastocaloric_mode(self.combo_recipe_mode.currentData())
+        ):
+            self._start_isolated_prepared_elastocaloric_jump(interval_ms)
+            return
         if not self._using_shared_broker_supply():
             shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
             if shared_index < 0:
@@ -34339,6 +34440,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self._control_process_poll_timer.start()
         self._update_recipe_buttons()
 
+    def _start_isolated_prepared_elastocaloric_jump(self, interval_ms: int) -> None:
+        process = self._production_control_process
+        if process is None or not process.is_alive():
+            self._elastocaloric_prepared_ready = False
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "The prepared controller is no longer available. Start a full recipe to prepare again.",
+            )
+            self._update_recipe_buttons()
+            return
+        self._sync_stale_log_name_from_sample()
+        if not self._preflight_isolated_session_output():
+            return
+        raw_payload = capture_window_configuration(
+            self,
+            starting_length_mm=None,
+            cadence_downgrade_accepted=True,
+        )
+        payload = json.loads(raw_payload)
+        payload["continue_prepared_elastocaloric"] = True
+        config_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        self._production_control_generation += 1
+        identity = ControlSessionIdentity(
+            session_id=f"tma-{uuid4()}",
+            generation=self._production_control_generation,
+        )
+        policy = (
+            ControlPolicy.KOSICE
+            if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
+            else ControlPolicy.PRAGUE
+        )
+        try:
+            start_sequence = process.start_session(
+                ControlStartRequest(
+                    identity=identity,
+                    policy=policy,
+                    control_interval_s=min(0.01, max(0.001, interval_ms / 1000.0)),
+                    snapshot_interval_s=0.10,
+                    parent_heartbeat_timeout_s=2.0,
+                    config_json=config_json,
+                )
+            )
+        except Exception as exc:
+            self._elastocaloric_prepared_ready = False
+            QtWidgets.QMessageBox.critical(
+                self, APP_NAME, f"The prepared elastocaloric jump could not start: {exc}"
+            )
+            self._update_recipe_buttons()
+            return
+        self._production_control_identity = identity
+        self._isolated_recipe_active = True
+        self._isolated_recipe_paused = False
+        self._isolated_command_pending = "start"
+        self._isolated_pending_sequence = start_sequence
+        self._isolated_command_deadline_s = time.monotonic() + TMA_START_ACK_TIMEOUT_S
+        self._isolated_last_plot_elapsed_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
+        self._session_points = []
+        self._live_plot_points = []
+        self._automation_active = True
+        self._automation_paused = False
+        self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
+        self._automation_phase = "starting_prepared_jump"
+        self._control_process_poll_timer.start()
+        self._log("Starting the next jump from the retained prepared baseline.")
+        self._update_recipe_buttons()
+
     def _poll_production_control_process(self) -> None:
         process = self._production_control_process
         if process is None:
@@ -34386,6 +34557,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_hold_bypass_confirmed = bool(
                 readback.get("current_hold_bypass_active", False)
             )
+            self._elastocaloric_release_confirmed = bool(
+                readback.get("elastocaloric_release_confirmed", False)
+            )
+            self._preserve_current_supply_on_close = bool(
+                readback.get("preserve_current_supply_on_close", False)
+            )
+            self._elastocaloric_prepared_ready = bool(
+                readback.get("elastocaloric_prepared_ready", False)
+            )
             self._update_current_hold_bypass_dialog()
             self._consume_isolated_log_snapshot(readback)
             self._consume_isolated_plot_snapshot(readback)
@@ -34413,11 +34593,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 and getattr(snapshot, "last_command_result", "") == "rejected"
             ):
                 detail = str(getattr(snapshot, "last_command_detail", "") or "")
+                rejected_command = self._isolated_command_pending
                 self._isolated_command_pending = None
                 self._isolated_pending_sequence = None
                 self._isolated_command_deadline_s = None
                 self._isolated_runtime_update_values = None
                 self._log(f"Control-process command rejected: {detail}")
+                if (
+                    rejected_command == "start"
+                    and self._automation_phase == "starting_prepared_jump"
+                ):
+                    self._elastocaloric_prepared_ready = False
+                    self._automation_active = False
+                    self._isolated_recipe_active = False
+                    process.close(timeout_s=2.0)
+                    self._production_control_process = None
+                    self._production_control_identity = None
+                    self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+                    self.label_control_process_status.setText(
+                        "Controller: next jump rejected; preparation is no longer valid. "
+                        f"{detail}"
+                    )
+                    self.label_control_process_status.setVisible(True)
+                    self._update_recipe_buttons()
+                    return
                 self._update_recipe_buttons()
             elif (
                 self._isolated_command_pending in {"update_config", "starting_length"}
@@ -34777,6 +34976,15 @@ class MainWindow(QtWidgets.QMainWindow):
         wire_break_terminal = session_stop_reason == "wire_break_or_contact_loss"
         metadata_fault = session_stop_category == "fault"
         terminal_fault = state in {ControlState.FAULTED, ControlState.EMERGENCY} or metadata_fault
+        retain_prepared_controller = bool(
+            state is ControlState.STOPPED
+            and not user_stop_requested
+            and not terminal_fault
+            and final_readback.get("elastocaloric_prepared_ready", False)
+            and final_readback.get("elastocaloric_prepared_output_confirmed", False)
+            and process is not None
+            and process.is_alive()
+        )
         if session_stop_detail and not detail:
             detail = session_stop_detail
         if wire_break_terminal:
@@ -34825,9 +35033,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_paused = False
         self._automation_steps = []
         self._automation_index = 0
-        self._production_control_process = None
-        self._production_control_identity = None
-        if process is not None:
+        self._elastocaloric_prepared_ready = retain_prepared_controller
+        if not retain_prepared_controller:
+            self._production_control_process = None
+            self._production_control_identity = None
+        if process is not None and not retain_prepared_controller:
             if offer_recovery:
                 self.label_control_process_status.setStyleSheet("color: #2563eb;")
                 self.label_control_process_status.setText(
@@ -34878,7 +35088,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 else f"dedicated process {state.value}{suffix}"
             )
         )
-        self.label_control_process_status.setVisible(terminal_fault)
+        if retain_prepared_controller:
+            self.label_control_process_status.setText(
+                "Controller: prepared at the confirmed baseline; CH4 held for the next jump."
+            )
+        self.label_control_process_status.setVisible(
+            terminal_fault or retain_prepared_controller
+        )
         self._update_recipe_buttons()
         if self._isolated_terminal_readback is not None:
             self._apply_isolated_recipe_status(
@@ -35088,11 +35304,35 @@ class MainWindow(QtWidgets.QMainWindow):
         elif not self._preflight_recipe_hardware(steps, show_progress=True):
             self._first_overheating_preflight_decision = None
             return
-        if not self._prepare_continuity_current_for_recipe(steps):
+        if (
+            not self._elastocaloric_continue_prepared_requested
+            and not self._prepare_continuity_current_for_recipe(steps)
+        ):
             self._first_overheating_preflight_decision = None
             return
+        if self._is_elastocaloric_mode(self.combo_recipe_mode.currentData()):
+            if self._tic_command_dispatcher is not None:
+                if not self._stop_tic_dispatcher():
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        APP_NAME,
+                        "Could not release the idle Tic command worker before applying "
+                        "the elastocaloric acceleration.",
+                    )
+                    return
+                self._release_tic_device_lock()
+            motion_ok, motion_detail = self._apply_elastocaloric_motion_limits()
+            if not motion_ok:
+                QtWidgets.QMessageBox.critical(self, APP_NAME, motion_detail)
+                self._first_overheating_preflight_decision = None
+                return
+            self._log(
+                "Applied recipe-scoped elastocaloric acceleration: "
+                f"{motion_detail.removeprefix('PASS: ')}"
+            )
         self._manual_jog_uses_last_target = False
-        self._clear_run_zero_load_scale_reference()
+        if not self._elastocaloric_continue_prepared_requested:
+            self._clear_run_zero_load_scale_reference()
         self._last_move_target_mm = self._current_position_mm
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
@@ -36454,6 +36694,17 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._elastocaloric_release_confirmed
         )
         self._preserve_current_supply_on_close = preserve_current_output
+        self._elastocaloric_prepared_ready = preserve_current_output
+        self._elastocaloric_prepared_baseline_mm = (
+            float(self._current_position_mm) if preserve_current_output else None
+        )
+        self._elastocaloric_prepared_current_mA = (
+            float(self._supply_last_setpoint_mA)
+            if preserve_current_output and self._supply_last_setpoint_mA is not None
+            else None
+        )
+        self._elastocaloric_prepared_output_confirmed = False
+        self._elastocaloric_continue_prepared_requested = False
         if self._supply_output_enabled and not preserve_current_output:
             try:
                 self._disable_supply_output()
@@ -37108,6 +37359,57 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"configured Tic acceleration and speed. Use at least {minimum_s:.3f} s, or validate "
                     "a faster Tic profile in a separate hardware campaign."
                 )
+            if self._elastocaloric_continue_prepared_requested:
+                steps: list[AutomationStep] = []
+                if stabilize_s > 0.0:
+                    steps.append(
+                        AutomationStep(
+                            "settle",
+                            current_mA=hold_current_mA,
+                            duration_s=stabilize_s,
+                            note="elastocaloric:continued_pre_pull_baseline",
+                        )
+                    )
+                steps.extend(
+                    [
+                        AutomationStep(
+                            "mark_current_zero",
+                            target_value=0.0,
+                            basis=HSW_BASIS_STRAIN_PCT,
+                            current_mA=hold_current_mA,
+                            note="elastocaloric:continued_motion_zero",
+                        ),
+                        AutomationStep(
+                            "mechanical_scan",
+                            target_value=jump_strain,
+                            basis=HSW_BASIS_STRAIN_PCT,
+                            current_mA=hold_current_mA,
+                            mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                            mechanical_step_value=strain_jump_size,
+                            mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
+                            duration_s=jump_record_s,
+                            note="elastocaloric:continued_pull",
+                        ),
+                        AutomationStep(
+                            "mechanical_scan",
+                            target_value=0.0,
+                            basis=HSW_BASIS_STRAIN_PCT,
+                            current_mA=hold_current_mA,
+                            mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                            mechanical_step_value=strain_jump_size,
+                            mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
+                            duration_s=release_record_s,
+                            note="elastocaloric:continued_release",
+                        ),
+                    ]
+                )
+                summary = (
+                    "Continued prepared elastocaloric series: fresh baseline "
+                    f"{stabilize_s:.1f} s, pull {jump_strain:.4f}% in "
+                    f"{pull_duration_s:.3f} s, release in {release_duration_s:.3f} s; "
+                    f"hold current {hold_current_mA:.2f} mA; {clock_summary}."
+                )
+                return steps, summary, control_interval_ms
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             transition_start_mA = self._recipe_current_setpoint_mA(MIN_RECIPE_CURRENT_MA)
             steps.append(
@@ -37823,9 +38125,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if enabled and (
             not self._automation_active
             or self._automation_paused
-            or not self._is_current_sweep_mode(self._automation_name)
         ):
-            return False, "current-hold bypass requires a running current-sweep recipe"
+            return False, "current-hold bypass requires a running TMA recipe"
         if enabled == self._current_hold_bypass_active:
             return True, (
                 "current-hold bypass active"
@@ -38084,7 +38385,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tolerance: float,
     ) -> float:
         noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
-        if not self._is_current_sweep_mode(self._automation_name):
+        if not self._uses_current_sweep_force_control(self._automation_name):
             return noise_band
         cap = self._current_sweep_hold_noise_cap_for_basis(tolerance)
         if cap <= 0.0:
@@ -38223,6 +38524,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_endpoint_recovered(self, step: AutomationStep) -> bool:
         step_index = self._active_current_sweep_step_index
+        if step.current_end_mA is not None:
+            endpoint_mA = self._recipe_current_setpoint_mA(float(step.current_end_mA))
+            snapshot = self._refresh_supply_snapshot(force=False)
+            measured_mA = snapshot.get("current_mA")
+            current_tolerance_mA = max(
+                0.5,
+                self._supply_current_resolution_mA() * 1.5,
+            )
+            if (
+                measured_mA is None
+                or not math.isfinite(float(measured_mA))
+                or abs(float(measured_mA) - endpoint_mA) > current_tolerance_mA
+            ):
+                self._current_sweep_endpoint_scale_start_s = None
+                return False
+            if step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+                if self._current_sweep_endpoint_scale_start_s is None:
+                    self._current_sweep_endpoint_scale_start_s = (
+                        self._latest_scale_sample_time_s()
+                    )
+                    return False
+                endpoint_signal = self._scale_control_signal_for_basis(
+                    step.basis,
+                    trend_aware=True,
+                    since_s=self._current_sweep_endpoint_scale_start_s,
+                )
+                if endpoint_signal is None:
+                    return False
         if (
             step_index is not None
             and self._current_sweep_endpoint_seek_accepted_step_index == int(step_index)
@@ -38938,6 +39267,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
             self._current_sweep_endpoint_seek_accepted_step_index = None
+            self._current_sweep_endpoint_scale_start_s = None
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -39404,6 +39734,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._current_sweep_endpoint_seek_accepted_step_index = None
+            self._current_sweep_endpoint_scale_start_s = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -39586,7 +39917,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._end_zero_fallback_armed = False
             self._end_zero_fallback_return_position_mm = None
             self._end_zero_fallback_raw_g = None
-            if self._is_current_sweep_mode(self._automation_name) and step.basis in {
+            if self._uses_current_sweep_force_control(self._automation_name) and step.basis in {
                 HSW_BASIS_LOAD_G,
                 HSW_BASIS_STRESS_MPA,
             }:
@@ -40977,6 +41308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("elastocaloric_repetitions", self.spin_elastocaloric_repetitions.value())
         self.settings.setValue("elastocaloric_pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())
         self.settings.setValue("elastocaloric_release_duration_s", self.spin_elastocaloric_release_duration_s.value())
+        self.settings.setValue("elastocaloric_motion_accel", self.spin_elastocaloric_accel.value())
         self.settings.setValue("elastocaloric_hold_mA", self.spin_elastocaloric_hold_mA.value())
         self.settings.setValue(
             "elastocaloric_release_record_s",
@@ -41770,6 +42102,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_elastocaloric_release_duration_s.setValue(
             max(0.010, float(self.settings.value("elastocaloric_release_duration_s", 3.0)))
         )
+        self.spin_elastocaloric_accel.setValue(
+            max(
+                DEFAULT_TIC_MAX_ACCEL,
+                int(self.settings.value("elastocaloric_motion_accel", 200_000)),
+            )
+        )
         self.spin_elastocaloric_hold_mA.setValue(
             max(MIN_RECIPE_CURRENT_MA, float(self.settings.value("elastocaloric_hold_mA", MIN_RECIPE_CURRENT_MA)))
         )
@@ -41955,6 +42293,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._production_control_identity = None
             self._isolated_recipe_active = False
             self._automation_active = False
+        elif self._production_control_process is not None:
+            # A completed elastocaloric series may deliberately leave the
+            # dedicated child connected at the prepared baseline. Closing the
+            # app closes that child normally, preserving CH4 under the same
+            # confirmed-release policy as the completed run.
+            self._production_control_process.close(timeout_s=2.0)
+            self._production_control_process = None
+            self._production_control_identity = None
+            self._elastocaloric_prepared_ready = False
         try:
             WINDOWS.remove(self)
         except ValueError:
