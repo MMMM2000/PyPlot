@@ -30,9 +30,10 @@ def _configure_isolated_test_paths() -> None:
         or tempfile.gettempdir()
     )
     tmp_root = Path(base_tmp)
-    if os.name == "nt" and len(str(tmp_root.resolve())) > 60:
+    isolated_temp = os.environ.get("PYPLOT_TEST_TEMP_ISOLATED") == "1"
+    if os.name == "nt" and not isolated_temp and len(str(tmp_root.resolve())) > 60:
         tmp_root = Path("C:/tmp")
-    if tmp_root.name != "pyplot-tests":
+    if not isolated_temp and tmp_root.name != "pyplot-tests":
         tmp_root = tmp_root / "pyplot-tests"
     tmp_root = _worker_path(tmp_root, worker_id)
     tmp_root.mkdir(parents=True, exist_ok=True)
@@ -52,6 +53,28 @@ def _configure_isolated_test_paths() -> None:
     tempfile.tempdir = str(tmp_root)
 
 
+def _configure_qsettings_isolation() -> None:
+    raw_root = os.environ.get("PYTEST_QSETTINGS_ROOT", "").strip()
+    if not raw_root:
+        return
+    from PyQt6 import QtCore
+
+    settings_root = Path(raw_root)
+    settings_root.mkdir(parents=True, exist_ok=True)
+    ini_format = QtCore.QSettings.Format.IniFormat
+    QtCore.QSettings.setDefaultFormat(ini_format)
+    QtCore.QSettings.setPath(
+        ini_format,
+        QtCore.QSettings.Scope.UserScope,
+        str(settings_root / "user"),
+    )
+    QtCore.QSettings.setPath(
+        ini_format,
+        QtCore.QSettings.Scope.SystemScope,
+        str(settings_root / "system"),
+    )
+
+
 def pytest_configure() -> None:
     """Ensure the bundled Veusz sources are importable for the selftests."""
 
@@ -67,6 +90,7 @@ def pytest_configure() -> None:
         _configure_isolated_test_paths()
     except Exception:
         pass
+    _configure_qsettings_isolation()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

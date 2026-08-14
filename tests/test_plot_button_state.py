@@ -883,8 +883,14 @@ def test_showing_hidden_tab_respects_fullscreen_lock() -> None:
         app.processEvents()
 
         shown_geometry = second_sub.geometry()
-        assert shown_geometry.width() >= fullscreen_geometry.width() - 2
-        assert shown_geometry.height() >= fullscreen_geometry.height() - 2
+        # Docks may finish their deferred offscreen layout while the hidden tab
+        # is restored, so compare against the current MDI viewport rather than
+        # the stale geometry captured before that relayout.
+        viewport = tab_proxy._mdi.viewport()  # noqa: SLF001 - geometry invariant
+        margin = tab_proxy._layout_margin  # noqa: SLF001 - geometry invariant
+        expected = viewport.rect().adjusted(margin, margin, -margin, -margin)
+        assert shown_geometry.width() >= expected.width() - 2
+        assert shown_geometry.height() >= expected.height() - 2
     finally:
         window.close()
         app.processEvents()
@@ -2189,7 +2195,7 @@ def test_dock_switcher_hide_persists_current_dock_width() -> None:
         index = docks.index(project_dock)
 
         getattr(switcher, "_dock_widths")[project_dock] = 280  # noqa: SLF001
-        project_dock.resize(220, project_dock.height() or 400)
+        project_dock.setFixedWidth(220)
         app.processEvents()
 
         switcher._handle_visibility_change(index, False)  # noqa: SLF001
@@ -2211,8 +2217,8 @@ def test_store_side_panel_state_persists_user_shrunk_dock_width() -> None:
 
         window._primary_dock_widths[project_dock] = 280  # noqa: SLF001
         window._primary_dock_widths[object_dock] = 300  # noqa: SLF001
-        project_dock.resize(210, project_dock.height() or 400)
-        object_dock.resize(230, object_dock.height() or 400)
+        project_dock.setFixedWidth(210)
+        object_dock.setFixedWidth(230)
 
         window._store_side_panel_state()  # noqa: SLF001
 

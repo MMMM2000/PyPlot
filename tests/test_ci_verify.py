@@ -51,13 +51,21 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
     assert "MPLBACKEND=Agg" in result.stdout
     assert "MICROWIRE_BUILDER_STORAGE_ROOT=" in result.stdout
     assert "UV_CACHE_DIR=" in result.stdout
+    assert "PYPLOT_TEST_TEMP_ISOLATED=1" in result.stdout
     if os.name == "nt":
         expected_temp = REPO_ROOT / "artifacts" / "t" / "unit"
-        assert f"TEMP={expected_temp}" in result.stdout
-        assert f"TMP={expected_temp}" in result.stdout
+        expected_basetemp = Path("C:/tmp/pyt/unit")
+        env_lines = {
+            key: value
+            for line in result.stdout.splitlines()
+            if "=" in line
+            for key, value in [line.strip().split("=", 1)]
+        }
+        assert Path(env_lines["TEMP"]).resolve() == expected_temp.resolve()
+        assert Path(env_lines["TMP"]).resolve() == expected_temp.resolve()
+        assert "--basetemp" in result.stdout
+        assert Path(env_lines["pytest_basetemp"]).resolve() == expected_basetemp.resolve()
     assert "--basetemp" in result.stdout
-    if os.name == "nt":
-        assert r"C:\tmp\pyt\unit" in result.stdout
     assert "-p no:cacheprovider" in result.stdout
     assert (
         "tests/test_launcher.py::test_launcher_detects_pyplot_automation_flags"
