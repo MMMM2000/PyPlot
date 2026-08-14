@@ -270,6 +270,17 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
     cleaned_payload.setdefault("source_files", [])
     cleaned_payload.setdefault("sample", {})
     cleaned_payload.setdefault("analysis", {})
+    archive_requested = payload.get("archive_requested", False)
+    if not isinstance(archive_requested, bool):
+        raise TransitionReviewError("archive_requested must be a boolean.")
+    if archive_requested:
+        cleaned_payload["archive_requested"] = True
+        requested_utc = str(payload.get("archive_requested_utc") or "").strip()
+        if requested_utc:
+            cleaned_payload["archive_requested_utc"] = requested_utc
+    else:
+        cleaned_payload.pop("archive_requested", None)
+        cleaned_payload.pop("archive_requested_utc", None)
     return cleaned_payload
 
 

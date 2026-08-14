@@ -649,6 +649,20 @@ def test_v3_prepare_and_section_worker_leave_payload_lazy(tmp_path: Path) -> Non
     assert decoded["raw"] == b"binary-data"
 
 
+def test_v3_prepare_bypasses_legacy_json_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "large-package.pydpj"
+    project_package.write_project_package(target, _payload())
+    monkeypatch.setattr(builder_ui, "MAX_JSON_BYTES", 1)
+
+    prepared = builder_ui._prepare_project_payload_for_gui(target)  # noqa: SLF001
+
+    assert prepared.package_index is not None
+    assert prepared.payload_resolver is not None
+    assert prepared.byte_count == target.stat().st_size
+
+
 def test_store_lazy_payload_loader_is_transactional_and_resolves_once(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
     store_cls = builder_storage.MiniDatabaseStore
@@ -1138,7 +1152,8 @@ def test_deferred_transition_completion_forces_workspace_rebuild(
 
         assert not window._deferred_project_section_pending
         assert "mini_dma" not in window._deferred_project_section_keys
-        assert dirty_calls == [None]
+        assert "mini_dma" not in window._section_load_errors
+        assert dirty_calls == ["mini_dma"]
         assert refresh_calls == [{"force": True}]
     finally:
         deadline = time.monotonic() + 10

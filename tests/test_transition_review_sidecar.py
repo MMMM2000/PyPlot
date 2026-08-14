@@ -64,6 +64,23 @@ def test_atomic_review_round_trip_and_cleanup(tmp_path) -> None:
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_archive_request_round_trip_is_explicit_and_validated(tmp_path) -> None:
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    payload = _review(frame)
+    payload["archive_requested"] = True
+    payload["archive_requested_utc"] = "2026-08-14T09:00:00Z"
+    path = tmp_path / "transition_review.json"
+
+    atomic_write_review(path, payload)
+    restored = load_review(path)
+
+    assert restored["archive_requested"] is True
+    assert restored["archive_requested_utc"] == "2026-08-14T09:00:00Z"
+    payload["archive_requested"] = "yes"
+    with pytest.raises(TransitionReviewError, match="archive_requested"):
+        atomic_write_review(path, payload)
+
+
 def test_tma_review_round_trip_preserves_derived_transition_strain(tmp_path) -> None:
     fingerprint = "sha256:" + "d" * 64
     target = make_target(
@@ -356,6 +373,55 @@ def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) ->
         "Mf1": 40.0,
     }
 
+
+def test_review_dialog_marks_complete_run_for_archive_without_moving_it(
+    tmp_path, qtbot
+) -> None:
+    from PyQt6 import QtCore
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+        _review_units_from_payload,
+    )
+
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    sidecar = tmp_path / "transition_review.json"
+    dialog = PortableTransitionReviewDialog(
+        _review(frame),
+        {
+            "graph": ReviewPlot(
+                frame["I_mA"], frame["R_ohm"], "run", "Resistance (ohm)"
+            )
+        },
+        sidecar,
+    )
+    qtbot.addWidget(dialog)
+    original_status = dialog.payload["targets"][0]["status"]
+
+    qtbot.mouseClick(dialog.archive_button, QtCore.Qt.MouseButton.LeftButton)
+    target = dialog.payload["targets"][0]
+    assert dialog.payload["archive_requested"] is True
+    assert target["status"] == "excluded"
+    assert target["analysis_included"] is False
+    assert dialog.save_button.isEnabled()
+    assert not dialog.values_box.isEnabled()
+    assert "no files" in dialog.decision_summary.text().lower()
+
+    qtbot.mouseClick(dialog.archive_button, QtCore.Qt.MouseButton.LeftButton)
+    assert "archive_requested" not in dialog.payload
+    assert target["status"] == original_status
+    assert dialog.values_box.isEnabled()
+
+    qtbot.mouseClick(dialog.archive_button, QtCore.Qt.MouseButton.LeftButton)
+    dialog._save_and_accept()  # noqa: SLF001
+    restored = load_review(sidecar)
+    assert restored["archive_requested"] is True
+    assert restored["targets"][0]["analysis_included"] is False
+    assert {
+        summary.state for summary in _review_units_from_payload(restored)
+    } == {"archive_requested"}
+
+
 def test_review_dialog_requires_each_choice_and_uses_human_tma_labels(
     tmp_path,
     qtbot,
@@ -549,6 +615,35 @@ def test_review_dialog_draws_heating_and_cooling_as_separate_colours(
     assert cooling_x.tolist() == pytest.approx([3.0, 2.0, 1.0])
     assert dialog.heating_curve_item.opts['pen'].color().name() == '#ef4444'
     assert dialog.cooling_curve_item.opts['pen'].color().name() == '#3b82f6'
+    heating_symbols, _ = dialog.heating_symbol_item.getData()
+    cooling_symbols, _ = dialog.cooling_symbol_item.getData()
+    assert heating_symbols.tolist() == pytest.approx([1.0, 2.0, 3.0])
+    assert cooling_symbols.tolist() == pytest.approx([3.0, 2.0, 1.0])
+
+
+def test_review_dialog_decimates_symbols_for_dense_traces(tmp_path, qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    current = pd.Series(
+        [float(value) for value in range(1000)]
+        + [float(value) for value in range(999, -1, -1)]
+    )
+    resistance = pd.Series(float(value) for value in range(len(current)))
+    frame = pd.DataFrame({'I_mA': current, 'R_ohm': resistance})
+    dialog = PortableTransitionReviewDialog(
+        _review(frame),
+        {'graph': ReviewPlot(current, resistance, 'dense', 'Resistance (ohm)')},
+        tmp_path / 'transition_review.json',
+    )
+    qtbot.addWidget(dialog)
+
+    heating_symbols, _ = dialog.heating_symbol_item.getData()
+    cooling_symbols, _ = dialog.cooling_symbol_item.getData()
+    assert 0 < len(heating_symbols) <= 180
+    assert 0 < len(cooling_symbols) <= 180
 
 
 def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) -> None:
@@ -888,6 +983,7 @@ def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
 
 
 def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> None:
+    from PyQt6 import QtCore, QtWidgets
     from plotting.shared.transition_review_dialog import (
         PortableTransitionReviewDialog,
         PortableTransitionReviewQueueDialog,
@@ -941,15 +1037,27 @@ def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> N
         [
             ReviewQueueEntry("Sample A", "100 mA", builder("Sample A", "a.json")),
             ReviewQueueEntry("Sample B", "60 mA", builder("Sample B", "b.json")),
+            ReviewQueueEntry("Sample A", "70 mA", builder("Sample A 70", "a70.json")),
         ]
     )
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.wait(30)
 
+    header = dialog.tree.header()
+    assert header.stretchLastSection() is False
+    assert (
+        header.sectionResizeMode(1)
+        == QtWidgets.QHeaderView.ResizeMode.Interactive
+    )
+    assert header.sectionSize(1) == 112
+    header.resizeSection(1, 96)
+    assert header.sectionSize(1) == 96
+
     assert dialog.tree.topLevelItemCount() == 2
     sample_a = dialog.tree.topLevelItem(0)
     sample_b = dialog.tree.topLevelItem(1)
+    assert sample_a.childCount() == 2
     assert sample_a.text(0) == "Sample A"
     assert sample_b.text(0) == "Sample B"
     assert built == ["Sample A"]
@@ -961,16 +1069,35 @@ def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> N
     ]
 
     run_b = sample_b.child(0)
-    dialog.tree.setCurrentItem(run_b)
+    dialog.tree.setCurrentItem(sample_b)
     qtbot.wait(20)
     assert built == ["Sample A", "Sample B"]
     assert [run_b.child(index).text(0) for index in range(run_b.childCount())] == [
         "Cycle 1",
         "Cycle 2",
     ]
+    assert dialog.tree.currentItem() is run_b.child(0)
+
+    dialog.tree.setCurrentItem(run_b)
+    qtbot.wait(20)
+    assert dialog.tree.currentItem() is run_b.child(0)
     dialog.tree.setCurrentItem(run_b.child(1))
     qtbot.wait(10)
     assert dialog._editors[1].target_list.currentRow() == 1  # noqa: SLF001
+
+    dialog.tree.setCurrentItem(run_b.child(0))
+    dialog.tree.setFocus()
+    qtbot.keyClick(dialog.tree, QtCore.Qt.Key.Key_Up)
+    qtbot.wait(10)
+    run_a_70 = sample_a.child(1)
+    assert dialog.tree.currentItem() is run_a_70.child(1)
+    assert built == ["Sample A", "Sample B", "Sample A 70"]
+    assert dialog._editors[2].target_list.currentRow() == 1  # noqa: SLF001
+
+    qtbot.keyClick(dialog.tree, QtCore.Qt.Key.Key_Down)
+    qtbot.wait(10)
+    assert dialog.tree.currentItem() is run_b.child(0)
+    assert dialog._editors[1].target_list.currentRow() == 0  # noqa: SLF001
 
 
 def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> None:
@@ -1025,6 +1152,9 @@ def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> No
     editor = queue._editors[0]  # noqa: SLF001
     run_item = queue._run_items[0]  # noqa: SLF001
     assert run_item.childCount() == 2
+    queue.review_filter.setCurrentText('All')
+    queue.tree.setCurrentItem(run_item.child(0))
+    qtbot.wait(20)
     assert editor.save_button.text() == 'Save and next cycle'
     assert editor.save_button.isEnabled()
     qtbot.mouseClick(editor.save_button, QtCore.Qt.MouseButton.LeftButton)
@@ -1035,8 +1165,211 @@ def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> No
     assert editor.heating_curve_item.getData()[1][0] == 200.0
 
 
+def test_queue_shows_scientific_review_states_and_parent_progress(qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewQueueDialog,
+        ReviewQueueEntry,
+        ReviewUnitSummary,
+    )
+
+    def should_not_load(_parent):
+        raise AssertionError('reviewed entries must stay lazy')
+
+    queue = PortableTransitionReviewQueueDialog(
+        [
+            ReviewQueueEntry(
+                'Sample',
+                'Run',
+                should_not_load,
+                saved=True,
+                review_units=(
+                    ReviewUnitSummary('Cycle 1', 'manual', 'As1=12 (manual)'),
+                    ReviewUnitSummary('Cycle 2', 'excluded', 'excluded from analysis'),
+                ),
+            )
+        ]
+    )
+    qtbot.addWidget(queue)
+    run_item = queue._run_items[0]  # noqa: SLF001
+    sample_item = queue.tree.topLevelItem(0)
+
+    assert queue.review_filter.currentText() == 'Unreviewed'
+    assert sample_item.text(1) == '2/2 reviewed'
+    assert run_item.text(1) == '2/2 reviewed'
+    assert 'Manual' in run_item.child(0).text(1)
+    assert 'Excluded' in run_item.child(1).text(1)
+    assert run_item.isHidden()
+
+
+def test_review_state_classification_counts_no_transition_and_excluded_as_done() -> None:
+    from plotting.shared.transition_review_dialog import _review_unit_state
+
+    labels = ['As', 'Af', 'Ms', 'Mf']
+    no_transition, _ = _review_unit_state(
+        {'status': 'no_transition', 'cleared_labels': labels}, labels
+    )
+    excluded, _ = _review_unit_state(
+        {
+            'status': 'excluded',
+            'manual_values': {'As': 10.0},
+            'final_values': {'As': 10.0},
+        },
+        labels,
+    )
+    partial, _ = _review_unit_state(
+        {
+            'status': 'manual_adjusted',
+            'manual_values': {'As': 10.0},
+            'final_values': {'As': 10.0},
+        },
+        labels,
+    )
+
+    assert no_transition == 'no_transition'
+    assert excluded == 'excluded'
+    assert partial == 'partial'
+
+
+def test_save_completed_run_keeps_only_next_editor_visible(tmp_path, qtbot) -> None:
+    from PyQt6 import QtCore
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        PortableTransitionReviewQueueDialog,
+        ReviewPlot,
+        ReviewQueueEntry,
+    )
+
+    frame = pd.DataFrame(
+        {'I_mA': [10.0, 20.0, 10.0], 'R_Ohm': [100.0, 90.0, 101.0]}
+    )
+
+    def builder(run_number: int):
+        fingerprint = dataframe_fingerprint(
+            frame, namespace=f'queue-run-{run_number}'
+        )
+        payload = make_review(
+            family='current_annealing',
+            measurement_fingerprint=fingerprint,
+            targets=[
+                make_target(
+                    family='current_annealing',
+                    measurement_fingerprint=fingerprint,
+                    target_key='graph',
+                    status='unreviewed',
+                )
+            ],
+        )
+        plot = ReviewPlot(
+            frame['I_mA'],
+            frame['R_Ohm'],
+            f'Run {run_number}',
+            'Resistance (ohm)',
+            unit_series={'Cycle 1': (frame['I_mA'], frame['R_Ohm'])},
+        )
+        return lambda parent: PortableTransitionReviewDialog(
+            payload,
+            {'graph': plot},
+            tmp_path / f'run-{run_number}.review.json',
+            parent,
+        )
+
+    queue = PortableTransitionReviewQueueDialog(
+        [
+            ReviewQueueEntry('Sample', 'Run 1', builder(1)),
+            ReviewQueueEntry('Sample', 'Run 2', builder(2)),
+        ]
+    )
+    qtbot.addWidget(queue)
+    queue.show()
+    qtbot.wait(20)
+    first = queue._editors[0]  # noqa: SLF001
+    for label in first._active_unit_labels:  # noqa: SLF001
+        qtbot.mouseClick(
+            first.choice_buttons[label]['not_observed'],
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+    assert first.save_button.isEnabled()
+
+    qtbot.mouseClick(first.save_button, QtCore.Qt.MouseButton.LeftButton)
+    qtbot.wait(20)
+
+    second = queue._editors[1]  # noqa: SLF001
+    assert not first.isVisible()
+    assert second.isVisible()
+    assert sum(editor.isVisible() for editor in queue._editors.values()) == 1  # noqa: SLF001
+    assert queue._current_index == 1  # noqa: SLF001
+
+
+def test_mark_for_archive_saves_whole_run_and_advances_queue(tmp_path, qtbot) -> None:
+    from PyQt6 import QtCore
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        PortableTransitionReviewQueueDialog,
+        ReviewPlot,
+        ReviewQueueEntry,
+    )
+
+    frame = pd.DataFrame(
+        {'I_mA': [10.0, 20.0, 10.0], 'R_Ohm': [100.0, 90.0, 101.0]}
+    )
+
+    def builder(run_number: int):
+        fingerprint = dataframe_fingerprint(
+            frame, namespace=f'archive-queue-{run_number}'
+        )
+        payload = make_review(
+            family='current_annealing',
+            measurement_fingerprint=fingerprint,
+            targets=[
+                make_target(
+                    family='current_annealing',
+                    measurement_fingerprint=fingerprint,
+                    target_key='graph',
+                )
+            ],
+        )
+        plot = ReviewPlot(
+            frame['I_mA'],
+            frame['R_Ohm'],
+            f'Run {run_number}',
+            'Resistance (ohm)',
+            unit_series={
+                'Cycle 1': (frame['I_mA'], frame['R_Ohm']),
+                'Cycle 2': (frame['I_mA'], frame['R_Ohm']),
+            },
+        )
+        return lambda parent: PortableTransitionReviewDialog(
+            payload,
+            {'graph': plot},
+            tmp_path / f'archive-run-{run_number}.json',
+            parent,
+        )
+
+    queue = PortableTransitionReviewQueueDialog(
+        [
+            ReviewQueueEntry('Sample', 'Run 1', builder(1)),
+            ReviewQueueEntry('Sample', 'Run 2', builder(2)),
+        ]
+    )
+    qtbot.addWidget(queue)
+    queue.show()
+    qtbot.wait(20)
+    first = queue._editors[0]  # noqa: SLF001
+
+    qtbot.mouseClick(first.archive_button, QtCore.Qt.MouseButton.LeftButton)
+    assert first.save_button.text() == 'Save marked run and next'
+    qtbot.mouseClick(first.save_button, QtCore.Qt.MouseButton.LeftButton)
+    qtbot.wait(20)
+
+    assert load_review(tmp_path / 'archive-run-1.json')['archive_requested'] is True
+    assert not first.isVisible()
+    assert queue._editors[1].isVisible()  # noqa: SLF001
+    assert queue._current_index == 1  # noqa: SLF001
+
+
 def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> None:
     from plotting.shared import transition_review_dialog as review_dialog
+    from plotting.shared.transition_review_dialog import ReviewUnitSummary
 
     captured = []
 
@@ -1054,14 +1387,29 @@ def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> 
         None,
         ca_paths,
         sample_for_path=lambda path: {"sample": path.parent.name},
+        review_units_for_path=lambda path: (
+            ReviewUnitSummary("Cycle 1", "manual", f"reviewed {path.name}"),
+        ),
     )
     assert completed == 2
     assert [entry.sample_label for entry in captured[0][0]] == ["Sample A", "Sample B"]
+    assert all(entry.saved for entry in captured[0][0])
+    assert [entry.review_units[0].state for entry in captured[0][0]] == [
+        "manual",
+        "manual",
+    ]
 
     tma_paths = [tmp_path / "Sample C", tmp_path / "Sample D"]
-    completed = review_dialog.review_tma_runs(None, tma_paths)
+    completed = review_dialog.review_tma_runs(
+        None,
+        tma_paths,
+        review_units_for_path=lambda _path: (
+            ReviewUnitSummary("50 MPa", "no_transition"),
+        ),
+    )
     assert completed == 2
     assert [entry.sample_label for entry in captured[1][0]] == ["Sample C", "Sample D"]
+    assert all(entry.review_units[0].state == "no_transition" for entry in captured[1][0])
 
 def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatch) -> None:
     import logging
