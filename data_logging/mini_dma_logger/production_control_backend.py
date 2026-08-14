@@ -95,6 +95,15 @@ def capture_window_configuration(
                 "",
             )
         ),
+        "connected_sensors": {
+            # Preserve optional live instrumentation across the ownership
+            # handoff even when the selected recipe does not require that
+            # sensor for control.  Stationary thermal diagnostics, for
+            # example, deliberately do not require force feedback but should
+            # continue recording it when the operator had the scale connected.
+            "scale": getattr(window, "_scale_thread", None) is not None,
+            "ir": getattr(window, "_ir_thread", None) is not None,
+        },
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -357,6 +366,25 @@ class ProductionTmaBackend:
             if recent_log:
                 detail = f"{detail} Child log: {recent_log}"
             raise RuntimeError(detail)
+        connected_sensors = payload.get("connected_sensors")
+        parent_scale_connected = bool(
+            isinstance(connected_sensors, Mapping)
+            and connected_sensors.get("scale", False)
+        )
+        if (
+            parent_scale_connected
+            and getattr(self._window, "_scale_thread", None) is None
+        ):
+            ensure_scale = getattr(
+                self._window,
+                "_ensure_scale_ready_for_recipe",
+                None,
+            )
+            if not callable(ensure_scale) or not bool(ensure_scale()):
+                raise RuntimeError(
+                    "controller-process scale handoff could not restore the "
+                    "parent's connected scale"
+                )
         # Hardware auto-detection can update the scale protocol and therefore
         # the Prague/Košice force-control profile. Validate the IPC policy only
         # after the child has reconstructed and probed its actual hardware;
@@ -838,13 +866,26 @@ class ProductionTmaBackend:
         capture_plot_point = getattr(window, "_capture_live_plot_point", None)
         plot_point = capture_plot_point() if callable(capture_plot_point) else None
         if plot_point is None:
+            # A stationary thermal diagnostic is allowed to proceed without a
+            # live scale timestamp. Its authoritative scheduled measurement
+            # points still contain current, temperature, phase, and the last
+            # known mechanical values, so publish the newest one instead of
+            # leaving the visible dashboard blank.
+            session_points = getattr(window, "_session_points", ())
+            if session_points:
+                plot_point = session_points[-1]
+        if plot_point is None:
+            return base_readback
+        try:
+            plot_fields = fields(plot_point)
+        except TypeError:
             return base_readback
         plot_readback = tuple(
             (
                 f"plot_{field.name}",
                 _json_scalar(getattr(plot_point, field.name)),
             )
-            for field in fields(plot_point)
+            for field in plot_fields
         )
         return base_readback + plot_readback
 

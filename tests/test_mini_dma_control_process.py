@@ -1104,6 +1104,51 @@ def test_production_backend_exposes_bounded_latest_thermal_preview() -> None:
     assert payload["values"] == [20.0, 21.0, 22.0, 23.0]
 
 
+def test_production_backend_exports_recorded_point_when_live_scale_plot_is_absent() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+
+    @dataclass
+    class _RecordedPoint:
+        elapsed_s: float
+        current_measured_mA: float
+        ir_temperature_c: float
+
+    class _StationaryThermalWindow(_FakeProductionWindow):
+        def _start_auto_ramp(self) -> None:
+            super()._start_auto_ramp()
+            self._session_points = [
+                _RecordedPoint(
+                    elapsed_s=2.5,
+                    current_measured_mA=29.0,
+                    ir_temperature_c=46.75,
+                )
+            ]
+
+        def _capture_live_plot_point(self) -> None:
+            return None
+
+    backend = ProductionMiniDmaBackend(window_factory=_StationaryThermalWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    readback = dict(backend.readback())
+
+    assert readback["plot_elapsed_s"] == pytest.approx(2.5)
+    assert readback["plot_current_measured_mA"] == pytest.approx(29.0)
+    assert readback["plot_ir_temperature_c"] == pytest.approx(46.75)
+    backend.close()
+
+
 def test_production_backend_exposes_wire_break_terminal_metadata() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app
@@ -1472,6 +1517,8 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
             self.name = QtWidgets.QLineEdit("sample")
             self._first_overheating_preflight_decision = {"action": "continue"}
             self._controller_process_output_collision_action = "next"
+            self._scale_thread = object()
+            self._ir_thread = None
 
     payload = capture_window_configuration(
         _Window(),
@@ -1485,7 +1532,44 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     assert '"kind":"decimal_spin","value":12.5' in payload
     assert '"value":12.5' in payload
     assert '"data":"prague"' in payload
+    assert '"connected_sensors":{"ir":false,"scale":true}' in payload
     assert "PyQt6" not in payload
+
+
+def test_production_backend_restores_parent_connected_optional_scale() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+
+    class _OptionalScaleWindow(_FakeProductionWindow):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self._scale_thread = None
+
+        def _ensure_scale_ready_for_recipe(self) -> bool:
+            self.lifecycle_calls.append("scale_reconnect")
+            self._scale_thread = object()
+            return True
+
+    backend = ProductionMiniDmaBackend(window_factory=_OptionalScaleWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"connected_sensors":{"scale":true,"ir":false},'
+                '"output_collision_action":"replace",'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    assert backend._window.lifecycle_calls == [
+        "hardware_preflight",
+        "scale_reconnect",
+        "recipe_start",
+    ]
+    backend.close()
 
 
 def test_window_configuration_round_trip_preserves_qt_spin_box_types(
