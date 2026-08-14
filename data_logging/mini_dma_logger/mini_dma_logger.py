@@ -26696,6 +26696,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "button_manual_auto_connect"):
                 self.button_manual_auto_connect.setEnabled(True)
                 self.button_manual_auto_connect.setText("Auto-connect hardware")
+            self._update_recipe_buttons()
 
     def _apply_manual_auto_connect_tic_settings(self) -> tuple[bool, list[str]]:
         if not self._tic_status_text:
@@ -33767,7 +33768,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.button_thermal_response.setEnabled(
                 bool(
-                    not self._isolated_recipe_active
+                    not self._automation_active
                     and self._is_elastocaloric_mode(self.combo_recipe_mode.currentData())
                     and (
                         not self._elastocaloric_prepared_ready

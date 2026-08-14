@@ -438,6 +438,8 @@ class ProductionTmaBackend:
         payload: Mapping[str, object],
     ) -> None:
         window = self._require_window()
+        thermal_response = payload.get("thermal_response_diagnostic")
+        is_stationary_thermal_response = isinstance(thermal_response, Mapping)
         if not self._stopped or bool(window._automation_active):
             raise RuntimeError("prepared elastocaloric controller is not idle")
         if not bool(getattr(window, "_elastocaloric_prepared_ready", False)):
@@ -465,19 +467,22 @@ class ProductionTmaBackend:
             raise RuntimeError(
                 "CH4 current is not confirmed at the prepared hold setpoint"
             )
-        if not window._has_fresh_scale_reading():
+        if not is_stationary_thermal_response and not window._has_fresh_scale_reading():
             raise RuntimeError("scale feedback is not fresh for the next jump")
         ir_snapshot = window._latest_ir_snapshot()
         ir_age_s = ir_snapshot.get("sample_age_s")
         if ir_age_s is None or float(ir_age_s) > 1.0:
             raise RuntimeError("thermal-camera feedback is not fresh for the next jump")
-        thermal_response = payload.get("thermal_response_diagnostic")
         window._thermal_response_diagnostic_config = (
             dict(thermal_response) if isinstance(thermal_response, Mapping) else None
         )
         window._thermal_response_roi_sums = None
         window._thermal_response_roi_count = 0
         window._thermal_response_roi_indices = ()
+        # Preparation is a one-shot recipe.  Leaving this flag set makes every
+        # retained run enter the preparation ramp again instead of the requested
+        # jump or stationary diagnostic.
+        window._stationary_thermal_preparation_config = None
         window._elastocaloric_continue_prepared_requested = True
         window._controller_process_prior_run_preflight_complete = True
         window._controller_process_hardware_preflight_complete = True

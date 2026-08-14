@@ -988,6 +988,8 @@ def test_production_backend_runs_stationary_thermal_response_as_prepared_recipe(
     window._elastocaloric_prepared_ready = True
     window._elastocaloric_prepared_baseline_mm = 1.25
     window._elastocaloric_prepared_current_mA = 2.0
+    window._has_fresh_scale_reading = lambda: False
+    window._stationary_thermal_preparation_config = {"target_current_mA": 2.0}
     backend._stopped = True
 
     backend.start(
@@ -1006,6 +1008,7 @@ def test_production_backend_runs_stationary_thermal_response_as_prepared_recipe(
 
     assert window._thermal_response_diagnostic_config["cycles"] == 3
     assert window._thermal_response_roi_indices == ()
+    assert window._stationary_thermal_preparation_config is None
     assert window._elastocaloric_release_confirmed is True
     assert window._current_position_mm == pytest.approx(1.25)
     backend.close()
