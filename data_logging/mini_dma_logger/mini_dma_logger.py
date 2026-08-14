@@ -476,6 +476,8 @@ IR_TEMPERATURE_CSV_FIELDNAMES = [
     "frame_hotspot_col",
     "frame_width",
     "frame_height",
+    "diagnostic_roi_mean_c",
+    "diagnostic_roi_indices",
     "raw_ambient",
     "raw_object",
     "read_us",
@@ -8433,6 +8435,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ir_state_lock = RLock()
         self._latest_ir_sample: IrTemperatureSample | None = None
         self._latest_ir_frame: object | None = None
+        self._thermal_response_diagnostic_config: dict[str, object] | None = None
+        self._thermal_response_roi_sums: list[float] | None = None
+        self._thermal_response_roi_count = 0
+        self._thermal_response_roi_indices: tuple[int, ...] = ()
         self._ir_temperature_buffer = IrTemperatureBuffer()
         self._ir_baseline_object_c: float | None = None
         self._current_position_steps = 0
@@ -11847,6 +11853,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_accel_row = constant_current_form.labelForField(
             self.spin_elastocaloric_accel
         )
+        self.label_thermal_response_heading = QtWidgets.QLabel(
+            "Stationary thermal-response check", automation_box
+        )
+        thermal_response_font = self.label_thermal_response_heading.font()
+        thermal_response_font.setBold(True)
+        self.label_thermal_response_heading.setFont(thermal_response_font)
+        constant_current_form.addRow("", self.label_thermal_response_heading)
+        self.spin_thermal_response_step_down_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_thermal_response_step_down_mA.setDecimals(2)
+        self.spin_thermal_response_step_down_mA.setRange(0.10, 10.0)
+        self.spin_thermal_response_step_down_mA.setValue(1.0)
+        self.spin_thermal_response_step_down_mA.setSuffix(" mA")
+        constant_current_form.addRow("Current step down", self.spin_thermal_response_step_down_mA)
+        self.label_thermal_response_step_down_row = constant_current_form.labelForField(
+            self.spin_thermal_response_step_down_mA
+        )
+        self.spin_thermal_response_baseline_s = CompactDoubleSpinBox(automation_box)
+        self.spin_thermal_response_baseline_s.setDecimals(1)
+        self.spin_thermal_response_baseline_s.setRange(1.0, 300.0)
+        self.spin_thermal_response_baseline_s.setValue(5.0)
+        self.spin_thermal_response_baseline_s.setSuffix(" s")
+        constant_current_form.addRow("Thermal baseline", self.spin_thermal_response_baseline_s)
+        self.label_thermal_response_baseline_row = constant_current_form.labelForField(
+            self.spin_thermal_response_baseline_s
+        )
+        self.spin_thermal_response_hold_s = CompactDoubleSpinBox(automation_box)
+        self.spin_thermal_response_hold_s.setDecimals(1)
+        self.spin_thermal_response_hold_s.setRange(0.5, 300.0)
+        self.spin_thermal_response_hold_s.setValue(5.0)
+        self.spin_thermal_response_hold_s.setSuffix(" s")
+        constant_current_form.addRow("Low-current hold", self.spin_thermal_response_hold_s)
+        self.label_thermal_response_hold_row = constant_current_form.labelForField(
+            self.spin_thermal_response_hold_s
+        )
+        self.spin_thermal_response_recovery_s = CompactDoubleSpinBox(automation_box)
+        self.spin_thermal_response_recovery_s.setDecimals(1)
+        self.spin_thermal_response_recovery_s.setRange(0.5, 300.0)
+        self.spin_thermal_response_recovery_s.setValue(5.0)
+        self.spin_thermal_response_recovery_s.setSuffix(" s")
+        constant_current_form.addRow("Recovery", self.spin_thermal_response_recovery_s)
+        self.label_thermal_response_recovery_row = constant_current_form.labelForField(
+            self.spin_thermal_response_recovery_s
+        )
+        self.spin_thermal_response_cycles = QtWidgets.QSpinBox(automation_box)
+        self.spin_thermal_response_cycles.setRange(1, 100)
+        self.spin_thermal_response_cycles.setValue(3)
+        self.spin_thermal_response_cycles.setSuffix(" cycles")
+        constant_current_form.addRow("Thermal cycles", self.spin_thermal_response_cycles)
+        self.label_thermal_response_cycles_row = constant_current_form.labelForField(
+            self.spin_thermal_response_cycles
+        )
+        self.button_thermal_response = QtWidgets.QPushButton(
+            "Measure thermal response", automation_box
+        )
+        self.button_thermal_response.setToolTip(
+            "Keep the motor fixed, step CH4 down and back up under the retained controller, "
+            "and log a fixed camera ROI at full camera rate."
+        )
+        self.button_thermal_response.clicked.connect(self._start_prepared_thermal_response)
+        constant_current_form.addRow("", self.button_thermal_response)
+        self.label_thermal_response_button_row = constant_current_form.labelForField(
+            self.button_thermal_response
+        )
         self.label_elastocaloric_motion_plan = QtWidgets.QLabel(automation_box)
         self.label_elastocaloric_motion_plan.setWordWrap(True)
         self.label_elastocaloric_motion_plan.setTextInteractionFlags(
@@ -12193,6 +12262,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
             self.spin_elastocaloric_accel,
+            self.spin_thermal_response_step_down_mA,
+            self.spin_thermal_response_baseline_s,
+            self.spin_thermal_response_hold_s,
+            self.spin_thermal_response_recovery_s,
+            self.spin_thermal_response_cycles,
             self.spin_elastocaloric_hold_mA,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
@@ -21223,6 +21297,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_elastocaloric_accel",
             "spin_elastocaloric_hold_mA",
             "label_elastocaloric_motion_plan",
+            "label_thermal_response_heading",
+            "spin_thermal_response_step_down_mA",
+            "spin_thermal_response_baseline_s",
+            "spin_thermal_response_hold_s",
+            "spin_thermal_response_recovery_s",
+            "spin_thermal_response_cycles",
+            "button_thermal_response",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
@@ -21230,6 +21311,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     widget_name.startswith("spin_elastocaloric")
                     or widget_name.startswith("check_elastocaloric")
                     or widget_name == "label_elastocaloric_motion_plan"
+                    or widget_name.startswith("label_thermal_response")
+                    or widget_name.startswith("spin_thermal_response")
+                    or widget_name == "button_thermal_response"
                 ):
                     widget.setVisible(elastocaloric_mode)
                 elif widget_name == "spin_constant_current_step_size":
@@ -21259,10 +21343,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_elastocaloric_hold_mA_row",
             "label_elastocaloric_motion_plan_heading",
             "label_elastocaloric_motion_plan_row",
+            "label_thermal_response_step_down_row",
+            "label_thermal_response_baseline_row",
+            "label_thermal_response_hold_row",
+            "label_thermal_response_recovery_row",
+            "label_thermal_response_cycles_row",
+            "label_thermal_response_button_row",
         ):
             label = getattr(self, label_name, None)
             if label is not None:
-                if label_name.startswith("label_elastocaloric"):
+                if label_name.startswith("label_elastocaloric") or label_name.startswith(
+                    "label_thermal_response"
+                ):
                     label.setVisible(elastocaloric_mode)
                 elif label_name == "label_constant_current_step_size_row":
                     label.setVisible(not fixed_strain_mode)
@@ -30181,6 +30273,53 @@ class MainWindow(QtWidgets.QMainWindow):
             and not (bool(self._automation_active) and bool(self._automation_paused))
         )
 
+    def _thermal_response_roi_value_locked(
+        self,
+        sample: IrTemperatureSample,
+    ) -> tuple[float | None, str]:
+        config = self._thermal_response_diagnostic_config
+        if not isinstance(config, Mapping) or sample.sensor_type != IR_SENSOR_MLX90640:
+            return None, ""
+        frame = self._latest_ir_frame
+        if frame is None or getattr(frame, "sequence", None) != sample.sequence:
+            return None, ""
+        try:
+            values = [float(value) for value in getattr(frame, "values", ())]
+        except (TypeError, ValueError):
+            return None, ""
+        if not values or not all(math.isfinite(value) for value in values):
+            return None, ""
+        if self._thermal_response_roi_sums is None:
+            self._thermal_response_roi_sums = [0.0] * len(values)
+        if len(self._thermal_response_roi_sums) != len(values):
+            return None, ""
+        elapsed_s = max(0.0, sample.timestamp_s - self._session_start_wall_s)
+        if not self._thermal_response_roi_indices:
+            for index, value in enumerate(values):
+                self._thermal_response_roi_sums[index] += value
+            self._thermal_response_roi_count += 1
+            selection_after_s = min(
+                1.0,
+                max(0.25, float(config.get("baseline_s", 5.0)) * 0.5),
+            )
+            if self._thermal_response_roi_count >= 8 and elapsed_s >= selection_after_s:
+                count = float(self._thermal_response_roi_count)
+                ranked = sorted(
+                    range(len(values)),
+                    key=lambda index: self._thermal_response_roi_sums[index] / count,
+                    reverse=True,
+                )
+                pixel_count = max(
+                    1,
+                    min(len(values), int(config.get("roi_pixel_count", 8))),
+                )
+                self._thermal_response_roi_indices = tuple(sorted(ranked[:pixel_count]))
+        indices = self._thermal_response_roi_indices
+        if not indices:
+            return None, ""
+        roi_mean_c = sum(values[index] for index in indices) / len(indices)
+        return roi_mean_c, ";".join(str(index) for index in indices)
+
     def _reserve_ir_temperature_sample_locked(
         self,
         sample: IrTemperatureSample,
@@ -30196,6 +30335,9 @@ class MainWindow(QtWidgets.QMainWindow):
         baseline_c = self._ir_baseline_object_c
         delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
         sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=sample.timestamp_s)
+        diagnostic_roi_mean_c, diagnostic_roi_indices = (
+            self._thermal_response_roi_value_locked(sample)
+        )
         sample_count = self._session_ir_temperature_count + 1
         write = target.reserve(
             {
@@ -30216,6 +30358,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "frame_hotspot_col": "" if sample.frame_hotspot_col is None else sample.frame_hotspot_col,
                 "frame_width": "" if sample.frame_width is None else sample.frame_width,
                 "frame_height": "" if sample.frame_height is None else sample.frame_height,
+                "diagnostic_roi_mean_c": (
+                    "" if diagnostic_roi_mean_c is None else f"{diagnostic_roi_mean_c:.6f}"
+                ),
+                "diagnostic_roi_indices": diagnostic_roi_indices,
                 "raw_ambient": sample.raw_ambient,
                 "raw_object": sample.raw_object,
                 "read_us": sample.read_us,
@@ -31550,6 +31696,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "measurement_count": int(self.spin_elastocaloric_repetitions.value()),
                 "austenitize_current_mA": float(self.spin_constant_current_start_mA.value()),
                 "hold_current_mA": float(self.spin_elastocaloric_hold_mA.value()),
+                "thermal_response_step_down_mA": float(
+                    self.spin_thermal_response_step_down_mA.value()
+                ),
+                "thermal_response_baseline_s": float(
+                    self.spin_thermal_response_baseline_s.value()
+                ),
+                "thermal_response_low_hold_s": float(
+                    self.spin_thermal_response_hold_s.value()
+                ),
+                "thermal_response_recovery_s": float(
+                    self.spin_thermal_response_recovery_s.value()
+                ),
+                "thermal_response_cycles": int(self.spin_thermal_response_cycles.value()),
                 "current_mA": float(self.spin_constant_current_start_mA.value()),
                 "camera_required": True,
                 "camera_rate_hz": 64.0,
@@ -31936,6 +32095,46 @@ class MainWindow(QtWidgets.QMainWindow):
                     elastocaloric.get(
                         "motion_accel_tic_units",
                         self.spin_elastocaloric_accel.value(),
+                    )
+                )
+            )
+            self.spin_thermal_response_step_down_mA.setValue(
+                float(
+                    elastocaloric.get(
+                        "thermal_response_step_down_mA",
+                        self.spin_thermal_response_step_down_mA.value(),
+                    )
+                )
+            )
+            self.spin_thermal_response_baseline_s.setValue(
+                float(
+                    elastocaloric.get(
+                        "thermal_response_baseline_s",
+                        self.spin_thermal_response_baseline_s.value(),
+                    )
+                )
+            )
+            self.spin_thermal_response_hold_s.setValue(
+                float(
+                    elastocaloric.get(
+                        "thermal_response_low_hold_s",
+                        self.spin_thermal_response_hold_s.value(),
+                    )
+                )
+            )
+            self.spin_thermal_response_recovery_s.setValue(
+                float(
+                    elastocaloric.get(
+                        "thermal_response_recovery_s",
+                        self.spin_thermal_response_recovery_s.value(),
+                    )
+                )
+            )
+            self.spin_thermal_response_cycles.setValue(
+                int(
+                    elastocaloric.get(
+                        "thermal_response_cycles",
+                        self.spin_thermal_response_cycles.value(),
                     )
                 )
             )
@@ -33559,6 +33758,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             else "Start recipe"
         )
+        if hasattr(self, "button_thermal_response"):
+            self.button_thermal_response.setEnabled(
+                bool(
+                    not self._isolated_recipe_active
+                    and self._elastocaloric_prepared_ready
+                    and self._production_control_process is not None
+                    and self._production_control_process.is_alive()
+                    and self._is_elastocaloric_mode(self.combo_recipe_mode.currentData())
+                )
+            )
         child_owns_hardware = bool(
             self._isolated_recipe_active or self._elastocaloric_prepared_ready
         )
@@ -34576,7 +34785,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self._control_process_poll_timer.start()
         self._update_recipe_buttons()
 
-    def _start_isolated_prepared_elastocaloric_jump(self, interval_ms: int) -> None:
+    def _start_prepared_thermal_response(self, checked: bool = False) -> None:
+        del checked
+        if not self._is_elastocaloric_mode(self.combo_recipe_mode.currentData()):
+            return
+        config = {
+            "step_down_mA": float(self.spin_thermal_response_step_down_mA.value()),
+            "baseline_s": float(self.spin_thermal_response_baseline_s.value()),
+            "low_hold_s": float(self.spin_thermal_response_hold_s.value()),
+            "recovery_s": float(self.spin_thermal_response_recovery_s.value()),
+            "cycles": int(self.spin_thermal_response_cycles.value()),
+            "roi_pixel_count": 8,
+        }
+        self._start_isolated_prepared_elastocaloric_jump(
+            self._control_interval_ms(),
+            thermal_response_config=config,
+        )
+
+    def _start_isolated_prepared_elastocaloric_jump(
+        self,
+        interval_ms: int,
+        *,
+        thermal_response_config: Mapping[str, object] | None = None,
+    ) -> None:
         process = self._production_control_process
         if process is None or not process.is_alive():
             self._elastocaloric_prepared_ready = False
@@ -34597,6 +34828,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         payload = json.loads(raw_payload)
         payload["continue_prepared_elastocaloric"] = True
+        if thermal_response_config is not None:
+            payload["thermal_response_diagnostic"] = dict(thermal_response_config)
         config_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         self._production_control_generation += 1
         identity = ControlSessionIdentity(
@@ -34647,13 +34880,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
-        self._automation_phase = "starting_prepared_jump"
-        baseline_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
-        progress_text = (
-            f"Next jump: recording fresh {baseline_s:.1f} s baseline"
-            if baseline_s > 0.0
-            else "Next jump: starting strain jump"
+        self._automation_phase = (
+            "starting_thermal_response"
+            if thermal_response_config is not None
+            else "starting_prepared_jump"
         )
+        if thermal_response_config is not None:
+            baseline_s = max(1.0, float(thermal_response_config.get("baseline_s", 5.0)))
+            progress_text = (
+                "Thermal response: motor fixed; recording "
+                f"{baseline_s:.1f} s high-current baseline"
+            )
+        else:
+            baseline_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+            progress_text = (
+                f"Next jump: recording fresh {baseline_s:.1f} s baseline"
+                if baseline_s > 0.0
+                else "Next jump: starting strain jump"
+            )
         self.recipe_progress.setRange(0, 1000)
         self.recipe_progress.setValue(0)
         self.recipe_progress.setFormat(progress_text)
@@ -34664,7 +34908,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_control_process_status.setText(f"Controller: {progress_text}.")
         self.label_control_process_status.setVisible(True)
         self._control_process_poll_timer.start()
-        self._log("Starting the next jump from the retained prepared baseline.")
+        self._log(
+            "Starting a controller-owned stationary thermal-response diagnostic."
+            if thermal_response_config is not None
+            else "Starting the next jump from the retained prepared baseline."
+        )
         self._update_recipe_buttons()
 
     def _poll_production_control_process(self) -> None:
@@ -34768,7 +35016,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Control-process command rejected: {detail}")
                 if (
                     rejected_command == "start"
-                    and self._automation_phase == "starting_prepared_jump"
+                    and self._automation_phase in {
+                        "starting_prepared_jump",
+                        "starting_thermal_response",
+                    }
                 ):
                     self._elastocaloric_prepared_ready = False
                     self._automation_active = False
@@ -35166,7 +35417,11 @@ class MainWindow(QtWidgets.QMainWindow):
             terminal_task = (
                 "Recipe stopped (final values)"
                 if user_stop_requested
-                else "Recipe completed (final values)"
+                else (
+                    "Prepared series retained; hardware connected"
+                    if retain_prepared_controller
+                    else "Recipe completed; hardware released"
+                )
             )
         elif state is ControlState.EMERGENCY:
             terminal_task = "Emergency stop (final values)"
@@ -37626,6 +37881,65 @@ class MainWindow(QtWidgets.QMainWindow):
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
             transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            thermal_response = self._thermal_response_diagnostic_config
+            if self._elastocaloric_continue_prepared_requested and isinstance(
+                thermal_response, Mapping
+            ):
+                baseline_s = max(1.0, float(thermal_response.get("baseline_s", 5.0)))
+                low_hold_s = max(0.5, float(thermal_response.get("low_hold_s", 5.0)))
+                recovery_s = max(0.5, float(thermal_response.get("recovery_s", 5.0)))
+                cycles = max(1, int(thermal_response.get("cycles", 3)))
+                step_down_mA = max(0.1, float(thermal_response.get("step_down_mA", 1.0)))
+                low_current_mA = self._recipe_current_setpoint_mA(
+                    hold_current_mA - step_down_mA
+                )
+                if low_current_mA >= hold_current_mA - 0.05:
+                    raise ValueError(
+                        "The stationary thermal-response current step must lower CH4 by at least 0.1 mA."
+                    )
+                steps = [
+                    AutomationStep(
+                        "settle",
+                        current_mA=hold_current_mA,
+                        duration_s=baseline_s,
+                        note="elastocaloric:thermal_response_baseline",
+                    )
+                ]
+                for cycle_index in range(cycles):
+                    cycle_number = cycle_index + 1
+                    steps.extend(
+                        [
+                            AutomationStep(
+                                "set_current",
+                                current_mA=low_current_mA,
+                                note=f"elastocaloric:thermal_response_low:{cycle_number}",
+                            ),
+                            AutomationStep(
+                                "settle",
+                                current_mA=low_current_mA,
+                                duration_s=low_hold_s,
+                                note=f"elastocaloric:thermal_response_low_hold:{cycle_number}",
+                            ),
+                            AutomationStep(
+                                "set_current",
+                                current_mA=hold_current_mA,
+                                note=f"elastocaloric:thermal_response_restore:{cycle_number}",
+                            ),
+                            AutomationStep(
+                                "settle",
+                                current_mA=hold_current_mA,
+                                duration_s=recovery_s,
+                                note=f"elastocaloric:thermal_response_recovery:{cycle_number}",
+                            ),
+                        ]
+                    )
+                summary = (
+                    "Stationary prepared-wire thermal response: motor fixed; "
+                    f"baseline {baseline_s:.1f} s at {hold_current_mA:.2f} mA, "
+                    f"step to {low_current_mA:.2f} mA for {low_hold_s:.1f} s, "
+                    f"recover {recovery_s:.1f} s; {cycles} cycles; {clock_summary}."
+                )
+                return steps, summary, control_interval_ms
             if strain_jump_size <= 0.0:
                 raise ValueError("Set a non-zero elastocaloric strain jump.")
             if transition_rate_mA_s <= 0.0:
@@ -41625,6 +41939,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_elastocaloric_release_matches_pull.isChecked(),
         )
         self.settings.setValue("elastocaloric_motion_accel", self.spin_elastocaloric_accel.value())
+        self.settings.setValue(
+            "thermal_response_step_down_mA",
+            self.spin_thermal_response_step_down_mA.value(),
+        )
+        self.settings.setValue(
+            "thermal_response_baseline_s",
+            self.spin_thermal_response_baseline_s.value(),
+        )
+        self.settings.setValue(
+            "thermal_response_low_hold_s",
+            self.spin_thermal_response_hold_s.value(),
+        )
+        self.settings.setValue(
+            "thermal_response_recovery_s",
+            self.spin_thermal_response_recovery_s.value(),
+        )
+        self.settings.setValue(
+            "thermal_response_cycles",
+            self.spin_thermal_response_cycles.value(),
+        )
         self.settings.setValue("elastocaloric_hold_mA", self.spin_elastocaloric_hold_mA.value())
         self.settings.setValue(
             "elastocaloric_release_record_s",
@@ -42433,6 +42767,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 DEFAULT_TIC_MAX_ACCEL,
                 int(self.settings.value("elastocaloric_motion_accel", 200_000)),
             )
+        )
+        self.spin_thermal_response_step_down_mA.setValue(
+            float(self.settings.value("thermal_response_step_down_mA", 1.0))
+        )
+        self.spin_thermal_response_baseline_s.setValue(
+            float(self.settings.value("thermal_response_baseline_s", 5.0))
+        )
+        self.spin_thermal_response_hold_s.setValue(
+            float(self.settings.value("thermal_response_low_hold_s", 5.0))
+        )
+        self.spin_thermal_response_recovery_s.setValue(
+            float(self.settings.value("thermal_response_recovery_s", 5.0))
+        )
+        self.spin_thermal_response_cycles.setValue(
+            int(self.settings.value("thermal_response_cycles", 3))
         )
         self.spin_elastocaloric_hold_mA.setValue(
             max(MIN_RECIPE_CURRENT_MA, float(self.settings.value("elastocaloric_hold_mA", MIN_RECIPE_CURRENT_MA)))

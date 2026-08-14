@@ -968,6 +968,49 @@ def test_production_backend_reuses_prepared_elastocaloric_window_without_preflig
     backend.close()
 
 
+def test_production_backend_runs_stationary_thermal_response_as_prepared_recipe() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace","cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+    window = backend._window
+    window._automation_active = False
+    window._session_active = False
+    window._elastocaloric_prepared_ready = True
+    window._elastocaloric_prepared_baseline_mm = 1.25
+    window._elastocaloric_prepared_current_mA = 2.0
+    backend._stopped = True
+
+    backend.start(
+        ControlStartRequest(
+            identity=ControlSessionIdentity("prepared-thermal", 2),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},'
+                '"continue_prepared_elastocaloric":true,'
+                '"thermal_response_diagnostic":{"baseline_s":5.0,'
+                '"step_down_mA":0.5,"low_hold_s":5.0,"recovery_s":5.0,'
+                '"cycles":3,"roi_pixel_count":8}}'
+            ),
+        )
+    )
+
+    assert window._thermal_response_diagnostic_config["cycles"] == 3
+    assert window._thermal_response_roi_indices == ()
+    assert window._elastocaloric_release_confirmed is True
+    assert window._current_position_mm == pytest.approx(1.25)
+    backend.close()
+
+
 def test_prepared_elastocaloric_rejection_does_not_trigger_output_shutdown() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app

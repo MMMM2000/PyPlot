@@ -453,6 +453,13 @@ class ProductionTmaBackend:
         ir_age_s = ir_snapshot.get("sample_age_s")
         if ir_age_s is None or float(ir_age_s) > 1.0:
             raise RuntimeError("thermal-camera feedback is not fresh for the next jump")
+        thermal_response = payload.get("thermal_response_diagnostic")
+        window._thermal_response_diagnostic_config = (
+            dict(thermal_response) if isinstance(thermal_response, Mapping) else None
+        )
+        window._thermal_response_roi_sums = None
+        window._thermal_response_roi_count = 0
+        window._thermal_response_roi_indices = ()
         window._elastocaloric_continue_prepared_requested = True
         window._controller_process_prior_run_preflight_complete = True
         window._controller_process_hardware_preflight_complete = True
@@ -460,6 +467,12 @@ class ProductionTmaBackend:
         self._drain_events()
         if not window._automation_active:
             raise RuntimeError("prepared elastocaloric jump did not start")
+        if window._thermal_response_diagnostic_config is not None:
+            # This recipe never moves the motor away from the prepared baseline.
+            # Marking the return contract here lets normal completion perform the
+            # same fresh CH4 verification and retained-controller handoff as a
+            # completed pull/release cycle.
+            window._elastocaloric_release_confirmed = True
         self._started = True
         self._stopped = False
 

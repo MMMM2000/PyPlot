@@ -6558,6 +6558,8 @@ def test_session_logs_ir_temperature_sidecar_and_measurement_columns(tmp_path: P
                 "frame_hotspot_col": "",
                 "frame_width": "",
                 "frame_height": "",
+                "diagnostic_roi_mean_c": "",
+                "diagnostic_roi_indices": "",
                 "raw_ambient": "14813",
                 "raw_object": "15733",
                 "read_us": "2370",
@@ -20948,6 +20950,113 @@ def test_prepared_elastocaloric_continuation_honors_measurement_count(
         assert not any(step.action in {"seek_target", "sweep_current"} for step in steps)
         assert "Continued prepared elastocaloric series" in summary
         assert "3 measurements" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_prepared_thermal_response_keeps_motor_fixed_and_restores_current(
+    tmp_path: Path, qtbot
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_constant_current_start_mA.setValue(30.0)
+        window.spin_elastocaloric_hold_mA.setValue(30.0)
+        window._elastocaloric_continue_prepared_requested = True
+        window._thermal_response_diagnostic_config = {
+            "baseline_s": 4.0,
+            "step_down_mA": 1.0,
+            "low_hold_s": 3.0,
+            "recovery_s": 2.0,
+            "cycles": 2,
+        }
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        assert [step.action for step in steps] == [
+            "settle",
+            "set_current",
+            "settle",
+            "set_current",
+            "settle",
+            "set_current",
+            "settle",
+            "set_current",
+            "settle",
+        ]
+        assert not any(
+            step.action in {"move", "seek_target", "mechanical_scan", "mark_current_zero"}
+            for step in steps
+        )
+        assert [step.current_mA for step in steps if step.action == "set_current"] == pytest.approx(
+            [29.0, 30.0, 29.0, 30.0]
+        )
+        assert steps[-1].current_mA == pytest.approx(30.0)
+        assert "motor fixed" in summary
+        assert "2 cycles" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_thermal_response_roi_is_selected_from_baseline_and_stays_fixed(
+    tmp_path: Path, qtbot
+) -> None:
+    from experiments.thermal_camera_viewer import ThermalFrame
+
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._thermal_response_diagnostic_config = {
+            "baseline_s": 2.0,
+            "roi_pixel_count": 2,
+        }
+        window._session_start_wall_s = 100.0
+        for sequence in range(1, 9):
+            frame = ThermalFrame(
+                elapsed_ms=sequence * 100,
+                ambient_c=24.0,
+                values=(20.0, 30.0, 29.0, 21.0),
+                unit="C",
+                raw_read_us=1000,
+                sequence=sequence,
+                width=2,
+                height=2,
+            )
+            window._latest_ir_frame = frame
+            sample = mini_dma_mod.IrTemperatureSample(
+                timestamp_s=100.2 + sequence * 0.1,
+                raw_text="",
+                sequence=sequence,
+                device_elapsed_ms=sequence * 100,
+                read_us=1000,
+                ambient_c=24.0,
+                object_c_apparent=30.0,
+                raw_ambient=0,
+                raw_object=0,
+                flags=0,
+                sensor_type=mini_dma_mod.IR_SENSOR_MLX90640,
+            )
+            roi_mean, indices = window._thermal_response_roi_value_locked(sample)
+
+        assert window._thermal_response_roi_indices == (1, 2)
+        assert roi_mean == pytest.approx(29.5)
+        assert indices == "1;2"
+
+        window._latest_ir_frame = ThermalFrame(
+            elapsed_ms=1000,
+            ambient_c=24.0,
+            values=(100.0, 31.0, 27.0, 20.0),
+            unit="C",
+            raw_read_us=1000,
+            sequence=9,
+            width=2,
+            height=2,
+        )
+        sample.sequence = 9
+        sample.timestamp_s = 102.0
+        roi_mean, indices = window._thermal_response_roi_value_locked(sample)
+        assert roi_mean == pytest.approx(29.0)
+        assert indices == "1;2"
     finally:
         _close_test_window(window)
 
