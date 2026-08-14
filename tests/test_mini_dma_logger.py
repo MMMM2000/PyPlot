@@ -20999,6 +20999,42 @@ def test_prepared_thermal_response_keeps_motor_fixed_and_restores_current(
         _close_test_window(window)
 
 
+def test_stationary_thermal_preparation_ramps_current_without_motor_actions(
+    tmp_path: Path, qtbot
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_elastocaloric_hold_mA.setValue(30.0)
+        window._stationary_thermal_preparation_config = {
+            "target_current_mA": 30.0,
+            "ramp_rate_mA_s": 5.0,
+            "baseline_s": 5.0,
+        }
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        assert not any(
+            step.action in {"move", "seek_target", "mechanical_scan", "mark_current_zero"}
+            for step in steps
+        )
+        current_steps = [step for step in steps if step.action == "set_current"]
+        assert current_steps[0].current_mA == pytest.approx(2.0)
+        assert current_steps[-1].current_mA == pytest.approx(30.0)
+        assert all(
+            later.current_mA > earlier.current_mA
+            for earlier, later in zip(current_steps, current_steps[1:])
+        )
+        assert steps[-1].action == "settle"
+        assert steps[-1].current_mA == pytest.approx(30.0)
+        assert steps[-1].duration_s == pytest.approx(5.0)
+        assert "motor fixed" in summary
+        assert "5.00 mA/s" in summary
+    finally:
+        _close_test_window(window)
+
+
 def test_thermal_response_roi_is_selected_from_baseline_and_stays_fixed(
     tmp_path: Path, qtbot
 ) -> None:

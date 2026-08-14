@@ -293,6 +293,12 @@ class ProductionTmaBackend:
         )
         if callable(payload_hook):
             payload_hook(payload)
+        stationary_preparation = payload.get("stationary_thermal_preparation")
+        self._window._stationary_thermal_preparation_config = (
+            dict(stationary_preparation)
+            if isinstance(stationary_preparation, Mapping)
+            else None
+        )
         self._window._supply_lease_owner = str(
             payload.get("supply_lease_owner") or ""
         )
@@ -411,6 +417,18 @@ class ProductionTmaBackend:
                 or "controller process did not start the recipe"
             )
             raise RuntimeError(detail)
+        if self._window._stationary_thermal_preparation_config is not None:
+            target_current_mA = float(
+                self._window._stationary_thermal_preparation_config.get(
+                    "target_current_mA",
+                    self._window.spin_elastocaloric_hold_mA.value(),
+                )
+            )
+            self._window._elastocaloric_prepared_baseline_mm = float(
+                self._window._current_position_mm
+            )
+            self._window._elastocaloric_prepared_current_mA = target_current_mA
+            self._window._elastocaloric_release_confirmed = True
         self._started = True
         self._stopped = False
 

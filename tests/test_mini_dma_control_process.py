@@ -1011,6 +1011,32 @@ def test_production_backend_runs_stationary_thermal_response_as_prepared_recipe(
     backend.close()
 
 
+def test_production_backend_marks_stationary_preparation_reusable() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"output_collision_action":"replace","cadence_downgrade_accepted":true,'
+                '"stationary_thermal_preparation":{"target_current_mA":30.0,'
+                '"ramp_rate_mA_s":5.0,"baseline_s":5.0}}'
+            ),
+        )
+    )
+
+    window = backend._window
+    assert window._stationary_thermal_preparation_config["target_current_mA"] == 30.0
+    assert window._elastocaloric_prepared_baseline_mm == pytest.approx(1.25)
+    assert window._elastocaloric_prepared_current_mA == pytest.approx(30.0)
+    assert window._elastocaloric_release_confirmed is True
+    backend.close()
+
+
 def test_prepared_elastocaloric_rejection_does_not_trigger_output_shutdown() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app

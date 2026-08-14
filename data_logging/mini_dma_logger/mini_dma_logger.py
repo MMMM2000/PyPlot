@@ -8436,6 +8436,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._latest_ir_sample: IrTemperatureSample | None = None
         self._latest_ir_frame: object | None = None
         self._thermal_response_diagnostic_config: dict[str, object] | None = None
+        self._stationary_thermal_preparation_config: dict[str, object] | None = None
         self._thermal_response_roi_sums: list[float] | None = None
         self._thermal_response_roi_count = 0
         self._thermal_response_roi_indices: tuple[int, ...] = ()
@@ -11911,7 +11912,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Keep the motor fixed, step CH4 down and back up under the retained controller, "
             "and log a fixed camera ROI at full camera rate."
         )
-        self.button_thermal_response.clicked.connect(self._start_prepared_thermal_response)
+        self.button_thermal_response.clicked.connect(self._start_or_prepare_thermal_response)
         constant_current_form.addRow("", self.button_thermal_response)
         self.label_thermal_response_button_row = constant_current_form.labelForField(
             self.button_thermal_response
@@ -33759,13 +33760,22 @@ class MainWindow(QtWidgets.QMainWindow):
             else "Start recipe"
         )
         if hasattr(self, "button_thermal_response"):
+            self.button_thermal_response.setText(
+                "Measure thermal response"
+                if self._elastocaloric_prepared_ready
+                else "Prepare at fixed motor, then measure"
+            )
             self.button_thermal_response.setEnabled(
                 bool(
                     not self._isolated_recipe_active
-                    and self._elastocaloric_prepared_ready
-                    and self._production_control_process is not None
-                    and self._production_control_process.is_alive()
                     and self._is_elastocaloric_mode(self.combo_recipe_mode.currentData())
+                    and (
+                        not self._elastocaloric_prepared_ready
+                        or (
+                            self._production_control_process is not None
+                            and self._production_control_process.is_alive()
+                        )
+                    )
                 )
             )
         child_owns_hardware = bool(
@@ -34637,6 +34647,16 @@ class MainWindow(QtWidgets.QMainWindow):
             starting_length_mm=starting_length_mm,
             cadence_downgrade_accepted=True,
         )
+        if isinstance(self._stationary_thermal_preparation_config, Mapping):
+            config_payload = json.loads(config_json)
+            config_payload["stationary_thermal_preparation"] = dict(
+                self._stationary_thermal_preparation_config
+            )
+            config_json = json.dumps(
+                config_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         self._update_length_setup_dialog(
             "Waiting for dedicated controller readiness; hardware remains UI-owned."
         )
@@ -34785,9 +34805,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._control_process_poll_timer.start()
         self._update_recipe_buttons()
 
-    def _start_prepared_thermal_response(self, checked: bool = False) -> None:
+    def _start_or_prepare_thermal_response(self, checked: bool = False) -> None:
         del checked
         if not self._is_elastocaloric_mode(self.combo_recipe_mode.currentData()):
+            return
+        if not self._elastocaloric_prepared_ready:
+            self._stationary_thermal_preparation_config = {
+                "target_current_mA": float(self.spin_elastocaloric_hold_mA.value()),
+                "ramp_rate_mA_s": 5.0,
+                "baseline_s": float(self.spin_thermal_response_baseline_s.value()),
+            }
+            try:
+                self._start_auto_ramp()
+            finally:
+                self._stationary_thermal_preparation_config = None
             return
         config = {
             "step_down_mA": float(self.spin_thermal_response_step_down_mA.value()),
@@ -37881,6 +37912,59 @@ class MainWindow(QtWidgets.QMainWindow):
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
             transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            stationary_preparation = self._stationary_thermal_preparation_config
+            if isinstance(stationary_preparation, Mapping):
+                target_current_mA = self._recipe_current_setpoint_mA(
+                    float(stationary_preparation.get("target_current_mA", hold_current_mA))
+                )
+                ramp_rate_mA_s = max(
+                    0.1,
+                    float(stationary_preparation.get("ramp_rate_mA_s", 5.0)),
+                )
+                baseline_s = max(
+                    1.0,
+                    float(stationary_preparation.get("baseline_s", 5.0)),
+                )
+                start_current_mA = self._recipe_current_setpoint_mA(MIN_RECIPE_CURRENT_MA)
+                current_step_mA = min(1.0, max(0.1, target_current_mA - start_current_mA))
+                step_hold_s = current_step_mA / ramp_rate_mA_s
+                current_values: list[float] = []
+                current_mA = start_current_mA
+                while current_mA < target_current_mA - 1e-9:
+                    current_mA = min(target_current_mA, current_mA + current_step_mA)
+                    current_values.append(current_mA)
+                steps = []
+                for step_index, current_mA in enumerate(current_values, start=1):
+                    steps.extend(
+                        [
+                            AutomationStep(
+                                "set_current",
+                                current_mA=current_mA,
+                                note=f"elastocaloric:stationary_prepare_current:{step_index}",
+                            ),
+                            AutomationStep(
+                                "settle",
+                                current_mA=current_mA,
+                                duration_s=step_hold_s,
+                                note=f"elastocaloric:stationary_prepare_ramp:{step_index}",
+                            ),
+                        ]
+                    )
+                steps.append(
+                    AutomationStep(
+                        "settle",
+                        current_mA=target_current_mA,
+                        duration_s=baseline_s,
+                        note="elastocaloric:stationary_prepare_baseline",
+                    )
+                )
+                summary = (
+                    "Stationary elastocaloric preparation: motor fixed; ramp current "
+                    f"from {start_current_mA:.2f} to {target_current_mA:.2f} mA at "
+                    f"{ramp_rate_mA_s:.2f} mA/s, then record {baseline_s:.1f} s baseline; "
+                    f"{clock_summary}."
+                )
+                return steps, summary, control_interval_ms
             thermal_response = self._thermal_response_diagnostic_config
             if self._elastocaloric_continue_prepared_requested and isinstance(
                 thermal_response, Mapping
