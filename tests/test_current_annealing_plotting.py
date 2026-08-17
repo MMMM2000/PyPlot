@@ -815,6 +815,56 @@ def test_current_annealing_core_loads_session_v2_csv_folder(tmp_path: Path) -> N
     assert anneal_core.measurement_display_name(measurement) == run_dir.name
 
 
+def test_split_review_cycles_rejects_voltage_limited_continued_heating() -> None:
+    heating_current = np.linspace(2.0, 100.0, 100)
+    limited_current = np.linspace(100.0, 90.0, 30)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[heating_current, limited_current],
+            "R_Ohm": np.r_[
+                np.linspace(80.0, 150.0, heating_current.size),
+                np.linspace(150.0, 170.0, limited_current.size),
+            ],
+            "V_V": np.r_[
+                np.linspace(0.2, 30.0, heating_current.size),
+                np.full(limited_current.size, 30.0),
+            ],
+        }
+    )
+
+    cycles = anneal_core.split_review_cycles(frame)
+
+    assert len(cycles) == 1
+    assert cycles[0].cooling_recorded is False
+    assert cycles[0].cooling is not None
+    assert "30 V ceiling" in cycles[0].cooling_reason
+
+
+def test_split_review_cycles_accepts_commanded_cooling_ramp() -> None:
+    heating_current = np.linspace(2.0, 100.0, 100)
+    cooling_current = np.linspace(100.0, 2.0, 100)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[heating_current, cooling_current],
+            "R_Ohm": np.r_[
+                np.linspace(80.0, 150.0, heating_current.size),
+                np.linspace(150.0, 82.0, cooling_current.size),
+            ],
+            "V_V": np.r_[
+                np.linspace(0.2, 20.0, heating_current.size),
+                np.linspace(20.0, 0.2, cooling_current.size),
+            ],
+        }
+    )
+
+    cycles = anneal_core.split_review_cycles(frame)
+
+    assert len(cycles) == 1
+    assert cycles[0].cooling_recorded is True
+    assert cycles[0].cooling is not None
+    assert cycles[0].cooling["I_mA"].iloc[-1] == pytest.approx(2.0)
+
+
 def test_current_annealing_plugin_treats_run_folder_as_one_measurement(
     tmp_path: Path,
 ) -> None:

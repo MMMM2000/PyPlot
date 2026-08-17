@@ -702,7 +702,6 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
     for label in tuple(dialog.choice_buttons):
         dialog.choice_buttons[label]["auto"].click()
     assert not dialog.save_button.isEnabled()
-
     dialog.target_list.setCurrentRow(1)
     assert set(dialog.choice_buttons) == {"As2", "Af2", "Ms2", "Mf2"}
     assert {
@@ -727,6 +726,82 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
         for label in ("As1", "Af1", "Ms1", "Mf1")
     )
 
+
+def test_current_annealing_review_hides_absent_cooling_until_overridden(
+    tmp_path,
+    qtbot,
+) -> None:
+    from plotting.plugins.current_annealing.core import AnnealingReviewCycle
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    heating = pd.DataFrame(
+        {"I_mA": [1.0, 2.0, 3.0], "R_Ohm": [10.0, 11.0, 12.0]}
+    )
+    limited_tail = pd.DataFrame(
+        {"I_mA": [3.0, 2.9, 2.8], "R_Ohm": [12.0, 12.5, 13.0]}
+    )
+    frame = pd.concat((heating, limited_tail), ignore_index=True)
+    fingerprint = dataframe_fingerprint(
+        frame, namespace="current_annealing", columns=("I_mA", "R_Ohm")
+    )
+    target = make_target(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        target_key="graph",
+        status="manual_adjusted",
+        auto_values={"As1": 1.5, "Af1": 2.5, "Ms1": 2.4, "Mf1": 1.4},
+        manual_values={"Ms1": 2.35},
+        final_values={"Ms1": 2.35},
+    )
+    payload = make_review(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    branch = AnnealingReviewCycle(
+        heating=heating,
+        cooling=limited_tail,
+        cooling_recorded=False,
+        cooling_reason=(
+            "No cooling ramp: voltage remained at its 30 V ceiling while "
+            "resistance increased."
+        ),
+    )
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "graph": ReviewPlot(
+                frame["I_mA"],
+                frame["R_Ohm"],
+                "voltage limited",
+                "Resistance (ohm)",
+                unit_branches={"Cycle 1": branch},
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    assert set(dialog.choice_buttons) == {"As1", "Af1"}
+    cooling_x, _cooling_y = dialog.cooling_curve_item.getData()
+    assert cooling_x is None or cooling_x.size == 0
+    assert dialog.cooling_branch_check.isChecked() is False
+    assert "30 V ceiling" in dialog.cooling_branch_reason.text()
+
+    dialog.cooling_branch_check.click()
+
+    assert set(dialog.choice_buttons) == {"As1", "Af1", "Ms1", "Mf1"}
+    cooling_x, _cooling_y = dialog.cooling_curve_item.getData()
+    assert cooling_x.tolist() == pytest.approx([3.0, 2.9, 2.8])
+    assert dialog.choice_buttons["Ms1"]["manual"].isChecked()
+    assert dialog.payload["targets"][0]["final_values"]["Ms1"] == pytest.approx(2.35)
+    assert target.get("cooling_branch_overrides") is None
+    assert dialog.payload["targets"][0]["cooling_branch_overrides"] == {
+        "Cycle 1": True
+    }
 
 def test_tma_review_draft_preserves_repeated_stress_sweeps(
     tmp_path,

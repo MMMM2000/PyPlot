@@ -38,6 +38,7 @@ class ReviewPlot:
     derives_transition_strain: bool = False
     strain_reference: Mapping[str, Any] | None = None
     unit_series: Mapping[str, tuple[pd.Series, pd.Series]] | None = None
+    unit_branches: Mapping[str, annealing_core.AnnealingReviewCycle] | None = None
     x_label: str = 'Current'
     x_unit: str = 'mA'
     value_unit: str = 'mA'
@@ -118,7 +119,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.plot_item.showGrid(x=True, y=True, alpha=0.16)
         self.plot_item.setDownsampling(auto=True, mode="peak")
         self.plot_item.setClipToView(True)
-        self.plot_item.addLegend(offset=(10, 10))
+        self.legend = self.plot_item.addLegend(offset=(10, 10))
         self.heating_curve_item = self.plot_item.plot(
             [], [], pen=pg.mkPen('#ef4444', width=1.6), name='Heating'
         )
@@ -133,6 +134,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             [], [], pen=None, symbol='o', symbolSize=4,
             symbolPen=None, symbolBrush=pg.mkBrush('#3b82f6')
         )
+        self._cooling_legend_visible = True
         # Retain the former public-ish attribute for callers and tests that use
         # it, while drawing the two physical sweep directions independently.
         self.curve_item = self.heating_curve_item
@@ -218,6 +220,18 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.derived_strain_label.setWordWrap(True)
         self.derived_strain_label.setStyleSheet("color: #9ca3af;")
         values_layout.addWidget(self.derived_strain_label)
+        self.cooling_branch_row = QtWidgets.QWidget()
+        cooling_branch_layout = QtWidgets.QVBoxLayout(self.cooling_branch_row)
+        cooling_branch_layout.setContentsMargins(0, 0, 0, 0)
+        cooling_branch_layout.setSpacing(1)
+        self.cooling_branch_check = QtWidgets.QCheckBox("Cooling branch recorded")
+        self.cooling_branch_reason = QtWidgets.QLabel()
+        self.cooling_branch_reason.setWordWrap(True)
+        self.cooling_branch_reason.setStyleSheet("color: #9ca3af;")
+        cooling_branch_layout.addWidget(self.cooling_branch_check)
+        cooling_branch_layout.addWidget(self.cooling_branch_reason)
+        values_layout.addWidget(self.cooling_branch_row)
+        self.cooling_branch_row.hide()
         review_layout.addWidget(self.values_box)
 
         disposition_row = QtWidgets.QHBoxLayout()
@@ -259,6 +273,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.manual_value_edit.textChanged.connect(self._manual_text_changed)
         self.manual_value_edit.editingFinished.connect(
             self._manual_value_committed
+        )
+        self.cooling_branch_check.toggled.connect(
+            self._cooling_branch_override_changed
         )
         right.addWidget(review_panel)
         right.setStretchFactor(0, 1)
@@ -317,6 +334,23 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 available.update(str(label) for label in values)
         available.update(str(label) for label in target.get("cleared_labels", ()))
         if self.payload.get("experiment_family") == "current_annealing":
+            plot = self.plots.get(str(target.get('target_key') or ''))
+            if plot is not None and plot.unit_branches:
+                available = set()
+                overrides = target.get("cooling_branch_overrides")
+                overrides = overrides if isinstance(overrides, Mapping) else {}
+                for title, branch in plot.unit_branches.items():
+                    match = re.fullmatch(r'Cycle\s+(\d+)', str(title))
+                    if match is None:
+                        continue
+                    loop = int(match.group(1))
+                    available.update((f"As{loop}", f"Af{loop}"))
+                    cooling_recorded = bool(
+                        overrides.get(title, branch.cooling_recorded)
+                    )
+                    if cooling_recorded:
+                        available.update((f"Ms{loop}", f"Mf{loop}"))
+                return [label for label in LABELS if label in available]
             loop_numbers = {
                 int(label[-1])
                 for label in available
@@ -345,6 +379,19 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         labels = self._labels_for_target(target)
         if self.payload.get("experiment_family") != "current_annealing":
             return [("Transitions", labels)]
+        plot = self.plots.get(str(target.get('target_key') or ''))
+        if plot is not None and plot.unit_branches:
+            return [
+                (
+                    title,
+                    [
+                        label
+                        for label in labels
+                        if label.endswith(str(index))
+                    ],
+                )
+                for index, title in enumerate(plot.unit_branches, start=1)
+            ]
         loop_numbers = sorted(
             {
                 int(label[-1])
@@ -386,6 +433,75 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         finally:
             del blocker
 
+    def _update_cooling_branch_control(
+        self,
+        target: Mapping[str, Any],
+    ) -> None:
+        plot = self.plots.get(str(target.get("target_key") or ""))
+        title = self.review_unit_combo.currentText()
+        branch = (plot.unit_branches or {}).get(title) if plot is not None else None
+        if branch is None:
+            self.cooling_branch_row.hide()
+            return
+        overrides = target.get("cooling_branch_overrides")
+        overrides = overrides if isinstance(overrides, Mapping) else {}
+        checked = bool(overrides.get(title, branch.cooling_recorded))
+        blocker = QtCore.QSignalBlocker(self.cooling_branch_check)
+        try:
+            self.cooling_branch_check.setChecked(checked)
+        finally:
+            del blocker
+        if title in overrides:
+            prefix = "Manual override. "
+        else:
+            prefix = ""
+        self.cooling_branch_reason.setText(prefix + branch.cooling_reason)
+        self.cooling_branch_row.show()
+
+    def _cooling_branch_override_changed(self, checked: bool) -> None:
+        if self._loading or self._target_index < 0:
+            return
+        self._store_target_controls()
+        target = self._targets()[self._target_index]
+        plot = self.plots.get(str(target.get("target_key") or ""))
+        title = self.review_unit_combo.currentText()
+        branch = (plot.unit_branches or {}).get(title) if plot is not None else None
+        if branch is None:
+            return
+        overrides = target.setdefault("cooling_branch_overrides", {})
+        if checked == branch.cooling_recorded:
+            overrides.pop(title, None)
+        else:
+            overrides[title] = bool(checked)
+        if not overrides:
+            target.pop("cooling_branch_overrides", None)
+        if checked:
+            unavailable = target.pop("branch_unavailable_review", None)
+            if isinstance(unavailable, Mapping):
+                for field in ("manual_values", "final_values"):
+                    values = unavailable.get(field)
+                    if isinstance(values, Mapping):
+                        target.setdefault(field, {}).update(values)
+                cleared = unavailable.get("cleared_labels")
+                if isinstance(cleared, Sequence) and not isinstance(
+                    cleared, (str, bytes)
+                ):
+                    target["cleared_labels"] = sorted(
+                        set(target.get("cleared_labels", ()))
+                        | {str(label) for label in cleared}
+                    )
+        unit_index = self.review_unit_combo.currentIndex()
+        units = self._review_units_for_target(target)
+        self._review_unit_labels = [labels for _title, labels in units]
+        self._active_unit_labels = list(self._review_unit_labels[unit_index])
+        self._loading = True
+        self._populate_values_table(target)
+        self._loading = False
+        self._update_cooling_branch_control(target)
+        self._selected_row_changed()
+        self._update_decision_summary()
+        self._draw_target()
+
     def _review_unit_changed(self, index: int) -> None:
         if self._loading or index < 0 or index >= len(self._review_unit_labels):
             return
@@ -394,6 +510,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         target = self._targets()[self._target_index]
         self._loading = True
         self._populate_values_table(target)
+        self._update_cooling_branch_control(target)
         self._loading = False
         self._selected_row_changed()
         self._update_decision_summary()
@@ -782,10 +899,41 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         target = self._targets()[self._target_index]
         auto = dict(target.get("auto_values") or {})
         active_labels = set(self._choices)
+        applicable_labels = set(self._labels_for_target(target))
+        current_annealing = (
+            self.payload.get("experiment_family") == "current_annealing"
+        )
+        prior_manual = dict(target.get("manual_values") or {})
+        prior_final = dict(target.get("final_values") or {})
+        prior_cleared = set(str(label) for label in target.get("cleared_labels", ()))
+        unavailable_labels = {
+            label
+            for label in set(prior_manual) | set(prior_final) | prior_cleared
+            if current_annealing
+            and re.fullmatch(r"(?:As|Af|Ms|Mf)\d+", str(label))
+            and label not in applicable_labels
+        }
+        if unavailable_labels:
+            target["branch_unavailable_review"] = {
+                "manual_values": {
+                    label: float(prior_manual[label])
+                    for label in unavailable_labels
+                    if label in prior_manual
+                },
+                "final_values": {
+                    label: float(prior_final[label])
+                    for label in unavailable_labels
+                    if label in prior_final
+                },
+                "cleared_labels": sorted(prior_cleared & unavailable_labels),
+            }
+        else:
+            target.pop("branch_unavailable_review", None)
         manual = {
             str(label): float(value)
-            for label, value in dict(target.get("manual_values") or {}).items()
+            for label, value in prior_manual.items()
             if label not in active_labels
+            and (not current_annealing or label in applicable_labels)
         }
         manual.update(
             {
@@ -796,8 +944,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         )
         cleared = {
             str(label)
-            for label in target.get("cleared_labels", ())
+            for label in prior_cleared
             if label not in active_labels
+            and (not current_annealing or label in applicable_labels)
         }
         cleared.update(
             label
@@ -806,8 +955,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         )
         final = {
             str(label): float(value)
-            for label, value in dict(target.get("final_values") or {}).items()
+            for label, value in prior_final.items()
             if label not in active_labels
+            and (not current_annealing or label in applicable_labels)
         }
         final.update(
             {
@@ -886,6 +1036,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         )
         self._populate_review_units(target, selected_index=unit_index)
         self._populate_values_table(target)
+        self._update_cooling_branch_control(target)
         self._loading = False
         self._selected_row_changed()
         self._update_decision_summary()
@@ -991,16 +1142,43 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             )
             return True
 
+        unit_branch = (plot.unit_branches or {}).get(unit_title)
+        cooling_enabled = bool(
+            self.cooling_branch_check.isChecked()
+            if unit_branch is not None
+            else True
+        )
+        heating_series = plot.heating_series
+        cooling_series = plot.cooling_series
+        if unit_branch is not None:
+            heating_frame = unit_branch.heating
+            if not cooling_enabled and unit_branch.cooling is not None:
+                heating_frame = pd.concat(
+                    (unit_branch.heating, unit_branch.cooling),
+                    axis=0,
+                )
+            heating_series = (
+                heating_frame["I_mA"],
+                heating_frame["R_Ohm"],
+            )
+            cooling_series = (
+                (
+                    unit_branch.cooling["I_mA"],
+                    unit_branch.cooling["R_Ohm"],
+                )
+                if cooling_enabled and unit_branch.cooling is not None
+                else None
+            )
         explicit_branches = (
             set_branch(
                 self.heating_curve_item,
                 self.heating_symbol_item,
-                plot.heating_series,
+                heating_series,
             ),
             set_branch(
                 self.cooling_curve_item,
                 self.cooling_symbol_item,
-                plot.cooling_series,
+                cooling_series,
             ),
         )
         if not any(explicit_branches):
@@ -1027,6 +1205,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 self.cooling_curve_item.setData([], [])
                 self.heating_symbol_item.setData([], [])
                 self.cooling_symbol_item.setData([], [])
+        if cooling_series is None and self._cooling_legend_visible:
+            self.legend.removeItem(self.cooling_curve_item)
+            self._cooling_legend_visible = False
+        elif cooling_series is not None and not self._cooling_legend_visible:
+            self.legend.addItem(self.cooling_curve_item, "Cooling")
+            self._cooling_legend_visible = True
         self.plot_item.setLabel('bottom', plot.x_label, units=plot.x_unit)
         self.plot_item.setLabel("left", plot.y_label)
         self.plot_item.setTitle(plot.title)
@@ -1934,39 +2118,18 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                 editor._store_target_controls()  # noqa: SLF001
         super().accept()
 
-def _current_annealing_cycle_series(
+def _current_annealing_cycle_branches(
     frame: pd.DataFrame,
-) -> dict[str, tuple[pd.Series, pd.Series]]:
-    """Return one heating/cooling trace per current cycle for review."""
+) -> dict[str, annealing_core.AnnealingReviewCycle]:
+    """Return explicitly classified physical branches for each review cycle."""
 
-    resistance_column = "R_Ohm" if "R_Ohm" in frame.columns else "R_ohm"
-    if "I_mA" not in frame.columns or resistance_column not in frame.columns:
-        return {}
-    working = pd.DataFrame(
-        {
-            "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
-            "R_Ohm": pd.to_numeric(frame[resistance_column], errors="coerce"),
-        }
-    ).dropna()
-    if working.empty:
-        return {}
-    _directions, segments = annealing_core._direction_profile(  # noqa: SLF001
-        working["I_mA"].to_numpy(dtype=float)
-    )
-    result: dict[str, tuple[pd.Series, pd.Series]] = {}
-    cycle = 0
-    for segment_index, (start, end, direction) in enumerate(segments):
-        if direction < 0:
-            continue
-        cycle += 1
-        cycle_end = end
-        for _next_start, next_end, next_direction in segments[segment_index + 1 :]:
-            if next_direction >= 0:
-                break
-            cycle_end = next_end
-        trace = working.iloc[start:cycle_end]
-        result[f"Cycle {cycle}"] = (trace["I_mA"], trace["R_Ohm"])
-    return result
+    return {
+        f"Cycle {index}": cycle
+        for index, cycle in enumerate(
+            annealing_core.split_review_cycles(frame),
+            start=1,
+        )
+    }
 
 def _build_current_annealing_review_dialog(
     parent: QtWidgets.QWidget,
@@ -1988,12 +2151,34 @@ def _build_current_annealing_review_dialog(
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different measurement content.")
     frame = annealing_core.load_file(str(path))
+    branches = _current_annealing_cycle_branches(frame)
+    payload.setdefault("analysis", {})["branch_classifier"] = (
+        "current_voltage_resistance_v1"
+    )
+    for target in payload.get("targets", ()):
+        if not isinstance(target, dict) or target.get("target_key") != "graph":
+            continue
+        target["branch_availability"] = {
+            title: {
+                "heating_recorded": True,
+                "cooling_recorded": cycle.cooling_recorded,
+                "reason": cycle.cooling_reason,
+            }
+            for title, cycle in branches.items()
+        }
     plot = ReviewPlot(
         frame["I_mA"],
         frame["R_Ohm"],
         annealing_core.measurement_display_name(path),
         "Resistance (ohm)",
-        unit_series=_current_annealing_cycle_series(frame),
+        unit_series={
+            title: (
+                cycle.heating["I_mA"],
+                cycle.heating["R_Ohm"],
+            )
+            for title, cycle in branches.items()
+        },
+        unit_branches=branches,
     )
     return PortableTransitionReviewDialog(
         payload, {"graph": plot}, sidecar, parent
