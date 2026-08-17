@@ -49,6 +49,19 @@ def test_load_file_handles_decimal_commas(tmp_path: Path) -> None:
     assert df["R_Ohm"].tolist() == pytest.approx([1000.5, 1001.5])
 
 
+def test_load_file_returns_empty_review_frame_for_header_only_run(tmp_path: Path) -> None:
+    path = tmp_path / "interrupted.txt"
+    path.write_text(
+        "# Current (mA)\tVoltage (V)\tResistance (Ohm)\n",
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(path)
+
+    assert frame.empty
+    assert frame.columns.tolist() == ["I_mA", "R_Ohm", "V_V"]
+
+
 def test_load_file_keeps_milliamp_input_without_multiplying_by_1000(tmp_path: Path) -> None:
     path = tmp_path / "already_ma_80mA.txt"
     path.write_text("2 0.1 100\n4 0.2 110\n6 0.3 120\n")
@@ -863,6 +876,22 @@ def test_split_review_cycles_accepts_commanded_cooling_ramp() -> None:
     assert cycles[0].cooling_recorded is True
     assert cycles[0].cooling is not None
     assert cycles[0].cooling["I_mA"].iloc[-1] == pytest.approx(2.0)
+
+
+def test_review_measurement_frame_drops_nonpositive_resistance_placeholders() -> None:
+    frame = pd.DataFrame(
+        {
+            "I_mA": [0.0, 0.2, 0.0, 10.0, 0.0],
+            "R_Ohm": [0.0, 0.0, 100.0, 120.0, 110.0],
+            "V_V": [0.0, 0.0, 0.0, 1.2, 0.0],
+        }
+    )
+
+    reviewed = anneal_core.review_measurement_frame(frame)
+
+    assert reviewed["I_mA"].tolist() == pytest.approx([0.0, 10.0, 0.0])
+    assert reviewed["R_Ohm"].tolist() == pytest.approx([100.0, 120.0, 110.0])
+    assert (reviewed["R_Ohm"] > 0.0).all()
 
 
 def test_current_annealing_plugin_treats_run_folder_as_one_measurement(

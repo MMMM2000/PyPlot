@@ -254,14 +254,17 @@ def load_file(path: str | Path) -> pd.DataFrame:
             ]
 
     def _read(sep: str | None) -> pd.DataFrame:
-        return pd.read_csv(
-            source,
-            sep=sep,
-            engine="python",
-            header=None,
-            comment="#",
-            dtype=str,
-        )
+        try:
+            return pd.read_csv(
+                source,
+                sep=sep,
+                engine="python",
+                header=None,
+                comment="#",
+                dtype=str,
+            )
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
 
     try:
         df = _read(None)
@@ -270,6 +273,8 @@ def load_file(path: str | Path) -> pd.DataFrame:
     else:
         if df.shape[1] > 3:
             df = _read(r"\s+")
+    if df.empty and df.shape[1] == 0:
+        return pd.DataFrame(columns=["I_mA", "R_Ohm", "V_V"])
     if df.shape[1] < 3:
         raise ValueError(f"{source}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3].copy()
@@ -399,20 +404,35 @@ def _cooling_branch_evidence(
     return False, "No commanded cooling ramp was detected."
 
 
-def split_review_cycles(df: pd.DataFrame) -> tuple[AnnealingReviewCycle, ...]:
-    """Split acquisition-order data into physical review cycles."""
+def review_measurement_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return valid numeric rows used for scientific transition review.
+
+    Some acquisition files contain an initial zero-resistance placeholder,
+    sometimes with a tiny current readback such as ``0.2 mA``.  It is not a
+    physical resistance measurement and must not influence plots,
+    physical branch classification, or automatic transition estimates.
+    Legitimate zero-current rows with a measured nonzero resistance remain.
+    """
 
     resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
+    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
+        return pd.DataFrame(columns=["I_mA", "R_Ohm"])
     columns = ["I_mA", resistance_column]
     if "V_V" in df.columns:
         columns.append("V_V")
-    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
-        return ()
     working = df.loc[:, columns].copy()
     working = working.rename(columns={resistance_column: "R_Ohm"})
     for column in working.columns:
         working[column] = pd.to_numeric(working[column], errors="coerce")
     working = working.dropna(subset=["I_mA", "R_Ohm"]).reset_index(drop=True)
+    invalid_resistance = working["R_Ohm"].le(0.0)
+    return working.loc[~invalid_resistance].reset_index(drop=True)
+
+
+def split_review_cycles(df: pd.DataFrame) -> tuple[AnnealingReviewCycle, ...]:
+    """Split acquisition-order data into physical review cycles."""
+
+    working = review_measurement_frame(df)
     if working.empty:
         return ()
 
@@ -545,12 +565,7 @@ def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSum
     suppress an otherwise well-defined cooling transition.
     """
 
-    resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
-    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
-        return ()
-    currents = pd.to_numeric(df["I_mA"], errors="coerce")
-    resistances = pd.to_numeric(df[resistance_column], errors="coerce")
-    working = pd.DataFrame({"I_mA": currents, "R_Ohm": resistances}).dropna()
+    working = review_measurement_frame(df).loc[:, ["I_mA", "R_Ohm"]]
     if len(working.index) < 48:
         return ()
 

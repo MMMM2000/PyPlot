@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,13 @@ TRANSITION_LABELS = {
     "Ms2",
     "Mf2",
 }
+_TRANSITION_LABEL_PATTERN = re.compile(r"^(As|Af|Ms|Mf)(\d*)$")
+
+
+def is_transition_label(value: object) -> bool:
+    """Return whether *value* is a supported base or numbered phase point."""
+
+    return _TRANSITION_LABEL_PATTERN.fullmatch(str(value).strip()) is not None
 
 
 class TransitionReviewError(ValueError):
@@ -111,7 +119,7 @@ def _finite_values(values: object) -> dict[str, float]:
     cleaned: dict[str, float] = {}
     for raw_label, raw_value in values.items():
         label = str(raw_label).strip()
-        if label not in TRANSITION_LABELS:
+        if not is_transition_label(label):
             continue
         try:
             numeric = float(raw_value)
@@ -138,7 +146,11 @@ def make_target(
         raise TransitionReviewError(f"Unsupported experiment family: {family!r}")
     if status not in REVIEW_STATUSES:
         raise TransitionReviewError(f"Unsupported review status: {status!r}")
-    cleared = sorted({str(label).strip() for label in cleared_labels} & TRANSITION_LABELS)
+    cleared = sorted(
+        label
+        for label in {str(item).strip() for item in cleared_labels}
+        if is_transition_label(label)
+    )
     target: dict[str, Any] = {
         "target_id": target_id(family, measurement_fingerprint, target_key),
         "target_key": str(target_key).strip(),
@@ -258,7 +270,11 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
         else:
             cleaned.pop("strain_reference", None)
         cleaned["cleared_labels"] = sorted(
-            {str(label).strip() for label in raw.get("cleared_labels", ())} & TRANSITION_LABELS
+            label
+            for label in {
+                str(item).strip() for item in raw.get("cleared_labels", ())
+            }
+            if is_transition_label(label)
         )
         cleaned_targets.append(cleaned)
     cleaned_payload = dict(payload)

@@ -17,6 +17,7 @@ from plotting.plugins.current_annealing import core as annealing_core
 from plotting.plugins.mini_dma import core as tma_core
 from plotting.shared.transition_review import (
     atomic_write_review,
+    is_transition_label,
     load_review,
     sidecar_path_for_measurement,
     utc_now_text,
@@ -28,6 +29,25 @@ from plotting.shared.transition_review_adapters import (
 
 
 LABELS = ("As", "Af", "Ms", "Mf", "As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2")
+_POINT_ORDER = {point: index for index, point in enumerate(("As", "Af", "Ms", "Mf"))}
+
+
+def _transition_label_parts(label: str) -> tuple[str, int | None] | None:
+    match = re.fullmatch(r"(As|Af|Ms|Mf)(\d*)", str(label))
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2)) if match.group(2) else None
+
+
+def _ordered_transition_labels(labels: Sequence[str]) -> list[str]:
+    valid = [str(label) for label in labels if is_transition_label(label)]
+    return sorted(
+        set(valid),
+        key=lambda label: (
+            (_transition_label_parts(label) or ("As", None))[1] or 0,
+            _POINT_ORDER[(_transition_label_parts(label) or ("As", None))[0]],
+        ),
+    )
 
 @dataclass(frozen=True)
 class ReviewPlot:
@@ -350,11 +370,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                     )
                     if cooling_recorded:
                         available.update((f"Ms{loop}", f"Mf{loop}"))
-                return [label for label in LABELS if label in available]
+                return _ordered_transition_labels(available)
             loop_numbers = {
-                int(label[-1])
+                parts[1]
                 for label in available
-                if label[:-1] in {"As", "Af", "Ms", "Mf"} and label[-1:].isdigit()
+                if (parts := _transition_label_parts(label)) is not None
+                and parts[1] is not None
             }
             plot = self.plots.get(str(target.get('target_key') or ''))
             if plot is not None:
@@ -370,7 +391,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 )
         else:
             available.update(("As", "Af", "Ms", "Mf"))
-        return [label for label in LABELS if label in available]
+        return _ordered_transition_labels(available)
 
     def _review_units_for_target(
         self,
@@ -394,10 +415,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             ]
         loop_numbers = sorted(
             {
-                int(label[-1])
+                parts[1]
                 for label in labels
-                if label[:-1] in {"As", "Af", "Ms", "Mf"}
-                and label[-1:].isdigit()
+                if (parts := _transition_label_parts(label)) is not None
+                and parts[1] is not None
             }
         )
         return [
@@ -1411,10 +1432,10 @@ def _review_units_from_payload(
         if family == "current_annealing":
             loops = sorted(
                 {
-                    int(label[-1])
+                    parts[1]
                     for label in labels
-                    if label[:-1] in {"As", "Af", "Ms", "Mf"}
-                    and label[-1:].isdigit()
+                    if (parts := _transition_label_parts(label)) is not None
+                    and parts[1] is not None
                 }
             )
             if not loops:
@@ -2159,7 +2180,17 @@ def _build_current_annealing_review_dialog(
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different measurement content.")
     frame = annealing_core.load_file(str(path))
-    branches = _current_annealing_cycle_branches(frame)
+    review_frame = annealing_core.review_measurement_frame(frame)
+    branches = _current_annealing_cycle_branches(review_frame)
+    if not branches:
+        branches = {
+            "Cycle 1": annealing_core.AnnealingReviewCycle(
+                heating=review_frame,
+                cooling=None,
+                cooling_recorded=False,
+                cooling_reason="No usable measurement samples were recorded.",
+            )
+        }
     payload.setdefault("analysis", {})["branch_classifier"] = (
         "current_voltage_resistance_v1"
     )
@@ -2175,8 +2206,8 @@ def _build_current_annealing_review_dialog(
             for title, cycle in branches.items()
         }
     plot = ReviewPlot(
-        frame["I_mA"],
-        frame["R_Ohm"],
+        review_frame["I_mA"],
+        review_frame["R_Ohm"],
         annealing_core.measurement_display_name(path),
         "Resistance (ohm)",
         unit_series={

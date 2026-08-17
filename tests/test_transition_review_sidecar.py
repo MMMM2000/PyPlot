@@ -727,6 +727,84 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
     )
 
 
+def test_third_current_annealing_cycle_does_not_borrow_legacy_values(
+    tmp_path, qtbot
+) -> None:
+    from plotting.plugins.current_annealing.core import AnnealingReviewCycle
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_Ohm": [10.0, 11.0]})
+    fingerprint = dataframe_fingerprint(
+        frame, namespace="current_annealing", columns=("I_mA", "R_Ohm")
+    )
+    legacy_values = {
+        f"{point}{cycle}": float(10 * cycle + offset)
+        for cycle in (1, 2)
+        for offset, point in enumerate(("As", "Af", "Ms", "Mf"), start=1)
+    }
+    target = make_target(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        target_key="graph",
+        status="manual_adjusted",
+        manual_values=legacy_values,
+        final_values=legacy_values,
+    )
+    payload = make_review(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    branch = AnnealingReviewCycle(frame, frame, True, "Recorded cooling ramp.")
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "graph": ReviewPlot(
+                frame["I_mA"],
+                frame["R_Ohm"],
+                "three cycles",
+                "Resistance (ohm)",
+                unit_branches={f"Cycle {cycle}": branch for cycle in (1, 2, 3)},
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+    dialog.target_list.setCurrentRow(2)
+
+    assert set(dialog.choice_buttons) == {"As3", "Af3", "Ms3", "Mf3"}
+    assert all(choice is None for choice in dialog._choices.values())  # noqa: SLF001
+    for label in tuple(dialog.choice_buttons):
+        dialog.choice_buttons[label]["not_observed"].click()
+    dialog._store_target_controls()  # noqa: SLF001
+    atomic_write_review(tmp_path / "transition_review.json", dialog.payload)
+    stored = load_review(tmp_path / "transition_review.json")["targets"][0]
+    assert set(stored["cleared_labels"]) >= {"As3", "Af3", "Ms3", "Mf3"}
+
+
+def test_header_only_current_annealing_run_can_open_for_archive(tmp_path, qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        _build_current_annealing_review_dialog,
+    )
+
+    measurement = tmp_path / "interrupted.txt"
+    measurement.write_text(
+        "# Current (mA)\tVoltage (V)\tResistance (Ohm)\n",
+        encoding="utf-8",
+    )
+
+    dialog = _build_current_annealing_review_dialog(None, measurement)
+    qtbot.addWidget(dialog)
+
+    assert dialog.target_list.count() == 1
+    assert dialog.target_list.item(0).text() == "Current Annealing"
+    assert dialog.archive_button.isEnabled()
+    assert dialog.heating_curve_item.getData()[0] is None
+
+
 def test_current_annealing_review_hides_absent_cooling_until_overridden(
     tmp_path,
     qtbot,
