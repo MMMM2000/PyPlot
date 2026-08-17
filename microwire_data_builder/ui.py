@@ -1109,6 +1109,7 @@ LEGACY_PROJECT_PAYLOAD_MESSAGE = (
 PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
 PROJECT_LAZY_PAYLOAD_LOADERS_KEY = "__lazy_payload_loaders"
 _ACTIVE_PROJECT_PAYLOAD_STAGER: Callable[[Any], Any] | None = None
+_ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER: Callable[[Callable[[], Any]], Any] | None = None
 _ACTIVE_PROJECT_SAVE_PROGRESS: Callable[[str], None] | None = None
 
 
@@ -10352,6 +10353,19 @@ def _mini_dma_preview_run(record: MiniDmaRecord) -> Any:
     return _downsample_mini_dma_preview_run(run)
 
 
+def _mini_dma_record_supports_transition_review(record: MiniDmaRecord) -> bool:
+    """Return whether a parsed TMA record represents a current-sweep review run."""
+
+    if mini_dma_core is None:
+        return False
+    try:
+        return bool(
+            mini_dma_core.supports_transition_review(_mini_dma_preview_run(record))
+        )
+    except Exception:
+        return False
+
+
 def _mini_dma_preview_items(
     records: Sequence[MiniDmaRecord],
     logger: logging.Logger,
@@ -11694,7 +11708,10 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
         transition_lines: List[str] = []
         break_lines: List[str] = []
         for record in group:
-            for line in _mini_dma_peak_strain_summary(record):
+            # Records receive their strain summaries during import/refresh.
+            # Table reconstruction is also used while saving transition
+            # reviews, so it must not reopen every synchronized source run.
+            for line in getattr(record, "strain_summary", ()) or ():
                 if line and line not in strain_lines:
                     strain_lines.append(str(line))
             for line in getattr(record, "transition_summary", ()) or ():
@@ -13442,6 +13459,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 # entry and is streamed into the next save without materialization.
                 continue
             try:
+                if _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER is not None:
+                    staged_payload = _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER(
+                        partial(self.store.load_payload, name)
+                    )
+                    if staged_payload is not None:
+                        project_payloads[name] = staged_payload
+                    continue
                 stored_payload = self.store.load_payload(name)
             except SafeCodecError:
                 raise
@@ -27022,6 +27046,19 @@ class MiniDmaSection(MiniDatabaseSection):
                 "No TMA runs are available to review.",
             )
             return
+        records = [
+            record
+            for record in records
+            if _mini_dma_record_supports_transition_review(record)
+        ]
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "The selected TMA runs are not current-sweep transition runs. "
+                "Iso-current and iso-strain runs do not have As/Af/Ms/Mf currents to review.",
+            )
+            return
         paths = list(
             dict.fromkeys(
                 path
@@ -27393,7 +27430,11 @@ class MiniDmaSection(MiniDatabaseSection):
                     data=record.data,
                     key=record.key,
                     label=record.label,
-                    strain_summary=_mini_dma_peak_strain_summary(record),
+                    # Transition review changes only the As/Af/Ms/Mf summary.
+                    # Keep the strain summary calculated during import/refresh;
+                    # reopening every source run here makes project saves block
+                    # on synchronized-drive I/O without changing the result.
+                    strain_summary=tuple(record.strain_summary),
                     transition_summary=tuple(reviewed_lines),
                     break_summary=record.break_summary,
                 )
@@ -28310,6 +28351,7 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
         return [
             path
             for record in self._records()
+            if _mini_dma_record_supports_transition_review(record)
             if isinstance((path := getattr(record, "path", None)), Path)
         ]
 
@@ -42455,16 +42497,38 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _default_project_filename(self) -> str:
         return f"microwire_project{self.PROJECT_EXTENSION}"
 
+    def _wait_for_project_save_future(
+        self,
+        future: concurrent.futures.Future[Any],
+    ) -> Any:
+        """Wait for save work without starving the Qt event loop."""
+
+        if not future.done():
+            wait_loop = QtCore.QEventLoop(self)
+            poll_timer = QtCore.QTimer(self)
+            poll_timer.setInterval(50)
+            poll_timer.timeout.connect(
+                lambda: wait_loop.quit() if future.done() else None
+            )
+            poll_timer.start()
+            wait_loop.exec()
+            poll_timer.stop()
+            poll_timer.deleteLater()
+        return future.result()
+
     def _build_project_payload(
         self,
         payload_staging_root: Path | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
-        global _ACTIVE_PROJECT_PAYLOAD_STAGER, _ACTIVE_PROJECT_SAVE_PROGRESS
+        global _ACTIVE_PROJECT_PAYLOAD_STAGER
+        global _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER
+        global _ACTIVE_PROJECT_SAVE_PROGRESS
         sections_payload: Dict[str, Any] = {}
         deferred = getattr(self, "_deferred_project_section_keys", set())
         deferred_keys = set(deferred) if isinstance(deferred, set) else set()
         previous_stager = _ACTIVE_PROJECT_PAYLOAD_STAGER
+        previous_source_stager = _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER
         previous_progress = _ACTIVE_PROJECT_SAVE_PROGRESS
         staged_count = 0
 
@@ -42478,15 +42542,41 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 return _encode_project_payload(value)
             staged_count += 1
             _progress(f"Staging measurement payload {staged_count:,}...")
-            return stage_payload_value(
+            # Encoding and hashing a large ndarray can spend several seconds before
+            # the streaming codec reaches its first progress callback. Keep that
+            # CPU and disk work off the GUI thread; the modal save dialog prevents
+            # the underlying data from being edited while the worker reads it.
+            future = _PROJECT_SAVE_EXECUTOR.submit(
+                stage_payload_value,
                 value,
                 payload_staging_root / f"payload-{staged_count:04d}",
-                progress=lambda: _progress(
-                    f"Staging measurement payload {staged_count:,}..."
-                ),
+            )
+            return self._wait_for_project_save_future(future)
+
+        def _load_and_stage(loader: Callable[[], Any]) -> Any:
+            nonlocal staged_count
+            if payload_staging_root is None:
+                return _encode_project_payload(loader())
+            staged_count += 1
+            _progress(f"Staging measurement payload {staged_count:,}...")
+
+            def _worker() -> Any:
+                value = loader()
+                if value is None:
+                    return None
+                return stage_payload_value(
+                    value,
+                    payload_staging_root / f"payload-{staged_count:04d}",
+                )
+
+            return self._wait_for_project_save_future(
+                _PROJECT_SAVE_EXECUTOR.submit(_worker)
             )
 
         _ACTIVE_PROJECT_PAYLOAD_STAGER = _stage if payload_staging_root is not None else None
+        _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER = (
+            _load_and_stage if payload_staging_root is not None else None
+        )
         _ACTIVE_PROJECT_SAVE_PROGRESS = _progress if progress is not None else None
         try:
             for key, section in self.sections.items():
@@ -42508,6 +42598,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     _progress("Prepared Assemble.")
         finally:
             _ACTIVE_PROJECT_PAYLOAD_STAGER = previous_stager
+            _ACTIVE_PROJECT_PAYLOAD_SOURCE_STAGER = previous_source_stager
             _ACTIVE_PROJECT_SAVE_PROGRESS = previous_progress
         return {
             "version": self.PROJECT_VERSION,
@@ -42629,18 +42720,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     source_index=source_index,
                     loaded_sections=set(payload.get("sections", {})),
                 )
-                if not future.done():
-                    wait_loop = QtCore.QEventLoop(self)
-                    poll_timer = QtCore.QTimer(self)
-                    poll_timer.setInterval(50)
-                    poll_timer.timeout.connect(
-                        lambda: wait_loop.quit() if future.done() else None
-                    )
-                    poll_timer.start()
-                    wait_loop.exec()
-                    poll_timer.stop()
-                    poll_timer.deleteLater()
-                package_index = future.result()
+                package_index = self._wait_for_project_save_future(future)
         except Exception as exc:
             self.logger.exception("Failed to save Builder project to %s", target)
             if not _builder_dialogs_suppressed():

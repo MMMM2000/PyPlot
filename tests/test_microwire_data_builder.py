@@ -2038,6 +2038,31 @@ def test_mini_dma_section_frame_accepts_multiple_break_summaries(tmp_path: Path)
     ]
 
 
+def test_mini_dma_section_frame_uses_cached_strain_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run01",
+        strain_summary=("100 MPa / 1.5 g: 0.08% @ 80 mA",),
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_peak_strain_summary",
+        lambda _record: pytest.fail("table reconstruction must not reload source runs"),
+    )
+
+    frame = builder_ui._mini_dma_records_to_frame([record])
+
+    assert frame.iloc[0][MINI_DMA_STRAIN_COLUMN] == [
+        "100 MPa / 1.5 g: 0.08% @ 80 mA"
+    ]
+
+
 def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
     tmp_path: Path,
 ) -> None:
@@ -2858,6 +2883,26 @@ def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) 
     assert entries == []
 
 
+def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
+    tmp_path: Path,
+) -> None:
+    current_sweep = MiniDmaRecord(
+        path=_write_current_sweep_mini_dma_run_with_iso_columns(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="current-sweep",
+    )
+    iso_current = MiniDmaRecord(
+        path=_write_iso_current_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="iso-current",
+    )
+
+    assert builder_ui._mini_dma_record_supports_transition_review(current_sweep)  # noqa: SLF001
+    assert not builder_ui._mini_dma_record_supports_transition_review(iso_current)  # noqa: SLF001
+
+
 def test_dma_transitions_view_lists_run_target_rows() -> None:
     _ensure_qapp()
     record = _sample_mini_dma_record()
@@ -3033,6 +3078,11 @@ def test_mini_dma_section_opens_shared_transition_review_for_all_records_without
         )
         section._record_groups = {record.sample: [record]}  # noqa: SLF001
         monkeypatch.setattr(
+            builder_ui,
+            "_mini_dma_record_supports_transition_review",
+            lambda _record: True,
+        )
+        monkeypatch.setattr(
             "plotting.shared.transition_review_dialog.review_tma_runs",
             lambda _parent, paths: opened.extend(paths) or 0,
         )
@@ -3113,7 +3163,7 @@ def test_mini_dma_section_applies_reviewed_transition_values_to_records(
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_reviewed_transition_records_keep_recalculated_strain(
+def test_mini_dma_reviewed_transition_records_preserve_cached_strain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
@@ -3143,12 +3193,12 @@ def test_mini_dma_reviewed_transition_records_keep_recalculated_strain(
         monkeypatch.setattr(
             builder_ui,
             "_mini_dma_peak_strain_summary",
-            lambda _record: ("100 MPa / 1.5 g: 10.74% @ 2 mA",),
+            lambda _record: pytest.fail("transition reconciliation must not reload source runs"),
         )
 
         reviewed = section.records_with_reviewed_transitions([record])
 
-        assert reviewed[0].strain_summary == ("100 MPa / 1.5 g: 10.74% @ 2 mA",)
+        assert reviewed[0].strain_summary == ("100 MPa / 1.5 g: 0.08% @ 80 mA",)
     finally:
         section._transition_review_store_timer.stop()  # noqa: SLF001
         section._transition_table_apply_timer.stop()  # noqa: SLF001
@@ -12042,6 +12092,44 @@ def test_project_save_preparation_yields_to_qt_event_loop(
         window._write_project_file(target)
         assert target.exists()
         assert timer_fired == [True]
+        assert window._project_save_in_progress is False
+        assert window._dirty is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_project_save_payload_staging_runs_off_gui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    target = tmp_path / "responsive-staging.pydpj"
+    timer_fired: list[bool] = []
+    worker_threads: list[int] = []
+    gui_thread = threading.get_ident()
+    original_stage = builder_ui.stage_payload_value
+
+    def _slow_stage(*args: object, **kwargs: object) -> object:
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.15)
+        return original_stage(*args, **kwargs)
+
+    monkeypatch.setattr(builder_ui, "stage_payload_value", _slow_stage)
+    section = window.fabrication_section
+    section.data.table = pd.DataFrame({"value": [1]})
+    section.data.extra = {"payloads": {"records": "save_test_records"}}
+    section.store.save_payload("save_test_records", {"values": list(range(100))})
+    try:
+        QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
+        window._dirty = True
+        window._write_project_file(target)
+        assert target.exists()
+        assert timer_fired == [True]
+        assert worker_threads and worker_threads[0] != gui_thread
         assert window._project_save_in_progress is False
         assert window._dirty is False
     finally:

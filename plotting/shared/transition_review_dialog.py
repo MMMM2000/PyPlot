@@ -1234,6 +1234,10 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             self._cooling_legend_visible = True
         self.plot_item.setLabel('bottom', plot.x_label, units=plot.x_unit)
         self.plot_item.setLabel("left", plot.y_label)
+        # Percent is already a human-scale display unit. PyQtGraph's automatic
+        # SI prefix otherwise turns 0.15 % into the much less readable
+        # ``150 (×0.001)`` presentation.
+        self.plot_item.getAxis("left").enableAutoSIPrefix(False)
         self.plot_item.setTitle(plot.title)
         self.values_box.setTitle(f'Transition choices ({plot.value_unit})')
         self.manual_graph_hint.setText(

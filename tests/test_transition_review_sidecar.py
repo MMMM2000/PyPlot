@@ -324,6 +324,33 @@ def test_review_dialog_does_not_overwrite_first_saved_target_on_open(tmp_path, q
     assert "As1" not in target["final_values"]
     assert target["final_values"]["Af1"] == 100.0
 
+def test_review_dialog_disables_confusing_si_prefix_on_strain_axis(
+    tmp_path, qtbot
+) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    frame = pd.DataFrame({"current_mA": [0.0, 1.0], "strain_pct": [0.0, 0.15]})
+    payload = _review(frame)
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "graph": ReviewPlot(
+                frame["current_mA"],
+                frame["strain_pct"],
+                "strain run",
+                "Strain (%)",
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.plot_item.getAxis("left").autoSIPrefix is False
+
+
 def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) -> None:
     from plotting.shared.transition_review_dialog import (
         PortableTransitionReviewDialog,
