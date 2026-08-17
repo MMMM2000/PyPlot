@@ -11995,7 +11995,7 @@ def test_project_save_keeps_qt_event_loop_responsive(
     timer_fired: list[bool] = []
     monkeypatch.setattr(
         window, "_build_project_payload",
-        lambda _staging: {
+        lambda _staging, progress=None: {
             "version": window.PROJECT_VERSION, "kind": window.PROJECT_KIND,
             "saved_at": "2026-08-13 12:00",
             "sections": {"fabrication": {"columns": [], "rows": []}},
@@ -12008,6 +12008,40 @@ def test_project_save_keeps_qt_event_loop_responsive(
         assert target.exists()
         assert timer_fired == [True]
         assert worker_threads and worker_threads[0] != gui_thread
+        assert window._project_save_in_progress is False
+        assert window._dirty is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_project_save_preparation_yields_to_qt_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    target = tmp_path / "responsive-preparation.pydpj"
+    timer_fired: list[bool] = []
+    section = window.fabrication_section
+    section.data.table = pd.DataFrame(
+        {"value": list(range(750)), "label": ["row"] * 750}
+    )
+    original_json_safe = builder_ui._json_safe
+
+    def _slow_json_safe(value: object) -> object:
+        time.sleep(0.0001)
+        return original_json_safe(value)
+
+    monkeypatch.setattr(builder_ui, "_json_safe", _slow_json_safe)
+    try:
+        QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
+        window._dirty = True
+        window._write_project_file(target)
+        assert target.exists()
+        assert timer_fired == [True]
         assert window._project_save_in_progress is False
         assert window._dirty is False
     finally:

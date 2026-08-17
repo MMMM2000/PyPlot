@@ -16,6 +16,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 import zipfile
 import zlib
@@ -141,7 +142,12 @@ class StagedProjectSection:
     payloads: Mapping[str, StagedEncodedPayload]
 
 
-def stage_payload_value(value: Any, staging_dir: Path) -> StagedEncodedPayload:
+def stage_payload_value(
+    value: Any,
+    staging_dir: Path,
+    *,
+    progress: Callable[[], None] | None = None,
+) -> StagedEncodedPayload:
     """Encode one loaded payload to bounded files without base64 materialization."""
 
     root = Path(staging_dir)
@@ -149,6 +155,16 @@ def stage_payload_value(value: Any, staging_dir: Path) -> StagedEncodedPayload:
     blob_dir = root / "blobs"
     blob_dir.mkdir()
     blob_paths: dict[str, Path] = {}
+    last_progress = time.monotonic()
+
+    def _yield_progress(*, force: bool = False) -> None:
+        nonlocal last_progress
+        if progress is None:
+            return
+        now = time.monotonic()
+        if force or now - last_progress >= 0.1:
+            progress()
+            last_progress = now
 
     def _blob_sink(buffer: memoryview) -> tuple[str, int]:
         size = len(buffer)
@@ -160,6 +176,7 @@ def stage_payload_value(value: Any, staging_dir: Path) -> StagedEncodedPayload:
             with target.open("xb") as handle:
                 for offset in range(0, size, STREAM_CHUNK_BYTES):
                     handle.write(buffer[offset : offset + STREAM_CHUNK_BYTES])
+                    _yield_progress()
                 handle.flush()
                 os.fsync(handle.fileno())
         blob_paths[digest] = target
@@ -174,8 +191,10 @@ def stage_payload_value(value: Any, staging_dir: Path) -> StagedEncodedPayload:
             if size > MAX_PAYLOAD_JSON_BYTES:
                 raise SafeCodecError("Builder package payload JSON exceeds its limit")
             handle.write(raw)
+            _yield_progress()
         handle.flush()
         os.fsync(handle.fileno())
+    _yield_progress(force=True)
     return StagedEncodedPayload(payload_path, blob_paths)
 
 

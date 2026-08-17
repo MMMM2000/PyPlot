@@ -1109,6 +1109,13 @@ LEGACY_PROJECT_PAYLOAD_MESSAGE = (
 PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
 PROJECT_LAZY_PAYLOAD_LOADERS_KEY = "__lazy_payload_loaders"
 _ACTIVE_PROJECT_PAYLOAD_STAGER: Callable[[Any], Any] | None = None
+_ACTIVE_PROJECT_SAVE_PROGRESS: Callable[[str], None] | None = None
+
+
+def _report_project_save_progress(message: str) -> None:
+    callback = _ACTIVE_PROJECT_SAVE_PROGRESS
+    if callback is not None:
+        callback(str(message))
 
 # These payloads are the data behind the Builder's overview thumbnails.  Their
 # section tables remain independently lazy, but once a graph tab is selected
@@ -13403,11 +13410,15 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if isinstance(frame, pd.DataFrame) and not frame.empty:
-            for record in frame.to_dict(orient="records"):
+            for row_number, record in enumerate(frame.to_dict(orient="records"), 1):
                 payload: Dict[str, Any] = {}
                 for column in columns:
                     payload[column] = _json_safe(record.get(column))
                 rows.append(payload)
+                if row_number % 250 == 0:
+                    _report_project_save_progress(
+                        f"Preparing {self.section_title}: {row_number:,} rows..."
+                    )
         index_payload: List[Any] = []
         if isinstance(frame, pd.DataFrame) and not frame.empty:
             for entry in frame.index.tolist():
@@ -21592,8 +21603,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
         columns = [str(column) for column in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if not frame.empty:
-            for record in frame.to_dict(orient="records"):
+            for row_number, record in enumerate(frame.to_dict(orient="records"), 1):
                 rows.append({column: _json_safe(record.get(column)) for column in columns})
+                if row_number % 250 == 0:
+                    _report_project_save_progress(
+                        f"Preparing {self.section_title}: {row_number:,} rows..."
+                    )
         index_payload = [_json_safe(index) for index in frame.index.tolist()] if not frame.empty else []
         return {
             "section": self.section_key,
@@ -35478,11 +35493,15 @@ class AssemblySection(QtWidgets.QWidget):
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if not frame.empty:
-            for record in frame.to_dict(orient="records"):
+            for row_number, record in enumerate(frame.to_dict(orient="records"), 1):
                 payload: Dict[str, Any] = {}
                 for column in columns:
                     payload[column] = _json_safe(record.get(column))
                 rows.append(payload)
+                if row_number % 250 == 0:
+                    _report_project_save_progress(
+                        f"Preparing Assemble: {row_number:,} rows..."
+                    )
         index_payload: List[Any] = []
         if not frame.empty:
             for entry in frame.index.tolist():
@@ -42437,25 +42456,38 @@ class BuilderWindow(QtWidgets.QMainWindow):
         return f"microwire_project{self.PROJECT_EXTENSION}"
 
     def _build_project_payload(
-        self, payload_staging_root: Path | None = None
+        self,
+        payload_staging_root: Path | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
-        global _ACTIVE_PROJECT_PAYLOAD_STAGER
+        global _ACTIVE_PROJECT_PAYLOAD_STAGER, _ACTIVE_PROJECT_SAVE_PROGRESS
         sections_payload: Dict[str, Any] = {}
         deferred = getattr(self, "_deferred_project_section_keys", set())
         deferred_keys = set(deferred) if isinstance(deferred, set) else set()
         previous_stager = _ACTIVE_PROJECT_PAYLOAD_STAGER
+        previous_progress = _ACTIVE_PROJECT_SAVE_PROGRESS
         staged_count = 0
+
+        def _progress(message: str) -> None:
+            if progress is not None:
+                progress(message)
 
         def _stage(value: Any) -> Any:
             nonlocal staged_count
             if payload_staging_root is None:
                 return _encode_project_payload(value)
             staged_count += 1
+            _progress(f"Staging measurement payload {staged_count:,}...")
             return stage_payload_value(
-                value, payload_staging_root / f"payload-{staged_count:04d}"
+                value,
+                payload_staging_root / f"payload-{staged_count:04d}",
+                progress=lambda: _progress(
+                    f"Staging measurement payload {staged_count:,}..."
+                ),
             )
 
         _ACTIVE_PROJECT_PAYLOAD_STAGER = _stage if payload_staging_root is not None else None
+        _ACTIVE_PROJECT_SAVE_PROGRESS = _progress if progress is not None else None
         try:
             for key, section in self.sections.items():
                 if key in deferred_keys:
@@ -42463,14 +42495,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 exporter = getattr(section, "export_project_payload", None)
                 if not callable(exporter):
                     continue
+                title = str(getattr(section, "section_title", key))
+                _progress(f"Preparing {title}...")
                 sections_payload[key] = exporter()
+                _progress(f"Prepared {title}.")
             assembly = getattr(self, "assembly_section", None)
             if assembly is not None and "assemble" not in deferred_keys:
                 exporter = getattr(assembly, "export_project_payload", None)
                 if callable(exporter):
+                    _progress("Preparing Assemble...")
                     sections_payload["assemble"] = exporter()
+                    _progress("Prepared Assemble.")
         finally:
             _ACTIVE_PROJECT_PAYLOAD_STAGER = previous_stager
+            _ACTIVE_PROJECT_SAVE_PROGRESS = previous_progress
         return {
             "version": self.PROJECT_VERSION,
             "kind": self.PROJECT_KIND,
@@ -42550,6 +42588,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         progress.setMinimumDuration(0)
         progress.show()
         QtWidgets.QApplication.processEvents()
+
+        def _update_save_progress(message: str) -> None:
+            progress.setLabelText(str(message))
+            QtWidgets.QApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 25
+            )
+
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             staging_parent = Path(
@@ -42562,7 +42607,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
             with TemporaryDirectory(
                 prefix="microwire-builder-save-payloads-", dir=staging_parent
             ) as staging_name:
-                payload = self._build_project_payload(Path(staging_name))
+                payload = self._build_project_payload(
+                    Path(staging_name), progress=_update_save_progress
+                )
                 sections = payload.get("sections", {})
                 if not sections:
                     if not _builder_dialogs_suppressed():
