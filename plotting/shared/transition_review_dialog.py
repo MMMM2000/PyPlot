@@ -1706,6 +1706,14 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                 run_item = sample_item.child(run_row)
                 run_visible = False
                 if run_item.childCount():
+                    states = self._run_unit_states(run_item)
+                    keep_incomplete_run_together = (
+                        selected_filter == "Unreviewed"
+                        and any(
+                            not self._is_reviewed_state(state)
+                            for state in states
+                        )
+                    )
                     for unit_row in range(run_item.childCount()):
                         unit_item = run_item.child(unit_row)
                         state = str(
@@ -1714,8 +1722,8 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                             )
                             or "unreviewed"
                         )
-                        visible = self._state_matches_filter(
-                            state, selected_filter
+                        visible = keep_incomplete_run_together or (
+                            self._state_matches_filter(state, selected_filter)
                         )
                         unit_item.setHidden(not visible)
                         run_visible = run_visible or visible

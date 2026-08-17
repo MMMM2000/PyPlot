@@ -1227,7 +1227,7 @@ def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> No
     editor = queue._editors[0]  # noqa: SLF001
     run_item = queue._run_items[0]  # noqa: SLF001
     assert run_item.childCount() == 2
-    queue.review_filter.setCurrentText('All')
+    assert queue.review_filter.currentText() == 'Unreviewed'
     queue.tree.setCurrentItem(run_item.child(0))
     qtbot.wait(20)
     assert editor.save_button.text() == 'Save and next cycle'
@@ -1235,6 +1235,12 @@ def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> No
     qtbot.mouseClick(editor.save_button, QtCore.Qt.MouseButton.LeftButton)
     qtbot.wait(20)
     assert queue.completed_count == 0
+    assert not run_item.isHidden()
+    assert not run_item.child(0).isHidden()
+    assert not run_item.child(1).isHidden()
+    assert queue._is_reviewed_state(  # noqa: SLF001
+        run_item.child(0).data(1, QtCore.Qt.ItemDataRole.UserRole)
+    )
     assert queue.tree.currentItem() is run_item.child(1)
     assert editor._active_unit_labels == ['As2', 'Af2', 'Ms2', 'Mf2']  # noqa: SLF001
     assert editor.heating_curve_item.getData()[1][0] == 200.0
