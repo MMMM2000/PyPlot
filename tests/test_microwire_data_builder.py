@@ -2886,6 +2886,7 @@ def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) 
 def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
     tmp_path: Path,
 ) -> None:
+    _ensure_qapp()
     current_sweep = MiniDmaRecord(
         path=_write_current_sweep_mini_dma_run_with_iso_columns(tmp_path),
         sample="Ni50Fe27Ga23 12_2",
@@ -2899,8 +2900,18 @@ def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
         label="iso-current",
     )
 
-    assert builder_ui._mini_dma_record_supports_transition_review(current_sweep)  # noqa: SLF001
-    assert not builder_ui._mini_dma_record_supports_transition_review(iso_current)  # noqa: SLF001
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    workspace = builder_ui._MiniDmaTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        section._all_mini_dma_records = [current_sweep, iso_current]  # noqa: SLF001
+
+        assert workspace._paths() == [current_sweep.path]  # noqa: SLF001
+    finally:
+        workspace.close()
+        section.close()
+        workspace.deleteLater()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_dma_transitions_view_lists_run_target_rows() -> None:

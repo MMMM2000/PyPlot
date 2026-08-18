@@ -28351,7 +28351,6 @@ class _AnnealingTransitionWorkspace(_PortableTransitionReviewWorkspace):
         return [
             path
             for record in self._records()
-            if _mini_dma_record_supports_transition_review(record)
             if isinstance((path := getattr(record, "path", None)), Path)
         ]
 
@@ -28503,6 +28502,7 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
         return [
             path
             for record in self._records()
+            if _mini_dma_record_supports_transition_review(record)
             if isinstance((path := getattr(record, "path", None)), Path)
         ]
 

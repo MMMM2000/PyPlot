@@ -1237,7 +1237,13 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         # Percent is already a human-scale display unit. PyQtGraph's automatic
         # SI prefix otherwise turns 0.15 % into the much less readable
         # ``150 (×0.001)`` presentation.
-        self.plot_item.getAxis("left").enableAutoSIPrefix(False)
+        left_axis = self.plot_item.getAxis("left")
+        left_axis.enableAutoSIPrefix(False)
+        # Disabling auto-prefixing does not reset the scale PyQtGraph already
+        # selected (for example 1000 for a 0.25% range). Without this reset the
+        # prefix disappears but the ticks misleadingly remain 250 instead of
+        # 0.250.
+        left_axis.setScale(1.0)
         self.plot_item.setTitle(plot.title)
         self.values_box.setTitle(f'Transition choices ({plot.value_unit})')
         self.manual_graph_hint.setText(

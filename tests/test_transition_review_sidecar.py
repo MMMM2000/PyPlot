@@ -348,7 +348,9 @@ def test_review_dialog_disables_confusing_si_prefix_on_strain_axis(
     )
     qtbot.addWidget(dialog)
 
-    assert dialog.plot_item.getAxis("left").autoSIPrefix is False
+    left_axis = dialog.plot_item.getAxis("left")
+    assert left_axis.autoSIPrefix is False
+    assert left_axis.scale == 1.0
 
 
 def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) -> None:
