@@ -35164,7 +35164,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
                 self._update_recipe_buttons()
             elif (
-                self._isolated_command_pending in {"update_config", "starting_length"}
+                self._isolated_command_pending
+                in {"update_config", "starting_length", "stress_recovery"}
                 and pending_sequence is not None
                 and snapshot.last_command_sequence >= pending_sequence
                 and getattr(snapshot, "last_command_result", "") == "accepted"
@@ -37231,6 +37232,33 @@ class MainWindow(QtWidgets.QMainWindow):
         return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
 
     def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
+        process = self._production_control_process
+        identity = self._production_control_identity
+        if (
+            self._isolated_recipe_active
+            and process is not None
+            and identity is not None
+            and process.is_alive()
+        ):
+            try:
+                sequence = process.recover_stress(
+                    identity,
+                    float(target_stress_mpa),
+                    reason=str(reason),
+                )
+            except Exception as exc:
+                self._log(f"Failed to request process-owned stress recovery: {exc}")
+                return False
+            self._isolated_command_pending = "stress_recovery"
+            self._isolated_pending_sequence = sequence
+            self._isolated_command_deadline_s = (
+                time.monotonic() + TMA_START_ACK_TIMEOUT_S
+            )
+            self._log(
+                "Requested process-owned current-off stress recovery toward "
+                f"{_format_compact_unit(float(target_stress_mpa), 'MPa')}."
+            )
+            return True
         self._activate_recovery_tic_settings()
         self._sync_manual_motion_base_from_current_position()
         target = max(0.0, float(target_stress_mpa))

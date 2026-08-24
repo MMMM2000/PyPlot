@@ -84,6 +84,11 @@ def capture_window_configuration(
             getattr(window, "_controller_process_output_collision_action", "cancel")
         ),
         "cadence_downgrade_accepted": bool(cadence_downgrade_accepted),
+        "elastocaloric_initial_baseline_s": getattr(
+            window,
+            "_elastocaloric_initial_baseline_s",
+            None,
+        ),
         "supply_lease_owner": str(
             getattr(window, "_supply_lease_owner", "")
         ),
@@ -302,6 +307,12 @@ class ProductionTmaBackend:
         )
         if callable(payload_hook):
             payload_hook(payload)
+        initial_baseline_s = payload.get("elastocaloric_initial_baseline_s")
+        self._window._elastocaloric_initial_baseline_s = (
+            None
+            if initial_baseline_s is None
+            else max(0.0, float(initial_baseline_s))
+        )
         stationary_preparation = payload.get("stationary_thermal_preparation")
         self._window._stationary_thermal_preparation_config = (
             dict(stationary_preparation)
@@ -616,6 +627,38 @@ class ProductionTmaBackend:
         if not callable(setter):
             return False, "controller does not support current-hold bypass"
         return setter(bool(enabled))
+
+    def start_stress_recovery(
+        self,
+        target_stress_mpa: float,
+        reason: str,
+    ) -> tuple[bool, str]:
+        """Start a child-owned, current-off recovery after a bench guard trip."""
+
+        window = self._require_window()
+        try:
+            window._disable_supply_output()
+        except Exception as exc:
+            self._last_error = str(exc)
+            return False, f"failed to disable current before stress recovery: {exc}"
+        starter = getattr(window, "start_bench_stress_recovery", None)
+        if not callable(starter):
+            return False, "controller does not support bench stress recovery"
+        accepted = bool(
+            starter(
+                float(target_stress_mpa),
+                reason=str(reason),
+            )
+        )
+        self._drain_events()
+        return (
+            accepted,
+            (
+                f"stress recovery toward {float(target_stress_mpa):.3f} MPa started"
+                if accepted
+                else "stress recovery preflight was rejected"
+            ),
+        )
 
     def _latest_ir_preview_json(self, window: Any) -> str:
         """Return one immutable, cached camera frame for latest-value UI IPC."""

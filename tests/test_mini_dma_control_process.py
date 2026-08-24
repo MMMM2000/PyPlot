@@ -285,6 +285,85 @@ def test_momentary_hold_bypass_is_latest_value_and_pause_clears_it() -> None:
         assert process.close(timeout_s=2.0, force=True)
 
 
+def test_process_owned_stress_recovery_disables_output_and_is_acknowledged() -> None:
+    process = MiniDmaControlProcess(heartbeat_interval_s=0.02)
+    identity = _identity()
+    try:
+        process.start_process()
+        process.wait_until_ready(timeout_s=3.0)
+        process.start_session(
+            ControlStartRequest(
+                identity=identity,
+                policy=ControlPolicy.PRAGUE,
+                snapshot_interval_s=0.02,
+            )
+        )
+        _wait_for_snapshot(process, lambda item: item.state is ControlState.RUNNING)
+
+        sequence = process.recover_stress(
+            identity,
+            20.0,
+            reason="synthetic high-stress guard",
+        )
+        recovered = _wait_for_snapshot(
+            process,
+            lambda item: item.last_command_sequence >= sequence,
+        )
+
+        assert recovered.state is ControlState.RUNNING
+        assert recovered.last_command_result == "accepted"
+        assert "20.000 MPa" in recovered.last_command_detail
+        assert recovered.readback_value("output_enabled") is False
+    finally:
+        assert process.close(timeout_s=2.0, force=True)
+
+
+def test_visible_window_forwards_bench_recovery_to_hardware_owner() -> None:
+    from data_logging.mini_dma_logger import mini_dma_logger as mini_dma_mod
+
+    calls: list[tuple[ControlSessionIdentity, float, str]] = []
+
+    class _Process:
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+        @staticmethod
+        def recover_stress(
+            identity: ControlSessionIdentity,
+            target_stress_mpa: float,
+            *,
+            reason: str,
+        ) -> int:
+            calls.append((identity, target_stress_mpa, reason))
+            return 17
+
+    identity = _identity()
+    log: list[str] = []
+    host = SimpleNamespace(
+        _production_control_process=_Process(),
+        _production_control_identity=identity,
+        _isolated_recipe_active=True,
+        _isolated_command_pending=None,
+        _isolated_pending_sequence=None,
+        _isolated_command_deadline_s=None,
+        _log=log.append,
+    )
+
+    accepted = mini_dma_mod.MainWindow.start_bench_stress_recovery(
+        host,
+        20.0,
+        reason="synthetic high-stress guard",
+    )
+
+    assert accepted is True
+    assert calls == [(identity, 20.0, "synthetic high-stress guard")]
+    assert host._isolated_command_pending == "stress_recovery"
+    assert host._isolated_pending_sequence == 17
+    assert host._isolated_command_deadline_s is not None
+    assert "process-owned" in log[-1]
+
+
 def test_production_backend_process_reports_ready_without_acquiring_hardware() -> None:
     process = MiniDmaControlProcess(
         heartbeat_interval_s=0.02,
@@ -691,6 +770,7 @@ class _FakeProductionWindow:
         self.runtime_update_calls = 0
         self.supply_disable_calls = 0
         self.motor_supply_disable_calls = 0
+        self.stress_recovery_calls: list[tuple[float, str]] = []
         self.lifecycle_calls: list[str] = []
         self._preserve_motor_supply_on_close = False
         self._preserve_current_supply_on_close = False
@@ -779,6 +859,16 @@ class _FakeProductionWindow:
 
     def _disable_motor_supply_output(self) -> None:
         self.motor_supply_disable_calls += 1
+
+    def start_bench_stress_recovery(
+        self,
+        target_stress_mpa: float,
+        *,
+        reason: str,
+    ) -> bool:
+        self.stress_recovery_calls.append((float(target_stress_mpa), str(reason)))
+        self._automation_phase = "recover"
+        return True
 
     def _apply_current_sweep_pending_overrides(self, *, show_message: bool) -> bool:
         assert show_message is False
@@ -1500,6 +1590,39 @@ def test_production_backend_rejects_non_runtime_configuration_update() -> None:
     backend.close()
 
 
+def test_production_backend_restores_initial_baseline_and_owns_guard_recovery() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    backend.start(
+        ControlStartRequest(
+            identity=_identity(),
+            policy=ControlPolicy.PRAGUE,
+            config_json=(
+                '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+                '"elastocaloric_initial_baseline_s":120.0,'
+                '"prior_run_preflight_complete":true,'
+                '"cadence_downgrade_accepted":true}'
+            ),
+        )
+    )
+
+    assert backend._window._elastocaloric_initial_baseline_s == pytest.approx(120.0)
+    accepted, detail = backend.start_stress_recovery(
+        20.0,
+        "synthetic high-stress guard",
+    )
+
+    assert accepted is True
+    assert "20.000 MPa" in detail
+    assert backend._window.supply_disable_calls == 1
+    assert backend._window.stress_recovery_calls == [
+        (20.0, "synthetic high-stress guard")
+    ]
+    backend._window._automation_active = False
+    backend.close()
+
+
 def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     qapp: QtWidgets.QApplication,
 ) -> None:
@@ -1519,6 +1642,7 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
             self._controller_process_output_collision_action = "next"
             self._scale_thread = object()
             self._ir_thread = None
+            self._elastocaloric_initial_baseline_s = 120.0
 
     payload = capture_window_configuration(
         _Window(),
@@ -1533,6 +1657,7 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     assert '"value":12.5' in payload
     assert '"data":"prague"' in payload
     assert '"connected_sensors":{"ir":false,"scale":true}' in payload
+    assert '"elastocaloric_initial_baseline_s":120.0' in payload
     assert "PyQt6" not in payload
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import importlib
+import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -46,6 +47,7 @@ class ControlCommandKind(str, Enum):
     RESUME = "resume"
     STOP = "stop"
     UPDATE_CONFIG = "update_config"
+    RECOVER_STRESS = "recover_stress"
 
 
 class ControlEventKind(str, Enum):
@@ -117,6 +119,8 @@ class ControlCommand:
     identity: ControlSessionIdentity
     start_request: ControlStartRequest | None = None
     config_json: str | None = None
+    recovery_target_stress_mpa: float | None = None
+    recovery_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ControlCommandKind):
@@ -130,15 +134,40 @@ class ControlCommand:
                 raise ValueError("start command identities do not match")
             if self.config_json is not None:
                 raise ValueError("start command cannot carry a config update")
+            if (
+                self.recovery_target_stress_mpa is not None
+                or self.recovery_reason is not None
+            ):
+                raise ValueError("start command cannot carry a stress recovery request")
         elif self.kind is ControlCommandKind.UPDATE_CONFIG:
             if self.start_request is not None:
                 raise ValueError("config update cannot carry a start request")
             if not isinstance(self.config_json, str):
                 raise ValueError("config update requires an immutable JSON string")
+            if (
+                self.recovery_target_stress_mpa is not None
+                or self.recovery_reason is not None
+            ):
+                raise ValueError("config update cannot carry a stress recovery request")
+        elif self.kind is ControlCommandKind.RECOVER_STRESS:
+            if self.start_request is not None or self.config_json is not None:
+                raise ValueError("stress recovery cannot carry start or config payloads")
+            if self.recovery_target_stress_mpa is None:
+                raise ValueError("stress recovery requires a target stress")
+            target_stress_mpa = float(self.recovery_target_stress_mpa)
+            if not math.isfinite(target_stress_mpa) or target_stress_mpa < 0.0:
+                raise ValueError("stress recovery target must be finite and non-negative")
+            if not str(self.recovery_reason or "").strip():
+                raise ValueError("stress recovery requires a reason")
         elif self.start_request is not None:
             raise ValueError("only start commands may carry a start_request")
         elif self.config_json is not None:
             raise ValueError("only config-update commands may carry config JSON")
+        elif (
+            self.recovery_target_stress_mpa is not None
+            or self.recovery_reason is not None
+        ):
+            raise ValueError("only stress-recovery commands may carry recovery fields")
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +261,12 @@ class ControlBackend(Protocol):
 
     def set_current_hold_bypass(self, enabled: bool) -> tuple[bool, str]: ...
 
+    def start_stress_recovery(
+        self,
+        target_stress_mpa: float,
+        reason: str,
+    ) -> tuple[bool, str]: ...
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]: ...
 
     def completion_detail(self) -> str | None: ...
@@ -303,6 +338,18 @@ class SimulatedControlBackend:
             "current-hold bypass active"
             if self._current_hold_bypass_active
             else "current-hold bypass released"
+        )
+
+    def start_stress_recovery(
+        self,
+        target_stress_mpa: float,
+        reason: str,
+    ) -> tuple[bool, str]:
+        del reason
+        self._output_enabled = False
+        return (
+            True,
+            f"simulated stress recovery toward {target_stress_mpa:.3f} MPa started",
         )
 
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]:
@@ -571,6 +618,22 @@ class _ControlProcessRuntime:
                 return
             self._accept_command(detail or "configuration updated")
             self._emit_event(ControlEventKind.CONFIG_UPDATED, detail=detail)
+        elif command.kind is ControlCommandKind.RECOVER_STRESS:
+            if self._state is not ControlState.RUNNING:
+                self._reject(
+                    "stress recovery requires a running session",
+                    identity=command.identity,
+                )
+                return
+            assert command.recovery_target_stress_mpa is not None
+            accepted, detail = self._backend.start_stress_recovery(
+                float(command.recovery_target_stress_mpa),
+                str(command.recovery_reason or "bench high-stress guard"),
+            )
+            if not accepted:
+                self._reject(detail or "stress recovery rejected")
+                return
+            self._accept_command(detail or "stress recovery started")
         self._publish_snapshot()
 
     def _handle_start(self, command: ControlCommand) -> None:
@@ -876,6 +939,20 @@ class TmaControlProcess:
             config_json=config_json,
         )
 
+    def recover_stress(
+        self,
+        identity: ControlSessionIdentity,
+        target_stress_mpa: float,
+        *,
+        reason: str,
+    ) -> int:
+        return self._send(
+            ControlCommandKind.RECOVER_STRESS,
+            identity,
+            recovery_target_stress_mpa=float(target_stress_mpa),
+            recovery_reason=str(reason),
+        )
+
     def set_current_hold_bypass(
         self,
         identity: ControlSessionIdentity,
@@ -975,6 +1052,8 @@ class TmaControlProcess:
         *,
         start_request: ControlStartRequest | None = None,
         config_json: str | None = None,
+        recovery_target_stress_mpa: float | None = None,
+        recovery_reason: str | None = None,
     ) -> int:
         if not self.is_alive():
             raise RuntimeError("control process is not running")
@@ -987,6 +1066,8 @@ class TmaControlProcess:
             identity=identity,
             start_request=start_request,
             config_json=config_json,
+            recovery_target_stress_mpa=recovery_target_stress_mpa,
+            recovery_reason=recovery_reason,
         )
         try:
             self._command_queue.put_nowait(command)
