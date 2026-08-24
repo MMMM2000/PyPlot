@@ -1,0 +1,1 @@
+- TMA runs using the MLX90640 camera now retain every calibrated thermal pixel in a compact, checksummed `ir_frames.bin` sidecar. Per-frame host and device timing plus explicit completion, loss, and failure metadata make elastocaloric wire/background reconstruction auditable without slowing the camera worker.

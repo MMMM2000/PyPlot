@@ -5099,13 +5099,13 @@ def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
         window._refresh_live_labels()
 
         assert window._dashboard_value_labels["task"].text() == (
-            "Recipe completed (final values)"
+            "Recipe completed; hardware released"
         )
         assert window._dashboard_value_labels["load_g"].text() == "0.002 g"
         assert window._dashboard_value_labels["stress_mpa"].text() == "0.1 MPa"
         assert window.recipe_progress.value() == 100
         assert window.recipe_progress.format() == (
-            "Overall 100% | Recipe completed (final values)"
+            "Overall 100% | Recipe completed; hardware released"
         )
     finally:
         window._isolated_recipe_active = False
@@ -8382,6 +8382,46 @@ def test_elastocaloric_strain_path_places_release_to_the_right(tmp_path: Path, q
         x_values, y_values = window._plot_xy_values(points, x_channel, y_channel)
         assert x_values == pytest.approx(path)
         assert y_values == pytest.approx([20.0, 21.0, 22.0, 23.0, 24.0, 25.0])
+    finally:
+        _close_test_window(window)
+
+
+def test_session_logs_reconstructable_mlx90640_frames(tmp_path: Path, qtbot) -> None:
+    from data_logging.mini_dma_logger.thermal_frame_log import (
+        iter_thermal_frame_records,
+    )
+
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_ir_sensor.setCurrentIndex(
+            window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90640)
+        )
+        window.edit_log_name.setText("mlx90640_full_frames")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        token = object()
+        window._ir_connection_token = token
+        frame = SimpleNamespace(
+            unit="C",
+            values=(20.0, 21.0, 22.0, 23.0, 24.0, 25.5),
+            width=3,
+            height=2,
+            sequence=42,
+            elapsed_ms=1200,
+            raw_read_us=15000,
+            ambient_c=25.0,
+            flags=1,
+        )
+
+        window._record_ir_frame_from_worker(token, frame)
+        window._stop_session(reason="test_complete", detail="Full frame logging test complete.")
+
+        run_dir = tmp_path / "mlx90640_full_frames"
+        (loaded,) = tuple(iter_thermal_frame_records(run_dir / "ir_frames.bin"))
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+        assert loaded.sequence == 42
+        assert loaded.values_c == pytest.approx(frame.values)
+        assert metadata["logging"]["sensor_sidecars"]["ir_frames"]["complete"] is True
+        assert metadata["logging"]["sensor_sidecars"]["ir_frames"]["written_rows"] == 1
     finally:
         _close_test_window(window)
 

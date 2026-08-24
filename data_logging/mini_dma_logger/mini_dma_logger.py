@@ -115,6 +115,12 @@ from data_logging.mini_dma_logger.time_axis import (
 from data_logging.mini_dma_logger.metadata_checkpoints import (
     SessionMetadataCheckpointStore,
 )
+from data_logging.mini_dma_logger.thermal_frame_log import (
+    SessionThermalFrameTarget,
+    THERMAL_FRAME_LOG_FILENAME,
+    THERMAL_FRAME_LOG_FORMAT,
+    thermal_frame_record_from_object,
+)
 
 try:
     import serial
@@ -8531,6 +8537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_handle: Any = None
         self._session_ir_temperature_writer: csv.DictWriter[str] | None = None
         self._session_ir_temperature_target: SessionSensorCsvTarget | None = None
+        self._session_ir_frame_target: SessionThermalFrameTarget | None = None
         self._session_sensor_log_outcomes: dict[str, dict[str, object]] = {}
         self._session_identity: str | None = None
         self._session_ir_temperature_path: Path | None = None
@@ -18172,10 +18179,28 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _record_ir_frame_from_worker(self, token: object, frame: object) -> None:
+        failure_target: SessionThermalFrameTarget | None = None
         with self._ir_state_lock:
             if self._window_closing or token is not self._ir_connection_token:
                 return
             self._latest_ir_frame = frame
+            target = self._session_ir_frame_target
+            if target is None:
+                return
+            try:
+                record = thermal_frame_record_from_object(
+                    frame,
+                    host_timestamp_s=time.time(),
+                    session_start_wall_s=self._session_start_wall_s,
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                if target.reject("invalid_frame", exc) is not None:
+                    failure_target = target
+            else:
+                if target.submit(record) is not None:
+                    failure_target = target
+        if failure_target is not None:
+            self._queue_session_sensor_log_failure(failure_target)
 
 
     def _handle_ir_sample(self, sample: IrTemperatureSample) -> None:
@@ -28868,10 +28893,13 @@ class MainWindow(QtWidgets.QMainWindow):
             raw_scale_target = self._session_raw_scale_target
         with self._ir_state_lock:
             ir_temperature_target = self._session_ir_temperature_target
+            ir_frame_target = self._session_ir_frame_target
         if "raw_scale" not in outcomes and raw_scale_target is not None:
             outcomes["raw_scale"] = raw_scale_target.outcome()
         if "ir_temperature" not in outcomes and ir_temperature_target is not None:
             outcomes["ir_temperature"] = ir_temperature_target.outcome()
+        if "ir_frames" not in outcomes and ir_frame_target is not None:
+            outcomes["ir_frames"] = ir_frame_target.outcome()
         return outcomes
 
     def _session_metadata(self) -> dict[str, Any]:
@@ -28977,6 +29005,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sidecar": None
                 if self._session_ir_temperature_path is None
                 else self._session_ir_temperature_path.name,
+                "ir_frame_sidecar": (
+                    THERMAL_FRAME_LOG_FILENAME
+                    if str(self.combo_ir_sensor.currentData() or "") == IR_SENSOR_MLX90640
+                    else None
+                ),
+                "ir_frame_format": (
+                    THERMAL_FRAME_LOG_FORMAT
+                    if str(self.combo_ir_sensor.currentData() or "") == IR_SENSOR_MLX90640
+                    else None
+                ),
                 "control_trace_csv": None
                 if self._session_control_trace_path is None
                 else self._session_control_trace_path.name,
@@ -29476,6 +29514,16 @@ class MainWindow(QtWidgets.QMainWindow):
             session_identity=self._session_identity,
             metadata_lock=self._session_metadata_write_lock,
         )
+        ir_frame_target = (
+            SessionThermalFrameTarget(
+                txt_path.parent / THERMAL_FRAME_LOG_FILENAME,
+                metadata_path=json_path,
+                session_identity=self._session_identity,
+                metadata_lock=self._session_metadata_write_lock,
+            )
+            if str(self.combo_ir_sensor.currentData() or "") == IR_SENSOR_MLX90640
+            else None
+        )
         with self._scale_state_lock:
             self._session_raw_scale_handle = raw_scale_handle
             self._session_raw_scale_writer = raw_scale_writer
@@ -29484,6 +29532,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_ir_temperature_handle = ir_temperature_handle
             self._session_ir_temperature_writer = ir_temperature_writer
             self._session_ir_temperature_target = ir_temperature_target
+            self._session_ir_frame_target = ir_frame_target
         self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_handle = control_trace_handle
         self._session_control_trace_writer = control_trace_writer
@@ -29526,7 +29575,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(
             "Remote debug logging active: "
             f"{SESSION_RUN_LOG_TXT}, {SESSION_RAW_SCALE_CSV}, {SESSION_UI_TELEMETRY_CSV}, "
-            f"and {SESSION_CONTROL_TRACE_CSV} are written into this run folder."
+            f"{SESSION_CONTROL_TRACE_CSV}, and calibrated MLX90640 frames (when selected) "
+            f"in {THERMAL_FRAME_LOG_FILENAME} are written into this run folder."
         )
         self._log(
             "Scale debug config: "
@@ -29579,7 +29629,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_session_sensor_log_failure(
         self,
-        target: SessionSensorCsvTarget,
+        target: SessionSensorCsvTarget | SessionThermalFrameTarget,
     ) -> None:
         reason = target.take_failure_notice()
         if reason is None:
@@ -29595,7 +29645,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _handle_session_sensor_log_failure(
         self,
-        target: SessionSensorCsvTarget,
+        target: SessionSensorCsvTarget | SessionThermalFrameTarget,
         reason: str,
     ) -> None:
         current_session = (
@@ -29604,7 +29654,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         prefix = "" if current_session else "Earlier session: "
         message = (
-            f"{prefix}{target.name.replace('_', ' ').title()} CSV is incomplete: {reason}. "
+            f"{prefix}{target.name.replace('_', ' ').title()} sidecar is incomplete: {reason}. "
             "Later rows for this sidecar are disabled."
         )
         self.statusBar().showMessage(message)
@@ -29616,7 +29666,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_session_sensor_reconciliation(
         self,
-        target: SessionSensorCsvTarget,
+        target: SessionSensorCsvTarget | SessionThermalFrameTarget,
     ) -> None:
         self._run_on_ui_thread(
             WeakOwnerCallback(self, "_handle_session_sensor_reconciliation", target)
@@ -29624,7 +29674,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _handle_session_sensor_reconciliation(
         self,
-        target: SessionSensorCsvTarget,
+        target: SessionSensorCsvTarget | SessionThermalFrameTarget,
     ) -> None:
         result = target.reconciliation_result or "reconciliation status unavailable"
         self.statusBar().showMessage(
@@ -29634,9 +29684,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _detach_and_close_session_sensor_targets(
         self,
-    ) -> list[SessionSensorCsvTarget]:
-        targets: list[tuple[str, SessionSensorCsvTarget]] = []
-        timed_out_targets: list[SessionSensorCsvTarget] = []
+    ) -> list[SessionSensorCsvTarget | SessionThermalFrameTarget]:
+        targets: list[
+            tuple[str, SessionSensorCsvTarget | SessionThermalFrameTarget]
+        ] = []
+        timed_out_targets: list[SessionSensorCsvTarget | SessionThermalFrameTarget] = []
         with self._scale_state_lock:
             raw_scale_target = self._session_raw_scale_target
             self._session_raw_scale_target = None
@@ -29647,15 +29699,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 targets.append(("raw_scale", raw_scale_target))
         with self._ir_state_lock:
             ir_temperature_target = self._session_ir_temperature_target
+            ir_frame_target = self._session_ir_frame_target
             self._session_ir_temperature_target = None
+            self._session_ir_frame_target = None
             self._session_ir_temperature_handle = None
             self._session_ir_temperature_writer = None
             if ir_temperature_target is not None:
                 ir_temperature_target.detach_and_close()
                 targets.append(("ir_temperature", ir_temperature_target))
-        deadline_s = time.monotonic() + SESSION_SENSOR_FILE_CLOSE_WAIT_S
+            if ir_frame_target is not None:
+                ir_frame_target.detach_and_close()
+                targets.append(("ir_frames", ir_frame_target))
+        csv_deadline_s = time.monotonic() + SESSION_SENSOR_FILE_CLOSE_WAIT_S
         for name, target in targets:
-            closed = target.wait_closed(max(0.0, deadline_s - time.monotonic()))
+            close_wait_s = (
+                2.0
+                if isinstance(target, SessionThermalFrameTarget)
+                else max(0.0, csv_deadline_s - time.monotonic())
+            )
+            closed = target.wait_closed(close_wait_s)
             outcome = target.outcome(close_timed_out=not closed)
             self._session_sensor_log_outcomes[name] = outcome
             if not closed:
