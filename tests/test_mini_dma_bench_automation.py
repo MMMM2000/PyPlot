@@ -1593,6 +1593,7 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
             self._automation_active = True
             self._session_active = True
             self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            self._stress_mpa = 320.0
 
         def set_length_setup_automation_values(
             self,
@@ -1609,7 +1610,7 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
             return
 
         def _bench_latest_stress_mpa(self) -> float:
-            return 320.0
+            return self._stress_mpa
 
         def _wire_break_detected(self) -> bool:
             return False
@@ -1620,8 +1621,12 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
         def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
             events.append(("recover", (target_stress_mpa, reason)))
             self._automation_active = False
-            self._session_active = False
+            self._stress_mpa = 49.0
             return True
+
+        def _stop_session(self, *, reason: str, detail: str) -> None:
+            events.append(("stop_session", {"reason": reason, "detail": detail}))
+            self._session_active = False
 
         def close(self) -> None:
             events.append(("close", None))
@@ -1637,8 +1642,14 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
     assert run["status"] == "guard_recovered"
     assert run["guard_events"][0]["type"] == "high_stress"
     assert run["guard_events"][0]["stress_mpa"] == pytest.approx(320.0)
+    assert run["guard_events"][0]["recovery_completed"] is True
+    assert run["guard_events"][0]["recovered_stress_mpa"] == pytest.approx(49.0)
     assert ("disable_supply", None) in events
     assert ("recover", (50.0, "bench high-stress guard")) in events
+    assert any(
+        name == "stop_session" and payload["reason"] == "bench_high_stress_recovered"
+        for name, payload in events
+    )
 
 
 def test_mini_dma_bench_plan_wire_break_stops_remaining_runs(

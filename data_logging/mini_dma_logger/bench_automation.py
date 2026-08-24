@@ -992,6 +992,7 @@ def _execute_run(
     metadata_path = _metadata_path(window)
     status = "completed"
     guard_events: list[dict[str, Any]] = []
+    guard_recovery_target_mpa: float | None = None
     while _window_active(window):
         app.processEvents()
         active_metadata_path = _metadata_path(window)
@@ -1001,6 +1002,37 @@ def _execute_run(
         if persisted_outcome is not None:
             status = persisted_outcome
             break
+        if guard_recovery_target_mpa is not None:
+            if not bool(getattr(window, "_automation_active", False)):
+                recovered_stress_mpa = _latest_stress_mpa(window)
+                recovered = bool(
+                    recovered_stress_mpa is not None
+                    and recovered_stress_mpa <= guard_recovery_target_mpa + 1.0
+                )
+                guard_events[-1]["recovery_completed"] = recovered
+                guard_events[-1]["recovered_stress_mpa"] = recovered_stress_mpa
+                status = "guard_recovered" if recovered else "guard_tripped"
+                stop_session = getattr(window, "_stop_session", None)
+                if callable(stop_session) and bool(getattr(window, "_session_active", False)):
+                    reason = (
+                        "bench_high_stress_recovered"
+                        if recovered
+                        else "bench_high_stress_recovery_incomplete"
+                    )
+                    detail = (
+                        f"Bench high-stress recovery finished at {recovered_stress_mpa:.3f} MPa."
+                        if recovered_stress_mpa is not None
+                        else "Bench high-stress recovery finished without a valid stress reading."
+                    )
+                    stop_session(reason=reason, detail=detail)
+                break
+            if time.monotonic() >= deadline_s:
+                status = "guard_tripped"
+                guard_events[-1]["recovery_completed"] = False
+                guard_events[-1]["recovery_timeout"] = True
+                break
+            sleep_fn(0.05)
+            continue
         guard_event = _check_guardrails(window, guardrails)
         if guard_event is not None:
             guard_events.append(guard_event)
@@ -1008,7 +1040,12 @@ def _execute_run(
                 status = "wire_break"
                 break
             if guard_event["type"] == "high_stress":
-                status = "guard_recovered" if guard_event.get("recovery_started") else "guard_tripped"
+                if guard_event.get("recovery_started"):
+                    guard_recovery_target_mpa = guardrails.recovery_stress_mpa
+                    status = "guard_recovering"
+                    sleep_fn(0.05)
+                    continue
+                status = "guard_tripped"
                 break
             if guard_event["type"] == "current_hold_quality_timeout":
                 status = "quality_stopped"
