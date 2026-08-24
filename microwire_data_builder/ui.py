@@ -10330,7 +10330,11 @@ def _downsample_mini_dma_preview_run(run: Any, *, points_per_trace: int = 180) -
     )
 
 
-def _mini_dma_preview_run(record: MiniDmaRecord) -> Any:
+def _mini_dma_preview_run(
+    record: MiniDmaRecord,
+    *,
+    downsample: bool = True,
+) -> Any:
     path = getattr(record, "path", None)
     if not isinstance(path, Path):
         raise ValueError("TMA preview record has no path")
@@ -10350,7 +10354,7 @@ def _mini_dma_preview_run(record: MiniDmaRecord) -> Any:
             sample_name=str(getattr(record, "sample", "") or path.name),
             initial_length_mm=initial_length_mm,
         )
-    return _downsample_mini_dma_preview_run(run)
+    return _downsample_mini_dma_preview_run(run) if downsample else run
 
 
 def _mini_dma_record_supports_transition_review(record: MiniDmaRecord) -> bool:
@@ -10359,8 +10363,12 @@ def _mini_dma_record_supports_transition_review(record: MiniDmaRecord) -> bool:
     if mini_dma_core is None:
         return False
     try:
+        # Classification only inspects run mode and target availability. Avoid
+        # copying/downsampling every stored frame whenever a table row is clicked.
         return bool(
-            mini_dma_core.supports_transition_review(_mini_dma_preview_run(record))
+            mini_dma_core.supports_transition_review(
+                _mini_dma_preview_run(record, downsample=False)
+            )
         )
     except Exception:
         return False
@@ -27799,6 +27807,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self._overview_data: List[Dict[str, Any]] = []
         self._source_availability: Dict[str, bool] = {}
         self._source_scan_generation = 0
+        self._paths_cache: tuple[Path, ...] | None = None
         self.sourceAvailabilityReady.connect(self._apply_source_availability)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -27896,6 +27905,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self._update_review_buttons()
 
     def _request_refresh(self) -> None:
+        self._paths_cache = None
         self._source_availability.clear()
         self.show_loading("Loading transition review data...")
         if self.receivers(self.refreshRequested):
@@ -27916,8 +27926,12 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self.refresh_button.setEnabled(True)
         self._update_review_buttons()
 
-    def _paths(self) -> List[Path]:
-        return list(dict.fromkeys(Path(path) for path in self._paths_provider()))
+    def _review_paths(self) -> List[Path]:
+        if self._paths_cache is None:
+            self._paths_cache = tuple(
+                dict.fromkeys(Path(path) for path in self._paths_provider())
+            )
+        return list(self._paths_cache)
 
     @staticmethod
     def _path_key(path: Path) -> str:
@@ -27934,7 +27948,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
     def _available_paths(self) -> List[Path]:
         return [
             path
-            for path in self._paths()
+            for path in self._review_paths()
             if self._source_availability.get(self._path_key(path), False)
         ]
 
@@ -27951,7 +27965,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self,
         rows: Sequence[Mapping[str, Any]],
     ) -> None:
-        candidates = list(self._paths())
+        candidates = list(self._review_paths())
         candidates.extend(
             path for row in rows if isinstance((path := row.get('path')), Path)
         )
@@ -28157,6 +28171,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         )
 
     def refresh_workspace(self) -> None:
+        self._paths_cache = None
         self.loading_bar.hide()
         self.refresh_button.setEnabled(True)
         rows = self._overview_rows()

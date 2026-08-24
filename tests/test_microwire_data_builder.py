@@ -2885,6 +2885,7 @@ def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) 
 
 def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
     current_sweep = MiniDmaRecord(
@@ -2901,11 +2902,25 @@ def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
     )
 
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    section._all_mini_dma_records = [current_sweep, iso_current]  # noqa: SLF001
+    support_calls: list[MiniDmaRecord] = []
+    real_support_check = builder_ui._mini_dma_record_supports_transition_review  # noqa: SLF001
+
+    def counted_support_check(record: MiniDmaRecord) -> bool:
+        support_calls.append(record)
+        return real_support_check(record)
+
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_record_supports_transition_review",
+        counted_support_check,
+    )
     workspace = builder_ui._MiniDmaTransitionWorkspace(section)  # noqa: SLF001
     try:
-        section._all_mini_dma_records = [current_sweep, iso_current]  # noqa: SLF001
-
-        assert workspace._paths() == [current_sweep.path]  # noqa: SLF001
+        assert workspace._review_paths() == [current_sweep.path]  # noqa: SLF001
+        assert workspace._review_paths() == [current_sweep.path]  # noqa: SLF001
+        workspace._update_review_buttons()  # noqa: SLF001
+        assert support_calls == [current_sweep, iso_current]
     finally:
         workspace.close()
         section.close()

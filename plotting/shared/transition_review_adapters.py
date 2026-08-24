@@ -69,8 +69,12 @@ def current_annealing_review_draft(
     )
 
 
-def tma_review_draft(run_path: Path) -> dict[str, Any]:
-    run = tma_core.load_run(Path(run_path))
+def tma_review_draft(
+    run_path: Path,
+    *,
+    loaded_run: tma_core.MiniDmaRun | None = None,
+) -> dict[str, Any]:
+    run = loaded_run if loaded_run is not None else tma_core.load_run(Path(run_path))
     if not tma_core.supports_transition_review(run):
         raise ValueError(f"TMA run does not support transition review: {run_path}")
     fingerprint = dataframe_fingerprint(

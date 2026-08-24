@@ -349,8 +349,14 @@ def test_review_dialog_disables_confusing_si_prefix_on_strain_axis(
     qtbot.addWidget(dialog)
 
     left_axis = dialog.plot_item.getAxis("left")
-    assert left_axis.autoSIPrefix is False
+    assert left_axis.autoSIPrefix is True
     assert left_axis.scale == 1.0
+    assert left_axis.autoSIPrefixScale == 1.0
+    for upper_bound in (0.15, 2.0, 0.276, 2.0):
+        left_axis.setRange(0.0, upper_bound)
+        assert left_axis.scale == 1.0
+        assert left_axis.autoSIPrefixScale == 1.0
+
 
 
 def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) -> None:
@@ -580,6 +586,7 @@ def test_tma_review_dialog_derives_point_strain_and_retains_it_when_excluded(
 
 def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -> None:
     import pyqtgraph as pg
+    from PyQt6 import QtCore
 
     from plotting.shared.transition_review_dialog import (
         PortableTransitionReviewDialog,
@@ -605,6 +612,24 @@ def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -
     dialog._draw_target()  # noqa: SLF001
     assert dialog._auto_marker_items["As1"] is first_auto  # noqa: SLF001
     assert dialog._manual_marker_items["As1"] is first_manual  # noqa: SLF001
+
+    as_auto = dialog._auto_marker_items["As1"]  # noqa: SLF001
+    af_auto = dialog._auto_marker_items["Af1"]  # noqa: SLF001
+    assert as_auto.pen.color().name() == "#f97316"
+    assert af_auto.pen.color().name() == "#f97316"
+    assert as_auto.pen.style() == QtCore.Qt.PenStyle.SolidLine
+    assert af_auto.pen.style() == QtCore.Qt.PenStyle.DashLine
+    assert as_auto.pen.widthF() > af_auto.pen.widthF()
+    assert "As1: 80 mA (automatic)" in as_auto.toolTip()
+    assert "Nearest curve point" in as_auto.toolTip()
+
+    dialog._stagger_transition_labels(  # noqa: SLF001
+        [(as_auto, 80.0), (af_auto, 81.0)], x_span=100.0
+    )
+    assert as_auto.label.orthoPos != af_auto.label.orthoPos
+
+    dialog.values_table.selectRow(dialog._row_for_label("Af1"))  # noqa: SLF001
+    assert af_auto.pen.widthF() > as_auto.pen.widthF()
 
     dialog._manual_marker_moved("As1", 84.25)  # noqa: SLF001
     target = dialog.payload["targets"][0]
@@ -1281,6 +1306,92 @@ def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> N
     assert dialog.tree.currentItem() is run_b.child(0)
     assert dialog._editors[1].target_list.currentRow() == 0  # noqa: SLF001
 
+
+def test_review_queue_prepares_measurement_without_blocking_gui(
+    tmp_path, qtbot
+) -> None:
+    import threading
+
+    from PyQt6 import QtCore
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewQueueDialog,
+        PreparedTransitionReview,
+        ReviewPlot,
+        ReviewQueueEntry,
+    )
+
+    frame = pd.DataFrame(
+        {"I_mA": [10.0, 20.0, 10.0], "R_Ohm": [100.0, 90.0, 101.0]}
+    )
+    fingerprint = dataframe_fingerprint(
+        frame,
+        namespace="background-review-loader",
+    )
+    target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="stress_mpa:100",
+        auto_values={"As": 12.0, "Af": 18.0},
+    )
+    payload = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    prepared = PreparedTransitionReview(
+        payload=payload,
+        plots={
+            "stress_mpa:100": ReviewPlot(
+                frame["I_mA"],
+                frame["R_Ohm"],
+                "100 MPa",
+                "Strain (%)",
+            )
+        },
+        sidecar_path=tmp_path / "transition_review.json",
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def loader() -> PreparedTransitionReview:
+        started.set()
+        if not release.wait(2.0):
+            raise TimeoutError("test loader was not released")
+        return prepared
+
+    def unexpected_builder(_parent):
+        raise AssertionError("background entry used its synchronous builder")
+
+    dialog = PortableTransitionReviewQueueDialog(
+        [
+            ReviewQueueEntry(
+                "Sample A",
+                "TMA run",
+                unexpected_builder,
+                loader=loader,
+            )
+        ]
+    )
+    qtbot.addWidget(dialog)
+    try:
+        dialog.show()
+        qtbot.waitUntil(started.is_set, timeout=1_000)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: bool(heartbeat), timeout=500)
+        assert 0 not in dialog._editors  # noqa: SLF001
+
+        assert "Loading" in dialog.placeholder.text()
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: 0 in dialog._editors,  # noqa: SLF001
+            timeout=3_000,
+        )
+        run_item = dialog._run_items[0]  # noqa: SLF001
+        assert dialog.tree.currentItem() is run_item.child(0)
+    finally:
+        release.set()
 
 def test_queue_keeps_measured_cycles_after_partial_review(tmp_path, qtbot) -> None:
     from PyQt6 import QtCore

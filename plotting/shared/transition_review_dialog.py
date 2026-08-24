@@ -66,6 +66,40 @@ class ReviewPlot:
     cooling_series: tuple[pd.Series, pd.Series] | None = None
 
 
+@dataclass(frozen=True)
+class PreparedTransitionReview:
+    payload: Mapping[str, Any]
+    plots: Mapping[str, ReviewPlot]
+    sidecar_path: Path
+
+
+class _ReviewLoadSignals(QtCore.QObject):
+    finished = QtCore.pyqtSignal(int, object)
+    failed = QtCore.pyqtSignal(int, str)
+
+
+class _ReviewLoadTask(QtCore.QRunnable):
+    def __init__(
+        self,
+        run_index: int,
+        loader: Callable[[], PreparedTransitionReview],
+    ) -> None:
+        super().__init__()
+        self.run_index = int(run_index)
+        self.loader = loader
+        self.signals = _ReviewLoadSignals()
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            prepared = self.loader()
+        except Exception as exc:
+            self.signals.failed.emit(self.run_index, str(exc))
+            return
+        self.signals.finished.emit(self.run_index, prepared)
+
+
+
 class PortableTransitionReviewDialog(QtWidgets.QDialog):
     """Edit all targets in one portable review record."""
 
@@ -695,6 +729,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.manual_value_edit.setEnabled(manual_mode)
         self.manual_graph_hint.setEnabled(manual_mode)
         self._update_derived_strain_label()
+        self._restyle_transition_markers()
 
     def _update_derived_strain_label(self) -> None:
         label = self._selected_label()
@@ -1075,6 +1110,13 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         marker = pool.get(label)
         if marker is not None:
             marker.setMovable(movable)
+            self._style_transition_marker(
+                marker,
+                label,
+                color=color,
+                dashed=dashed,
+                manual=movable,
+            )
             return marker
         style = (
             QtCore.Qt.PenStyle.DashLine
@@ -1097,8 +1139,121 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             )
         self.plot_item.addItem(marker)
         pool[label] = marker
+        self._style_transition_marker(
+            marker,
+            label,
+            color=color,
+            dashed=dashed,
+            manual=movable,
+        )
         return marker
 
+    @staticmethod
+    def _transition_marker_color(label: str) -> str:
+        return "#f97316" if label.startswith("A") else "#06b6d4"
+
+    @staticmethod
+    def _transition_marker_is_finish(label: str) -> bool:
+        return label.startswith(("Af", "Mf"))
+
+    def _style_transition_marker(
+        self,
+        marker: pg.InfiniteLine,
+        label: str,
+        *,
+        color: str,
+        dashed: bool,
+        manual: bool,
+    ) -> None:
+        selected = label == self._selected_label()
+        marker_color = QtGui.QColor(color)
+        marker_color.setAlpha(255 if selected else (205 if manual else 120))
+        style = (
+            QtCore.Qt.PenStyle.DashLine
+            if dashed
+            else QtCore.Qt.PenStyle.SolidLine
+        )
+        width = 2.8 if selected else (1.9 if manual else 1.25)
+        marker.setPen(pg.mkPen(marker_color, width=width, style=style))
+        marker.setHoverPen(pg.mkPen(color, width=3.2, style=style))
+        marker.setZValue(40 if selected else (30 if manual else 20))
+        if marker.label is not None:
+            marker.label.setColor(marker_color)
+
+    def _restyle_transition_markers(self) -> None:
+        for label, marker in self._auto_marker_items.items():
+            self._style_transition_marker(
+                marker,
+                label,
+                color=self._transition_marker_color(label),
+                dashed=self._transition_marker_is_finish(label),
+                manual=False,
+            )
+        for label, marker in self._manual_marker_items.items():
+            self._style_transition_marker(
+                marker,
+                label,
+                color=self._transition_marker_color(label),
+                dashed=self._transition_marker_is_finish(label),
+                manual=True,
+            )
+
+    @staticmethod
+    def _stagger_transition_labels(
+        markers: Sequence[tuple[pg.InfiniteLine, float]],
+        *, x_span: float | None = None,
+    ) -> None:
+        ordered = sorted(markers, key=lambda item: item[1])
+        for marker, _value in ordered:
+            if marker.label is not None:
+                marker.label.setPosition(0.94)
+        if len(ordered) < 2:
+            return
+        marker_span = max(value for _marker, value in ordered) - min(
+            value for _marker, value in ordered
+        )
+        span = (
+            float(x_span)
+            if x_span is not None and math.isfinite(x_span) and x_span > 0
+            else marker_span
+        )
+        close_limit = max(span * 0.06, 1e-9)
+        cluster: list[tuple[pg.InfiniteLine, float]] = []
+        for marker_value in ordered:
+            if cluster and marker_value[1] - cluster[-1][1] > close_limit:
+                cluster = []
+            cluster.append(marker_value)
+            if len(cluster) > 1:
+                for index, (marker, _value) in enumerate(cluster):
+                    if marker.label is not None:
+                        marker.label.setPosition(max(0.54, 0.94 - 0.08 * index))
+
+
+    @staticmethod
+    def _transition_marker_tooltip(
+        label: str,
+        value: float,
+        *,
+        value_unit: str,
+        source: str,
+        series_pair: tuple[pd.Series, pd.Series],
+        y_label: str,
+    ) -> str:
+        points = pd.DataFrame(
+            {
+                "x": pd.to_numeric(series_pair[0], errors="coerce"),
+                "y": pd.to_numeric(series_pair[1], errors="coerce"),
+            }
+        ).dropna()
+        heading = f"{label}: {value:.6g} {value_unit} ({source})"
+        if points.empty:
+            return heading
+        point_index = int((points["x"] - value).abs().to_numpy().argmin())
+        point = points.iloc[point_index]
+        return (
+            f"{heading}\nNearest curve point: {float(point['x']):.6g} "
+            f"{value_unit}, {float(point['y']):.6g} {y_label}"
+        )
     def _hide_markers(self) -> None:
         for marker in (
             *self._auto_marker_items.values(),
@@ -1238,11 +1393,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         # SI prefix otherwise turns 0.15 % into the much less readable
         # ``150 (×0.001)`` presentation.
         left_axis = self.plot_item.getAxis("left")
-        left_axis.enableAutoSIPrefix(False)
-        # Disabling auto-prefixing does not reset the scale PyQtGraph already
-        # selected (for example 1000 for a 0.25% range). Without this reset the
-        # prefix disappears but the ticks misleadingly remain 250 instead of
-        # 0.250.
+        # Changing the view range can retain or recompute a separate hidden
+        # SI-prefix multiplier and make 0.25% appear as 250 or 2500 on
+        # successive target switches. An empty public enable-range keeps that
+        # multiplier at one for this draw and every later range update.
+        left_axis.setSIPrefixEnableRanges(())
+        left_axis.enableAutoSIPrefix(True)
         left_axis.setScale(1.0)
         self.plot_item.setTitle(plot.title)
         self.values_box.setTitle(f'Transition choices ({plot.value_unit})')
@@ -1254,32 +1410,70 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             if isinstance(target.get("auto_values"), Mapping)
             else {}
         )
+        visible_markers: list[tuple[pg.InfiniteLine, float]] = []
+
+        def marker_series(label: str) -> tuple[pd.Series, pd.Series]:
+            branch = heating_series if label.startswith("A") else cooling_series
+            return branch if branch is not None else (plot_x, plot_y)
+
         for label, value in auto.items():
             if label not in self._active_unit_labels:
                 continue
             if self._choices.get(label) == "not_observed":
                 continue
+            marker_value = float(value)
             marker = self._marker_item(
                 self._auto_marker_items,
                 label,
-                color="#9ca3af",
-                dashed=True,
+                color=self._transition_marker_color(label),
+                dashed=self._transition_marker_is_finish(label),
                 movable=False,
             )
-            marker.setPos(float(value))
+            marker.setPos(marker_value)
+            marker.setToolTip(
+                self._transition_marker_tooltip(
+                    label,
+                    marker_value,
+                    value_unit=plot.value_unit,
+                    source="automatic",
+                    series_pair=marker_series(label),
+                    y_label=plot.y_label,
+                )
+            )
             marker.show()
+            visible_markers.append((marker, marker_value))
         for label, value in self._manual_values.items():
             if self._choices.get(label) != "manual":
                 continue
+            marker_value = float(value)
             marker = self._marker_item(
                 self._manual_marker_items,
                 label,
-                color="#dc2626",
-                dashed=False,
+                color=self._transition_marker_color(label),
+                dashed=self._transition_marker_is_finish(label),
                 movable=True,
             )
-            marker.setPos(float(value))
+            marker.setPos(marker_value)
+            marker.setToolTip(
+                self._transition_marker_tooltip(
+                    label,
+                    marker_value,
+                    value_unit=plot.value_unit,
+                    source="manual",
+                    series_pair=marker_series(label),
+                    y_label=plot.y_label,
+                )
+            )
             marker.show()
+            visible_markers.append((marker, marker_value))
+        self._restyle_transition_markers()
+        numeric_plot_x = pd.to_numeric(plot_x, errors="coerce").dropna()
+        plot_x_span = (
+            float(numeric_plot_x.max() - numeric_plot_x.min())
+            if not numeric_plot_x.empty
+            else None
+        )
+        self._stagger_transition_labels(visible_markers, x_span=plot_x_span)
         self.plot_item.enableAutoRange()
 
     def _set_manual_plot_value(self, value: float) -> None:
@@ -1481,6 +1675,7 @@ class ReviewQueueEntry:
     builder: Callable[[QtWidgets.QWidget], PortableTransitionReviewDialog]
     saved: bool = False
     review_units: tuple[ReviewUnitSummary, ...] = ()
+    loader: Callable[[], PreparedTransitionReview] | None = None
 
     @property
     def label(self) -> str:
@@ -1503,6 +1698,8 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         self._run_items: list[QtWidgets.QTreeWidgetItem] = []
         self._saved_indices: set[int] = set()
         self._current_index: int | None = None
+        self._load_tasks: dict[int, _ReviewLoadTask] = {}
+        self._requested_navigation_rows: dict[int, int] = {}
         self.setWindowTitle("Transition review")
         self.resize(1280, 720)
         self.setMinimumSize(900, 560)
@@ -1837,6 +2034,14 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         run_item = self._run_items[run_index]
         run_item.setText(1, "Loading...")
         run_item.setForeground(1, QtGui.QBrush(QtGui.QColor("#60a5fa")))
+        if entry.loader is not None:
+            if run_index not in self._load_tasks:
+                task = _ReviewLoadTask(run_index, entry.loader)
+                task.signals.finished.connect(self._editor_load_finished)
+                task.signals.failed.connect(self._editor_load_failed)
+                self._load_tasks[run_index] = task
+                QtCore.QThreadPool.globalInstance().start(task)
+            return None
         QtWidgets.QApplication.processEvents(
             QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
         )
@@ -1876,6 +2081,71 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         self._refresh_run_from_editor(run_index)
         return editor
 
+    def _editor_load_finished(
+        self, run_index: int, prepared_value: object
+    ) -> None:
+        self._load_tasks.pop(run_index, None)
+        if not isinstance(prepared_value, PreparedTransitionReview):
+            self._editor_load_failed(run_index, "Invalid prepared review data.")
+            return
+        if run_index in self._editors:
+            return
+        entry = self.entries[run_index]
+        editor = PortableTransitionReviewDialog(
+            prepared_value.payload,
+            prepared_value.plots,
+            prepared_value.sidecar_path,
+            self.editor_host,
+        )
+        editor.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        editor._queue_mode = True  # noqa: SLF001
+        editor._update_archive_controls()  # noqa: SLF001
+        editor.target_panel.hide()
+        editor.heading.setText(
+            f"{entry.label} · saves {editor.sidecar_path.name} beside this measurement"
+        )
+        editor.save_button.setText("Save and continue")
+        for button_box in editor.findChildren(QtWidgets.QDialogButtonBox):
+            cancel_button = button_box.button(
+                QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            )
+            if cancel_button is not None:
+                cancel_button.hide()
+        editor.accepted.connect(
+            lambda selected_index=run_index: self._editor_saved(selected_index)
+        )
+        editor.advanceRequested.connect(
+            lambda selected_index=run_index: self._advance_editor(selected_index)
+        )
+        self.editor_layout.addWidget(editor, 1)
+        editor.hide()
+        self._editors[run_index] = editor
+        self._refresh_run_from_editor(run_index)
+        if self._current_index == run_index:
+            navigation_row = self._requested_navigation_rows.pop(run_index, 0)
+            run_item = self._run_items[run_index]
+            if run_item.childCount():
+                row = min(max(int(navigation_row), 0), run_item.childCount() - 1)
+                self.tree.setCurrentItem(run_item.child(row))
+            else:
+                self._show_editor(run_index, navigation_row)
+
+    def _editor_load_failed(self, run_index: int, message: str) -> None:
+        self._load_tasks.pop(run_index, None)
+        entry = self.entries[run_index]
+        run_item = self._run_items[run_index]
+        run_item.setData(1, QtCore.Qt.ItemDataRole.UserRole, "load_failed")
+        self._set_review_state(run_item, "load_failed", message)
+        run_item.setToolTip(0, message)
+        self._apply_review_filter()
+        self._update_status(f"Could not load {entry.label}: {message}")
+        if self._current_index == run_index:
+            self.placeholder.setText(
+                f"Could not load {entry.label}.\n\n{message}"
+            )
+            self.placeholder.show()
+
+
     def _show_editor(self, run_index: int, navigation_row: int = 0) -> None:
         if self._current_index is not None and self._current_index != run_index:
             current = self._editors.get(self._current_index)
@@ -1885,10 +2155,19 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                     self._current_index, select_if_hidden=False
                 )
                 current.hide()
+        self._current_index = run_index
+        self._requested_navigation_rows[run_index] = int(navigation_row)
         editor = self._build_editor(run_index)
         if editor is None:
+            self.placeholder.setText(
+                f"Loading {self.entries[run_index].label}…\n\n"
+                "You can continue navigating while the measurement is prepared."
+            )
+            self.placeholder.show()
+            self._update_status(f"Loading {self.entries[run_index].label}…")
             return
         self.placeholder.hide()
+        self._requested_navigation_rows.pop(run_index, None)
         self._current_index = run_index
         if editor.target_list.count():
             navigation_row = min(
@@ -1932,14 +2211,16 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
     def _select_review_unit(self, run_index: int, navigation_row: int) -> bool:
         if not 0 <= run_index < len(self._run_items):
             return False
-        editor = self._build_editor(run_index)
-        if editor is None:
-            return False
         run_item = self._run_items[run_index]
         if not run_item.childCount():
-            self._show_editor(run_index, 0)
-            return True
-        row = min(max(int(navigation_row), 0), run_item.childCount() - 1)
+            self._show_editor(run_index, navigation_row)
+            run_item = self._run_items[run_index]
+            if not run_item.childCount():
+                return True
+        row = min(
+            max(int(navigation_row), 0),
+            run_item.childCount() - 1,
+        )
         self.tree.setCurrentItem(run_item.child(row))
         return True
 
@@ -2098,9 +2379,6 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             return
         run_index = int(run_index)
         run_item = self._run_items[run_index]
-        editor = self._build_editor(run_index)
-        if editor is None:
-            return
         visible_rows = self._visible_unit_rows(run_item)
         self._select_review_unit(
             run_index, visible_rows[0] if visible_rows else 0
@@ -2143,7 +2421,7 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             return
         next_index = self._adjacent_visual_run(run_index, 1)
         if next_index is not None and not self._run_items[next_index].isHidden():
-            self.tree.setCurrentItem(self._run_items[next_index])
+            self._select_review_unit(next_index, 0)
             return
         self._select_first_visible_item()
         editor = self._editors.get(run_index)
@@ -2247,15 +2525,15 @@ def review_current_annealing_file(
     _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
 
-def _build_tma_review_dialog(
-    parent: QtWidgets.QWidget,
+def _prepare_tma_review(
     run_path: Path,
     *,
     initial_payload: Mapping[str, Any] | None = None,
-) -> PortableTransitionReviewDialog:
+) -> PreparedTransitionReview:
     run_dir = Path(run_path)
     sidecar = sidecar_path_for_measurement(run_dir, family="tma")
-    draft = tma_review_draft(run_dir)
+    run = tma_core.load_run(run_dir)
+    draft = tma_review_draft(run_dir, loaded_run=run)
     payload = (
         load_review(sidecar)
         if sidecar.exists()
@@ -2265,7 +2543,6 @@ def _build_tma_review_dialog(
     )
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different TMA run content.")
-    run = tma_core.load_run(run_dir)
     plots: dict[str, ReviewPlot] = {}
     groups = tma_core.current_sweep_groups(run.frame)
     sweep_counts: dict[str, int] = {}
@@ -2300,8 +2577,26 @@ def _build_tma_review_dialog(
                 **({"l0_mm": l0_mm} if l0_mm is not None else {}),
             },
         )
-    return PortableTransitionReviewDialog(payload, plots, sidecar, parent)
+    return PreparedTransitionReview(payload, plots, sidecar)
 
+
+
+def _build_tma_review_dialog(
+    parent: QtWidgets.QWidget,
+    run_path: Path,
+    *,
+    initial_payload: Mapping[str, Any] | None = None,
+) -> PortableTransitionReviewDialog:
+    prepared = _prepare_tma_review(
+        run_path,
+        initial_payload=initial_payload,
+    )
+    return PortableTransitionReviewDialog(
+        prepared.payload,
+        prepared.plots,
+        prepared.sidecar_path,
+        parent,
+    )
 
 def review_tma_run(
     parent: QtWidgets.QWidget,
@@ -2431,6 +2726,37 @@ def review_tma_runs(
         review_units = _saved_review_units(sidecar)
         if not review_units and review_units_for_path is not None:
             review_units = tuple(review_units_for_path(path))
+        payload_value = (
+            review_payload_for_path(path)
+            if review_payload_for_path is not None
+            else None
+        )
+        initial_payload = (
+            copy.deepcopy(dict(payload_value))
+            if isinstance(payload_value, Mapping)
+            else None
+        )
+
+        def build_tma_review(
+            owner: QtWidgets.QWidget,
+            selected_path: Path = path,
+            selected_payload: Mapping[str, Any] | None = initial_payload,
+        ) -> PortableTransitionReviewDialog:
+            return _build_tma_review_dialog(
+                owner,
+                selected_path,
+                initial_payload=selected_payload,
+            )
+
+        def load_tma_review(
+            selected_path: Path = path,
+            selected_payload: Mapping[str, Any] | None = initial_payload,
+        ) -> PreparedTransitionReview:
+            return _prepare_tma_review(
+                selected_path,
+                initial_payload=selected_payload,
+            )
+
         entries.append(
             ReviewQueueEntry(
                 sample_label=sample_label,
@@ -2438,15 +2764,8 @@ def review_tma_runs(
                 saved=sidecar.exists()
                 or _review_units_have_completed_review(review_units),
                 review_units=review_units,
-                builder=lambda owner, selected_path=path: _build_tma_review_dialog(
-                    owner,
-                    selected_path,
-                    initial_payload=(
-                        review_payload_for_path(selected_path)
-                        if review_payload_for_path is not None
-                        else None
-                    ),
-                ),
+                builder=build_tma_review,
+                loader=load_tma_review,
             )
         )
     if not entries:
