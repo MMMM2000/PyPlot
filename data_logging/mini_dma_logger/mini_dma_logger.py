@@ -11794,7 +11794,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_elastocaloric_stabilize_s.setRange(0.0, 3600.0)
         self.spin_elastocaloric_stabilize_s.setValue(10.0)
         self.spin_elastocaloric_stabilize_s.setSuffix(" s")
-        constant_current_form.addRow("Pre-pull baseline", self.spin_elastocaloric_stabilize_s)
+        self.spin_elastocaloric_stabilize_s.setToolTip(
+            "Record this stationary baseline once before the first pull."
+        )
+        constant_current_form.addRow("Initial baseline", self.spin_elastocaloric_stabilize_s)
         self.label_elastocaloric_stabilize_row = constant_current_form.labelForField(
             self.spin_elastocaloric_stabilize_s
         )
@@ -11810,12 +11813,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_elastocaloric_repetitions_row = constant_current_form.labelForField(
             self.spin_elastocaloric_repetitions
         )
+        self.spin_elastocaloric_between_cycles_s = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_between_cycles_s.setDecimals(1)
+        self.spin_elastocaloric_between_cycles_s.setRange(0.0, 3600.0)
+        self.spin_elastocaloric_between_cycles_s.setValue(10.0)
+        self.spin_elastocaloric_between_cycles_s.setSuffix(" s")
+        self.spin_elastocaloric_between_cycles_s.setToolTip(
+            "Wait at the released baseline only when another pull follows."
+        )
+        constant_current_form.addRow("Between cycles", self.spin_elastocaloric_between_cycles_s)
+        self.label_elastocaloric_between_cycles_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_between_cycles_s
+        )
         self.spin_elastocaloric_release_record_s = CompactDoubleSpinBox(automation_box)
         self.spin_elastocaloric_release_record_s.setDecimals(1)
         self.spin_elastocaloric_release_record_s.setRange(0.0, 3600.0)
         self.spin_elastocaloric_release_record_s.setValue(10.0)
         self.spin_elastocaloric_release_record_s.setSuffix(" s")
-        constant_current_form.addRow("Record after release", self.spin_elastocaloric_release_record_s)
+        self.spin_elastocaloric_release_record_s.setToolTip(
+            "Record this stationary period once after the final release."
+        )
+        constant_current_form.addRow("Final post-release", self.spin_elastocaloric_release_record_s)
         self.label_elastocaloric_release_record_row = constant_current_form.labelForField(
             self.spin_elastocaloric_release_record_s
         )
@@ -12267,6 +12285,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
             self.spin_elastocaloric_repetitions,
+            self.spin_elastocaloric_between_cycles_s,
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
@@ -12779,6 +12798,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_hold_s,
             self.spin_elastocaloric_stabilize_s,
             self.spin_elastocaloric_repetitions,
+            self.spin_elastocaloric_between_cycles_s,
             self.spin_elastocaloric_release_record_s,
             self.spin_elastocaloric_pull_duration_s,
             self.spin_elastocaloric_release_duration_s,
@@ -21317,6 +21337,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "spin_constant_current_move_speed_mm_s",
             "spin_elastocaloric_stabilize_s",
             "spin_elastocaloric_repetitions",
+            "spin_elastocaloric_between_cycles_s",
             "spin_elastocaloric_release_record_s",
             "spin_elastocaloric_pull_duration_s",
             "spin_elastocaloric_release_duration_s",
@@ -21362,6 +21383,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "label_constant_current_step_speed_row",
             "label_elastocaloric_stabilize_row",
             "label_elastocaloric_repetitions_row",
+            "label_elastocaloric_between_cycles_row",
             "label_elastocaloric_release_record_row",
             "label_elastocaloric_pull_duration_row",
             "label_elastocaloric_release_duration_row",
@@ -21420,7 +21442,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "label_constant_current_step_size_row", None) is not None:
             self.label_constant_current_step_size_row.setText("Jump size" if elastocaloric_mode else "Step size")
         if getattr(self, "label_constant_current_hold_row", None) is not None:
-            self.label_constant_current_hold_row.setText("Record after jump" if elastocaloric_mode else "Hold per step")
+            self.label_constant_current_hold_row.setText("Post-pull" if elastocaloric_mode else "Hold per step")
         if getattr(self, "label_constant_current_step_speed_row", None) is not None:
             self.label_constant_current_step_speed_row.setText("Jump speed" if elastocaloric_mode else "Step speed")
         step_basis = self._constant_current_step_basis()
@@ -25555,7 +25577,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"austenitize {_format_compact_unit(current_mA, 'mA', decimals=2)}, "
                 f"hold/move {_format_compact_unit(hold_current_mA, 'mA', decimals=2)}; "
                 "capture the post-austenitization position as relative strain 0%, "
-                f"record baseline {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
+                f"record initial baseline {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
                 f"pull by {_format_compact_unit(jump_strain, '%', decimals=4)} in "
                 f"{_format_compact_unit(self.spin_elastocaloric_pull_duration_s.value(), 's', decimals=3)} "
                 f"at {pull_plan.command_speed_mm_s:.3f} mm/s, then release in "
@@ -25572,9 +25594,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.check_constant_current_transition_hold_on_error.isChecked():
                 summary += " Transition current pauses while the target recovers."
             summary += (
-                f" Records {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=1)} "
-                "after the tensile jump and "
-                f"{_format_compact_unit(self.spin_elastocaloric_release_record_s.value(), 's', decimals=1)} after release."
+                f" Timing: {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=1)} "
+                "post-pull, "
+                f"{_format_compact_unit(self.spin_elastocaloric_between_cycles_s.value(), 's', decimals=1)} "
+                "between cycles, and "
+                f"{_format_compact_unit(self.spin_elastocaloric_release_record_s.value(), 's', decimals=1)} "
+                "after the final release."
             )
             if self._pre_measurement_setup_enabled(mode):
                 setup_load_g = load_g_from_stress_mpa(
@@ -29092,8 +29117,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     if self._elastocaloric_initial_baseline_s is not None
                     else self.spin_elastocaloric_stabilize_s.value()
                 ),
+                "post_pull_s": float(self.spin_constant_current_hold_s.value()),
+                "between_cycles_s": float(self.spin_elastocaloric_between_cycles_s.value()),
+                "final_post_release_s": float(self.spin_elastocaloric_release_record_s.value()),
                 "between_measurement_baseline_s": float(
-                    self.spin_elastocaloric_stabilize_s.value()
+                    self.spin_elastocaloric_between_cycles_s.value()
                 ),
                 "measurement_count": int(self.spin_elastocaloric_repetitions.value()),
                 "jump_strain_pct": float(self.spin_constant_current_end_target.value()),
@@ -31762,17 +31790,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 "return_to_start": True,
             }
         if self._is_elastocaloric_mode(mode):
+            initial_baseline_s = float(
+                self._elastocaloric_initial_baseline_s
+                if self._elastocaloric_initial_baseline_s is not None
+                else self.spin_elastocaloric_stabilize_s.value()
+            )
             payload["recipe"]["elastocaloric_effect"] = {
                 "strain_reference": "captured_post_austenitization_baseline",
                 "start_strain_pct": 0.0,
                 "jump_strain_pct": float(self.spin_constant_current_end_target.value()),
                 "jump_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
-                "pre_pull_baseline_s": float(self.spin_elastocaloric_stabilize_s.value()),
-                "temperature_stabilize_s": float(
-                    self._elastocaloric_initial_baseline_s
-                    if self._elastocaloric_initial_baseline_s is not None
-                    else self.spin_elastocaloric_stabilize_s.value()
-                ),
+                "initial_baseline_s": initial_baseline_s,
+                "post_pull_s": float(self.spin_constant_current_hold_s.value()),
+                "between_cycles_s": float(self.spin_elastocaloric_between_cycles_s.value()),
+                "final_post_release_s": float(self.spin_elastocaloric_release_record_s.value()),
+                # Legacy aliases keep older PyPlot versions able to open the recipe.
+                "temperature_stabilize_s": initial_baseline_s,
+                "pre_pull_baseline_s": float(self.spin_elastocaloric_between_cycles_s.value()),
                 "pull_duration_s": float(self.spin_elastocaloric_pull_duration_s.value()),
                 "release_duration_s": float(self.spin_elastocaloric_release_duration_s.value()),
                 "release_duration_matches_pull": bool(
@@ -32130,28 +32164,68 @@ class MainWindow(QtWidgets.QMainWindow):
                     float(elastocaloric.get("jump_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())),
                 )
             )
-            repeat_baseline_s = max(
+            legacy_initial_s = max(
                 0.0,
                 float(
                     elastocaloric.get(
-                        "pre_pull_baseline_s",
+                        "temperature_stabilize_s",
                         elastocaloric.get(
-                            "temperature_stabilize_s",
+                            "pre_pull_baseline_s",
                             self.spin_elastocaloric_stabilize_s.value(),
                         ),
                     )
                 ),
             )
-            self._elastocaloric_initial_baseline_s = max(
+            legacy_post_pull_s = max(
                 0.0,
-                float(elastocaloric.get("temperature_stabilize_s", repeat_baseline_s)),
+                float(elastocaloric.get("record_after_jump_s", self.spin_constant_current_hold_s.value())),
             )
-            self.spin_elastocaloric_stabilize_s.setValue(
-                max(
-                    0.0,
-                    repeat_baseline_s,
-                )
+            legacy_post_release_s = max(
+                0.0,
+                float(
+                    elastocaloric.get(
+                        "record_after_release_s",
+                        self.spin_elastocaloric_release_record_s.value(),
+                    )
+                ),
             )
+            legacy_repeat_baseline_s = max(
+                0.0,
+                float(elastocaloric.get("pre_pull_baseline_s", 0.0)),
+            )
+            initial_baseline_s = max(
+                0.0,
+                float(elastocaloric.get("initial_baseline_s", legacy_initial_s)),
+            )
+            post_pull_s = max(
+                0.0,
+                float(elastocaloric.get("post_pull_s", legacy_post_pull_s)),
+            )
+            between_cycles_s = max(
+                0.0,
+                float(
+                    elastocaloric.get(
+                        "between_cycles_s",
+                        legacy_repeat_baseline_s + legacy_post_release_s,
+                    )
+                ),
+            )
+            final_post_release_s = max(
+                0.0,
+                float(
+                    elastocaloric.get(
+                        "final_post_release_s",
+                        legacy_post_release_s,
+                    )
+                ),
+            )
+            self.spin_elastocaloric_stabilize_s.setValue(initial_baseline_s)
+            # The explicit UI field now owns initial timing.  The private
+            # override remains only for legacy control-process payloads.
+            self._elastocaloric_initial_baseline_s = None
+            self.spin_constant_current_hold_s.setValue(post_pull_s)
+            self.spin_elastocaloric_between_cycles_s.setValue(between_cycles_s)
+            self.spin_elastocaloric_release_record_s.setValue(final_post_release_s)
             self.spin_elastocaloric_pull_duration_s.setValue(
                 max(
                     0.010,
@@ -32233,23 +32307,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         "thermal_response_cycles",
                         self.spin_thermal_response_cycles.value(),
                     )
-                )
-            )
-            self.spin_constant_current_hold_s.setValue(
-                max(
-                    0.0,
-                    float(elastocaloric.get("record_after_jump_s", self.spin_constant_current_hold_s.value())),
-                )
-            )
-            self.spin_elastocaloric_release_record_s.setValue(
-                max(
-                    0.0,
-                    float(
-                        elastocaloric.get(
-                            "record_after_release_s",
-                            self.spin_elastocaloric_release_record_s.value(),
-                        )
-                    ),
                 )
             )
             austenitize_current = max(
@@ -35019,7 +35076,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{baseline_s:.1f} s high-current baseline"
             )
         else:
-            baseline_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+            baseline_s = max(
+                0.0,
+                float(
+                    self._elastocaloric_initial_baseline_s
+                    if self._elastocaloric_initial_baseline_s is not None
+                    else self.spin_elastocaloric_stabilize_s.value()
+                ),
+            )
             progress_text = (
                 f"Next jump: recording fresh {baseline_s:.1f} s baseline"
                 if baseline_s > 0.0
@@ -38022,15 +38086,22 @@ class MainWindow(QtWidgets.QMainWindow):
             release_duration_s = float(self.spin_elastocaloric_release_duration_s.value())
             pull_plan = self._elastocaloric_motion_plan(pull_duration_s)
             release_plan = self._elastocaloric_motion_plan(release_duration_s)
-            jump_record_s = max(0.0, float(self.spin_constant_current_hold_s.value()))
-            release_record_s = max(0.0, float(self.spin_elastocaloric_release_record_s.value()))
-            stabilize_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+            post_pull_s = max(0.0, float(self.spin_constant_current_hold_s.value()))
+            final_post_release_s = max(0.0, float(self.spin_elastocaloric_release_record_s.value()))
+            configured_initial_baseline_s = max(
+                0.0,
+                float(self.spin_elastocaloric_stabilize_s.value()),
+            )
+            between_cycles_s = max(
+                0.0,
+                float(self.spin_elastocaloric_between_cycles_s.value()),
+            )
             initial_stabilize_s = max(
                 0.0,
                 float(
                     self._elastocaloric_initial_baseline_s
                     if self._elastocaloric_initial_baseline_s is not None
-                    else stabilize_s
+                    else configured_initial_baseline_s
                 ),
             )
             repetitions = max(1, int(self.spin_elastocaloric_repetitions.value()))
@@ -38171,13 +38242,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             if self._elastocaloric_continue_prepared_requested:
                 steps: list[AutomationStep] = []
-                if stabilize_s > 0.0:
+                if initial_stabilize_s > 0.0:
                     steps.append(
                         AutomationStep(
                             "settle",
                             current_mA=hold_current_mA,
-                            duration_s=stabilize_s,
-                            note="elastocaloric:continued_pre_pull_baseline",
+                            duration_s=initial_stabilize_s,
+                            note="elastocaloric:continued_initial_baseline",
                         )
                     )
                 steps.extend(
@@ -38194,18 +38265,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 for repetition_index in range(repetitions):
                     repetition_number = repetition_index + 1
                     note_suffix = "" if repetitions == 1 else f":{repetition_number}"
-                    if repetition_index > 0 and stabilize_s > 0.0:
-                        steps.append(
-                            AutomationStep(
-                                "settle",
-                                current_mA=hold_current_mA,
-                                duration_s=stabilize_s,
-                                note=(
-                                    "elastocaloric:continued_pre_pull_baseline"
-                                    f"{note_suffix}"
-                                ),
-                            )
-                        )
                     steps.extend(
                         [
                             AutomationStep(
@@ -38216,7 +38275,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                                 mechanical_step_value=strain_jump_size,
                                 mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
-                                duration_s=jump_record_s,
+                                duration_s=post_pull_s,
                                 note=f"elastocaloric:continued_pull{note_suffix}",
                             ),
                             AutomationStep(
@@ -38227,15 +38286,35 @@ class MainWindow(QtWidgets.QMainWindow):
                                 mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                                 mechanical_step_value=strain_jump_size,
                                 mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
-                                duration_s=release_record_s,
+                                duration_s=0.0,
                                 note=f"elastocaloric:continued_release{note_suffix}",
                             ),
                         ]
                     )
+                    waiting_s = (
+                        final_post_release_s
+                        if repetition_index == repetitions - 1
+                        else between_cycles_s
+                    )
+                    if waiting_s > 0.0:
+                        steps.append(
+                            AutomationStep(
+                                "settle",
+                                current_mA=hold_current_mA,
+                                duration_s=waiting_s,
+                                note=(
+                                    "elastocaloric:continued_final_post_release"
+                                    if repetition_index == repetitions - 1
+                                    else f"elastocaloric:continued_between_cycles:{repetition_number}"
+                                ),
+                            )
+                        )
                 summary = (
-                    "Continued prepared elastocaloric series: fresh baseline "
-                    f"{stabilize_s:.1f} s, pull {jump_strain:.4f}% in "
+                    "Continued prepared elastocaloric series: initial baseline "
+                    f"{initial_stabilize_s:.1f} s, pull {jump_strain:.4f}% in "
                     f"{pull_duration_s:.3f} s, release in {release_duration_s:.3f} s; "
+                    f"post-pull {post_pull_s:.1f} s, between cycles {between_cycles_s:.1f} s, "
+                    f"final post-release {final_post_release_s:.1f} s; "
                     f"hold current {hold_current_mA:.2f} mA; "
                     f"{repetitions} measurement{'s' if repetitions != 1 else ''}; "
                     f"{clock_summary}."
@@ -38300,7 +38379,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         "settle",
                         current_mA=hold_current_mA,
                         duration_s=initial_stabilize_s,
-                        note="elastocaloric:pre_pull_baseline",
+                        note="elastocaloric:initial_baseline",
                     )
                 )
             steps.append(
@@ -38315,15 +38394,6 @@ class MainWindow(QtWidgets.QMainWindow):
             for repetition_index in range(repetitions):
                 repetition_number = repetition_index + 1
                 note_suffix = "" if repetitions == 1 else f":{repetition_number}"
-                if repetition_index > 0 and stabilize_s > 0.0:
-                    steps.append(
-                        AutomationStep(
-                            "settle",
-                            current_mA=hold_current_mA,
-                            duration_s=stabilize_s,
-                            note=f"elastocaloric:pre_pull_baseline{note_suffix}",
-                        )
-                    )
                 steps.append(
                     AutomationStep(
                         "mechanical_scan",
@@ -38333,7 +38403,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                         mechanical_step_value=strain_jump_size,
                         mechanical_step_speed_mm_s=pull_plan.command_speed_mm_s,
-                        duration_s=jump_record_s,
+                        duration_s=post_pull_s,
                         note=f"elastocaloric:pull{note_suffix}",
                     )
                 )
@@ -38346,10 +38416,28 @@ class MainWindow(QtWidgets.QMainWindow):
                         mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
                         mechanical_step_value=strain_jump_size,
                         mechanical_step_speed_mm_s=release_plan.command_speed_mm_s,
-                        duration_s=release_record_s,
+                        duration_s=0.0,
                         note=f"elastocaloric:release{note_suffix}",
                     )
                 )
+                waiting_s = (
+                    final_post_release_s
+                    if repetition_index == repetitions - 1
+                    else between_cycles_s
+                )
+                if waiting_s > 0.0:
+                    steps.append(
+                        AutomationStep(
+                            "settle",
+                            current_mA=hold_current_mA,
+                            duration_s=waiting_s,
+                            note=(
+                                "elastocaloric:final_post_release"
+                                if repetition_index == repetitions - 1
+                                else f"elastocaloric:between_cycles:{repetition_number}"
+                            ),
+                        )
+                    )
             summary = (
                 "Started elastocaloric effect recipe: "
                 f"austenitize at {austenitize_current_mA:.2f} mA, hold/move at {hold_current_mA:.2f} mA, "
@@ -38357,13 +38445,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"({pull_plan.command_speed_mm_s:.4f} mm/s), release in {release_duration_s:.3f} s "
                 f"({release_plan.command_speed_mm_s:.4f} mm/s), record initial baseline "
                 f"{initial_stabilize_s:.1f} s"
+                + f", post-pull {post_pull_s:.1f} s"
                 + (
-                    f" and {stabilize_s:.1f} s between measurements"
+                    f", {between_cycles_s:.1f} s between cycles"
                     if repetitions > 1
                     else ""
                 )
-                + ", "
-                f"record {jump_record_s:.1f} s after jump and {release_record_s:.1f} s after release; "
+                + f", final post-release {final_post_release_s:.1f} s; "
                 f"{repetitions} measurement{'s' if repetitions != 1 else ''}; "
                 f"{clock_summary}."
             )
@@ -42155,6 +42243,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
         self.settings.setValue("elastocaloric_stabilize_s", self.spin_elastocaloric_stabilize_s.value())
         self.settings.setValue("elastocaloric_repetitions", self.spin_elastocaloric_repetitions.value())
+        self.settings.setValue(
+            "elastocaloric_between_cycles_s",
+            self.spin_elastocaloric_between_cycles_s.value(),
+        )
         self.settings.setValue("elastocaloric_pull_duration_s", self.spin_elastocaloric_pull_duration_s.value())
         self.settings.setValue("elastocaloric_release_duration_s", self.spin_elastocaloric_release_duration_s.value())
         self.settings.setValue(
@@ -42968,6 +43060,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.spin_elastocaloric_repetitions.setValue(
             max(1, int(self.settings.value("elastocaloric_repetitions", 1)))
+        )
+        self.spin_elastocaloric_between_cycles_s.setValue(
+            max(0.0, float(self.settings.value("elastocaloric_between_cycles_s", 10.0)))
         )
         self.spin_elastocaloric_pull_duration_s.setValue(
             max(0.010, float(self.settings.value("elastocaloric_pull_duration_s", 3.0)))
