@@ -125,7 +125,7 @@ def test_elastocaloric_summary_interpolates_temperature_against_strain() -> None
     try:
         assert _plot_elastocaloric_temperature_strain(ax, measurement, temperature) is True
         assert ax.get_xlabel() == "Strain (%)"
-        assert ax.get_ylabel() == "Temperature (C)"
+        assert ax.get_ylabel() == "Temperature (°C)"
         assert ax.lines[0].get_xdata().tolist() == pytest.approx([0.0, 2.0, 4.0, 2.0, 0.0])
     finally:
         plt.close(fig)

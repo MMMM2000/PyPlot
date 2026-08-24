@@ -910,7 +910,7 @@ def _plot_temperature(
         lw=1.8,
         label="processed",
     )
-    _style_axis(ax, "Temperature max vs time", time_axis.label, "Temperature (C)")
+    _style_axis(ax, "Temperature max vs time", time_axis.label, "Temperature (°C)")
     ax.legend(fontsize=8, loc="best")
     return True
 
@@ -967,7 +967,7 @@ def _plot_elastocaloric_temperature_strain(
     interpolated_strain = np.interp(thermal_x, motion_x, motion_y)
     interpolated_strain, thermal_y = _decimate(interpolated_strain, thermal_y)
     ax.plot(interpolated_strain, thermal_y, color="#dc2626", lw=1.25)
-    _style_axis(ax, "Temperature max vs strain", "Strain (%)", "Temperature (C)")
+    _style_axis(ax, "Temperature max vs strain", "Strain (%)", "Temperature (°C)")
     return True
 
 

@@ -4548,6 +4548,56 @@ def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> No
         _restore_settings(snapshot)
 
 
+def test_recipe_plot_choices_survive_switch_close_and_reopen(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.sync()
+    custom = {
+        "visible": True,
+        "x": "elastocaloric_strain_path_pct",
+        "y_left": "current_measured_mA",
+        "y_right": "temperature_c",
+    }
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+        elastocaloric_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        calibration_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
+        assert elastocaloric_index >= 0
+        assert calibration_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(elastocaloric_index)
+        _set_plot_tile(
+            window,
+            3,
+            str(custom["x"]),
+            str(custom["y_left"]),
+            str(custom["y_right"]),
+        )
+        window.combo_recipe_mode.setCurrentIndex(calibration_index)
+        window.close()
+        _ensure_app().processEvents()
+
+        assert _saved_recipe_plot_tile_values(mini_dma_mod.ELASTOCALORIC_EFFECT, 3) == custom
+
+        reopened = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(reopened)
+        reopened.combo_recipe_mode.setCurrentIndex(
+            reopened.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        )
+        tile = reopened._plot_tiles[3]
+        assert tile.visible.isChecked() is True
+        assert tile.x_combo.currentData() == custom["x"]
+        assert tile.y_left_combo.currentData() == custom["y_left"]
+        assert tile.y_right_combo.currentData() == custom["y_right"]
+        reopened.close()
+        _ensure_app().processEvents()
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_normal_open_close_preserves_saved_sample_and_dashboard_settings(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()

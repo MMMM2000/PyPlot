@@ -1,0 +1,1 @@
+- Label TMA dashboard and saved-run temperature axes in degrees Celsius, and durably retain each recipe type's custom dashboard plot configuration when switching recipes or closing the app.

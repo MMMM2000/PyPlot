@@ -13125,7 +13125,7 @@ class MainWindow(QtWidgets.QMainWindow):
             PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
             PlotChannel(
                 "temperature_c",
-                "Temperature (C)",
+                "Temperature (°C)",
                 "#38bdf8",
                 lambda point: point.ir_temperature_c
                 if point.ir_temperature_c is not None
@@ -13133,21 +13133,21 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             PlotChannel(
                 "ir_object_c_apparent",
-                "IR apparent temp (C)",
+                "IR apparent temp (°C)",
                 "#38bdf8",
                 lambda point: point.ir_object_c_apparent,
                 hidden_from_picker=True,
             ),
             PlotChannel(
                 "ir_delta_c",
-                "IR delta temp (C)",
+                "IR delta temp (°C)",
                 "#06b6d4",
                 lambda point: point.ir_delta_c,
                 hidden_from_picker=True,
             ),
             PlotChannel(
                 "ir_ambient_c",
-                "IR ambient temp (C)",
+                "IR ambient temp (°C)",
                 "#67e8f9",
                 lambda point: point.ir_ambient_c,
                 hidden_from_picker=True,
@@ -13268,8 +13268,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _handle_plot_config_changed(self, *_args: object) -> None:
         if not self._plot_settings_restore_in_progress:
-            self._store_dashboard_plot_settings(write_settings=True)
-            self.settings.sync()
+            self._store_dashboard_plot_settings(write_settings=self._persist_settings)
+            if self._persist_settings:
+                self.settings.sync()
         self._refresh_plots()
         self._persist_settings_if_enabled()
 
@@ -21140,7 +21141,12 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_mode = self._last_recipe_mode
         current_mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if not self._settings_restore_in_progress:
-            self._store_dashboard_plot_settings(previous_mode)
+            self._store_dashboard_plot_settings(
+                previous_mode,
+                write_settings=self._persist_settings,
+            )
+            if self._persist_settings:
+                self.settings.sync()
             self._store_current_sweep_target_values(previous_mode)
             if current_mode in CURRENT_TARGET_VALUE_MODES and current_mode != previous_mode:
                 self._apply_current_sweep_target_values(current_mode)
