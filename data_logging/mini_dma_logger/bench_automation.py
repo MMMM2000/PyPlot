@@ -1037,11 +1037,17 @@ def _execute_recovery_only_run(
 
     app.processEvents()
     final_stress_mpa = _latest_stress_mpa(window)
+    accepted_final_stress_mpa = target_stress_mpa + 1.0
+    if guardrails.recovery_stress_mpa is not None:
+        accepted_final_stress_mpa = max(
+            accepted_final_stress_mpa,
+            guardrails.recovery_stress_mpa + 1.0,
+        )
     if started and status == "recovery_not_started":
         status = (
             "recovered"
             if final_stress_mpa is not None
-            and final_stress_mpa <= target_stress_mpa + 1.0
+            and final_stress_mpa <= accepted_final_stress_mpa
             else "recovery_incomplete"
         )
     _call_window_method(window, "_disable_supply_output")
@@ -1065,6 +1071,7 @@ def _execute_recovery_only_run(
         "elapsed_s": max(0.0, time.monotonic() - start_s),
         "metadata_path": metadata_path,
         "recovery_only_target_stress_mpa": target_stress_mpa,
+        "accepted_final_stress_mpa": accepted_final_stress_mpa,
         "final_stress_mpa": final_stress_mpa,
         "guard_events": [] if guard_event is None else [guard_event],
         "stop_metadata": _session_stop_metadata(window)

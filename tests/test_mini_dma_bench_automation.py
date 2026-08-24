@@ -164,7 +164,7 @@ def test_recovery_only_run_disables_current_and_finishes_logged_session() -> Non
             return True
 
         def _bench_latest_stress_mpa(self) -> float:
-            return 20.2
+            return 27.1
 
         def _wire_break_detected(self) -> bool:
             return False
@@ -191,13 +191,17 @@ def test_recovery_only_run_disables_current_and_finishes_logged_session() -> Non
         ),
         app=_App(),
         window=window,
-        guardrails=bench_automation.MiniDmaBenchGuardrails(max_stress_mpa=330.0),
+        guardrails=bench_automation.MiniDmaBenchGuardrails(
+            max_stress_mpa=330.0,
+            recovery_stress_mpa=50.0,
+        ),
         sleep_fn=lambda _seconds: None,
         total_deadline_s=None,
     )
 
     assert result["status"] == "recovered"
-    assert result["final_stress_mpa"] == pytest.approx(20.2)
+    assert result["accepted_final_stress_mpa"] == pytest.approx(51.0)
+    assert result["final_stress_mpa"] == pytest.approx(27.1)
     assert events.count("current_off") >= 3
     assert ("recovery", 20.0, "armed recovery-only bench run") in events
     assert any(
