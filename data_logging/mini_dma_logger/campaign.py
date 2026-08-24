@@ -124,6 +124,25 @@ def _as_float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _nested_dotted(mapping: Mapping[str, Any], dotted_path: str) -> Any:
+    current: Any = mapping
+    for key in dotted_path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _contract_values_match(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, bool):
+        return actual is expected
+    expected_number = _as_float(expected)
+    actual_number = _as_float(actual)
+    if expected_number is not None and actual_number is not None:
+        return math.isclose(actual_number, expected_number, rel_tol=0.0, abs_tol=1e-9)
+    return actual == expected
+
+
 def _git(args: Sequence[str], cwd: Path) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -193,6 +212,8 @@ def validate_campaign(
         travel_limit_mm = length * travel_fraction
         if travel_fraction < 0.01 or travel_fraction > 0.25:
             warnings.append("max_correction_travel_fraction is outside the expected 0.01-0.25 range")
+    root = campaign_root(manifest, path)
+    recipe_contracts: list[dict[str, Any]] = []
     stages = nested(manifest, "run_plan", "stages")
     if not isinstance(stages, list) or not stages:
         errors.append("run_plan.stages must be a non-empty list")
@@ -205,7 +226,39 @@ def validate_campaign(
                 errors.append(f"run_plan.stages[{index}].id is required")
             if not stage.get("recipe_path"):
                 errors.append(f"run_plan.stages[{index}].recipe_path is required")
-    root = campaign_root(manifest, path)
+                continue
+            expected_recipe = stage.get("expected_recipe")
+            if expected_recipe is None:
+                continue
+            if not isinstance(expected_recipe, Mapping) or not expected_recipe:
+                errors.append(f"run_plan.stages[{index}].expected_recipe must be a non-empty mapping")
+                continue
+            recipe_path = root / str(stage["recipe_path"])
+            contract_result = {"stage": stage.get("id"), "recipe_path": str(recipe_path), "ok": False}
+            recipe_contracts.append(contract_result)
+            if not recipe_path.is_file():
+                errors.append(f"run_plan.stages[{index}] recipe does not exist: {recipe_path}")
+                continue
+            try:
+                recipe_payload = json.loads(recipe_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError) as exc:
+                errors.append(f"run_plan.stages[{index}] recipe could not be read: {exc}")
+                continue
+            if not isinstance(recipe_payload, Mapping):
+                errors.append(f"run_plan.stages[{index}] recipe must be a mapping")
+                continue
+            mismatches: list[str] = []
+            for dotted_path, expected in expected_recipe.items():
+                actual = _nested_dotted(recipe_payload, str(dotted_path))
+                if not _contract_values_match(actual, expected):
+                    mismatches.append(f"{dotted_path}: expected {expected!r}, got {actual!r}")
+            if mismatches:
+                errors.append(
+                    f"run_plan.stages[{index}] recipe contract mismatch: " + "; ".join(mismatches)
+                )
+                contract_result["mismatches"] = mismatches
+            else:
+                contract_result["ok"] = True
     report_path = nested(manifest, "reporting", "report_path")
     if isinstance(report_path, str) and report_path:
         report_full = root / report_path
@@ -219,6 +272,14 @@ def validate_campaign(
             commit = _git(["rev-parse", "HEAD"], cwd)
             status = _git(["status", "--porcelain"], cwd)
             git_info.update({"branch": branch, "commit": commit, "dirty": bool(status)})
+            approved_version = str(
+                nested(manifest, "control_source", "approved_control_logic_version") or ""
+            ).strip()
+            if approved_version and not commit.startswith(approved_version):
+                errors.append(
+                    "current commit does not match control_source.approved_control_logic_version "
+                    f"({commit} vs {approved_version})"
+                )
             prefix = nested(manifest, "control_source", "required_branch_prefix")
             if prefix and branch and not branch.startswith(str(prefix)) and branch != "main":
                 errors.append(f"current branch {branch!r} does not match required prefix {prefix!r}")
@@ -238,6 +299,7 @@ def validate_campaign(
     derived = {
         "max_correction_travel_mm": travel_limit_mm,
         "report_path": None if report_full is None else str(report_full),
+        "recipe_contracts": recipe_contracts,
         "git": git_info,
     }
     return CampaignCheckResult(

@@ -94,6 +94,47 @@ def test_campaign_check_rejects_missing_control_source(tmp_path: Path) -> None:
     assert "missing required field: control_source.approved_control_logic_version" in result.errors
 
 
+def test_campaign_check_enforces_declared_recipe_contract(tmp_path: Path) -> None:
+    manifest = tmp_path / "campaign.json"
+    root = tmp_path / "campaign-root"
+    recipe_path = root / "plans" / "recipes" / "baseline.recipe.json"
+    recipe_path.parent.mkdir(parents=True)
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "recipe": {
+                    "mode": "elastocaloric_effect",
+                    "elastocaloric_effect": {
+                        "hold_current_mA": 1.0,
+                        "jump_strain_pct": 7.0,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_manifest(manifest, root)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["run_plan"]["stages"][0]["expected_recipe"] = {
+        "recipe.mode": "elastocaloric_effect",
+        "recipe.elastocaloric_effect.hold_current_mA": 1.0,
+        "recipe.elastocaloric_effect.jump_strain_pct": 7.0,
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = validate_campaign(manifest, skip_git=True)
+    assert result.ok
+    assert result.derived["recipe_contracts"][0]["ok"] is True
+
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    recipe["recipe"]["elastocaloric_effect"]["hold_current_mA"] = 30.0
+    recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+
+    result = validate_campaign(manifest, skip_git=True)
+    assert not result.ok
+    assert "hold_current_mA: expected 1.0, got 30.0" in result.errors[0]
+
+
 def test_yaml_campaign_template_parses() -> None:
     template = Path("docs/automation_templates/mini_dma_campaign.yaml")
 

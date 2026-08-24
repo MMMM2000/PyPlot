@@ -34690,6 +34690,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_constant_current_end_target.setValue(4.25)
         window.spin_constant_current_move_speed_mm_s.setValue(6.0)
         window.spin_elastocaloric_stabilize_s.setValue(45.0)
+        window._elastocaloric_initial_baseline_s = 120.0
         window.spin_elastocaloric_repetitions.setValue(4)
         window.spin_elastocaloric_pull_duration_s.setValue(2.5)
         window.check_elastocaloric_release_matches_pull.setChecked(False)
@@ -34712,7 +34713,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert elastocaloric["start_strain_pct"] == pytest.approx(0.0)
         assert elastocaloric["jump_strain_pct"] == pytest.approx(4.25)
         assert elastocaloric["jump_speed_mm_s"] == pytest.approx(6.0)
-        assert elastocaloric["temperature_stabilize_s"] == pytest.approx(45.0)
+        assert elastocaloric["temperature_stabilize_s"] == pytest.approx(120.0)
         assert elastocaloric["pre_pull_baseline_s"] == pytest.approx(45.0)
         assert elastocaloric["measurement_count"] == 4
         assert elastocaloric["pull_duration_s"] == pytest.approx(2.5)
@@ -34757,6 +34758,7 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_constant_current_end_target.value() == pytest.approx(4.25)
         assert window.spin_constant_current_move_speed_mm_s.value() == pytest.approx(6.0)
         assert window.spin_elastocaloric_stabilize_s.value() == pytest.approx(45.0)
+        assert window._elastocaloric_initial_baseline_s == pytest.approx(120.0)
         assert window.spin_elastocaloric_repetitions.value() == 4
         assert window.spin_elastocaloric_pull_duration_s.value() == pytest.approx(2.5)
         assert window.spin_elastocaloric_release_duration_s.value() == pytest.approx(3.5)
@@ -34770,6 +34772,18 @@ def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_constant_current_transition_rate_mA_s.value() == pytest.approx(1.5)
         assert window.spin_constant_current_transition_settle_s.value() == pytest.approx(2.0)
         assert window.check_constant_current_transition_hold_on_error.isChecked() is True
+        steps, summary, _interval_ms = window._build_automation_recipe()
+        baselines = [
+            step.duration_s
+            for step in steps
+            if step.note.startswith("elastocaloric:pre_pull_baseline")
+        ]
+        assert baselines == pytest.approx([120.0, 45.0, 45.0, 45.0])
+        assert "initial baseline 120.0 s and 45.0 s between measurements" in summary
+        metadata = window._session_metadata_from_ui()["elastocaloric_effect"]
+        assert metadata["initial_baseline_s"] == pytest.approx(120.0)
+        assert metadata["between_measurement_baseline_s"] == pytest.approx(45.0)
+        assert metadata["motion_accel_tic_units"] == 400_000
         assert window.spin_elastocaloric_stabilize_s.isVisibleTo(window.recipe_stack)
         assert "Loaded recipe" in window.log_output.toPlainText()
     finally:
