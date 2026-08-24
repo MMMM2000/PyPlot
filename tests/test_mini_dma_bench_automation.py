@@ -110,6 +110,103 @@ def test_mini_dma_bench_plan_dry_run_validates_recipe_paths(tmp_path: Path) -> N
     assert summary_path.exists()
 
 
+def test_mini_dma_bench_plan_parses_recovery_only_target(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "recovery-context.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "runs": [
+                    {
+                        "name": "recover",
+                        "recipe_path": recipe_path.name,
+                        "recovery_only_target_stress_mpa": 20.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = bench_automation.load_mini_dma_bench_plan(plan_path)
+    summary = bench_automation.run_mini_dma_bench_plan(plan_path)
+
+    assert plan.runs[0].recovery_only_target_stress_mpa == pytest.approx(20.0)
+    assert summary["runs"][0]["recovery_only_target_stress_mpa"] == pytest.approx(20.0)
+
+
+def test_recovery_only_run_disables_current_and_finishes_logged_session() -> None:
+    events: list[object] = []
+
+    class _Window:
+        _session_active = False
+        _automation_active = False
+        _session_json_path = None
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(("session_start", enable_logging, record_initial_point))
+            self._session_active = True
+
+        def _disable_supply_output(self) -> None:
+            events.append("current_off")
+
+        def start_bench_stress_recovery(
+            self,
+            target_stress_mpa: float,
+            *,
+            reason: str,
+        ) -> bool:
+            events.append(("recovery", target_stress_mpa, reason))
+            self._automation_active = True
+            return True
+
+        def _bench_latest_stress_mpa(self) -> float:
+            return 20.2
+
+        def _wire_break_detected(self) -> bool:
+            return False
+
+        def _stop_session(self, *, reason: str, detail: str) -> None:
+            events.append(("session_stop", reason, detail))
+            self._session_active = False
+
+        def _session_stop_metadata(self) -> dict[str, str]:
+            return {"reason": "recovery_completed", "category": "normal"}
+
+    window = _Window()
+
+    class _App:
+        def processEvents(self) -> None:
+            if window._automation_active:
+                window._automation_active = False
+
+    result = bench_automation._execute_recovery_only_run(
+        bench_automation.MiniDmaBenchRun(
+            name="recover",
+            recipe_path=Path("recovery-context.recipe.json"),
+            recovery_only_target_stress_mpa=20.0,
+        ),
+        app=_App(),
+        window=window,
+        guardrails=bench_automation.MiniDmaBenchGuardrails(max_stress_mpa=330.0),
+        sleep_fn=lambda _seconds: None,
+        total_deadline_s=None,
+    )
+
+    assert result["status"] == "recovered"
+    assert result["final_stress_mpa"] == pytest.approx(20.2)
+    assert events.count("current_off") >= 3
+    assert ("recovery", 20.0, "armed recovery-only bench run") in events
+    assert any(
+        isinstance(event, tuple)
+        and event[:2] == ("session_stop", "recovery_completed")
+        for event in events
+    )
+
+
 def test_mini_dma_bench_plan_accepts_utf8_bom(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)

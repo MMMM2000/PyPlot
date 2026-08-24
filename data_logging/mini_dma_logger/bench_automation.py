@@ -35,6 +35,7 @@ class MiniDmaBenchRun:
     max_run_duration_s: float = DEFAULT_MAX_RUN_DURATION_S
     starting_length_mm: float | None = None
     preload_length_mm: float | None = None
+    recovery_only_target_stress_mpa: float | None = None
 
 
 @dataclass(frozen=True)
@@ -348,6 +349,17 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
             raise MiniDmaBenchAutomationError(f"TMA bench run #{index} length_setup must be an object.")
         starting_length_mm = _optional_float(run_lengths, "starting_length_mm")
         preload_length_mm = _optional_float(run_lengths, "preload_length_mm")
+        recovery_only_target_stress_mpa = _optional_float(
+            raw_run,
+            "recovery_only_target_stress_mpa",
+        )
+        if (
+            recovery_only_target_stress_mpa is not None
+            and recovery_only_target_stress_mpa <= 0.0
+        ):
+            raise MiniDmaBenchAutomationError(
+                f"TMA bench run #{index} recovery_only_target_stress_mpa must be positive."
+            )
         if starting_length_mm is None:
             starting_length_mm = default_starting_length_mm
         if preload_length_mm is None:
@@ -363,6 +375,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
                     max_run_duration_s=max_run_duration_s,
                     starting_length_mm=starting_length_mm,
                     preload_length_mm=preload_length_mm,
+                    recovery_only_target_stress_mpa=recovery_only_target_stress_mpa,
                 )
             )
     if execute and not allow_interactive_setup_prompts:
@@ -930,6 +943,136 @@ def _check_guardrails(
     }
 
 
+def _execute_recovery_only_run(
+    run: MiniDmaBenchRun,
+    *,
+    app: Any,
+    window: Any,
+    guardrails: MiniDmaBenchGuardrails,
+    sleep_fn: Callable[[float], None],
+    total_deadline_s: float | None,
+) -> dict[str, Any]:
+    """Run only the existing scale-driven stress recovery controller."""
+
+    target_stress_mpa = run.recovery_only_target_stress_mpa
+    assert target_stress_mpa is not None
+    start_s = time.monotonic()
+    deadline_s = start_s + run.max_run_duration_s
+    if total_deadline_s is not None:
+        deadline_s = min(deadline_s, total_deadline_s)
+
+    start_session = getattr(window, "_start_session", None)
+    if callable(start_session) and not bool(getattr(window, "_session_active", False)):
+        start_session(enable_logging=True, record_initial_point=False)
+    _call_window_method(window, "_disable_supply_output")
+    started = bool(
+        _call_window_method(
+            window,
+            "start_bench_stress_recovery",
+            target_stress_mpa,
+            reason="armed recovery-only bench run",
+        )
+    )
+    # Preflight may have connected the shared PSU after the first off request.
+    # Repeat the command after hardware acquisition so recovery is mechanically
+    # driven with specimen current unambiguously disabled.
+    _call_window_method(window, "_disable_supply_output")
+    app.processEvents()
+
+    status = "recovery_not_started"
+    guard_event: dict[str, Any] | None = None
+    while started and bool(getattr(window, "_automation_active", False)):
+        app.processEvents()
+        if guardrails.max_stress_mpa is not None:
+            stress_mpa = _latest_stress_mpa(window)
+            if stress_mpa is not None and stress_mpa > guardrails.max_stress_mpa:
+                guard_event = {
+                    "type": "high_stress",
+                    "stress_mpa": stress_mpa,
+                    "max_stress_mpa": guardrails.max_stress_mpa,
+                }
+                _call_window_method(window, "_disable_supply_output")
+                _call_window_method(
+                    window,
+                    "_stop_auto_ramp",
+                    log_completion=False,
+                    user_initiated=False,
+                    offer_recovery=False,
+                    stop_reason="recipe_control_stop",
+                    stop_detail=(
+                        "Recovery-only run exceeded the armed stress ceiling: "
+                        f"{stress_mpa:.3f} > {guardrails.max_stress_mpa:.3f} MPa."
+                    ),
+                )
+                status = "guard_tripped"
+                break
+        wire_break = getattr(window, "_wire_break_detected", None)
+        if callable(wire_break) and bool(wire_break()):
+            _call_window_method(window, "_disable_supply_output")
+            _call_window_method(
+                window,
+                "_stop_auto_ramp",
+                log_completion=False,
+                user_initiated=False,
+                offer_recovery=False,
+                stop_reason="wire_break_or_contact_loss",
+                stop_detail="Recovery-only run detected wire break or contact loss.",
+            )
+            status = "wire_break"
+            break
+        if time.monotonic() >= deadline_s:
+            _call_window_method(window, "_disable_supply_output")
+            _call_window_method(
+                window,
+                "_stop_auto_ramp",
+                log_completion=False,
+                user_initiated=False,
+                offer_recovery=False,
+                stop_reason="automation_timeout",
+                stop_detail="Recovery-only run exceeded its time limit.",
+            )
+            status = "timeout"
+            break
+        sleep_fn(0.05)
+
+    app.processEvents()
+    final_stress_mpa = _latest_stress_mpa(window)
+    if started and status == "recovery_not_started":
+        status = (
+            "recovered"
+            if final_stress_mpa is not None
+            and final_stress_mpa <= target_stress_mpa + 1.0
+            else "recovery_incomplete"
+        )
+    _call_window_method(window, "_disable_supply_output")
+    stop_session = getattr(window, "_stop_session", None)
+    if callable(stop_session) and bool(getattr(window, "_session_active", False)):
+        normal = status == "recovered"
+        stop_session(
+            reason="recovery_completed" if normal else "recipe_control_stop",
+            detail=(
+                f"Recovery-only run finished at {final_stress_mpa:.3f} MPa."
+                if final_stress_mpa is not None
+                else "Recovery-only run finished without valid stress readback."
+            ),
+        )
+    metadata_path = _metadata_path(window)
+    return {
+        "name": run.name,
+        "recipe_path": str(run.recipe_path),
+        "repeat_index": run.repeat_index,
+        "status": status,
+        "elapsed_s": max(0.0, time.monotonic() - start_s),
+        "metadata_path": metadata_path,
+        "recovery_only_target_stress_mpa": target_stress_mpa,
+        "final_stress_mpa": final_stress_mpa,
+        "guard_events": [] if guard_event is None else [guard_event],
+        "stop_metadata": _session_stop_metadata(window)
+        or _persisted_stop_metadata(metadata_path),
+        "startup_log_tail": _window_log_tail(window),
+    }
+
+
 def _execute_run(
     run: MiniDmaBenchRun,
     *,
@@ -947,6 +1090,17 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
+    if run.recovery_only_target_stress_mpa is not None:
+        _apply_sample_identity(window, sample_identity)
+        _prefer_next_output_run(window)
+        return _execute_recovery_only_run(
+            run,
+            app=app,
+            window=window,
+            guardrails=guardrails,
+            sleep_fn=sleep_fn,
+            total_deadline_s=total_deadline_s,
+        )
     needs_history_scan = _recipe_needs_tma_history_scan(window)
     if needs_history_scan:
         _wait_for_tma_history_scan(
@@ -1178,6 +1332,9 @@ def run_mini_dma_bench_plan(
                     "recipe_path": str(run.recipe_path),
                     "repeat_index": run.repeat_index,
                     "status": "validated",
+                    "recovery_only_target_stress_mpa": (
+                        run.recovery_only_target_stress_mpa
+                    ),
                     "guardrails": {
                         "max_stress_mpa": plan.guardrails.max_stress_mpa,
                         "recovery_stress_mpa": plan.guardrails.recovery_stress_mpa,
