@@ -19858,22 +19858,42 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return l0_mm
 
-    def _setup_unload_candidate_points(self) -> list[tuple[float, float]]:
+    def _setup_unload_candidate_points(
+        self,
+        *,
+        zero_raw_g: float | None = None,
+    ) -> list[tuple[float, float]]:
         start_index = max(0, int(self._setup_return_zero_start_point_index))
         return_points = self._length_setup_points[start_index:]
+        if zero_raw_g is None and self._run_zero_load_scale_g is not None:
+            zero_raw_g = float(self._run_zero_load_scale_g)
+        raw_load_sign = self._load_sign()
+        if zero_raw_g is not None and return_points:
+            first_raw_delta_g = float(return_points[0].raw_load_g) - float(zero_raw_g)
+            if raw_load_sign * first_raw_delta_g < 0.0:
+                raw_load_sign = -raw_load_sign
         candidates: list[tuple[float, float]] = []
         for point in return_points:
-            stress_mpa = point.stress_mpa
-            if stress_mpa is None:
-                stress_mpa = stress_mpa_from_load_g(point.load_g, float(self.spin_diameter.value()))
+            if zero_raw_g is None:
+                load_g = float(point.load_g)
+            else:
+                load_g = max(
+                    0.0,
+                    raw_load_sign * (float(point.raw_load_g) - float(zero_raw_g)),
+                )
+            stress_mpa = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
             if stress_mpa is None or not math.isfinite(float(stress_mpa)):
                 continue
             stress_value = abs(float(stress_mpa))
             candidates.append((float(point.raw_position_mm), stress_value))
         return candidates
 
-    def _setup_unload_baseline_fit(self) -> SetupUnloadBaselineFit | None:
-        candidates = self._setup_unload_candidate_points()
+    def _setup_unload_baseline_fit(
+        self,
+        *,
+        zero_raw_g: float | None = None,
+    ) -> SetupUnloadBaselineFit | None:
+        candidates = self._setup_unload_candidate_points(zero_raw_g=zero_raw_g)
         if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
             return None
         max_stress = max(stress for _position, stress in candidates)
@@ -19965,10 +19985,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if self._setup_zero_position_mm is not None:
             return False
-        fit = self._setup_unload_baseline_fit()
+        return_points = self._length_setup_points[self._setup_return_zero_start_point_index :]
+        if len(return_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS + SETUP_UNLOAD_SLACK_RECENT_POINTS:
+            return False
+        recent_raw_values = [
+            float(point.raw_load_g)
+            for point in return_points[-SETUP_UNLOAD_SLACK_RECENT_POINTS:]
+        ]
+        provisional_zero_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
+        fit = self._setup_unload_baseline_fit(zero_raw_g=provisional_zero_raw_g)
         if fit is None or fit.r_squared < 0.90:
             return False
-        candidates = self._setup_unload_candidate_points()
+        candidates = self._setup_unload_candidate_points(zero_raw_g=provisional_zero_raw_g)
         if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS + SETUP_UNLOAD_SLACK_RECENT_POINTS:
             return False
         recent = candidates[-SETUP_UNLOAD_SLACK_RECENT_POINTS:]
@@ -20001,7 +20029,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"to {abs(recent_slope):.4g} MPa/mm from the linear-fit "
             f"{abs(fit.slope_mpa_per_mm):.4g} MPa/mm stiffness; using "
             f"{_format_compact_unit(zero_position_mm, 'mm')} as the zero-stress l0 position "
-            "and returning there instead of driving farther into slack."
+            "and returning there instead of driving farther into slack. The fit is referenced "
+            f"to the observed raw slack plateau ({provisional_zero_raw_g:.5f} g), not the stored tare."
         )
         if not self._move_to_position_mm(
             zero_position_mm,
@@ -23926,7 +23955,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         plateau_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
         residual_load_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
-        if residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
+        baseline_is_slope_identified = self._setup_zero_fallback_reason == "linear_unload_slack"
+        if not baseline_is_slope_identified and residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
             return False
         zero_position_mm = float(self._current_position_mm)
         self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="setup linear-unload near-zero plateau")
@@ -23935,9 +23965,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._log(
             "Accepted stable near-zero load plateau during setup return: "
-            f"{_format_compact_unit(abs(residual_load_g), 'g')} residual over "
+            f"raw span {_format_compact_unit(raw_span_g, 'g')} over "
             f"{_format_duration(max(elapsed_values) - min(elapsed_values))}; "
-            f"using current position {_format_compact_unit(zero_position_mm, 'mm')} for l0."
+            f"using {_format_compact_unit(plateau_raw_g, 'g')} as this run's zero-load reading "
+            f"and current position {_format_compact_unit(zero_position_mm, 'mm')} for l0."
         )
         return True
 

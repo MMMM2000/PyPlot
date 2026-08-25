@@ -5557,9 +5557,9 @@ def test_setup_return_zero_stops_at_linear_unload_slack_onset(tmp_path: Path, qt
 
         assert window._maybe_start_setup_unload_baseline_fallback() is True
 
-        assert targets == [pytest.approx(7.078, abs=0.01)]
-        assert window._setup_zero_position_mm == pytest.approx(7.078, abs=0.01)
-        assert window._setup_zero_fallback_return_position_mm == pytest.approx(7.078, abs=0.01)
+        assert targets == [pytest.approx(7.066, abs=0.01)]
+        assert window._setup_zero_position_mm == pytest.approx(7.066, abs=0.01)
+        assert window._setup_zero_fallback_return_position_mm == pytest.approx(7.066, abs=0.01)
         assert window._setup_zero_fallback_reason == "linear_unload_slack"
         assert "slack onset" in window.log_output.toPlainText()
 
@@ -5568,6 +5568,72 @@ def test_setup_return_zero_stops_at_linear_unload_slack_onset(tmp_path: Path, qt
             mini_dma_mod.HSW_BASIS_LOAD_G,
             target_value=0.0,
         ) is False
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_unload_slack_fit_uses_observed_plateau_despite_large_tare_drift(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: targets.append(target_mm) or True
+    )
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_return_zero_start_point_index = 0
+    window._current_position_mm = 7.18
+    window._effective_position_mm = 7.18
+    actual_zero_raw_g = 21.7
+
+    try:
+        unload_points = [
+            (7.000, 20.0),
+            (7.012, 17.0),
+            (7.024, 14.0),
+            (7.036, 11.0),
+            (7.048, 8.0),
+            (7.060, 5.0),
+            (7.072, 2.0),
+            (7.090, 0.0),
+            (7.115, 0.0),
+            (7.140, 0.0),
+            (7.160, 0.0),
+            (7.180, 0.0),
+        ]
+        for index, (raw_position_mm, stress_mpa) in enumerate(unload_points):
+            tensile_load_g = mini_dma_mod.load_g_from_stress_mpa(
+                stress_mpa,
+                window.spin_diameter.value(),
+            )
+            assert tensile_load_g is not None
+            raw_load_g = actual_zero_raw_g - tensile_load_g
+            point = window._capture_measurement_point(
+                elapsed_s=index * 0.25,
+                position_mm=raw_position_mm,
+                effective_position_mm=raw_position_mm,
+                raw_load_g=raw_load_g,
+                load_g=window._effective_load_from_raw_g(raw_load_g),
+            )
+            window._length_setup_points.append(point)
+
+        assert window._maybe_start_setup_unload_baseline_fallback() is True
+
+        assert targets == [pytest.approx(7.08, abs=0.01)]
+        assert window._setup_zero_position_mm == pytest.approx(7.08, abs=0.01)
+        assert "observed raw slack plateau (21.70000 g)" in window.log_output.toPlainText()
+
+        window._set_run_zero_load_scale_reference(actual_zero_raw_g, reason="test")
+        committed_fit = window._setup_unload_baseline_fit()
+        assert committed_fit is not None
+        assert committed_fit.zero_position_mm == pytest.approx(7.08, abs=0.01)
     finally:
         _close_test_window(window)
 
@@ -6228,6 +6294,47 @@ def test_pending_linear_unload_fallback_accepts_stable_near_zero_plateau(
         assert window._setup_zero_position_mm == pytest.approx(-1.94875)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.1301, abs=0.001)
         assert "stable near-zero load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_pending_linear_unload_fallback_accepts_stable_plateau_after_large_tare_drift(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._active_control_config = window._freeze_control_config()
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_return_zero_start_point_index = 0
+    window._setup_zero_position_mm = -1.925
+    window._setup_zero_fallback_return_position_mm = -1.925
+    window._setup_zero_fallback_reason = "linear_unload_slack"
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._move_to_position_mm = pytest.fail  # type: ignore[method-assign]
+
+    for index, raw_load_g in enumerate([21.7000, 21.7005, 21.6998, 21.7002, 21.7001]):
+        window._latest_scale_value_g = raw_load_g
+        window._current_position_mm = -1.925
+        window._effective_position_mm = -1.925
+        window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.4
+
+    try:
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.005,
+        ) is True
+
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.7001, abs=0.001)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert "raw span" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
