@@ -3715,6 +3715,40 @@ def test_measurement_history_dialog_uses_scroll_area_instead_of_tabs(qtbot) -> N
     assert len(dialog.findChildren(logger_mod.QtWidgets.QFrame)) >= 5
 
 
+def test_isolated_run_completion_adds_authoritative_run_folder_to_history(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._measurement_history = []
+    window._samples_current = []
+    window._samples_resistance = []
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 annealing_run03"
+    run_dir.mkdir()
+    (run_dir / "measurement.csv").write_text(
+        "elapsed_s,timestamp_utc,phase,cycle_index,direction,set_current_mA,"
+        "measured_current_mA,voltage_V,resistance_ohm,power_mW,energy_J,"
+        "current_density_A_mm2,readback_age_s\n"
+        "0.1,2026-08-25T12:00:00Z,ramp,1,heating,1,1,0.05,50,0.05,0,,,\n"
+        "0.2,2026-08-25T12:00:00Z,ramp,1,heating,2,2,0.10,50,0.20,0,,,\n"
+        "0.3,2026-08-25T12:00:00Z,ramp,1,heating,3,3,0.15,50,0.45,0,,,\n",
+        encoding="utf-8",
+    )
+    window._annealing_control_run_dir = run_dir
+
+    window._finish_isolated_annealing_ui("completed", "Run complete.")
+
+    assert window._annealing_control_run_dir is None
+    assert len(window._measurement_history) == 1
+    entry = window._measurement_history[0]
+    assert entry["currents"] == [1.0, 2.0, 3.0]
+    assert entry["resistances"] == [50.0, 50.0, 50.0]
+    assert entry["source"] == str(run_dir / "measurement.csv")
+    assert "annealing" in entry["title"].lower()
+    assert window.ui.pushButton_show_history.isEnabled() is True
+
+
 def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

@@ -13,6 +13,7 @@ import time
 import math
 import re
 import json
+import csv
 import logging
 import shutil
 import ctypes
@@ -2595,7 +2596,53 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._segment_lines_ax2.append(item2)
         self._refresh_pyqtgraph_ranges()
 
+    def _measurement_history_entry_from_run_folder(
+        self,
+        run_dir: Path,
+    ) -> Dict[str, Any] | None:
+        measurement_path = Path(run_dir) / "measurement.csv"
+        try:
+            with measurement_path.open("r", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, csv.Error):
+            return None
+        currents: list[float] = []
+        resistances: list[float] = []
+        for row in rows:
+            try:
+                current_mA = float(row.get("measured_current_mA", ""))
+                resistance_ohm = float(row.get("resistance_ohm", ""))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(current_mA) or not math.isfinite(resistance_ohm):
+                continue
+            if current_mA <= 0.0 or resistance_ohm <= 0.0:
+                continue
+            currents.append(current_mA)
+            resistances.append(resistance_ohm)
+        if len(currents) < 2:
+            return None
+        try:
+            title = format_annealing_title(Path(run_dir).name)
+        except Exception:
+            title = Path(run_dir).name
+        return {
+            "currents": currents,
+            "resistances": resistances,
+            "title": title or "Current annealing",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(measurement_path),
+        }
+
     def _finalize_measurement_history(self) -> None:
+        run_dir = self._annealing_control_run_dir
+        if run_dir is not None:
+            run_entry = self._measurement_history_entry_from_run_folder(run_dir)
+            if run_entry is not None:
+                self._measurement_history.insert(0, run_entry)
+                self._measurement_history = self._measurement_history[:MEASUREMENT_HISTORY_LIMIT]
+                self._save_measurement_history()
+                return
         if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
             return
         title_source = self.f_name or ""
@@ -5524,6 +5571,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.process_running = False
         if process is not None:
             process.close(timeout_s=2.0, force=False)
+        self._finalize_measurement_history()
+        self._annealing_control_run_dir = None
         self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
         self._update_hmp_cadence_label()
         self._display_ui_value("label_set_current", "0")
