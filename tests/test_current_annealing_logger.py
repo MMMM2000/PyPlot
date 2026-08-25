@@ -3749,6 +3749,41 @@ def test_isolated_run_completion_adds_authoritative_run_folder_to_history(
     assert window.ui.pushButton_show_history.isEnabled() is True
 
 
+def test_measurement_history_backfills_existing_matching_run_folders(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._measurement_history = []
+    base_output = tmp_path / "Ni50Fe27Ga23 12_2 annealing.txt"
+    monkeypatch.setattr(window, "build_log_path", lambda: str(base_output))
+    header = (
+        "elapsed_s,timestamp_utc,phase,cycle_index,direction,set_current_mA,"
+        "measured_current_mA,voltage_V,resistance_ohm,power_mW,energy_J,"
+        "current_density_A_mm2,readback_age_s\n"
+    )
+    rows = (
+        "0.1,2026-08-25T12:00:00Z,ramp,1,heating,1,1,0.05,50,0.05,0,,,\n"
+        "0.2,2026-08-25T12:00:00Z,ramp,1,heating,2,2,0.10,50,0.20,0,,,\n"
+    )
+    for suffix in ("run01", "run02"):
+        run_dir = tmp_path / f"{base_output.stem}_{suffix}"
+        run_dir.mkdir()
+        (run_dir / "measurement.csv").write_text(header + rows, encoding="utf-8")
+    unrelated = tmp_path / "different_sample_run01"
+    unrelated.mkdir()
+    (unrelated / "measurement.csv").write_text(header + rows, encoding="utf-8")
+
+    window._refresh_measurement_history_from_run_folders()
+    window._refresh_measurement_history_from_run_folders()
+
+    assert len(window._measurement_history) == 2
+    assert all(base_output.stem in entry["source"] for entry in window._measurement_history)
+    assert len({entry["source"] for entry in window._measurement_history}) == 2
+
+
 def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

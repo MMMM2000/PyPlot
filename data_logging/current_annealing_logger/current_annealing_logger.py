@@ -2661,6 +2661,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self._measurement_history = self._measurement_history[:MEASUREMENT_HISTORY_LIMIT]
         self._save_measurement_history()
 
+    def _refresh_measurement_history_from_run_folders(self) -> None:
+        try:
+            base_output = Path(self.build_log_path())
+            candidates = list(base_output.parent.glob(f"{base_output.stem}_run*/measurement.csv"))
+            candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            return
+        known_sources = {
+            os.path.normcase(os.path.abspath(str(entry.get("source", ""))))
+            for entry in self._measurement_history
+            if str(entry.get("source", "")).strip()
+        }
+        discovered: list[Dict[str, Any]] = []
+        for measurement_path in candidates:
+            source_key = os.path.normcase(os.path.abspath(str(measurement_path)))
+            if source_key in known_sources:
+                continue
+            entry = self._measurement_history_entry_from_run_folder(measurement_path.parent)
+            if entry is None:
+                continue
+            discovered.append(entry)
+            known_sources.add(source_key)
+            if len(discovered) >= MEASUREMENT_HISTORY_LIMIT:
+                break
+        if not discovered:
+            return
+        self._measurement_history = (
+            discovered + self._measurement_history
+        )[:MEASUREMENT_HISTORY_LIMIT]
+        self._save_measurement_history()
+
     def _reset_loop_tracking(self) -> None:
         self._loop_sample_history = []
         self._current_loop_samples = 0
@@ -5348,6 +5379,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_planned_time_label()
         
     def handle_show_history_clicked(self) -> None:
+        self._refresh_measurement_history_from_run_folders()
         dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
         dialog.exec()
 
