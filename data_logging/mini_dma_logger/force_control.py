@@ -93,6 +93,159 @@ class GainEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class RobustLinearGainEstimate:
+    load_per_mm_g: float | None
+    uncertainty_g_per_mm: float | None
+    confidence: float
+    point_count: int
+    position_span_mm: float
+    r_squared: float | None
+    trusted: bool
+
+
+class RobustLinearGainEstimator:
+    """Estimate local load stiffness from several independent position samples.
+
+    The median pairwise slope is deliberately used instead of a single
+    move/response quotient. Repeated readings at one motor position do not earn
+    confidence, and one delayed or spurious scale value cannot replace the
+    trusted stiffness by itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        minimum_points: int = 5,
+        maximum_points: int = 15,
+        minimum_r_squared: float = 0.90,
+        maximum_relative_uncertainty: float = 0.50,
+    ) -> None:
+        if minimum_points < 3:
+            raise ValueError("minimum_points must be at least 3")
+        if maximum_points < minimum_points:
+            raise ValueError("maximum_points must be at least minimum_points")
+        self.minimum_points = int(minimum_points)
+        self.maximum_points = int(maximum_points)
+        self.minimum_r_squared = float(minimum_r_squared)
+        self.maximum_relative_uncertainty = float(maximum_relative_uncertainty)
+        self._points: list[tuple[float, float]] = []
+        self._motor_resolution_mm = 0.0
+        self._observation_floor_g = 0.0
+
+    def reset(self) -> None:
+        self._points.clear()
+        self._motor_resolution_mm = 0.0
+        self._observation_floor_g = 0.0
+
+    def observe(
+        self,
+        *,
+        position_mm: float,
+        load_g: float,
+        motor_resolution_mm: float,
+        observation_floor_g: float,
+    ) -> RobustLinearGainEstimate:
+        values = (
+            float(position_mm),
+            float(load_g),
+            float(motor_resolution_mm),
+            float(observation_floor_g),
+        )
+        if not _finite(values) or motor_resolution_mm <= 0.0 or observation_floor_g < 0.0:
+            raise ValueError("invalid robust gain observation")
+        self._motor_resolution_mm = max(self._motor_resolution_mm, abs(float(motor_resolution_mm)))
+        self._observation_floor_g = max(self._observation_floor_g, abs(float(observation_floor_g)))
+        independent_floor = self._motor_resolution_mm * 0.5
+        if not self._points or abs(float(position_mm) - self._points[-1][0]) >= independent_floor:
+            self._points.append((float(position_mm), float(load_g)))
+            self._points = self._points[-self.maximum_points :]
+        return self.estimate
+
+    @property
+    def estimate(self) -> RobustLinearGainEstimate:
+        points = self._points
+        point_count = len(points)
+        if point_count < 2:
+            return RobustLinearGainEstimate(None, None, 0.0, point_count, 0.0, None, False)
+        positions = [point[0] for point in points]
+        loads = [point[1] for point in points]
+        position_span = max(positions) - min(positions)
+        pairwise_slopes = [
+            (loads[right] - loads[left]) / (positions[right] - positions[left])
+            for left in range(point_count - 1)
+            for right in range(left + 1, point_count)
+            if abs(positions[right] - positions[left]) >= self._motor_resolution_mm
+            and (loads[right] - loads[left]) * (positions[right] - positions[left]) > 0.0
+        ]
+        if not pairwise_slopes:
+            return RobustLinearGainEstimate(None, None, 0.0, point_count, position_span, None, False)
+        slope = statistics.median(pairwise_slopes)
+        slope_mad = _median_absolute_deviation(pairwise_slopes, slope)
+        uncertainty = 1.4826 * slope_mad
+        intercept = statistics.median(
+            load - slope * position for position, load in points
+        )
+        residuals = [
+            load - (slope * position + intercept)
+            for position, load in points
+        ]
+        residual_center = statistics.median(residuals)
+        residual_mad = _median_absolute_deviation(residuals, residual_center)
+        if residual_mad <= 1e-18:
+            inlier_points = [
+                point
+                for point, residual in zip(points, residuals, strict=True)
+                if abs(residual - residual_center) <= max(self._observation_floor_g, 1e-12)
+            ]
+        else:
+            residual_limit = max(
+                self._observation_floor_g,
+                4.5 * 1.4826 * residual_mad,
+            )
+            inlier_points = [
+                point
+                for point, residual in zip(points, residuals, strict=True)
+                if abs(residual - residual_center) <= residual_limit
+            ]
+        if len(inlier_points) < 2:
+            inlier_points = points
+        residual_sum = sum(
+            (load - (slope * position + intercept)) ** 2
+            for position, load in inlier_points
+        )
+        inlier_loads = [load for _position, load in inlier_points]
+        mean_load = statistics.mean(inlier_loads)
+        total_sum = sum((load - mean_load) ** 2 for load in inlier_loads)
+        r_squared = 1.0 if total_sum <= 1e-18 else 1.0 - residual_sum / total_sum
+        relative_uncertainty = uncertainty / slope if slope > 0.0 else math.inf
+        minimum_span = max(
+            self._motor_resolution_mm * max(3, self.minimum_points - 1),
+            self._observation_floor_g / max(slope, 1e-12) * 2.0,
+        )
+        point_confidence = min(1.0, point_count / float(self.minimum_points + 2))
+        span_confidence = min(1.0, position_span / max(minimum_span, 1e-12))
+        precision_confidence = max(0.0, 1.0 - relative_uncertainty)
+        fit_confidence = max(0.0, min(1.0, r_squared))
+        confidence = point_confidence * span_confidence * precision_confidence * fit_confidence
+        trusted = (
+            point_count >= self.minimum_points
+            and position_span >= minimum_span
+            and slope > 0.0
+            and r_squared >= self.minimum_r_squared
+            and relative_uncertainty <= self.maximum_relative_uncertainty
+        )
+        return RobustLinearGainEstimate(
+            load_per_mm_g=float(slope),
+            uncertainty_g_per_mm=float(uncertainty),
+            confidence=float(confidence),
+            point_count=point_count,
+            position_span_mm=float(position_span),
+            r_squared=float(r_squared),
+            trusted=trusted,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ForceControlDecision:
     intent: ForceControlIntent
     state: ForceControlState

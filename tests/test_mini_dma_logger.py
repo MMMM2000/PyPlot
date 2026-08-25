@@ -5168,6 +5168,105 @@ def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
         _close_test_window(window)
 
 
+def test_isolated_normal_finish_schedules_passive_monitor_reconnect(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    scheduled: list[bool] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._schedule_post_recipe_monitor_reconnect = (  # type: ignore[method-assign]
+        lambda: scheduled.append(True)
+    )
+
+    try:
+        window._finish_isolated_recipe(state=mini_dma_mod.ControlState.STOPPED)
+
+        assert process.closed is True
+        assert scheduled == [True]
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_post_recipe_monitor_reconnect_is_passive_and_clears_terminal_snapshot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[str] = []
+    window._isolated_terminal_readback = {"load_g": 21.195, "stress_mpa": 725.4}
+    window._isolated_terminal_state = mini_dma_mod.ControlState.STOPPED
+    window._isolated_terminal_task = "Recipe completed; hardware released"
+    window._ensure_scale_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: calls.append("scale") or True
+    )
+    window._ensure_supply_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: calls.append("supply") or True
+    )
+    window._ensure_tic_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: calls.append("tic") or True
+    )
+    window._manual_auto_connect_should_connect_ir = lambda: False  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = (  # type: ignore[method-assign]
+        lambda: pytest.fail("passive reconnect must not prepare or change a PSU channel")
+    )
+    window._enable_motor_supply_output = (  # type: ignore[method-assign]
+        lambda: pytest.fail("passive reconnect must not enable motor power")
+    )
+
+    try:
+        window._resume_post_recipe_live_monitoring()
+
+        assert calls == ["scale", "supply", "tic"]
+        assert window._isolated_terminal_readback is None
+        assert window._isolated_terminal_state is None
+        assert window._isolated_terminal_task == ""
+        assert window._ui_refresh_timer.isActive() is True
+        assert window._dashboard_value_labels["task"].text() == "Manual mode"
+        assert "PSU outputs and motor position were left unchanged" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_post_recipe_monitor_reconnect_continues_after_one_device_fails(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[str] = []
+    window._ensure_scale_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: (_ for _ in ()).throw(RuntimeError("synthetic scale failure"))
+    )
+    window._ensure_supply_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: calls.append("supply") or True
+    )
+    window._ensure_tic_ready_for_recipe = (  # type: ignore[method-assign]
+        lambda: calls.append("tic") or True
+    )
+    window._manual_auto_connect_should_connect_ir = lambda: False  # type: ignore[method-assign]
+
+    try:
+        window._resume_post_recipe_live_monitoring()
+
+        assert calls == ["supply", "tic"]
+        log_text = window.log_output.toPlainText()
+        assert "synthetic scale failure" in log_text
+        assert "Live monitoring reconnect needs attention: scale" in log_text
+    finally:
+        _close_test_window(window)
+
+
 def test_iso_stress_recipe_blocks_when_first_target_exceeds_planning_limit(
     tmp_path: Path,
     qtbot,
@@ -5335,10 +5434,12 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         return_zero_index = next(
             index
             for index, step in enumerate(steps)
-            if step.action == "seek_target" and step.note == "setup_return_zero"
+            if step.action == "ramp_target" and step.note == "setup_return_zero"
         )
         assert preload_settle.duration_s == pytest.approx(2.0)
         assert not any(step.action == "settle" and step.note == "setup_return_zero" for step in steps)
+        assert steps[return_zero_index].target_end_value == pytest.approx(0.0)
+        assert steps[return_zero_index].target_ramp_rate_value_s is not None
         assert steps[return_zero_index - 1].action == "mark_setup_return_zero"
         assert steps[return_zero_index + 1].action == "apply_length_setup"
     finally:
@@ -5407,6 +5508,8 @@ def test_length_setup_uses_linear_unload_intercept_for_l0(tmp_path: Path, qtbot)
         assert window.spin_initial_length.value() == pytest.approx(30.1)
         assert window._active_control_config is not None
         assert window._active_control_config.initial_length_mm == pytest.approx(30.1)
+        assert window._seek_live_stiffness_g_per_mm is not None
+        assert window._seek_live_stiffness_g_per_mm > 0.0
         assert "linear unload fit" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -6442,6 +6545,33 @@ def test_dashboard_resistance_label_uses_si_symbol_and_full_title(tmp_path: Path
             )
             == "Current + Resistance vs Time"
         )
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_inserts_one_bounded_identification_retry_when_fit_is_untrusted(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_setup_preload_stress_mpa.setValue(20.0)
+    window.spin_setup_preload_duration_s.setValue(10.0)
+    window._automation_steps = [mini_dma_mod.AutomationStep("start_session")]
+    window._automation_index = 0
+
+    try:
+        assert window._schedule_setup_identification_retry() is True
+        inserted = window._automation_steps[:4]
+        assert [step.action for step in inserted] == [
+            "ramp_target",
+            "mark_setup_return_zero",
+            "ramp_target",
+            "apply_length_setup",
+        ]
+        assert inserted[0].target_end_value == pytest.approx(20.0)
+        assert inserted[0].target_ramp_rate_value_s == pytest.approx(2.0)
+        assert inserted[2].target_value == pytest.approx(0.0)
+        assert window._schedule_setup_identification_retry() is False
     finally:
         _close_test_window(window)
 
@@ -15841,6 +15971,7 @@ def test_setup_return_zero_keeps_initial_time_based_unload_speed(tmp_path: Path,
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_setup_preload_duration_s.setValue(5.0)
     window.spin_setup_return_duration_s.setValue(5.0)
     window.spin_motion_speed_mm_s.setValue(1.0)
     window._calibrated_stiffness_g_per_mm = 22.7
@@ -17475,7 +17606,7 @@ def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot
                 break
 
         assert len(targets) == 1, window.log_output.toPlainText()
-        assert targets[0] == (pytest.approx(-0.075), False)
+        assert targets[0] == (pytest.approx(-0.06), False)
         assert window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
             target_value=10.0,
@@ -19026,7 +19157,12 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
 
         current_steps = [step for step in steps if step.action == "set_current"]
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
-        target_ramps = [step for step in steps if step.action == "ramp_target" and step.note != "setup_preload"]
+        target_ramps = [
+            step
+            for step in steps
+            if step.action == "ramp_target"
+            and step.note not in {"setup_preload", "setup_return_zero"}
+        ]
         setup_ramps = [step for step in steps if step.action == "ramp_target" and step.note == "setup_preload"]
 
         assert interval_ms == 250
@@ -19078,7 +19214,8 @@ def test_current_sweep_first_overheating_uses_independent_preheat_target(tmp_pat
         ramp_steps = [
             step
             for step in steps
-            if step.action == "ramp_target" and step.note != "setup_preload"
+                if step.action == "ramp_target"
+                and step.note not in {"setup_preload", "setup_return_zero"}
         ]
 
         assert [(step.basis, step.target_end_value) for step in ramp_steps[:3]] == [
@@ -19220,7 +19357,8 @@ def test_current_sweep_can_skip_final_target_return(tmp_path: Path, qtbot) -> No
         target_ramps = [
             step
             for step in steps
-            if step.action == "ramp_target" and step.note != "setup_preload"
+                if step.action == "ramp_target"
+                and step.note not in {"setup_preload", "setup_return_zero"}
         ]
         set_current_steps = [step for step in steps if step.action == "set_current"]
 
@@ -28595,6 +28733,7 @@ def test_setup_return_zero_uses_return_time_speed(tmp_path: Path, qtbot) -> None
     window.spin_zero_load_scale_g.setValue(21.17)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_diameter.setValue(0.0137)
+    window.spin_setup_preload_duration_s.setValue(5.0)
     window.spin_setup_return_duration_s.setValue(5.0)
     window.spin_motion_speed_mm_s.setValue(1.0)
     window._calibrated_stiffness_g_per_mm = 22.7
@@ -28626,6 +28765,7 @@ def test_setup_return_zero_uses_return_time_speed(tmp_path: Path, qtbot) -> None
 def test_setup_return_zero_uses_strain_floor_for_tiny_residual_load(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_initial_length.setValue(80.0)
+    window.spin_setup_preload_duration_s.setValue(5.0)
     window.spin_setup_return_duration_s.setValue(5.0)
     window.spin_motion_speed_mm_s.setValue(1.0)
     window._calibrated_stiffness_g_per_mm = 100.0
@@ -33275,19 +33415,17 @@ def test_current_sweep_target_ramp_updates_live_stiffness_before_heating(
         plateau_index=1,
     )
     seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
-    window._seek_last_stiffness_value_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 40.0
-    window._seek_last_stiffness_position_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 0.0
-    window._seek_last_value_by_key[seek_key] = 40.0
-    window._seek_last_effective_position_by_key[seek_key] = 0.0
-    window._current_position_mm = 0.02
-    window._effective_position_mm = 0.02
-
     try:
-        window._update_live_seek_stiffness(
-            seek_key,
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            90.0,
-        )
+        for index in range(5):
+            window._current_position_mm = index * 0.01
+            window._effective_position_mm = index * 0.01
+            window._update_live_seek_stiffness(
+                seek_key,
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                40.0 + index * 10.0,
+            )
+            if index == 0:
+                assert seek_key not in window._seek_live_stiffness_by_key
 
         assert seek_key in window._seek_live_stiffness_by_key
         assert window._seek_live_stiffness_g_per_mm is not None
@@ -33401,7 +33539,7 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == -1250
+        assert controller.target_steps == 1000
         assert controller.max_speed == 450_000_000
     finally:
         _close_test_window(window)
@@ -33634,7 +33772,7 @@ def test_current_sweep_current_phase_large_error_uses_fast_recovery_cap(
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
+def test_iso_current_stress_ramp_large_lag_still_uses_rate_sized_step(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33649,6 +33787,7 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
     window._calibrated_stiffness_length_mm = 50.0
     window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP
     window._active_target_ramp_start_value = 0.0
+    window._active_target_ramp_end_value = 400.0
     window._active_target_ramp_rate_value_s = 5.0
     window._set_automation_context(
         phase="target_ramp",
@@ -33660,20 +33799,26 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
 
     try:
         seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 270.0)
-        correction_mm = window._predictive_seek_step_mm(
+        large_lag_step = window._predictive_seek_step_mm(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
             error_value=95.0,
             tolerance=0.1,
             seek_key=seek_key,
         )
+        small_lag_step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=5.0,
+            tolerance=0.1,
+            seek_key=seek_key,
+        )
 
-        assert correction_mm > window.spin_current_sweep_nudge_mm.value()
-        assert correction_mm == pytest.approx(50.0 * 0.0012)
+        assert large_lag_step == pytest.approx(small_lag_step)
+        assert large_lag_step == pytest.approx(1.0 / 142.0)
     finally:
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_lagging_target_adds_feedforward(
+def test_iso_current_stress_ramp_step_does_not_grow_with_phase_error(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33687,6 +33832,7 @@ def test_iso_current_stress_ramp_lagging_target_adds_feedforward(
     window._calibrated_stiffness_length_mm = 50.0
     window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP
     window._active_target_ramp_start_value = 0.0
+    window._active_target_ramp_end_value = 400.0
     window._active_target_ramp_rate_value_s = 5.0
     window._set_automation_context(
         phase="target_ramp",
@@ -33704,35 +33850,19 @@ def test_iso_current_stress_ramp_lagging_target_adds_feedforward(
             tolerance=0.1,
             seek_key=seek_key,
         )
-        ahead_step = window._predictive_seek_step_mm(
+        larger_lag_step = window._predictive_seek_step_mm(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            error_value=-2.0,
+            error_value=20.0,
             tolerance=0.1,
             seek_key=seek_key,
         )
-        lagging_speed = window._seek_speed_mm_s(
-            2.0,
-            0.1,
-            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            seek_key=seek_key,
-            current_value=198.0,
-        )
-        ahead_speed = window._seek_speed_mm_s(
-            -2.0,
-            0.1,
-            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            seek_key=seek_key,
-            current_value=202.0,
-        )
 
-        assert lagging_step > ahead_step
-        assert lagging_step - ahead_step == pytest.approx(1.5 / 142.0)
-        assert lagging_speed > ahead_speed
+        assert lagging_step == pytest.approx(larger_lag_step)
     finally:
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_tapers_correction_near_endpoint(
+def test_iso_current_stress_ramp_keeps_rate_step_near_scheduled_endpoint(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33765,12 +33895,12 @@ def test_iso_current_stress_ramp_tapers_correction_near_endpoint(
             seek_key=seek_key,
         )
 
-        assert correction_mm == pytest.approx(3.0 / 142.0)
+        assert correction_mm == pytest.approx(1.0 / 142.0)
     finally:
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_keeps_moving_when_ahead_of_mid_ramp_target(
+def test_iso_current_stress_ramp_waits_when_ahead_then_resumes_when_lagging(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33813,8 +33943,7 @@ def test_iso_current_stress_ramp_keeps_moving_when_ahead_of_mid_ramp_target(
         )
 
         assert reached is False
-        assert len(moves) == 1
-        assert moves[-1] < 10.0
+        assert moves == []
 
         window._current_distribution_value = lambda *_args, **_kwargs: 198.0  # type: ignore[method-assign]
         window._latest_scale_timestamp = time.time() + 1.0
@@ -33825,7 +33954,7 @@ def test_iso_current_stress_ramp_keeps_moving_when_ahead_of_mid_ramp_target(
         )
 
         assert reached is False
-        assert len(moves) == 2
+        assert len(moves) == 1
         assert moves[-1] < 10.0
     finally:
         _close_test_window(window)
@@ -33878,7 +34007,7 @@ def test_iso_current_stress_ramp_accepts_ahead_at_endpoint(
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_inside_mid_ramp_tolerance_still_moves(
+def test_iso_current_stress_ramp_ahead_of_mid_ramp_target_waits(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33919,13 +34048,12 @@ def test_iso_current_stress_ramp_inside_mid_ramp_tolerance_still_moves(
         )
 
         assert reached is False
-        assert len(moves) == 1
-        assert moves[-1] < 10.0
+        assert moves == []
     finally:
         _close_test_window(window)
 
 
-def test_iso_current_stress_ramp_rate_error_adjusts_continuous_step(
+def test_iso_current_stress_ramp_does_not_catch_up_after_rate_error(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -33950,6 +34078,16 @@ def test_iso_current_stress_ramp_rate_error_adjusts_continuous_step(
     )
 
     try:
+        assert window._iso_current_stress_ramp_rate_error_value_s(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            100.0,
+            10.0,
+        ) is None
+        window._iso_current_stress_ramp_rate_error_value_s(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            101.0,
+            10.202,
+        )
         base_step = window._iso_current_stress_ramp_continuous_step_mm(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
             142.0,
@@ -33972,8 +34110,10 @@ def test_iso_current_stress_ramp_rate_error_adjusts_continuous_step(
         assert base_step is not None
         assert slow_step is not None
         assert fast_step is not None
-        assert slow_step > base_step > fast_step
-        assert fast_step >= window._motor_step_mm()
+        assert slow_step == pytest.approx(base_step)
+        assert fast_step == pytest.approx(base_step)
+        assert base_step == pytest.approx((5.0 * 0.202) / 142.0)
+        assert base_step >= window._motor_step_mm()
     finally:
         _close_test_window(window)
 
@@ -34947,6 +35087,46 @@ def test_legacy_elastocaloric_timing_loads_without_losing_wait_time(tmp_path: Pa
         _close_test_window(window)
 
 
+@pytest.mark.parametrize(
+    ("mode", "note"),
+    [
+        (mini_dma_mod.CURRENT_SWEEP_STRESS, "first_overheating"),
+        (mini_dma_mod.CURRENT_SWEEP_STRESS, "1"),
+        (mini_dma_mod.CURRENT_SWEEP_STRESS, "2"),
+        (mini_dma_mod.ELASTOCALORIC_EFFECT, "elastocaloric_preload"),
+    ],
+)
+def test_every_iso_stress_plateau_uses_shared_moving_ramp_controller(
+    tmp_path: Path,
+    qtbot,
+    mode: str,
+    note: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mode
+    window._active_target_ramp_start_value = 20.0
+    window._active_target_ramp_end_value = 100.0
+    window._active_target_ramp_rate_value_s = 5.0
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=2,
+        note=note,
+    )
+
+    try:
+        first_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+        window._automation_target_value = 51.0
+        second_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 51.0)
+
+        assert window._is_iso_current_stress_target_ramp(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        assert first_key == second_key == (mini_dma_mod.HSW_BASIS_STRESS_MPA, 2, 100.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_recipe_round_trips_disabled_return_target(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "current_sweep_no_return.recipe.json"
@@ -35116,7 +35296,7 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic step mode" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
-        assert "PASS: Tic motion limits speed 10000000, accel 2000000, decel 2000000" in (
+        assert "PASS: automation Tic motion limits speed 10000000, accel 2000000, decel 2000000" in (
             window.label_hardware_provisioning_status.text()
         )
     finally:

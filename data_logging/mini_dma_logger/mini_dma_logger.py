@@ -94,6 +94,7 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlIntent,
     ForceControlPolicy,
     ForceControlProfile,
+    RobustLinearGainEstimator,
 )
 from data_logging.mini_dma_logger.control_process import (
     BackendFactorySpec,
@@ -589,7 +590,7 @@ SESSION_DATA_FLUSH_INTERVAL_S = 2.0
 CONTROL_TRACE_FLUSH_INTERVAL_S = 1.0
 SESSION_SENSOR_FILE_CLOSE_WAIT_S = 0.1
 SESSION_METADATA_WRITE_INTERVAL_S = 5.0
-DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
+DEFAULT_SCALE_REQUEST_INTERVAL_MS = GNG_SCALE_INTERVAL_MS
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
 FATIGUE_RETAINED_MEASUREMENT_POINTS = 20_000
@@ -8495,6 +8496,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_post_move_sample_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_stiffness_estimators_by_key: dict[
+            tuple[str, int, float], RobustLinearGainEstimator
+        ] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
@@ -8525,6 +8529,7 @@ class MainWindow(QtWidgets.QMainWindow):
             not in {"0", "false", "no", "off"}
         )
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
+        self._iso_current_stress_ramp_interval_s_by_key: dict[tuple[str, int, str], float] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
@@ -8800,6 +8805,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm: float | None = None
         self._setup_zero_fallback_raw_g: float | None = None
         self._setup_zero_fallback_reason = ""
+        self._setup_identification_retry_count = 0
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
         self._end_zero_fallback_return_position_mm: float | None = None
@@ -8880,6 +8886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_click_suppressed = False
         self._manual_jog_velocity_sequence: int | None = None
         self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
+        self._post_recipe_monitor_reconnect_pending = False
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
         self._last_motion_command_monotonic_s: float | None = None
@@ -10905,13 +10912,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_preload_duration_s.setValue(SETUP_PRELOAD_DEFAULT_DURATION_S)
         self.spin_setup_preload_duration_s.setSuffix(" s")
         self.spin_setup_preload_duration_s.setToolTip(
-            "Desired time for the setup preload ramp after the wire is engaged; TMA derives the MPa/s rate."
+            "Nominal time for each setup ramp: up to preload and back down to the zero-load baseline."
         )
         setup_ramp_row, self.label_setup_preload_ramp_equiv = self._spin_with_equivalent_label(
             self.setup_details_panel,
             self.spin_setup_preload_duration_s,
         )
-        strain_setup_form.addRow("Setup preload time", setup_ramp_row)
+        strain_setup_form.addRow("Setup ramp time (each direction)", setup_ramp_row)
         self.spin_setup_slack_speed_strain_pct_s = CompactDoubleSpinBox(self.setup_details_panel)
         self.spin_setup_slack_speed_strain_pct_s.setDecimals(3)
         self.spin_setup_slack_speed_strain_pct_s.setRange(0.001, 100.0)
@@ -12471,7 +12478,7 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
         manual_form.addRow("Manual acceleration", self.spin_manual_accel_mm_s2)
         manual_form.addRow("Single-click step", self.spin_jog_mm)
-        manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
+        manual_form.addRow("Manual recovery time", self.spin_setup_return_duration_s)
         self.button_restore_manual_action_defaults = QtWidgets.QPushButton(
             "Restore manual defaults",
             self.manual_action_settings_panel,
@@ -18724,11 +18731,35 @@ class MainWindow(QtWidgets.QMainWindow):
             0.001,
             config.setup_preload_stress_mpa if config is not None else float(self.spin_setup_preload_stress_mpa.value()),
         )
-        preload_duration_s = max(
-            0.1,
-            config.setup_preload_duration_s if config is not None else float(self.spin_setup_preload_duration_s.value()),
-        )
+        preload_duration_s = self._setup_ramp_duration_s()
         return preload_stress_mpa / preload_duration_s
+
+    def _setup_preload_ramp_rate_load_g_s(self) -> float:
+        config = self._control_config()
+        preload_stress_mpa = max(
+            0.001,
+            config.setup_preload_stress_mpa
+            if config is not None
+            else float(self.spin_setup_preload_stress_mpa.value()),
+        )
+        diameter_mm = (
+            config.diameter_mm
+            if config is not None
+            else float(self.spin_diameter.value())
+        )
+        preload_load_g = load_g_from_stress_mpa(preload_stress_mpa, diameter_mm)
+        if preload_load_g is None:
+            return 1e-9
+        return max(1e-9, abs(float(preload_load_g)) / self._setup_ramp_duration_s())
+
+    def _setup_ramp_duration_s(self) -> float:
+        config = self._control_config()
+        duration_s = (
+            config.setup_preload_duration_s
+            if config is not None
+            else float(self.spin_setup_preload_duration_s.value())
+        )
+        return max(0.1, float(duration_s))
 
     def _setup_slack_speed_mm_s(self) -> float:
         config = self._control_config()
@@ -18778,7 +18809,10 @@ class MainWindow(QtWidgets.QMainWindow):
         length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         distance_floor_mm = length_mm * SETUP_RETURN_MIN_SPEED_STRAIN_PCT / 100.0
         distance_mm = max(distance_mm, distance_floor_mm)
-        speed_mm_s = self._setup_return_speed_for_distance_mm_s(distance_mm)
+        speed_mm_s = self._setup_return_speed_for_distance_mm_s(
+            distance_mm,
+            duration_s=self._setup_ramp_duration_s(),
+        )
         self._setup_return_zero_speed_mm_s_value = speed_mm_s
         return speed_mm_s
 
@@ -19136,7 +19170,7 @@ class MainWindow(QtWidgets.QMainWindow):
             },
         }
         return True, (
-            f"PASS: canonical Tic T500 runtime profile verified: 1/8 step, "
+            f"PASS: automation Tic T500 runtime profile verified: 1/8 step, "
             f"{units_per_mm:g} Tic units/mm, {reported_current_mA} mA, "
             f"{self._format_tic_motion_limits(motion_readbacks)}."
         )
@@ -19886,12 +19920,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _fit_setup_unload_zero_position_mm(self) -> float | None:
         fit = self._setup_unload_baseline_fit()
-        if fit is None:
+        if fit is None or fit.r_squared < 0.90:
             return None
+        stiffness_g_per_mm = self._load_stiffness_from_basis_sensitivity(
+            HSW_BASIS_STRESS_MPA,
+            abs(float(fit.slope_mpa_per_mm)),
+        )
+        if stiffness_g_per_mm is not None:
+            self._remember_live_stiffness(stiffness_g_per_mm)
         self._log(
             "Computed setup l0 zero position from linear unload fit: "
             f"{_format_compact_unit(fit.zero_position_mm, 'mm')} "
-            f"using {fit.fit_point_count} points."
+            f"using {fit.fit_point_count} points (R^2={fit.r_squared:.3f}); "
+            "the same fit seeded the run's stiffness estimate."
         )
         return fit.zero_position_mm
 
@@ -20350,11 +20391,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return max(self._motor_step_mm(), min(max_cap_mm, earned_cap_mm))
 
     def _is_iso_current_stress_target_ramp(self, basis: str | None = None) -> bool:
-        if not self._is_constant_current_stress_ramp_mode(self._automation_name):
+        if not (
+            self._uses_current_sweep_force_control(self._automation_name)
+            or self._is_constant_current_stress_ramp_mode(self._automation_name)
+        ):
             return False
         if self._automation_phase != "target_ramp":
             return False
-        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+        if (
+            self._active_target_ramp_end_value is None
+            or self._active_target_ramp_rate_value_s is None
+        ):
             return False
         return basis is None or basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
 
@@ -20365,7 +20412,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if note.endswith(":down"):
             return -1.0
         start = self._active_target_ramp_start_value
-        target = self._automation_target_value
+        target = self._active_target_ramp_end_value
         if start is None or target is None:
             return 0.0
         delta = float(target) - float(start)
@@ -20425,6 +20472,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dt_s = float(sample_time_s) - float(previous_time_s)
         if dt_s <= 1e-6:
             return None
+        self._iso_current_stress_ramp_interval_s_by_key[key] = dt_s
         direction = self._iso_current_stress_ramp_direction()
         if direction == 0.0:
             return None
@@ -20524,17 +20572,32 @@ class MainWindow(QtWidgets.QMainWindow):
         ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
         if ramp_rate is None or ramp_rate <= 0.0:
             return None
-        base_value = abs(float(ramp_rate)) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S
+        del rate_error_value_s
+        nominal_interval_s = self._seek_decision_interval_s(basis)
+        observed_interval_s = self._iso_current_stress_ramp_interval_s_by_key.get(
+            self._iso_current_stress_ramp_rate_key(basis),
+            nominal_interval_s,
+        )
+        command_interval_s = max(
+            nominal_interval_s * 0.5,
+            min(nominal_interval_s * 2.5, observed_interval_s),
+        )
+        base_value = abs(float(ramp_rate)) * command_interval_s
         direction = self._iso_current_stress_ramp_direction()
-        phase_error = float(error_value) * direction if direction != 0.0 else 0.0
-        phase_value = max(-0.75 * base_value, min(1.5 * base_value, phase_error * 0.2))
-        rate_value = 0.0
-        if rate_error_value_s is not None and math.isfinite(float(rate_error_value_s)):
-            rate_value = max(
-                -0.75 * base_value,
-                min(1.5 * base_value, float(rate_error_value_s) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S * 0.35),
-            )
-        command_value = max(base_value * 0.2, base_value + phase_value + rate_value)
+        if direction == 0.0:
+            return None
+        target_value = self._automation_target_value
+        end_value = self._active_target_ramp_end_value
+        if target_value is None or end_value is None:
+            return None
+        current_value = float(target_value) - float(error_value)
+        remaining_value = max(0.0, direction * (float(end_value) - current_value))
+        if remaining_value <= 0.0:
+            return None
+        # Follow the requested instantaneous rate. Deliberately do not add a
+        # phase-error or measured-rate catch-up term: a delayed scale sample or
+        # one large response must not make the next move larger.
+        command_value = min(base_value, remaining_value * 0.5)
         cap_mm = self._iso_current_stress_ramp_command_cap_mm(basis, sensitivity)
         return max(self._motor_step_mm(), min(cap_mm, command_value / sensitivity))
 
@@ -22165,11 +22228,51 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         current_position = self._current_effective_tensile_position_mm()
+        robust_learning = (
+            basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and (
+                self._automation_phase == "target_ramp"
+                or self._automation_step_note in {"setup_preload", "setup_return_zero"}
+            )
+        )
         if self._setup_preload_first_contact_transition(seek_key, basis, current_value):
+            self._seek_stiffness_estimators_by_key.pop(seek_key, None)
             self._seek_last_stiffness_value_by_basis[basis] = float(current_value)
             self._seek_last_stiffness_position_by_basis[basis] = float(current_position)
             self._seek_last_value_by_key[seek_key] = float(current_value)
             self._seek_last_effective_position_by_key[seek_key] = float(current_position)
+            return
+        if robust_learning:
+            current_load_g = self._basis_value_as_load_g(basis, current_value)
+            if current_load_g is None:
+                return
+            estimator = self._seek_stiffness_estimators_by_key.setdefault(
+                seek_key,
+                RobustLinearGainEstimator(),
+            )
+            estimate = estimator.observe(
+                position_mm=float(current_position),
+                load_g=float(current_load_g),
+                motor_resolution_mm=self._motor_step_mm(),
+                observation_floor_g=max(
+                    self._scale_readability_g() or 0.0,
+                    abs(float(self._calibrated_load_noise_g or 0.0)) * SERVO_NOISE_SIGMA,
+                ),
+            )
+            self._seek_last_value_by_key[seek_key] = float(current_value)
+            self._seek_last_effective_position_by_key[seek_key] = float(current_position)
+            if not estimate.trusted or estimate.load_per_mm_g is None:
+                return
+            candidate = float(estimate.load_per_mm_g)
+            prior = self._seek_live_stiffness_by_key.get(seek_key)
+            if prior is None:
+                prior = self._seek_live_stiffness_g_per_mm
+            if prior is None:
+                prior = self._stored_calibration_stiffness_g_per_mm()
+            if prior is not None and math.isfinite(float(prior)) and float(prior) > 0.0:
+                candidate = max(float(prior) * 0.75, min(float(prior) * 2.0, candidate))
+            self._seek_live_stiffness_by_key[seek_key] = candidate
+            self._remember_live_stiffness(candidate)
             return
         previous_basis_value = self._seek_last_stiffness_value_by_basis.get(basis)
         previous_basis_position = self._seek_last_stiffness_position_by_basis.get(basis)
@@ -22302,6 +22405,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._motion_speed_for_current_context(manual_jog=False),
                 )
             return self._seek_step_mm(error_value, tolerance, basis=basis)
+        continuous_ramp_step_mm = self._iso_current_stress_ramp_continuous_step_mm(
+            basis,
+            sensitivity,
+            error_value,
+            None,
+        )
+        if continuous_ramp_step_mm is not None:
+            return continuous_ramp_step_mm
         feedforward_mm = self._iso_current_stress_ramp_feedforward_mm(
             basis,
             sensitivity,
@@ -22661,6 +22772,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
         self._seek_post_move_sample_count_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
+        self._seek_stiffness_estimators_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
         self._seek_pending_reversal_by_key.pop(seek_key, None)
@@ -23238,6 +23350,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_name == RECOVERY_LOAD:
             return max(self._minimum_held_speed_mm_s(), base_speed)
         if self._automation_step_note == "setup_return_zero":
+            if self._is_iso_current_stress_target_ramp(basis):
+                sensitivity = self._basis_sensitivity_per_mm(
+                    str(basis),
+                    seek_key=seek_key,
+                )
+                ramp_rate = self._target_ramp_rate_value_s_for_context(str(basis))
+                if (
+                    sensitivity is not None
+                    and abs(float(sensitivity)) > 0.0
+                    and ramp_rate is not None
+                    and float(ramp_rate) > 0.0
+                ):
+                    return max(
+                        self._minimum_held_speed_mm_s(),
+                        min(base_speed, abs(float(ramp_rate)) / abs(float(sensitivity))),
+                    )
             return self._setup_return_zero_speed_mm_s(basis, current_value)
         if (
             current_value is not None
@@ -23449,7 +23577,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _seek_error_key(self, basis: str, target_value: float) -> tuple[str, int, float]:
         plateau = -1 if self._automation_plateau_index is None else int(self._automation_plateau_index)
-        return basis, plateau, round(float(target_value), 9)
+        stable_target = float(target_value)
+        if self._automation_phase == "target_ramp" and self._active_target_ramp_end_value is not None:
+            stable_target = float(self._active_target_ramp_end_value)
+        return basis, plateau, round(stable_target, 9)
 
     def _automation_tolerance_for_step(self, step: AutomationStep) -> float:
         return self._auto_requested_tolerance_for_basis(step.basis)
@@ -24403,7 +24534,11 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_current_stress_ramp_rate_error = self._iso_current_stress_ramp_rate_error_value_s(
             basis,
             current_value,
-            seek_sample_time_s,
+            (
+                float(self._latest_scale_timestamp)
+                if self._latest_scale_timestamp is not None
+                else seek_sample_time_s
+            ),
         )
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
@@ -24580,6 +24715,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="monotonic_target_ramp_endpoint",
             )
             return True
+        if self._iso_current_stress_ramp_is_ahead_of_target(basis, delta_value):
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=acceptance_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="waiting",
+                reason="monotonic_target_ramp_ahead",
+            )
+            return False
         if (
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -26734,6 +26882,85 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._run_manual_auto_connect_hardware)
         return True
 
+    def _schedule_post_recipe_monitor_reconnect(self) -> None:
+        if self._window_closing or self._post_recipe_monitor_reconnect_pending:
+            return
+        self._post_recipe_monitor_reconnect_pending = True
+        QtCore.QTimer.singleShot(
+            0,
+            WeakOwnerCallback(self, "_resume_post_recipe_live_monitoring"),
+        )
+
+    def _resume_post_recipe_live_monitoring(self) -> None:
+        """Re-adopt passive hardware readbacks after the recipe process exits."""
+
+        self._post_recipe_monitor_reconnect_pending = False
+        if (
+            self._window_closing
+            or self._isolated_recipe_active
+            or self._production_control_process is not None
+        ):
+            return
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
+        self._log(
+            "Recipe hardware released; reconnecting live monitoring without "
+            "changing PSU outputs or motor position."
+        )
+        def attempt(label: str, callback: Callable[[], bool]) -> tuple[str, bool]:
+            try:
+                return label, bool(callback())
+            except Exception as exc:
+                self._log(f"Live monitoring could not reconnect {label}: {exc}")
+                return label, False
+
+        outcomes: list[tuple[str, bool]] = []
+        outcomes.append(
+            attempt(
+                "scale",
+                lambda: self._scale_thread is not None
+                or self._ensure_scale_ready_for_recipe(),
+            )
+        )
+        outcomes.append(
+            attempt(
+                "supply readback",
+                lambda: (
+                    self._supply_controller is not None
+                    and self._supply_controller.is_connected()
+                )
+                or self._ensure_supply_ready_for_recipe(),
+            )
+        )
+        outcomes.append(attempt("Tic status", self._ensure_tic_ready_for_recipe))
+        if self._manual_auto_connect_should_connect_ir():
+            outcomes.append(
+                attempt(
+                    "IR",
+                    lambda: self._ir_thread is not None
+                    or self._connect_ir_thermometer(show_errors=False),
+                )
+            )
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
+        failed = [label for label, ok in outcomes if not ok]
+        if failed:
+            self._log(
+                "Live monitoring reconnect needs attention: "
+                + ", ".join(failed)
+                + ". Auto-connect remains available."
+            )
+        else:
+            self._log(
+                "Live monitoring reconnected: "
+                + ", ".join(label for label, _ok in outcomes)
+                + ". PSU outputs and motor position were left unchanged."
+            )
+        self._update_current_task_display()
+        self._refresh_live_labels()
+        self._update_recipe_buttons()
+
     def _run_manual_auto_connect_hardware(self) -> None:
         self._apply_shared_broker_bench_defaults_for_tic_preflight()
         self._apply_direct_hmp_bench_defaults_for_tic_preflight()
@@ -28016,7 +28243,8 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Setup preload duration s\t{self.spin_setup_preload_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
         setup_txt_handle.write(f"# Setup preload settle s\t{self.spin_setup_preload_stable_s.value():.6f}\n")
-        setup_txt_handle.write(f"# Setup return duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup return duration s\t{self._setup_ramp_duration_s():.6f}\n")
+        setup_txt_handle.write(f"# Manual recovery duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack step cap MPa\t{self.spin_setup_slack_step_cap_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
@@ -28585,7 +28813,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "control_interval_ms": self._control_interval_ms(),
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
                 "setup_preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
-                "setup_return_duration_s": float(self.spin_setup_return_duration_s.value()),
+                "setup_return_duration_s": self._setup_ramp_duration_s(),
+                "manual_recovery_duration_s": float(self.spin_setup_return_duration_s.value()),
                 "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
                 "setup_slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                 "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
@@ -29219,7 +29448,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
                 "setup_preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
                 "setup_preload_ramp_rate_mpa_s": self._setup_preload_ramp_rate_mpa_s(),
-                "setup_return_duration_s": float(self.spin_setup_return_duration_s.value()),
+                "setup_return_duration_s": self._setup_ramp_duration_s(),
+                "manual_recovery_duration_s": float(self.spin_setup_return_duration_s.value()),
                 "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
                 "setup_slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                 "setup_stage_max_speed_mm_s": self._setup_motion_speed_cap_mm_s(),
@@ -31528,14 +31758,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return True, f"PASS: Tic motion limits {self._format_tic_motion_limits(targets)}."
 
     def _apply_tic_motion_limits(self) -> tuple[bool, str]:
-        return self._apply_tic_motion_limit_targets(
+        ok, message = self._apply_tic_motion_limit_targets(
             self._selected_tic_motion_limits()
         )
+        return ok, message.replace("Tic motion limits", "automation Tic motion limits", 1)
 
     def _apply_manual_tic_motion_limits(self) -> tuple[bool, str]:
-        return self._apply_tic_motion_limit_targets(
+        ok, message = self._apply_tic_motion_limit_targets(
             self._manual_tic_motion_limits()
         )
+        return ok, message.replace("Tic motion limits", "manual Tic motion limits now active", 1)
 
     def _apply_elastocaloric_motion_limits(self) -> tuple[bool, str]:
         acceleration = int(self.spin_elastocaloric_accel.value())
@@ -35790,6 +36022,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_terminal_readback,
                 terminal_task=self._isolated_terminal_task,
             )
+        if (
+            state is ControlState.STOPPED
+            and not terminal_fault
+            and not retain_prepared_controller
+        ):
+            self._schedule_post_recipe_monitor_reconnect()
         if offer_recovery:
             self._schedule_recovery_after_stop()
         elif wire_break_terminal:
@@ -36063,6 +36301,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._setup_identification_retry_count = 0
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
         self._end_zero_fallback_return_position_mm = None
@@ -36079,6 +36318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
+        self._seek_stiffness_estimators_by_key.clear()
         self._seek_live_stiffness_g_per_mm = None
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
@@ -37612,6 +37852,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
+        self._seek_stiffness_estimators_by_key.clear()
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
         self._current_sweep_hold_instability_by_key.clear()
@@ -37765,8 +38006,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         steps.append(
             AutomationStep(
-                "seek_target",
+                "ramp_target",
                 target_value=0.0,
+                target_start_value=None,
+                target_end_value=0.0,
+                target_ramp_rate_value_s=max(1e-9, preload_load_g / preload_duration_s),
                 basis=HSW_BASIS_LOAD_G,
                 note="setup_return_zero",
             )
@@ -40895,21 +41139,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_rate_value_s = configured_ramp_rate
             self._active_target_ramp_end_value = end_value
             self._iso_current_stress_ramp_rate_sample_by_key.clear()
+            self._iso_current_stress_ramp_interval_s_by_key.clear()
             start_value = step.target_start_value
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
             self._active_target_ramp_start_value = float(end_value if start_value is None else start_value)
             if (
                 step.target_start_value is None
-                and step.note == "setup_preload"
+                and step.note in {"setup_preload", "setup_return_zero"}
                 and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             ):
-                duration_s = max(
-                    0.1,
-                    config.setup_preload_duration_s
-                    if config is not None
-                    else float(self.spin_setup_preload_duration_s.value()),
-                )
+                duration_s = self._setup_ramp_duration_s()
                 live_delta = abs(float(self._active_target_ramp_start_value) - end_value)
                 self._active_target_ramp_rate_value_s = max(1e-9, live_delta / duration_s)
             self._end_zero_fallback_armed = False
@@ -41141,6 +41381,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Length reference already captured; returning load to 0 g to compute l0.")
         return True
 
+    def _schedule_setup_identification_retry(self) -> bool:
+        if self._setup_identification_retry_count >= 1:
+            return False
+        config = self._control_config()
+        preload_stress_mpa = max(
+            0.001,
+            config.setup_preload_stress_mpa
+            if config is not None
+            else float(self.spin_setup_preload_stress_mpa.value()),
+        )
+        retry_steps = [
+            AutomationStep(
+                "ramp_target",
+                target_value=preload_stress_mpa,
+                target_start_value=0.0,
+                target_end_value=preload_stress_mpa,
+                target_ramp_rate_value_s=self._setup_preload_ramp_rate_mpa_s(),
+                basis=HSW_BASIS_STRESS_MPA,
+                note="setup_identification_up",
+            ),
+            AutomationStep(
+                "mark_setup_return_zero",
+                target_value=preload_stress_mpa,
+                basis=HSW_BASIS_STRESS_MPA,
+                note="setup_return_zero_start",
+            ),
+            AutomationStep(
+                "ramp_target",
+                target_value=0.0,
+                target_start_value=None,
+                target_end_value=0.0,
+                target_ramp_rate_value_s=self._setup_preload_ramp_rate_load_g_s(),
+                basis=HSW_BASIS_LOAD_G,
+                note="setup_return_zero",
+            ),
+            AutomationStep("apply_length_setup", note="setup_apply_l0"),
+        ]
+        self._automation_steps[self._automation_index:self._automation_index] = retry_steps
+        self._automation_total_steps = len(self._automation_steps)
+        self._setup_identification_retry_count += 1
+        self._setup_zero_position_mm = None
+        self._setup_zero_fallback_return_position_mm = None
+        self._setup_zero_fallback_raw_g = None
+        self._setup_zero_fallback_reason = ""
+        self._update_length_setup_dialog(
+            "The first unload did not establish a confident linear stiffness; "
+            "performing one bounded 0-load to preload identification cycle."
+        )
+        self._log(
+            "Setup unload fit was not sufficiently linear (requires at least "
+            f"{SETUP_UNLOAD_BASELINE_MIN_POINTS} taut points and R^2 >= 0.90). "
+            "Repeating one bounded preload/unload identification cycle before starting the recipe."
+        )
+        return True
+
     def _commit_length_setup_zero_load_reference(self, zero_position_mm: float) -> None:
         if self._run_zero_load_scale_g is not None:
             return
@@ -41176,6 +41471,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         try:
             self._refresh_tic_status()
+            setup_fit = self._setup_unload_baseline_fit()
+            if self._automation_active and (setup_fit is None or setup_fit.r_squared < 0.90):
+                if self._schedule_setup_identification_retry():
+                    return True
+                raise RuntimeError(
+                    "setup could not establish a confident linear unload stiffness after "
+                    "the bounded identification retry; inspect the wire engagement and scale signal"
+                )
             if self._setup_zero_position_mm is not None:
                 zero_position_mm = float(self._setup_zero_position_mm)
             else:

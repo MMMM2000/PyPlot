@@ -1,0 +1,1 @@
+- Reconnect passive TMA scale, PSU, Tic, and optional IR readbacks after a process-isolated recipe ends, without changing outputs or motor position, and clarify automation versus manual acceleration-profile logs.

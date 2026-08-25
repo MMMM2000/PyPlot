@@ -12,6 +12,7 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlPolicy,
     ForceControlProfile,
     ForceControlState,
+    RobustLinearGainEstimator,
 )
 
 
@@ -49,6 +50,51 @@ def _adaptive(*, gain: float | None = 1.0, **changes: object) -> ForceControlPol
         **changes,  # type: ignore[arg-type]
     )
     return ForceControlPolicy(config)
+
+
+def test_robust_linear_gain_requires_several_independent_positions() -> None:
+    estimator = RobustLinearGainEstimator()
+
+    first = estimator.observe(
+        position_mm=0.0,
+        load_g=0.0,
+        motor_resolution_mm=0.00125,
+        observation_floor_g=0.005,
+    )
+    second = estimator.observe(
+        position_mm=0.010,
+        load_g=0.100,
+        motor_resolution_mm=0.00125,
+        observation_floor_g=0.005,
+    )
+
+    assert first.trusted is False
+    assert second.load_per_mm_g == pytest.approx(10.0)
+    assert second.trusted is False
+
+
+def test_robust_linear_gain_rejects_one_scale_outlier() -> None:
+    estimator = RobustLinearGainEstimator()
+    estimate = None
+    for position_mm, load_g in (
+        (0.000, 0.000),
+        (0.010, 0.100),
+        (0.020, 0.200),
+        (0.030, 1.500),
+        (0.040, 0.400),
+        (0.050, 0.500),
+        (0.060, 0.600),
+    ):
+        estimate = estimator.observe(
+            position_mm=position_mm,
+            load_g=load_g,
+            motor_resolution_mm=0.00125,
+            observation_floor_g=0.005,
+        )
+
+    assert estimate is not None
+    assert estimate.load_per_mm_g == pytest.approx(10.0)
+    assert estimate.trusted is True
 
 
 def test_profiles_and_intents_are_explicit() -> None:
