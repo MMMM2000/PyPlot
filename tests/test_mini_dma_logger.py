@@ -6428,6 +6428,24 @@ def test_mini_dma_plot_channels_include_ir_temperature(tmp_path: Path, qtbot) ->
         _close_test_window(window)
 
 
+def test_dashboard_resistance_label_uses_si_symbol_and_full_title(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        channels = {channel.key: channel for channel in window._plot_channels()}
+
+        assert channels["resistance_ohm"].label == "Resistance (Ω)"
+        assert (
+            window._plot_title(
+                channels["elapsed_s"],
+                channels["current_measured_mA"],
+                channels["resistance_ohm"],
+            )
+            == "Current + Resistance vs Time"
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_legacy_ir_plot_settings_map_to_temperature_channel(tmp_path: Path, qtbot) -> None:
     settings = _test_settings()
     settings.clear()

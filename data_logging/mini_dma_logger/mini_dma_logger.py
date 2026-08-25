@@ -13148,7 +13148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             PlotChannel("voltage_V", "Voltage (V)", "#facc15", lambda point: point.voltage_V),
             PlotChannel(
                 "resistance_ohm",
-                "Resistance (Ohm)",
+                "Resistance (Ω)",
                 "#14b8a6",
                 self._plot_resistance_ohm,
             ),
@@ -13268,7 +13268,6 @@ class MainWindow(QtWidgets.QMainWindow):
         compact = compact.replace("Effective load", "Load")
         compact = compact.replace("Measured current", "Current")
         compact = compact.replace("Displacement", "Disp.")
-        compact = compact.replace("Resistance", "Res.")
         return compact
 
     def _plot_title(

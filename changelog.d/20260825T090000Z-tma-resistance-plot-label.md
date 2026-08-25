@@ -1,0 +1,1 @@
+- Clean up the TMA dashboard resistance plot with the SI `Ω` unit and an unabbreviated title.
