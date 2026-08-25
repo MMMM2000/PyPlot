@@ -579,8 +579,8 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
 DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 500
-PRAGUE_SCALE_CONTROL_INTERVAL_MS = 250
-PRAGUE_SCALE_UI_REFRESH_INTERVAL_MS = 250
+PRAGUE_SCALE_CONTROL_INTERVAL_MS = GNG_SCALE_INTERVAL_MS
+PRAGUE_SCALE_UI_REFRESH_INTERVAL_MS = GNG_SCALE_INTERVAL_MS
 PRAGUE_SCALE_GRAPH_REFRESH_INTERVAL_MS = 500
 KOSICE_SCALE_CONTROL_INTERVAL_MS = 50
 KOSICE_SCALE_UI_REFRESH_INTERVAL_MS = 200
@@ -42431,7 +42431,10 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_request = KERN_KCP_SCALE_REQUEST
             scale_terminator = KERN_KCP_SCALE_TERMINATOR
             saved_scale_interval_ms = KERN_KCP_SCALE_INTERVAL_MS
-        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < GNG_SCALE_INTERVAL_MS:
+        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms in {
+            50,
+            250,
+        }:
             saved_scale_interval_ms = GNG_SCALE_INTERVAL_MS
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)

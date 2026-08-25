@@ -16880,14 +16880,19 @@ def test_ir_sample_from_thermal_frame_rejects_raw_units() -> None:
     assert mini_dma_mod._ir_sample_from_thermal_frame(frame, timestamp_s=10.0) is None
 
 
-def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, qtbot) -> None:
+@pytest.mark.parametrize("saved_interval_ms", [50, 250])
+def test_scale_request_poll_interval_migrates_to_response_time(
+    tmp_path: Path,
+    qtbot,
+    saved_interval_ms: int,
+) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
     settings = _test_settings()
     settings.clear()
     settings.setValue("scale_baud", "9600")
     settings.setValue("scale_request", "\\x1bp")
-    settings.setValue("scale_interval_ms", 50)
+    settings.setValue("scale_interval_ms", saved_interval_ms)
     settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
@@ -17020,7 +17025,8 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
     assert window.combo_scale_baud.current_text == "9600"
     assert window.edit_scale_request.text_value == "\\x1bp"
     assert window.edit_scale_terminator.text_value == ""
-    assert spinners["control"].value_set == 250
+    assert spinners["control"].value_set == mini_dma_mod.GNG_SCALE_INTERVAL_MS
+    assert spinners["ui"].value_set == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     assert spinners["scale"].value_set == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     assert "Prague G&G" in messages[-1]
 
