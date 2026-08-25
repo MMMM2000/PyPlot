@@ -8530,6 +8530,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
         self._iso_current_stress_ramp_interval_s_by_key: dict[tuple[str, int, str], float] = {}
+        self._iso_current_stress_ramp_command_time_s_by_key: dict[tuple[str, int, str], float] = {}
+        self._iso_current_stress_ramp_command_interval_s_by_key: dict[tuple[str, int, str], float] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
@@ -20574,13 +20576,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         del rate_error_value_s
         nominal_interval_s = self._seek_decision_interval_s(basis)
-        observed_interval_s = self._iso_current_stress_ramp_interval_s_by_key.get(
+        observed_interval_s = self._iso_current_stress_ramp_command_interval_s_by_key.get(
             self._iso_current_stress_ramp_rate_key(basis),
             nominal_interval_s,
         )
         command_interval_s = max(
             nominal_interval_s * 0.5,
-            min(nominal_interval_s * 2.5, observed_interval_s),
+            min(nominal_interval_s * 4.0, observed_interval_s),
         )
         base_value = abs(float(ramp_rate)) * command_interval_s
         direction = self._iso_current_stress_ramp_direction()
@@ -20600,6 +20602,26 @@ class MainWindow(QtWidgets.QMainWindow):
         command_value = min(base_value, remaining_value * 0.5)
         cap_mm = self._iso_current_stress_ramp_command_cap_mm(basis, sensitivity)
         return max(self._motor_step_mm(), min(cap_mm, command_value / sensitivity))
+
+    def _note_iso_current_stress_ramp_command(self, basis: str, command_time_s: float) -> None:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return
+        key = self._iso_current_stress_ramp_rate_key(basis)
+        previous_time_s = self._iso_current_stress_ramp_command_time_s_by_key.get(key)
+        self._iso_current_stress_ramp_command_time_s_by_key[key] = float(command_time_s)
+        if previous_time_s is None:
+            return
+        nominal_interval_s = self._seek_decision_interval_s(basis)
+        observed_interval_s = max(
+            nominal_interval_s * 0.5,
+            min(nominal_interval_s * 4.0, float(command_time_s) - float(previous_time_s)),
+        )
+        previous_interval_s = self._iso_current_stress_ramp_command_interval_s_by_key.get(key)
+        if previous_interval_s is None:
+            smoothed_interval_s = observed_interval_s
+        else:
+            smoothed_interval_s = 0.75 * float(previous_interval_s) + 0.25 * observed_interval_s
+        self._iso_current_stress_ramp_command_interval_s_by_key[key] = smoothed_interval_s
 
     def _iso_current_stress_ramp_feedforward_value_rate_s(
         self,
@@ -23950,12 +23972,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         if abs(float(self._current_position_mm) - float(target_mm)) <= self._motor_step_mm():
-            self._setup_zero_fallback_return_position_mm = None
-            if self._setup_zero_fallback_reason == "linear_unload_slack":
-                self._log("Returned to the linear-unload zero-stress position for l0.")
-            else:
-                self._log("Returned to zero-load plateau position for l0.")
-            return True
+            if self._accept_pending_linear_zero_plateau_if_stable():
+                return True
+            self._log_waiting_for_feedback(
+                "Holding the fitted zero-stress position for a stable fresh scale baseline."
+            )
+            return False
         if self._accept_pending_linear_zero_plateau_if_stable():
             return True
         if self._pending_motion_command is None:
@@ -24555,7 +24577,7 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._setup_zero_position_mm is not None
             and self._setup_zero_fallback_return_position_mm is None
         ):
-            if self._latest_scale_value_g is not None:
+            if self._run_zero_load_scale_g is None and self._latest_scale_value_g is not None:
                 self._set_run_zero_load_scale_reference(
                     float(self._latest_scale_value_g),
                     reason="setup linear-unload baseline committed",
@@ -25043,7 +25065,9 @@ class MainWindow(QtWidgets.QMainWindow):
             previous_error,
             delta_value,
             effective_tolerance,
-        ) and self._automation_phase != "current_hold"
+        ) and self._automation_phase != "current_hold" and not self._is_iso_current_stress_target_ramp(
+            basis
+        )
         if overshot_target:
             if self._automation_phase == "current_hold":
                 self._note_current_sweep_hold_instability(seek_key)
@@ -25145,7 +25169,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Overshoot detected at target {_format_compact_number(target_value)}"
                 f"{self._distribution_units(basis)[0]}; switching to fine correction steps."
             )
-        elif previous_error is not None:
+        elif previous_error is not None and not self._is_iso_current_stress_target_ramp(basis):
             worsening_floor = self._current_sweep_worsening_floor_for_basis(
                 basis,
                 effective_tolerance,
@@ -25430,6 +25454,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason=correction_reason,
             )
             return False
+        self._note_iso_current_stress_ramp_command(basis, time.monotonic())
         self._write_control_trace(
             decision="correction",
             basis=basis,
@@ -41140,6 +41165,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_end_value = end_value
             self._iso_current_stress_ramp_rate_sample_by_key.clear()
             self._iso_current_stress_ramp_interval_s_by_key.clear()
+            self._iso_current_stress_ramp_command_time_s_by_key.clear()
+            self._iso_current_stress_ramp_command_interval_s_by_key.clear()
             start_value = step.target_start_value
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)

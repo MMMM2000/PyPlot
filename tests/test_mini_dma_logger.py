@@ -6136,8 +6136,17 @@ def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
         assert window._handle_pending_setup_zero_fallback() is False
 
         window._current_position_mm = -1.0
+        assert window._handle_pending_setup_zero_fallback() is False
+        assert window._setup_zero_fallback_return_position_mm == pytest.approx(-1.0)
+
+        def _accept_stable_baseline() -> bool:
+            window._setup_zero_fallback_return_position_mm = None
+            return True
+
+        window._accept_pending_linear_zero_plateau_if_stable = (  # type: ignore[method-assign]
+            _accept_stable_baseline
+        )
         assert window._handle_pending_setup_zero_fallback() is True
-        assert window._setup_zero_fallback_return_position_mm is None
     finally:
         _close_test_window(window)
 
@@ -6242,8 +6251,17 @@ def test_pending_linear_unload_fallback_retries_blocked_return_move(tmp_path: Pa
         assert targets == [pytest.approx(3.9723)]
 
         window._current_position_mm = 3.97
+        assert window._handle_pending_setup_zero_fallback() is False
+        assert window._setup_zero_fallback_return_position_mm == pytest.approx(3.9723)
+
+        def _accept_stable_baseline() -> bool:
+            window._setup_zero_fallback_return_position_mm = None
+            return True
+
+        window._accept_pending_linear_zero_plateau_if_stable = (  # type: ignore[method-assign]
+            _accept_stable_baseline
+        )
         assert window._handle_pending_setup_zero_fallback() is True
-        assert window._setup_zero_fallback_return_position_mm is None
     finally:
         _close_test_window(window)
 
@@ -34112,8 +34130,20 @@ def test_iso_current_stress_ramp_does_not_catch_up_after_rate_error(
         assert fast_step is not None
         assert slow_step == pytest.approx(base_step)
         assert fast_step == pytest.approx(base_step)
-        assert base_step == pytest.approx((5.0 * 0.202) / 142.0)
+        assert base_step == pytest.approx(
+            (5.0 * window._seek_decision_interval_s(mini_dma_mod.HSW_BASIS_STRESS_MPA)) / 142.0
+        )
         assert base_step >= window._motor_step_mm()
+
+        ramp_key = window._iso_current_stress_ramp_rate_key(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        window._iso_current_stress_ramp_command_interval_s_by_key[ramp_key] = 0.606
+        cadence_step = window._iso_current_stress_ramp_continuous_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            142.0,
+            error_value=0.0,
+            rate_error_value_s=3.0,
+        )
+        assert cadence_step == pytest.approx((5.0 * 0.606) / 142.0)
     finally:
         _close_test_window(window)
 

@@ -1,1 +1,3 @@
 - Reconnect passive TMA scale, PSU, Tic, and optional IR readbacks after a process-isolated recipe ends, without changing outputs or motor position, and clarify automation versus manual acceleration-profile logs.
+- Make all iso-stress target ramps follow their requested rate from the observed move-feedback command cadence without treating a moving target as a failed correction.
+- Hold the fitted zero-stress setup position until a stable fresh scale baseline is confirmed before committing l0.
