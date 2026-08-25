@@ -718,15 +718,18 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 4
-MOTOR_DEFAULTS_VERSION = 5
+MOTOR_DEFAULTS_VERSION = 6
 DEFAULT_FULL_STEPS_PER_MM = 100.0
 DEFAULT_TIC_STEP_MODE = "8"
 DEFAULT_STEPS_PER_MM = 800.0
 DEFAULT_TIC_CURRENT_LIMIT_MA = 343
 DEFAULT_TIC_MAX_SPEED = 10_000_000
-DEFAULT_TIC_MAX_ACCEL = 100_000
-DEFAULT_TIC_MAX_DECEL = 100_000
-CANONICAL_TIC_PROFILE_NAME = "tma-t500-1_8-v2"
+DEFAULT_TIC_MAX_ACCEL = 2_000_000
+DEFAULT_TIC_MAX_DECEL = 2_000_000
+MIN_TIC_ACCEL = 100_000
+DEFAULT_AUTOMATION_ACCEL_MM_S2 = 25.0
+DEFAULT_MANUAL_ACCEL_MM_S2 = 1.25
+CANONICAL_TIC_PROFILE_NAME = "tma-t500-1_8-v3"
 CANONICAL_TIC_PERSISTENT_SETTINGS: dict[str, str] = {
     "control_mode": "serial",
     "serial_baud_rate": "9600",
@@ -1402,6 +1405,14 @@ def tic_units_per_mm(full_steps_per_mm: float, step_mode: object) -> float:
     if factor is None:
         raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
     return float(full_steps_per_mm) * float(factor)
+
+
+def tic_acceleration_units(acceleration_mm_s2: float, units_per_mm: float) -> int:
+    """Convert a physical stage acceleration to Tic acceleration units."""
+
+    physical_acceleration = max(0.0, float(acceleration_mm_s2))
+    physical_units_per_mm = max(1.0, float(units_per_mm))
+    return max(100, int(round(physical_acceleration * physical_units_per_mm * 100.0)))
 
 
 TIC_SETTINGS_LINE_PATTERN = re.compile(
@@ -10098,7 +10109,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "this acceleration directly limits how quickly a short move can reach its requested speed."
         )
         self.spin_tic_max_accel.setReadOnly(True)
-        motion_advanced_form.addRow("Tic max acceleration", self.spin_tic_max_accel)
 
         self.spin_tic_max_decel = QtWidgets.QSpinBox(motion_advanced_box)
         self.spin_tic_max_decel.setRange(100, 2_147_483_647)
@@ -10109,7 +10119,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "Preflight applies and verifies it together with speed and acceleration."
         )
         self.spin_tic_max_decel.setReadOnly(True)
-        motion_advanced_form.addRow("Tic max deceleration", self.spin_tic_max_decel)
+        self.spin_automation_accel_mm_s2 = CompactDoubleSpinBox(motion_advanced_box)
+        self.spin_automation_accel_mm_s2.setDecimals(3)
+        self.spin_automation_accel_mm_s2.setRange(0.001, 10000.0)
+        self.spin_automation_accel_mm_s2.setValue(DEFAULT_AUTOMATION_ACCEL_MM_S2)
+        self.spin_automation_accel_mm_s2.setSuffix(" mm/s²")
+        self.spin_automation_accel_mm_s2.setToolTip(
+            "Acceleration and deceleration used by recipe setup and automated moves. "
+            "Recipe preflight converts this physical value to Tic units and verifies it."
+        )
+        motion_advanced_form.addRow("Automation acceleration", self.spin_automation_accel_mm_s2)
+
+        self.spin_manual_accel_mm_s2 = CompactDoubleSpinBox(motion_advanced_box)
+        self.spin_manual_accel_mm_s2.setDecimals(3)
+        self.spin_manual_accel_mm_s2.setRange(0.001, 10000.0)
+        self.spin_manual_accel_mm_s2.setValue(DEFAULT_MANUAL_ACCEL_MM_S2)
+        self.spin_manual_accel_mm_s2.setSuffix(" mm/s²")
+        self.spin_manual_accel_mm_s2.setToolTip(
+            "Gentler acceleration and deceleration restored while the controller is idle and used by manual motion."
+        )
+        self.spin_automation_accel_mm_s2.valueChanged.connect(self._sync_automation_tic_acceleration)
 
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
@@ -11868,7 +11897,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_elastocaloric_release_matches_pull
         )
         self.spin_elastocaloric_accel = QtWidgets.QSpinBox(automation_box)
-        self.spin_elastocaloric_accel.setRange(DEFAULT_TIC_MAX_ACCEL, 2_000_000)
+        self.spin_elastocaloric_accel.setRange(MIN_TIC_ACCEL, 2_000_000)
         self.spin_elastocaloric_accel.setSingleStep(100_000)
         self.spin_elastocaloric_accel.setValue(200_000)
         self.spin_elastocaloric_accel.setSuffix(" Tic units")
@@ -12440,6 +12469,7 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_form = QtWidgets.QFormLayout(self.manual_action_settings_panel)
         manual_form.setContentsMargins(0, 4, 0, 0)
         manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
+        manual_form.addRow("Manual acceleration", self.spin_manual_accel_mm_s2)
         manual_form.addRow("Single-click step", self.spin_jog_mm)
         manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
         self.button_restore_manual_action_defaults = QtWidgets.QPushButton(
@@ -18905,8 +18935,6 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.spin_full_steps_per_mm, DEFAULT_FULL_STEPS_PER_MM),
             (self.spin_tic_current_limit_mA, DEFAULT_TIC_CURRENT_LIMIT_MA),
             (self.spin_tic_max_speed, DEFAULT_TIC_MAX_SPEED),
-            (self.spin_tic_max_accel, DEFAULT_TIC_MAX_ACCEL),
-            (self.spin_tic_max_decel, DEFAULT_TIC_MAX_DECEL),
         )
         blockers = [QtCore.QSignalBlocker(widget) for widget, _value in widgets_and_values]
         for widget, value in widgets_and_values:
@@ -18932,8 +18960,32 @@ class MainWindow(QtWidgets.QMainWindow):
         blocker = QtCore.QSignalBlocker(self.spin_steps_per_mm)
         self.spin_steps_per_mm.setValue(units_per_mm)
         del blocker
+        self._sync_automation_tic_acceleration()
         self._clamp_motion_resolution_controls()
         self._update_recipe_mode_ui()
+
+    def _sync_automation_tic_acceleration(self, *_args: object) -> None:
+        if not hasattr(self, "spin_automation_accel_mm_s2"):
+            return
+        units = tic_acceleration_units(
+            float(self.spin_automation_accel_mm_s2.value()),
+            float(self.spin_steps_per_mm.value()),
+        )
+        accel_blocker = QtCore.QSignalBlocker(self.spin_tic_max_accel)
+        decel_blocker = QtCore.QSignalBlocker(self.spin_tic_max_decel)
+        self.spin_tic_max_accel.setValue(units)
+        self.spin_tic_max_decel.setValue(units)
+        del accel_blocker, decel_blocker
+
+    def _manual_tic_motion_limits(self) -> dict[str, int]:
+        targets = self._selected_tic_motion_limits()
+        acceleration = tic_acceleration_units(
+            float(self.spin_manual_accel_mm_s2.value()),
+            float(self.spin_steps_per_mm.value()),
+        )
+        targets["max_accel"] = acceleration
+        targets["max_decel"] = acceleration
+        return targets
 
     def _sync_tic_units_per_mm_from_full_steps(self, *_args: object, persist: bool = True) -> None:
         try:
@@ -19064,6 +19116,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "tic_units_per_mm": units_per_mm,
             "current_limit_mA": DEFAULT_TIC_CURRENT_LIMIT_MA,
             "runtime_motion_limits": motion_targets,
+            "automation_acceleration_mm_s2": float(self.spin_automation_accel_mm_s2.value()),
+            "manual_acceleration_mm_s2": float(self.spin_manual_accel_mm_s2.value()),
             "persistent_settings": persistent_profile,
         }
         fingerprint = hashlib.sha256(
@@ -19095,6 +19149,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_tic_current_limit,
             self._apply_tic_motion_limits,
             self._capture_verified_tic_profile,
+            self._apply_manual_tic_motion_limits,
         )
         messages: list[str] = []
         for check in checks:
@@ -21229,6 +21284,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _restore_manual_action_defaults(self) -> None:
         self.spin_motion_speed_mm_s.setValue(1.0)
+        self.spin_manual_accel_mm_s2.setValue(DEFAULT_MANUAL_ACCEL_MM_S2)
         self.spin_jog_mm.setValue(0.1)
         self.spin_setup_return_duration_s.setValue(SETUP_RETURN_DEFAULT_DURATION_S)
         self._clamp_motion_resolution_controls()
@@ -26766,6 +26822,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_tic_current_limit,
             self._apply_tic_motion_limits,
             self._capture_verified_tic_profile,
+            self._apply_manual_tic_motion_limits,
         ):
             setting_ok, message = apply_settings()
             messages.append(message)
@@ -31404,8 +31461,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _selected_tic_motion_limits(self) -> dict[str, int]:
         return {
             "max_speed": DEFAULT_TIC_MAX_SPEED,
-            "max_accel": DEFAULT_TIC_MAX_ACCEL,
-            "max_decel": DEFAULT_TIC_MAX_DECEL,
+            "max_accel": int(self.spin_tic_max_accel.value()),
+            "max_decel": int(self.spin_tic_max_decel.value()),
         }
 
     def _tic_motion_limits_match(self, readbacks: Mapping[str, int | None], targets: Mapping[str, int]) -> bool:
@@ -31476,6 +31533,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._selected_tic_motion_limits()
         )
 
+    def _apply_manual_tic_motion_limits(self) -> tuple[bool, str]:
+        return self._apply_tic_motion_limit_targets(
+            self._manual_tic_motion_limits()
+        )
+
     def _apply_elastocaloric_motion_limits(self) -> tuple[bool, str]:
         acceleration = int(self.spin_elastocaloric_accel.value())
         targets = self._selected_tic_motion_limits()
@@ -31497,11 +31559,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
             self._release_tic_device_lock()
-        ok, message = self._apply_tic_motion_limits()
+        ok, message = self._apply_manual_tic_motion_limits()
         if ok:
-            self._log(f"Restored Tic idle motion limits: {message.removeprefix('PASS: ')}")
+            self._log(f"Restored Tic manual/idle motion limits: {message.removeprefix('PASS: ')}")
         else:
-            self._log(f"Tic idle motion-limit restore skipped: {message}")
+            self._log(f"Tic manual/idle motion-limit restore skipped: {message}")
 
     def _provision_bench_hardware(self, _checked: bool = False) -> bool:
         statuses: list[str] = []
@@ -31560,6 +31622,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._apply_tic_current_limit,
                 self._apply_tic_motion_limits,
                 self._capture_verified_tic_profile,
+                self._apply_manual_tic_motion_limits,
             ):
                 check_ok, check_message = check()
                 statuses.append(check_message)
@@ -42029,6 +42092,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("tic_max_speed", self.spin_tic_max_speed.value())
         self.settings.setValue("tic_max_accel", self.spin_tic_max_accel.value())
         self.settings.setValue("tic_max_decel", self.spin_tic_max_decel.value())
+        self.settings.setValue("automation_accel_mm_s2", self.spin_automation_accel_mm_s2.value())
+        self.settings.setValue("manual_accel_mm_s2", self.spin_manual_accel_mm_s2.value())
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
         self.settings.setValue("full_steps_per_mm", self.spin_full_steps_per_mm.value())
@@ -42467,12 +42532,17 @@ class MainWindow(QtWidgets.QMainWindow):
             bool(self.settings.value("tic_native_usb_preferred", True, type=bool))
         )
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
-        # Motor configuration is a single canonical T500 profile shared by the
-        # Prague and Košice benches. Local QSettings must never override it.
+        # Electrical and step-mode configuration is canonical across both benches.
+        # Physical acceleration profiles remain operator-configurable.
         self.spin_tic_current_limit_mA.setValue(DEFAULT_TIC_CURRENT_LIMIT_MA)
         self.spin_tic_max_speed.setValue(DEFAULT_TIC_MAX_SPEED)
-        self.spin_tic_max_accel.setValue(DEFAULT_TIC_MAX_ACCEL)
-        self.spin_tic_max_decel.setValue(DEFAULT_TIC_MAX_DECEL)
+        self.spin_automation_accel_mm_s2.setValue(
+            float(self.settings.value("automation_accel_mm_s2", DEFAULT_AUTOMATION_ACCEL_MM_S2))
+        )
+        self.spin_manual_accel_mm_s2.setValue(
+            float(self.settings.value("manual_accel_mm_s2", DEFAULT_MANUAL_ACCEL_MM_S2))
+        )
+        self._sync_automation_tic_acceleration()
         self.spin_tic_status_interval.setValue(
             int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))
         )

@@ -58,6 +58,11 @@ stiff_guard_mod = importlib.import_module(
 source_provenance_mod = importlib.import_module("data_logging.source_provenance")
 
 
+def test_tic_acceleration_units_use_physical_stage_units() -> None:
+    assert mini_dma_mod.tic_acceleration_units(25.0, 800.0) == 2_000_000
+    assert mini_dma_mod.tic_acceleration_units(1.25, 800.0) == 100_000
+
+
 @pytest.mark.parametrize(
     ("requested_s", "feasible"),
     [(3.0, True), (1.0, False)],
@@ -9740,8 +9745,8 @@ def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, q
                 "VIN voltage: 12.00 V",
                 "Step mode: 1/8 step",
                 "Max speed: 10000000",
-                "Max acceleration: 100000",
-                "Max deceleration: 100000",
+                "Max acceleration: 2000000",
+                "Max deceleration: 2000000",
                 "Current limit: 343 mA",
                 "Errors currently stopping the motor: None",
             ]
@@ -9765,13 +9770,17 @@ def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, q
     window._capture_verified_tic_profile = (  # type: ignore[method-assign]
         lambda: called.append("verified") or (True, "PASS: canonical runtime profile")
     )
+    window._apply_manual_tic_motion_limits = (  # type: ignore[method-assign]
+        lambda: called.append("manual_motion")
+        or (True, "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000.")
+    )
 
     try:
         window._run_manual_auto_connect_hardware()
 
         assert called == [
             "scale", "supply", "current", "tic", "persistent",
-            "step", "current_limit", "motion", "verified",
+            "step", "current_limit", "motion", "verified", "manual_motion",
         ]
         log_text = window.log_output.toPlainText()
         assert "Manual hardware auto-connect: PASS: Tic step mode 1/8 step" in log_text
@@ -35077,12 +35086,13 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         assert tic.step_modes == ["8"]
         assert tic.current_limits == [343.0]
         assert tic.motion_limit_calls == [
-            ("--max-speed", "10000000", "--max-accel", "100000", "--max-decel", "100000")
+            ("--max-speed", "10000000", "--max-accel", "2000000", "--max-decel", "2000000"),
+            ("--max-speed", "10000000", "--max-accel", "100000", "--max-decel", "100000"),
         ]
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic step mode" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
-        assert "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000" in (
+        assert "PASS: Tic motion limits speed 10000000, accel 2000000, decel 2000000" in (
             window.label_hardware_provisioning_status.text()
         )
     finally:
@@ -35143,7 +35153,35 @@ def test_restore_idle_tic_motion_limits_refreshes_after_dynamic_move(tmp_path: P
         window._restore_idle_tic_motion_limits()
 
         assert tic.calls == [(10_000_000, 100_000, 100_000)]
-        assert "Restored Tic idle motion limits" in window.log_output.toPlainText()
+        assert "Restored Tic manual/idle motion limits" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_automation_and_manual_acceleration_profiles_are_separate_physical_settings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert window.spin_automation_accel_mm_s2.value() == pytest.approx(25.0)
+        assert window.spin_manual_accel_mm_s2.value() == pytest.approx(1.25)
+        assert window._selected_tic_motion_limits() == {
+            "max_speed": 10_000_000,
+            "max_accel": 2_000_000,
+            "max_decel": 2_000_000,
+        }
+        assert window._manual_tic_motion_limits() == {
+            "max_speed": 10_000_000,
+            "max_accel": 100_000,
+            "max_decel": 100_000,
+        }
+
+        window.spin_automation_accel_mm_s2.setValue(12.5)
+        window.spin_manual_accel_mm_s2.setValue(2.5)
+
+        assert window._selected_tic_motion_limits()["max_accel"] == 1_000_000
+        assert window._manual_tic_motion_limits()["max_accel"] == 200_000
     finally:
         _close_test_window(window)
 
@@ -35212,8 +35250,8 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
                 "VIN voltage: 12.00 V",
                 "Step mode: 1/8 step",
                 "Max speed: 10000000",
-                "Max acceleration: 100000",
-                "Max deceleration: 100000",
+                "Max acceleration: 2000000",
+                "Max deceleration: 2000000",
                 "Current limit: 343 mA",
                 "Errors currently stopping the motor: None",
             ]
@@ -38587,6 +38625,23 @@ def test_saved_full_step_settings_cannot_override_canonical_t500_profile(tmp_pat
         _close_test_window(window)
 
 
+def test_physical_acceleration_profiles_survive_reopen(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("automation_accel_mm_s2", 30.0)
+    settings.setValue("manual_accel_mm_s2", 2.5)
+    settings.sync()
+
+    reopened = _build_window(tmp_path, qtbot, preserve_settings=True)
+    try:
+        assert reopened.spin_automation_accel_mm_s2.value() == pytest.approx(30.0)
+        assert reopened.spin_manual_accel_mm_s2.value() == pytest.approx(2.5)
+        assert reopened._selected_tic_motion_limits()["max_accel"] == 2_400_000
+        assert reopened._manual_tic_motion_limits()["max_accel"] == 200_000
+    finally:
+        _close_test_window(reopened)
+
+
 def test_apply_tic_persistent_profile_repairs_and_verifies_controller(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -38650,8 +38705,8 @@ def test_verified_tic_profile_is_recorded_in_run_metadata(tmp_path: Path, qtbot)
             "VIN voltage: 12.00 V",
             "Step mode: 1/8 step",
             "Max speed: 10000000",
-            "Max acceleration: 100000",
-            "Max deceleration: 100000",
+            "Max acceleration: 2000000",
+            "Max deceleration: 2000000",
             "Current limit: 343 mA",
             "Errors currently stopping the motor: None",
         ]
@@ -38667,6 +38722,8 @@ def test_verified_tic_profile_is_recorded_in_run_metadata(tmp_path: Path, qtbot)
         assert profile["device_serial"] == "00501366"
         assert profile["step_mode"] == "8"
         assert profile["tic_units_per_mm"] == pytest.approx(800.0)
+        assert profile["automation_acceleration_mm_s2"] == pytest.approx(25.0)
+        assert profile["manual_acceleration_mm_s2"] == pytest.approx(1.25)
         assert profile["readback"]["step_mode"] == "8"
         assert profile["readback"]["current_limit_mA"] == 343
         assert profile["persistent_readback"]["step_mode"] == "8"
