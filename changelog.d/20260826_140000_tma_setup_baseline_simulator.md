@@ -1,0 +1,1 @@
+Added an offline deterministic TMA setup-baseline simulator and setup.csv replay tool for validating zero-load detection against fresh-sample delays, motor quantization, false knees, curved tensile response, and missing or ambiguous slack plateaus before changing live hardware control.
