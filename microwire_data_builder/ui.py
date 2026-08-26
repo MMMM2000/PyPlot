@@ -56,8 +56,26 @@ _PROJECT_SAVE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 
-def _check_transition_source_paths(paths: Sequence[str]) -> Dict[str, bool]:
-    return {path: Path(path).exists() for path in paths}
+def _check_transition_source_paths(
+    paths: Sequence[str],
+    family: str = "",
+) -> Dict[str, bool]:
+    availability: Dict[str, bool] = {}
+    for path_value in paths:
+        path = Path(path_value)
+        available = path.exists()
+        if available and family == "tma":
+            try:
+                available = bool(
+                    mini_dma_core is not None
+                    and mini_dma_core.supports_transition_review(
+                        mini_dma_core.load_run(path)
+                    )
+                )
+            except Exception:
+                available = False
+        availability[path_value] = available
+    return availability
 
 
 def _transition_lab_for_path(path: Path | str | None) -> str:
@@ -8587,6 +8605,7 @@ def _mini_dma_project_review_payload(
         entry = entry_by_target.get((stress, sweep_index))
         if entry is None:
             continue
+        target["display_label"] = entry.target_label
         stored = reviews.get(_mini_dma_review_record_id(record, entry.target_label), {})
         if not isinstance(stored, Mapping) or not stored:
             continue
@@ -8641,6 +8660,81 @@ def _mini_dma_project_review_payload(
             }
         )
     return draft
+
+
+def _apply_saved_tma_review_payload(
+    record: MiniDmaRecord,
+    portable_payload: Mapping[str, Any],
+    section: "MiniDmaSection",
+    logger: logging.Logger,
+) -> bool:
+    """Mirror one freshly saved portable review without reopening its source run."""
+
+    from plotting.shared.transition_review import sidecar_path_for_measurement
+
+    path = getattr(record, "path", None)
+    if not isinstance(path, Path):
+        return False
+    review_path = sidecar_path_for_measurement(path, family="tma")
+    changed = False
+    for target in portable_payload.get("targets", []):
+        if not isinstance(target, Mapping):
+            continue
+        target_label = str(target.get("display_label") or "").strip()
+        portable_status = str(target.get("status") or "").strip()
+        if not target_label or portable_status == "unreviewed":
+            continue
+        status = (
+            MINI_DMA_REVIEW_STATUS_ACCEPTED
+            if portable_status in {"accepted_auto", "manual_adjusted"}
+            else portable_status
+        )
+        project_review: Dict[str, Any] = {
+            "status": status,
+            "analysis_included": bool(
+                target.get(
+                    "analysis_included",
+                    portable_status
+                    in {"accepted_auto", "manual_adjusted", "no_transition"},
+                )
+            ),
+            "target_label": target_label,
+            "values": _clean_mini_dma_transition_values(target.get("final_values")),
+            "auto_values_mA": _clean_mini_dma_transition_values(
+                target.get("auto_values")
+            ),
+            "manual_values_mA": _clean_mini_dma_transition_values(
+                target.get("manual_values")
+            ),
+            "strain_at_transition_pct": _clean_mini_dma_transition_values(
+                target.get("strain_at_transition_pct")
+            ),
+            "cleared_labels": sorted(_mini_dma_cleared_transition_labels(target)),
+            "portable_sidecar_path": str(review_path),
+            "portable_review_revision": portable_payload.get("review_revision", 1),
+            "measurement_fingerprint": portable_payload.get(
+                "measurement_fingerprint", ""
+            ),
+        }
+        strain_reference = target.get("strain_reference")
+        if isinstance(strain_reference, Mapping):
+            project_review["strain_reference"] = dict(strain_reference)
+        project_review = {
+            key: value
+            for key, value in project_review.items()
+            if value not in (None, "", [], {})
+        }
+        record_id = _mini_dma_review_record_id(record, target_label)
+        before = section._transition_reviews.get(record_id)
+        section.set_transition_review_for_target(record_id, project_review)
+        if section._transition_reviews.get(record_id) != before:
+            changed = True
+    if changed:
+        try:
+            section.data_updated.emit()
+        except Exception:
+            logger.debug("Could not emit TMA transition review update", exc_info=True)
+    return changed
 
 
 def _import_portable_tma_reviews(
@@ -27995,6 +28089,7 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         future = _TRANSITION_SOURCE_EXECUTOR.submit(
             _check_transition_source_paths,
             unknown,
+            self._family,
         )
 
         def _finished(result: concurrent.futures.Future[Dict[str, bool]]) -> None:
@@ -28194,6 +28289,10 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
         self._update_status_label()
         self.workspaceRefreshed.emit()
 
+    def _schedule_post_review_refresh(self) -> None:
+        self.show_loading("Updating transition review summary...")
+        QtCore.QTimer.singleShot(0, self.refresh_workspace)
+
     def _open_selected_review(self) -> None:
         selected = self._selected_row()
         path = selected.get("path") if selected else None
@@ -28201,16 +28300,17 @@ class _PortableTransitionReviewWorkspace(QtWidgets.QWidget):
             self._path_key(path), False
         ):
             return
-        self._review_callback([path])
-        self.refresh_workspace()
+        completed = self._review_callback([path])
+        if completed:
+            self._schedule_post_review_refresh()
 
     def _open_review(self) -> None:
         paths = self._lab_filtered_available_paths()
         if not paths:
-            self.refresh_workspace()
             return
-        self._review_callback(paths)
-        self.refresh_workspace()
+        completed = self._review_callback(paths)
+        if completed:
+            self._schedule_post_review_refresh()
 
 def _transition_review_units_by_path(
     rows: Sequence[Mapping[str, Any]],
@@ -28594,7 +28694,18 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
         }
         project_units = _transition_review_units_by_path(self._overview_rows())
         project_reviews = self._mini_dma_section.transition_reviews_snapshot()
-        completed = review_tma_runs(
+        def import_saved_review(path: Path, payload: Mapping[str, Any]) -> None:
+            record = records_by_path.get(path)
+            if record is None:
+                return
+            _apply_saved_tma_review_payload(
+                record,
+                payload,
+                self._mini_dma_section,
+                self._mini_dma_section.logger,
+            )
+
+        return review_tma_runs(
             self,
             paths,
             sample_for_path=lambda path: {
@@ -28610,15 +28721,8 @@ class _MiniDmaTransitionWorkspace(_PortableTransitionReviewWorkspace):
             )
             if path in records_by_path
             else None,
+            review_saved_callback=import_saved_review,
         )
-        if completed and self._mini_dma_section._reconcile_transition_reviews(records):
-            self._mini_dma_section._schedule_transition_review_store()
-            self._mini_dma_section._schedule_transition_table_apply()
-            try:
-                self._mini_dma_section.data_updated.emit()
-            except Exception:
-                pass
-        return completed
 
 class _VsmTransitionReviewPanel(QtWidgets.QWidget):
     def __init__(

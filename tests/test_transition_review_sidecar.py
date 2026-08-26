@@ -1722,16 +1722,34 @@ def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> 
     ]
 
     tma_paths = [tmp_path / "Sample C", tmp_path / "Sample D"]
+    saved_events = []
     completed = review_dialog.review_tma_runs(
         None,
         tma_paths,
         review_units_for_path=lambda _path: (
             ReviewUnitSummary("50 MPa", "no_transition"),
         ),
+        review_saved_callback=lambda path, payload: saved_events.append(
+            (path, dict(payload))
+        ),
     )
     assert completed == 2
-    assert [entry.sample_label for entry in captured[1][0]] == ["Sample C", "Sample D"]
-    assert all(entry.review_units[0].state == "no_transition" for entry in captured[1][0])
+    tma_entries = captured[1][0]
+    assert [entry.sample_label for entry in tma_entries] == ["Sample C", "Sample D"]
+    assert all(entry.review_units[0].state == "no_transition" for entry in tma_entries)
+
+    written = []
+    monkeypatch.setattr(
+        review_dialog,
+        "atomic_write_review",
+        lambda path, payload: written.append((path, dict(payload))),
+    )
+    tma_entries[0].save_callback({"target": "first"})
+    tma_entries[1].save_callback({"target": "second"})
+
+    assert [event[0] for event in saved_events] == tma_paths
+    assert [event[1]["target"] for event in saved_events] == ["first", "second"]
+    assert [event[0].parent for event in written] == tma_paths
 
 def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatch) -> None:
     import logging

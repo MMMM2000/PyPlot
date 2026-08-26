@@ -2929,6 +2929,18 @@ def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
         QtWidgets.QApplication.processEvents()
 
 
+def test_tma_source_check_rejects_unsupported_run_modes(tmp_path: Path) -> None:
+    current_sweep = _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path)
+    iso_current = _write_iso_current_mini_dma_run(tmp_path)
+
+    availability = builder_ui._check_transition_source_paths(  # noqa: SLF001
+        [str(current_sweep), str(iso_current)],
+        "tma",
+    )
+
+    assert availability[str(current_sweep)] is True
+    assert availability[str(iso_current)] is False
+
 def test_dma_transitions_view_lists_run_target_rows() -> None:
     _ensure_qapp()
     record = _sample_mini_dma_record()
@@ -9765,9 +9777,11 @@ def test_transition_source_checks_do_not_block_workspace_refresh(
     source.write_text('data', encoding='utf-8')
     original_check = builder_ui._check_transition_source_paths  # noqa: SLF001
 
-    def _slow_check(paths: tuple[str, ...]) -> dict[str, bool]:
+    def _slow_check(
+        paths: tuple[str, ...], family: str = ""
+    ) -> dict[str, bool]:
         time.sleep(0.25)
-        return original_check(paths)
+        return original_check(paths, family)
 
     monkeypatch.setattr(builder_ui, '_check_transition_source_paths', _slow_check)
     workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
@@ -12706,6 +12720,109 @@ def test_vsm_shared_editor_uses_portable_design_and_real_cycles(tmp_path: Path) 
             editor.deleteLater()
         section.close()
         section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+def test_tma_review_save_imports_only_the_saved_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    run_path = _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path)
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="current-sweep",
+    )
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    section._all_mini_dma_records = [record]  # noqa: SLF001
+    workspace = builder_ui._MiniDmaTransitionWorkspace(section)  # noqa: SLF001
+    scheduled: list[str] = []
+    payload = {
+        "review_revision": 1,
+        "measurement_fingerprint": "saved-fingerprint",
+        "targets": [
+            {
+                "display_label": "50 MPa / 1 g",
+                "status": "manual_adjusted",
+                "analysis_included": True,
+                "auto_values": {"As": 10.0},
+                "manual_values": {"As": 11.0},
+                "final_values": {"As": 11.0},
+            }
+        ],
+    }
+
+    def fake_review_tma_runs(_parent, paths, **kwargs):
+        assert list(paths) == [run_path]
+        kwargs["review_saved_callback"](run_path, payload)
+        return 1
+
+    monkeypatch.setattr(
+        "plotting.shared.transition_review_dialog.review_tma_runs",
+        fake_review_tma_runs,
+    )
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "load_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("saving a prepared review must not reopen source data")
+        ),
+    )
+    monkeypatch.setattr(
+        section,
+        "_reconcile_transition_reviews",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("all-run reconciliation must not run on close")
+        ),
+    )
+    monkeypatch.setattr(
+        section,
+        "_schedule_transition_review_store",
+        lambda: scheduled.append("store"),
+    )
+    monkeypatch.setattr(
+        section,
+        "_schedule_transition_table_apply",
+        lambda: scheduled.append("table"),
+    )
+    try:
+        assert workspace._review([run_path]) == 1  # noqa: SLF001
+        review_id = builder_ui._mini_dma_review_record_id(  # noqa: SLF001
+            record, "50 MPa / 1 g"
+        )
+        assert section._transition_reviews[review_id]["values"] == {"As": 11.0}  # noqa: SLF001
+        assert scheduled == ["store", "table"]
+    finally:
+        workspace.close()
+        section.close()
+        workspace.deleteLater()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_workspace_defers_post_review_refresh(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "run"
+    workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
+        "Transitions",
+        "tma",
+        lambda: [run_path],
+        lambda _paths: 1,
+    )
+    refreshes: list[str] = []
+    workspace._lab_filtered_available_paths = lambda: [run_path]  # type: ignore[method-assign]  # noqa: SLF001
+    workspace.refresh_workspace = lambda: refreshes.append("refresh")  # type: ignore[method-assign]
+    try:
+        workspace._open_review()  # noqa: SLF001
+        assert refreshes == []
+        QtWidgets.QApplication.processEvents()
+        assert refreshes == ["refresh"]
+    finally:
+        workspace.close()
+        workspace.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 def test_tma_transition_workspace_uses_lazy_project_table_records(

@@ -1762,6 +1762,7 @@ class ReviewQueueEntry:
     saved: bool = False
     review_units: tuple[ReviewUnitSummary, ...] = ()
     loader: Callable[[], PreparedTransitionReview] | None = None
+    save_callback: Callable[[Mapping[str, Any]], None] | None = None
 
     @property
     def label(self) -> str:
@@ -2187,6 +2188,7 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             prepared_value.plots,
             prepared_value.sidecar_path,
             self.editor_host,
+            save_callback=entry.save_callback,
         )
         editor.setWindowFlags(QtCore.Qt.WindowType.Widget)
         editor._queue_mode = True  # noqa: SLF001
@@ -2557,6 +2559,20 @@ def _build_current_annealing_review_dialog(
         if isinstance(initial_payload, Mapping)
         else draft
     )
+    if isinstance(initial_payload, Mapping):
+        display_labels = {
+            str(target.get("target_key") or ""): str(
+                target.get("display_label") or ""
+            ).strip()
+            for target in initial_payload.get("targets", [])
+            if isinstance(target, Mapping)
+        }
+        for target in payload.get("targets", []):
+            if not isinstance(target, dict) or target.get("display_label"):
+                continue
+            display_label = display_labels.get(str(target.get("target_key") or ""))
+            if display_label:
+                target["display_label"] = display_label
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different measurement content.")
     frame = annealing_core.load_file(str(path))
@@ -2679,6 +2695,20 @@ def _prepare_tma_review(
         if isinstance(initial_payload, Mapping)
         else draft
     )
+    if isinstance(initial_payload, Mapping):
+        display_labels = {
+            str(target.get("target_key") or ""): str(
+                target.get("display_label") or ""
+            ).strip()
+            for target in initial_payload.get("targets", [])
+            if isinstance(target, Mapping)
+        }
+        for target in payload.get("targets", []):
+            if not isinstance(target, dict) or target.get("display_label"):
+                continue
+            display_label = display_labels.get(str(target.get("target_key") or ""))
+            if display_label:
+                target["display_label"] = display_label
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different TMA run content.")
     plots: dict[str, ReviewPlot] = {}
@@ -2868,6 +2898,7 @@ def review_tma_runs(
     sample_for_path: Callable[[Path], Mapping[str, Any] | None] | None = None,
     review_units_for_path: Callable[[Path], Sequence[ReviewUnitSummary]] | None = None,
     review_payload_for_path: Callable[[Path], Mapping[str, Any] | None] | None = None,
+    review_saved_callback: Callable[[Path, Mapping[str, Any]], None] | None = None,
 ) -> int:
     entries: list[ReviewQueueEntry] = []
     for path_value in run_paths:
@@ -2895,24 +2926,47 @@ def review_tma_runs(
             )
             return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else None
 
+        def save_tma_review(
+            payload: Mapping[str, Any],
+            selected_path: Path = path,
+            selected_sidecar: Path = sidecar,
+        ) -> None:
+            atomic_write_review(selected_sidecar, payload)
+            if review_saved_callback is not None:
+                review_saved_callback(selected_path, payload)
+
         def build_tma_review(
             owner: QtWidgets.QWidget,
             selected_path: Path = path,
+            selected_payload_provider: Callable[
+                [Path], Mapping[str, Any] | None
+            ] = payload_for_selected_path,
+            selected_save_callback: Callable[
+                [Mapping[str, Any]], None
+            ] = save_tma_review,
         ) -> PortableTransitionReviewDialog:
-            return _build_tma_review_dialog(
-                owner,
+            prepared = _prepare_tma_review(
                 selected_path,
-                initial_payload=None,
+                initial_payload=selected_payload_provider(selected_path),
+            )
+            return PortableTransitionReviewDialog(
+                prepared.payload,
+                prepared.plots,
+                prepared.sidecar_path,
+                owner,
+                save_callback=selected_save_callback,
             )
 
         def load_tma_review(
             selected_path: Path = path,
+            selected_payload_provider: Callable[
+                [Path], Mapping[str, Any] | None
+            ] = payload_for_selected_path,
         ) -> PreparedTransitionReview:
             return _prepare_tma_review(
                 selected_path,
-                initial_payload=payload_for_selected_path(selected_path),
+                initial_payload=selected_payload_provider(selected_path),
             )
-
         entries.append(
             ReviewQueueEntry(
                 sample_label=sample_label,
@@ -2921,6 +2975,7 @@ def review_tma_runs(
                 review_units=review_units,
                 builder=build_tma_review,
                 loader=load_tma_review,
+                save_callback=save_tma_review,
             )
         )
     if not entries:
