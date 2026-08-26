@@ -64,6 +64,8 @@ class ReviewPlot:
     value_unit: str = 'mA'
     heating_series: tuple[pd.Series, pd.Series] | None = None
     cooling_series: tuple[pd.Series, pd.Series] | None = None
+    cooling_recorded: bool | None = None
+    cooling_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.payload = copy.deepcopy(dict(payload))
+        # Keep the sidebar tied to the last successful sidecar save. Draft
+        # auto-prefills and edits must remain visibly unreviewed until saved.
+        self._persisted_review_units = _review_units_from_payload(self.payload)
         self.plots = dict(plots)
         self.sidecar_path = Path(sidecar_path)
         self._save_callback = save_callback
@@ -158,6 +163,22 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                     label = target_label
                 self.target_list.addItem(label)
                 self._navigation_items.append((target_index, unit_index))
+        # Rebuild the persisted snapshot from the actual measured units exposed
+        # by the plot. This preserves unreviewed cycles that are not represented
+        # in an older sidecar's final-values fields.
+        persisted_units: list[ReviewUnitSummary] = []
+        archive_requested = self.payload.get("archive_requested") is True
+        for target in targets:
+            for unit_title, unit_labels in self._review_units_for_target(target):
+                if archive_requested:
+                    state, tooltip = (
+                        "archive_requested",
+                        "Complete measurement run marked for later archiving.",
+                    )
+                else:
+                    state, tooltip = _review_unit_state(target, unit_labels)
+                persisted_units.append(ReviewUnitSummary(unit_title, state, tooltip))
+        self._persisted_review_units = tuple(persisted_units)
         self.target_list.currentRowChanged.connect(self._target_changed)
         left_layout.addWidget(self.target_list, 1)
         split.addWidget(left)
@@ -423,6 +444,18 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 available.update(
                     (f"As{loop}", f"Af{loop}", f"Ms{loop}", f"Mf{loop}")
                 )
+        elif self.payload.get("experiment_family") == "tma":
+            plot = self.plots.get(str(target.get("target_key") or ""))
+            cooling_recorded = (
+                bool(target.get("cooling_branch_override"))
+                if "cooling_branch_override" in target
+                else bool(plot.cooling_recorded)
+                if plot is not None and plot.cooling_recorded is not None
+                else True
+            )
+            available = {"As", "Af"}
+            if cooling_recorded:
+                available.update(("Ms", "Mf"))
         else:
             available.update(("As", "Af", "Ms", "Mf"))
         return _ordered_transition_labels(available)
@@ -495,22 +528,28 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         plot = self.plots.get(str(target.get("target_key") or ""))
         title = self.review_unit_combo.currentText()
         branch = (plot.unit_branches or {}).get(title) if plot is not None else None
-        if branch is None:
+        if branch is None and (plot is None or plot.cooling_recorded is None):
             self.cooling_branch_row.hide()
             return
-        overrides = target.get("cooling_branch_overrides")
-        overrides = overrides if isinstance(overrides, Mapping) else {}
-        checked = bool(overrides.get(title, branch.cooling_recorded))
+        if branch is not None:
+            overrides = target.get("cooling_branch_overrides")
+            overrides = overrides if isinstance(overrides, Mapping) else {}
+            checked = bool(overrides.get(title, branch.cooling_recorded))
+            reason = branch.cooling_reason
+            manual_override = title in overrides
+        else:
+            checked = bool(
+                target.get("cooling_branch_override", plot.cooling_recorded)
+            )
+            reason = plot.cooling_reason
+            manual_override = "cooling_branch_override" in target
         blocker = QtCore.QSignalBlocker(self.cooling_branch_check)
         try:
             self.cooling_branch_check.setChecked(checked)
         finally:
             del blocker
-        if title in overrides:
-            prefix = "Manual override. "
-        else:
-            prefix = ""
-        self.cooling_branch_reason.setText(prefix + branch.cooling_reason)
+        prefix = "Manual override. " if manual_override else ""
+        self.cooling_branch_reason.setText(prefix + reason)
         self.cooling_branch_row.show()
 
     def _cooling_branch_override_changed(self, checked: bool) -> None:
@@ -521,15 +560,21 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         plot = self.plots.get(str(target.get("target_key") or ""))
         title = self.review_unit_combo.currentText()
         branch = (plot.unit_branches or {}).get(title) if plot is not None else None
-        if branch is None:
+        if branch is None and (plot is None or plot.cooling_recorded is None):
             return
-        overrides = target.setdefault("cooling_branch_overrides", {})
-        if checked == branch.cooling_recorded:
-            overrides.pop(title, None)
+        if branch is not None:
+            overrides = target.setdefault("cooling_branch_overrides", {})
+            if checked == branch.cooling_recorded:
+                overrides.pop(title, None)
+            else:
+                overrides[title] = bool(checked)
+            if not overrides:
+                target.pop("cooling_branch_overrides", None)
         else:
-            overrides[title] = bool(checked)
-        if not overrides:
-            target.pop("cooling_branch_overrides", None)
+            if checked == plot.cooling_recorded:
+                target.pop("cooling_branch_override", None)
+            else:
+                target["cooling_branch_override"] = bool(checked)
         if checked:
             unavailable = target.pop("branch_unavailable_review", None)
             if isinstance(unavailable, Mapping):
@@ -585,9 +630,9 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             return "not_observed"
         if label in manual:
             return "manual"
-        if label in auto and (status == "accepted_auto" or label in final):
+        if label in auto:
             return "auto"
-        return None
+        return "not_observed"
 
     def _populate_values_table(self, target: Mapping[str, Any]) -> None:
         blocker = QtCore.QSignalBlocker(self.values_table)
@@ -956,17 +1001,18 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         auto = dict(target.get("auto_values") or {})
         active_labels = set(self._choices)
         applicable_labels = set(self._labels_for_target(target))
-        current_annealing = (
-            self.payload.get("experiment_family") == "current_annealing"
-        )
+        branch_aware = self.payload.get("experiment_family") in {
+            "current_annealing",
+            "tma",
+        }
         prior_manual = dict(target.get("manual_values") or {})
         prior_final = dict(target.get("final_values") or {})
         prior_cleared = set(str(label) for label in target.get("cleared_labels", ()))
         unavailable_labels = {
             label
             for label in set(prior_manual) | set(prior_final) | prior_cleared
-            if current_annealing
-            and re.fullmatch(r"(?:As|Af|Ms|Mf)\d+", str(label))
+            if branch_aware
+            and is_transition_label(str(label))
             and label not in applicable_labels
         }
         if unavailable_labels:
@@ -989,7 +1035,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             str(label): float(value)
             for label, value in prior_manual.items()
             if label not in active_labels
-            and (not current_annealing or label in applicable_labels)
+            and (not branch_aware or label in applicable_labels)
         }
         manual.update(
             {
@@ -1002,7 +1048,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             str(label)
             for label in prior_cleared
             if label not in active_labels
-            and (not current_annealing or label in applicable_labels)
+            and (not branch_aware or label in applicable_labels)
         }
         cleared.update(
             label
@@ -1013,7 +1059,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             str(label): float(value)
             for label, value in prior_final.items()
             if label not in active_labels
-            and (not current_annealing or label in applicable_labels)
+            and (not branch_aware or label in applicable_labels)
         }
         final.update(
             {
@@ -1032,6 +1078,8 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         target["manual_values"] = manual
         target["final_values"] = final
         target["cleared_labels"] = sorted(cleared)
+        if branch_aware:
+            target["applicable_labels"] = sorted(applicable_labels)
         all_choices = {
             label: (
                 self._choices[label]
@@ -1115,7 +1163,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 label,
                 color=color,
                 dashed=dashed,
-                manual=movable,
+                manual=pool is self._manual_marker_items,
             )
             return marker
         style = (
@@ -1131,12 +1179,11 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             label=label,
             labelOpts={"position": 0.92, "color": color},
         )
-        if movable:
-            marker.sigPositionChangeFinished.connect(
-                lambda moved, selected_label=label: self._manual_marker_moved(
-                    selected_label, float(moved.value())
-                )
+        marker.sigPositionChangeFinished.connect(
+            lambda moved, selected_label=label: self._manual_marker_moved(
+                selected_label, float(moved.value())
             )
+        )
         self.plot_item.addItem(marker)
         pool[label] = marker
         self._style_transition_marker(
@@ -1144,7 +1191,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             label,
             color=color,
             dashed=dashed,
-            manual=movable,
+            manual=pool is self._manual_marker_items,
         )
         return marker
 
@@ -1319,13 +1366,17 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             return True
 
         unit_branch = (plot.unit_branches or {}).get(unit_title)
+        branch_metadata = unit_branch is not None or plot.cooling_recorded is not None
         cooling_enabled = bool(
             self.cooling_branch_check.isChecked()
-            if unit_branch is not None
+            if branch_metadata
             else True
         )
         heating_series = plot.heating_series
         cooling_series = plot.cooling_series
+        if unit_branch is None and plot.cooling_recorded is not None and not cooling_enabled:
+            heating_series = (plot.x, plot.y)
+            cooling_series = None
         if unit_branch is not None:
             heating_frame = unit_branch.heating
             if not cooling_enabled and unit_branch.cooling is not None:
@@ -1419,7 +1470,8 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         for label, value in auto.items():
             if label not in self._active_unit_labels:
                 continue
-            if self._choices.get(label) == "not_observed":
+            choice = self._choices.get(label)
+            if choice not in {None, "auto"}:
                 continue
             marker_value = float(value)
             marker = self._marker_item(
@@ -1427,7 +1479,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
                 label,
                 color=self._transition_marker_color(label),
                 dashed=self._transition_marker_is_finish(label),
-                movable=False,
+                movable=True,
             )
             marker.setPos(marker_value)
             marker.setToolTip(
@@ -1510,6 +1562,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._update_choice_row(label)
         self._selected_row_changed()
         self._store_target_controls()
+        self._draw_target()
         self._update_decision_summary()
 
     def _plot_clicked(self, event: Any) -> None:
@@ -1526,6 +1579,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             self._save_callback(copy.deepcopy(self.payload))
         else:
             atomic_write_review(self.sidecar_path, self.payload)
+        self._persisted_review_units = _review_units_from_payload(self.payload)
 
     def _save_and_accept(self) -> None:
         self._store_target_controls()
@@ -1633,11 +1687,30 @@ def _review_units_from_payload(
             )
         }
         labels.update(str(label) for label in target.get("cleared_labels", ()))
+        explicit_applicable = {
+            str(label)
+            for label in target.get("applicable_labels", ())
+            if _transition_label_parts(str(label)) is not None
+        }
+        represented = {
+            str(label)
+            for field in ("manual_values", "final_values")
+            for label in (
+                target.get(field, {}).keys()
+                if isinstance(target.get(field), Mapping)
+                else ()
+            )
+        }
+        represented.update(str(label) for label in target.get("cleared_labels", ()))
+        final_status = str(target.get("status") or "").strip().casefold() in {
+            "accepted_auto", "manual_adjusted", "no_transition", "excluded"
+        }
+        applicable = explicit_applicable or (represented if final_status else set())
         if family == "current_annealing":
             loops = sorted(
                 {
                     parts[1]
-                    for label in labels
+                    for label in labels | applicable
                     if (parts := _transition_label_parts(label)) is not None
                     and parts[1] is not None
                 }
@@ -1647,7 +1720,11 @@ def _review_units_from_payload(
             units = [
                 (
                     f"Cycle {loop}",
-                    [f"{point}{loop}" for point in ("As", "Af", "Ms", "Mf")],
+                    [
+                        f"{point}{loop}"
+                        for point in ("As", "Af", "Ms", "Mf")
+                        if not applicable or f"{point}{loop}" in applicable
+                    ],
                 )
                 for loop in loops
             ]
@@ -1657,7 +1734,16 @@ def _review_units_from_payload(
                 or target.get("target_key")
                 or "Transitions"
             )
-            units = [(display, [point for point in ("As", "Af", "Ms", "Mf")])]
+            units = [
+                (
+                    display,
+                    [
+                        point
+                        for point in ("As", "Af", "Ms", "Mf")
+                        if not applicable or point in applicable
+                    ],
+                )
+            ]
         for label, unit_labels in units:
             if archive_requested:
                 state = "archive_requested"
@@ -1998,6 +2084,11 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
     def _review_units_from_editor(
         self, editor: PortableTransitionReviewDialog
     ) -> tuple[ReviewUnitSummary, ...]:
+        # Draft choices can be complete because auto/not-observed defaults are
+        # preselected, but they are not a review until the sidecar write succeeds.
+        persisted = tuple(editor._persisted_review_units)  # noqa: SLF001
+        if persisted:
+            return persisted
         summaries: list[ReviewUnitSummary] = []
         targets = editor._targets()  # noqa: SLF001
         for navigation_row, (target_index, unit_index) in enumerate(
@@ -2211,12 +2302,13 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
     def _select_review_unit(self, run_index: int, navigation_row: int) -> bool:
         if not 0 <= run_index < len(self._run_items):
             return False
+        # Showing a lazily prepared editor may rebuild the filtered tree while
+        # the previous run is being stored.  Resolve the run item only after
+        # that refresh so keyboard navigation never selects a stale Qt item.
+        self._show_editor(run_index, navigation_row)
         run_item = self._run_items[run_index]
         if not run_item.childCount():
-            self._show_editor(run_index, navigation_row)
-            run_item = self._run_items[run_index]
-            if not run_item.childCount():
-                return True
+            return True
         row = min(
             max(int(navigation_row), 0),
             run_item.childCount() - 1,
@@ -2525,6 +2617,52 @@ def review_current_annealing_file(
     _apply_queue_context(dialog, queue_position)
     return dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
 
+def _split_tma_review_branches(
+    group: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool, str]:
+    """Split one sweep and reject short/sudden current drops as cooling."""
+
+    if group.empty:
+        empty = group.iloc[0:0].copy()
+        return empty, empty, False, "No usable current sweep was recorded."
+    current = pd.to_numeric(group["current_mA"], errors="coerce")
+    if not current.notna().any():
+        empty = group.iloc[0:0].copy()
+        return empty, empty, False, "No usable current values were recorded."
+    peak_position = int(current.fillna(-math.inf).to_numpy().argmax())
+    heating = group.iloc[: peak_position + 1].copy()
+    cooling = group.iloc[peak_position:].copy()
+    cooling_current = pd.to_numeric(cooling["current_mA"], errors="coerce").dropna()
+    span = float(current.max() - current.min())
+    tolerance = max(0.02, span * 0.001)
+    differences = cooling_current.diff().dropna()
+    falling_steps = int((differences < -tolerance).sum())
+    tested_steps = int((differences.abs() > tolerance).sum())
+    drop = (
+        float(cooling_current.iloc[0] - cooling_current.iloc[-1])
+        if len(cooling_current.index) >= 2
+        else 0.0
+    )
+    minimum_drop = max(1.0, span * 0.05)
+    recorded = bool(
+        len(cooling_current.index) >= 6
+        and falling_steps >= 4
+        and tested_steps > 0
+        and falling_steps / tested_steps >= 0.55
+        and drop >= minimum_drop
+    )
+    if recorded:
+        reason = (
+            f"Sustained cooling ramp detected: {falling_steps} falling-current "
+            f"steps and {drop:.3g} mA total decrease."
+        )
+    else:
+        reason = (
+            "No sustained cooling ramp was recorded; short or abrupt current "
+            "drops are treated as heating termination or wire failure."
+        )
+    return heating, cooling, recorded, reason
+
 def _prepare_tma_review(
     run_path: Path,
     *,
@@ -2562,9 +2700,13 @@ def _prepare_tma_review(
         if sweep_count > 1:
             title += f" \N{MIDDLE DOT} sweep {sweep_index}/{sweep_count}"
         l0_mm = tma_core.group_l0_mm(run, group)
+        strain = tma_core.strain_from_trace_minimum_length(run, group)
+        heating, cooling, cooling_recorded, cooling_reason = (
+            _split_tma_review_branches(group)
+        )
         plots[key] = ReviewPlot(
             pd.to_numeric(group["current_mA"], errors="coerce"),
-            tma_core.strain_from_trace_minimum_length(run, group),
+            strain,
             title,
             "Strain (%) · per-target L₀",
             derives_transition_strain=True,
@@ -2576,6 +2718,16 @@ def _prepare_tma_review(
                 ),
                 **({"l0_mm": l0_mm} if l0_mm is not None else {}),
             },
+            heating_series=(
+                pd.to_numeric(heating["current_mA"], errors="coerce"),
+                strain.reindex(heating.index),
+            ),
+            cooling_series=(
+                pd.to_numeric(cooling["current_mA"], errors="coerce"),
+                strain.reindex(cooling.index),
+            ),
+            cooling_recorded=cooling_recorded,
+            cooling_reason=cooling_reason,
         )
     return PreparedTransitionReview(payload, plots, sidecar)
 
@@ -2723,46 +2875,49 @@ def review_tma_runs(
         sample = sample_for_path(path) if sample_for_path is not None else None
         sample_label, run_label = _queue_labels(path, sample)
         sidecar = sidecar_path_for_measurement(path, family="tma")
-        review_units = _saved_review_units(sidecar)
-        if not review_units and review_units_for_path is not None:
-            review_units = tuple(review_units_for_path(path))
-        payload_value = (
-            review_payload_for_path(path)
-            if review_payload_for_path is not None
-            else None
+        project_units = (
+            tuple(review_units_for_path(path))
+            if review_units_for_path is not None
+            else ()
         )
-        initial_payload = (
-            copy.deepcopy(dict(payload_value))
-            if isinstance(payload_value, Mapping)
-            else None
-        )
+        if project_units:
+            review_units = project_units
+            saved = _review_units_have_completed_review(review_units)
+        else:
+            review_units = _saved_review_units(sidecar)
+            saved = sidecar.exists() or _review_units_have_completed_review(review_units)
+
+        def payload_for_selected_path(selected_path: Path) -> Mapping[str, Any] | None:
+            value = (
+                review_payload_for_path(selected_path)
+                if review_payload_for_path is not None
+                else None
+            )
+            return copy.deepcopy(dict(value)) if isinstance(value, Mapping) else None
 
         def build_tma_review(
             owner: QtWidgets.QWidget,
             selected_path: Path = path,
-            selected_payload: Mapping[str, Any] | None = initial_payload,
         ) -> PortableTransitionReviewDialog:
             return _build_tma_review_dialog(
                 owner,
                 selected_path,
-                initial_payload=selected_payload,
+                initial_payload=None,
             )
 
         def load_tma_review(
             selected_path: Path = path,
-            selected_payload: Mapping[str, Any] | None = initial_payload,
         ) -> PreparedTransitionReview:
             return _prepare_tma_review(
                 selected_path,
-                initial_payload=selected_payload,
+                initial_payload=payload_for_selected_path(selected_path),
             )
 
         entries.append(
             ReviewQueueEntry(
                 sample_label=sample_label,
                 run_label=run_label,
-                saved=sidecar.exists()
-                or _review_units_have_completed_review(review_units),
+                saved=saved,
                 review_units=review_units,
                 builder=build_tma_review,
                 loader=load_tma_review,

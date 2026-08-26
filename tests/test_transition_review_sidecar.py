@@ -392,10 +392,11 @@ def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) ->
     )
     qtbot.addWidget(dialog)
 
-    assert not dialog.save_button.isEnabled()
-    for label in ("As1", "Af1", "Ms1", "Mf1"):
-        dialog.choice_buttons[label]["auto"].click()
     assert dialog.save_button.isEnabled()
+    assert all(
+        dialog.choice_buttons[label]["auto"].isChecked()
+        for label in ("As1", "Af1", "Ms1", "Mf1")
+    )
     dialog._save_and_accept()  # noqa: SLF001
 
     restored = load_review(sidecar)
@@ -497,15 +498,19 @@ def test_review_dialog_requires_each_choice_and_uses_human_tma_labels(
     assert dialog.target_list.item(0).text() == "50 MPa · 1.46 g"
     assert dialog.target_list.item(1).text() == "100 MPa · 2.92 g"
     assert not dialog.choice_buttons["Ms"]["auto"].isEnabled()
-    assert not dialog.save_button.isEnabled()
+    assert dialog.save_button.isEnabled()
+    assert dialog.choice_buttons["As"]["auto"].isChecked()
+    assert dialog.choice_buttons["Af"]["auto"].isChecked()
+    assert dialog.choice_buttons["Ms"]["not_observed"].isChecked()
+    assert dialog.choice_buttons["Mf"]["not_observed"].isChecked()
 
     dialog.choice_buttons["As"]["manual"].click()
     dialog.manual_value_edit.setText("31.5")
     dialog.choice_buttons["Af"]["auto"].click()
     dialog.choice_buttons["Ms"]["not_observed"].click()
     dialog.choice_buttons["Mf"]["not_observed"].click()
-    assert not dialog.save_button.isEnabled()
-    assert "remaining target" in dialog.decision_summary.text()
+    assert dialog.save_button.isEnabled()
+    assert "remaining target" not in dialog.decision_summary.text()
     first = dialog.payload["targets"][0]
     assert first["status"] == "manual_adjusted"
     assert first["final_values"] == {"As": 31.5, "Af": 70.0}
@@ -594,8 +599,21 @@ def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -
     )
 
     frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    fingerprint = dataframe_fingerprint(
+        frame, namespace="current_annealing", columns=("I_mA", "R_ohm")
+    )
+    target = make_target(
+        family="current_annealing",
+        measurement_fingerprint=fingerprint,
+        target_key="graph",
+        auto_values={"As1": 80.0, "Af1": 100.0, "Ms1": 60.0, "Mf1": 40.0},
+    )
     dialog = PortableTransitionReviewDialog(
-        _review(frame),
+        make_review(
+            family="current_annealing",
+            measurement_fingerprint=fingerprint,
+            targets=[target],
+        ),
         {
             "graph": ReviewPlot(
                 frame["I_mA"], frame["R_ohm"], "test run", "Resistance (ohm)"
@@ -608,10 +626,9 @@ def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -
     assert isinstance(dialog.plot_widget, pg.PlotWidget)
     assert dialog.canvas is dialog.plot_widget
     first_auto = dialog._auto_marker_items["As1"]  # noqa: SLF001
-    first_manual = dialog._manual_marker_items["As1"]  # noqa: SLF001
+    assert "As1" not in dialog._manual_marker_items  # noqa: SLF001
     dialog._draw_target()  # noqa: SLF001
     assert dialog._auto_marker_items["As1"] is first_auto  # noqa: SLF001
-    assert dialog._manual_marker_items["As1"] is first_manual  # noqa: SLF001
 
     as_auto = dialog._auto_marker_items["As1"]  # noqa: SLF001
     af_auto = dialog._auto_marker_items["Af1"]  # noqa: SLF001
@@ -635,6 +652,9 @@ def test_review_dialog_uses_pyqtgraph_and_reuses_marker_items(tmp_path, qtbot) -
     target = dialog.payload["targets"][0]
     assert target["manual_values"]["As1"] == 84.25
     assert target["final_values"]["As1"] == 84.25
+    assert dialog._choices["As1"] == "manual"  # noqa: SLF001
+    assert not dialog._auto_marker_items["As1"].isVisible()  # noqa: SLF001
+    assert dialog._manual_marker_items["As1"].isVisible()  # noqa: SLF001
 
 
 def test_review_dialog_draws_heating_and_cooling_as_separate_colours(
@@ -755,7 +775,7 @@ def test_current_annealing_cycles_are_reviewed_independently(tmp_path, qtbot) ->
     } == {"As1", "Af1", "Ms1", "Mf1"}
     for label in tuple(dialog.choice_buttons):
         dialog.choice_buttons[label]["auto"].click()
-    assert not dialog.save_button.isEnabled()
+    assert dialog.save_button.isEnabled()
     dialog.target_list.setCurrentRow(1)
     assert set(dialog.choice_buttons) == {"As2", "Af2", "Ms2", "Mf2"}
     assert {
@@ -830,7 +850,7 @@ def test_third_current_annealing_cycle_does_not_borrow_legacy_values(
     dialog.target_list.setCurrentRow(2)
 
     assert set(dialog.choice_buttons) == {"As3", "Af3", "Ms3", "Mf3"}
-    assert all(choice is None for choice in dialog._choices.values())  # noqa: SLF001
+    assert set(dialog._choices.values()) == {"not_observed"}  # noqa: SLF001
     for label in tuple(dialog.choice_buttons):
         dialog.choice_buttons[label]["not_observed"].click()
     dialog._store_target_controls()  # noqa: SLF001
@@ -1303,7 +1323,10 @@ def test_review_queue_shows_samples_runs_and_cycles_lazily(tmp_path, qtbot) -> N
 
     qtbot.keyClick(dialog.tree, QtCore.Qt.Key.Key_Down)
     qtbot.wait(10)
-    assert dialog.tree.currentItem() is run_b.child(0)
+    current_ref = dialog.tree.currentItem().data(
+        0, QtCore.Qt.ItemDataRole.UserRole
+    )
+    assert current_ref == ("unit", 1, 0)
     assert dialog._editors[1].target_list.currentRow() == 0  # noqa: SLF001
 
 
@@ -1773,3 +1796,81 @@ def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatc
         "50 MPa - sweep 2/2",
     }
     assert {review["values"]["As"] for review in reviews.values()} == {20.0, 23.0}
+
+
+def test_tma_branch_split_distinguishes_cooling_ramp_from_termination() -> None:
+    from plotting.shared.transition_review_dialog import _split_tma_review_branches
+
+    sustained = pd.DataFrame(
+        {
+            "current_mA": [0, 10, 20, 30, 40, 50, 45, 40, 35, 30, 25, 20],
+            "strain_pct": list(range(12)),
+        }
+    )
+    heating, cooling, recorded, reason = _split_tma_review_branches(sustained)
+
+    assert heating["current_mA"].tolist() == [0, 10, 20, 30, 40, 50]
+    assert cooling["current_mA"].tolist() == [50, 45, 40, 35, 30, 25, 20]
+    assert recorded is True
+    assert "Sustained cooling ramp" in reason
+
+    terminated = pd.DataFrame(
+        {
+            "current_mA": [0, 10, 20, 30, 40, 50, 49, 48],
+            "strain_pct": list(range(8)),
+        }
+    )
+    _heating, _cooling, recorded, reason = _split_tma_review_branches(terminated)
+
+    assert recorded is False
+    assert "No sustained cooling ramp" in reason
+
+
+def test_tma_review_hides_ms_mf_without_recorded_cooling(tmp_path, qtbot) -> None:
+    from plotting.shared.transition_review_dialog import (
+        PortableTransitionReviewDialog,
+        ReviewPlot,
+    )
+
+    fingerprint = "sha256:" + "a" * 64
+    target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="stress-100",
+        auto_values={"As": 12.0, "Af": 18.0, "Ms": 10.0, "Mf": 6.0},
+    )
+    payload = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=[target],
+    )
+    dialog = PortableTransitionReviewDialog(
+        payload,
+        {
+            "stress-100": ReviewPlot(
+                pd.Series([0.0, 10.0, 20.0]),
+                pd.Series([0.0, 1.0, 2.0]),
+                "100 MPa",
+                "Strain (%)",
+                cooling_recorded=False,
+                cooling_reason="No sustained cooling ramp was recorded.",
+            )
+        },
+        tmp_path / "transition_review.json",
+    )
+    qtbot.addWidget(dialog)
+
+    assert set(dialog.choice_buttons) == {"As", "Af"}
+    assert dialog.choice_buttons["As"]["auto"].isChecked()
+    assert dialog.choice_buttons["Af"]["auto"].isChecked()
+    dialog._store_target_controls()
+    assert dialog.payload["targets"][0]["final_values"] == {
+        "As": pytest.approx(12.0),
+        "Af": pytest.approx(18.0),
+    }
+
+    dialog.cooling_branch_check.click()
+
+    assert set(dialog.choice_buttons) == {"As", "Af", "Ms", "Mf"}
+    assert dialog.choice_buttons["Ms"]["auto"].isChecked()
+    assert dialog.choice_buttons["Mf"]["auto"].isChecked()

@@ -12146,9 +12146,19 @@ def test_project_save_payload_staging_runs_off_gui_thread(
 
     monkeypatch.setattr(builder_ui, "stage_payload_value", _slow_stage)
     section = window.fabrication_section
+    window._deferred_project_section_keys = set()
     section.data.table = pd.DataFrame({"value": [1]})
-    section.data.extra = {"payloads": {"records": "save_test_records"}}
-    section.store.save_payload("save_test_records", {"values": list(range(100))})
+
+    def _export_staged_payload() -> dict[str, object]:
+        stager = builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER
+        assert callable(stager)
+        return {
+            "payloads": {
+                "synthetic-payload": stager({"values": list(range(100))}),
+            }
+        }
+
+    monkeypatch.setattr(section, "export_project_payload", _export_staged_payload)
     try:
         QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
         window._dirty = True

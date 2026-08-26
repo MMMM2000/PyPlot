@@ -14,10 +14,12 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import traceback
 import unicodedata
@@ -49,7 +51,7 @@ _TRANSITION_SOURCE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix='transition-source-check',
 )
 _PROJECT_SAVE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1,
+    max_workers=2,
     thread_name_prefix='builder-project-save',
 )
 
@@ -10362,6 +10364,18 @@ def _mini_dma_record_supports_transition_review(record: MiniDmaRecord) -> bool:
 
     if mini_dma_core is None:
         return False
+    frame = getattr(record, "data", None)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        # Keep mode classification metadata-only on the GUI thread.
+        name = " ".join(
+            str(value or "")
+            for value in (getattr(record, "label", None), getattr(record, "path", None))
+        ).casefold().replace("_", "-")
+        if "iso-current" in name or "iso-strain" in name:
+            return False
+        if "iso-stress" in name or "current-sweep" in name:
+            return True
+        return bool(getattr(record, "transition_summary", ()) or ())
     try:
         # Classification only inspects run mode and target availability. Avoid
         # copying/downsampling every stored frame whenever a table row is clicked.
@@ -42515,6 +42529,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _wait_for_project_save_future(
         self,
         future: concurrent.futures.Future[Any],
+        *,
+        on_poll: Callable[[], None] | None = None,
     ) -> Any:
         """Wait for save work without starving the Qt event loop."""
 
@@ -42522,13 +42538,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
             wait_loop = QtCore.QEventLoop(self)
             poll_timer = QtCore.QTimer(self)
             poll_timer.setInterval(50)
-            poll_timer.timeout.connect(
-                lambda: wait_loop.quit() if future.done() else None
-            )
+            def _poll_future() -> None:
+                if on_poll is not None:
+                    on_poll()
+                if future.done():
+                    wait_loop.quit()
+
+            poll_timer.timeout.connect(_poll_future)
             poll_timer.start()
             wait_loop.exec()
             poll_timer.stop()
             poll_timer.deleteLater()
+        if on_poll is not None:
+            on_poll()
         return future.result()
 
     def _build_project_payload(
@@ -42561,6 +42583,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
             # the streaming codec reaches its first progress callback. Keep that
             # CPU and disk work off the GUI thread; the modal save dialog prevents
             # the underlying data from being edited while the worker reads it.
+            if threading.current_thread().name.startswith("builder-project-save"):
+                return stage_payload_value(
+                    value,
+                    payload_staging_root / f"payload-{staged_count:04d}",
+                )
             future = _PROJECT_SAVE_EXECUTOR.submit(
                 stage_payload_value,
                 value,
@@ -42584,6 +42611,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     payload_staging_root / f"payload-{staged_count:04d}",
                 )
 
+            if threading.current_thread().name.startswith("builder-project-save"):
+                return _worker()
             return self._wait_for_project_save_future(
                 _PROJECT_SAVE_EXECUTOR.submit(_worker)
             )
@@ -42695,11 +42724,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         progress.show()
         QtWidgets.QApplication.processEvents()
 
-        def _update_save_progress(message: str) -> None:
-            progress.setLabelText(str(message))
-            QtWidgets.QApplication.processEvents(
-                QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 25
-            )
+        progress_messages: queue.SimpleQueue[str] = queue.SimpleQueue()
+
+        def _queue_save_progress(message: str) -> None:
+            progress_messages.put(str(message))
+
+        def _drain_save_progress() -> None:
+            latest: str | None = None
+            while True:
+                try:
+                    latest = progress_messages.get_nowait()
+                except queue.Empty:
+                    break
+            if latest is not None:
+                progress.setLabelText(latest)
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -42713,8 +42751,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
             with TemporaryDirectory(
                 prefix="microwire-builder-save-payloads-", dir=staging_parent
             ) as staging_name:
-                payload = self._build_project_payload(
-                    Path(staging_name), progress=_update_save_progress
+                preparation_started = time.perf_counter()
+                preparation_future = _PROJECT_SAVE_EXECUTOR.submit(
+                    self._build_project_payload,
+                    Path(staging_name),
+                    _queue_save_progress,
+                )
+                payload = self._wait_for_project_save_future(
+                    preparation_future,
+                    on_poll=_drain_save_progress,
+                )
+                _drain_save_progress()
+                self.logger.info(
+                    "Prepared Builder project payload in %.3f s",
+                    time.perf_counter() - preparation_started,
                 )
                 sections = payload.get("sections", {})
                 if not sections:
@@ -42735,7 +42785,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     source_index=source_index,
                     loaded_sections=set(payload.get("sections", {})),
                 )
-                package_index = self._wait_for_project_save_future(future)
+                package_index = self._wait_for_project_save_future(
+                    future,
+                    on_poll=_drain_save_progress,
+                )
         except Exception as exc:
             self.logger.exception("Failed to save Builder project to %s", target)
             if not _builder_dialogs_suppressed():
