@@ -5065,7 +5065,7 @@ def test_isolated_wire_break_finishes_in_visible_parent_and_schedules_summary_an
         )
 
         assert process.closed is True
-        assert requested == [(run_dir, False, True)]
+        assert requested == [(run_dir, True, True)]
         assert window._dashboard_value_labels["task"].text() == (
             "Wire break or contact loss (final values)"
         )
@@ -5076,6 +5076,37 @@ def test_isolated_wire_break_finishes_in_visible_parent_and_schedules_summary_an
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_file_menu_can_reopen_previous_run_cleanup_review(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    run_dir = tmp_path / "completed-wire-break-run"
+    run_dir.mkdir()
+    reviewed: list[Path] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "discover_cleanup_candidates_for_run",
+        lambda path: [SimpleNamespace(path=Path(path)), SimpleNamespace(path=tmp_path)],
+    )
+    window._maybe_offer_run_cleanup = (  # type: ignore[method-assign]
+        lambda path=None: reviewed.append(Path(path))
+    )
+
+    try:
+        assert window.action_review_previous_runs is not None
+        window.action_review_previous_runs.trigger()
+        assert reviewed == [run_dir]
+    finally:
         _close_test_window(window)
 
 

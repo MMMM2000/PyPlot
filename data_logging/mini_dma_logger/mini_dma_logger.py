@@ -8942,6 +8942,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_current_sweep_advanced_settings: QtGui.QAction | None = None
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
+        self.action_review_previous_runs: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._current_sweep_advanced_dialog: QtWidgets.QDialog | None = None
         self._thermal_camera_dialog: MiniDmaThermalCameraDialog | None = None
@@ -9015,6 +9016,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.action_show_recipe_file_controls.setCheckable(True)
             self.action_show_recipe_file_controls.setChecked(False)
             self.action_show_recipe_file_controls.toggled.connect(self._set_recipe_file_controls_visible)
+
+    def _install_mini_dma_file_menu(self) -> None:
+        menu_bar = self.menuBar()
+        file_menu = self._menu_by_text("File")
+        if file_menu is None:
+            file_menu = menu_bar.addMenu("&File")
+            if file_menu is None:
+                return
+        file_menu.addSeparator()
+        self.action_review_previous_runs = file_menu.addAction(
+            "Review previous TMA runs..."
+        )
+        if self.action_review_previous_runs is not None:
+            self.action_review_previous_runs.triggered.connect(
+                self._choose_run_for_cleanup_review
+            )
 
     def _install_mini_dma_developer_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -9711,6 +9728,7 @@ class MainWindow(QtWidgets.QMainWindow):
             open_folder=self._choose_log_dir,
             help_topic="mini_dma_logger",
         )
+        self._install_mini_dma_file_menu()
         self._install_mini_dma_settings_menu()
         self._install_mini_dma_developer_menu()
 
@@ -15807,6 +15825,34 @@ class MainWindow(QtWidgets.QMainWindow):
             APP_NAME,
             f"Archived {len(moves)} older TMA run folder(s).\n\n{moved_lines}",
         )
+
+    def _choose_run_for_cleanup_review(self) -> None:
+        start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose a completed TMA run folder",
+            start_dir,
+        )
+        if not selected:
+            return
+        run_dir = Path(selected)
+        try:
+            candidates = discover_cleanup_candidates_for_run(run_dir)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                f"Could not review related TMA runs: {exc}",
+            )
+            return
+        if len(candidates) < 2:
+            QtWidgets.QMessageBox.information(
+                self,
+                APP_NAME,
+                "No related older wire-break runs were found for the selected run.",
+            )
+            return
+        self._maybe_offer_run_cleanup(run_dir)
 
     def _mark_current_sweep_voltage_limit(
         self,
@@ -36035,9 +36081,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_run_summary_generation(
                 summary_run_dir,
                 offer_cleanup=(
-                    state is ControlState.STOPPED
-                    and not offer_recovery
-                    and not terminal_fault
+                    wire_break_terminal
+                    or (
+                        state is ControlState.STOPPED
+                        and not offer_recovery
+                        and not terminal_fault
+                    )
                 ),
             )
         if self._isolated_supply_handoff_leases:
