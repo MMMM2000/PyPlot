@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import math
@@ -134,20 +135,136 @@ def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
     return 1000.0 if raw_max <= 1.2 else 1.0
 
 
-def load_file(path: str) -> pd.DataFrame:
+def resolve_measurement_path(path: str | Path) -> Path:
+    """Resolve either a legacy data file or a logger run folder."""
+
+    source = Path(path)
+    if source.is_dir():
+        metadata_path = source / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict) and metadata.get("data_file"):
+            measurement = source / str(metadata["data_file"])
+            if measurement.is_file():
+                return measurement
+        for name in ("measurement.csv", "measurement.txt"):
+            measurement = source / name
+            if measurement.is_file():
+                return measurement
+        raise ValueError(f"{source}: run folder has no measurement.csv or measurement.txt")
+    return source
+
+
+def measurement_display_name(path: str | Path) -> str:
+    """Return the human run name for files from either storage layout."""
+
+    source = resolve_measurement_path(path)
+    if source.name.casefold() in {"measurement.txt", "measurement.csv"}:
+        return source.parent.name
+    return source.stem
+
+
+def load_file(path: str | Path) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
-    Returns a DataFrame with I_mA and R_Ohm columns.
+    Returns a DataFrame with I_mA, R_Ohm, and V_V when voltage was recorded.
     """
+    source = resolve_measurement_path(path)
+
+    # Košice logger exports are labelled, six-column TSV files. They must be
+    # recognised before the legacy headerless three-column reader below;
+    # otherwise Cycle is mistaken for current and Ireal_mA for resistance.
+    if source.suffix.casefold() == '.dat':
+        try:
+            labelled = pd.read_csv(source, sep=r'\s+', engine='python')
+        except (csv.Error, pd.errors.ParserError, UnicodeError):
+            labelled = pd.DataFrame()
+        columns = {str(column).strip().casefold(): column for column in labelled.columns}
+        current_column = columns.get('ireal_ma')
+        resistance_column = columns.get('resistance_ohm')
+        if current_column is not None and resistance_column is not None:
+            voltage_column = next(
+                (
+                    columns.get(name)
+                    for name in ('voltage_v', 'vreal_v', 'ureal_v')
+                    if columns.get(name) is not None
+                ),
+                None,
+            )
+            values = {
+                'I_mA': pd.to_numeric(labelled[current_column], errors='coerce'),
+                'R_Ohm': pd.to_numeric(labelled[resistance_column], errors='coerce'),
+            }
+            if voltage_column is not None:
+                values['V_V'] = pd.to_numeric(labelled[voltage_column], errors='coerce')
+            frame = pd.DataFrame(values)
+            frame = frame.replace([np.inf, -np.inf], np.nan)
+            frame = frame.dropna(subset=['I_mA', 'R_Ohm']).reset_index(drop=True)
+            frame = frame.loc[frame['I_mA'] != 0].reset_index(drop=True)
+            if frame.empty:
+                raise ValueError(f'{source}: no usable samples after filtering zeros')
+            currents = frame['I_mA'].to_numpy(dtype=float)
+            resistances = frame['R_Ohm'].to_numpy(dtype=float)
+            trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(
+                currents, resistances
+            )
+            if trimmed_currents.shape[0] != currents.shape[0]:
+                frame = frame.iloc[: trimmed_currents.shape[0]].copy()
+                frame['I_mA'] = trimmed_currents
+                frame['R_Ohm'] = trimmed_resistances
+            return frame[[column for column in ('I_mA', 'R_Ohm', 'V_V') if column in frame]]
+
+    if source.name.casefold() == "measurement.csv":
+        session_frame = pd.read_csv(source)
+        required = {"measured_current_mA", "resistance_ohm"}
+        if required.issubset(session_frame.columns):
+            values = {
+                    "I_mA": pd.to_numeric(
+                        session_frame["measured_current_mA"], errors="coerce"
+                    ),
+                    "R_Ohm": pd.to_numeric(
+                        session_frame["resistance_ohm"], errors="coerce"
+                    ),
+            }
+            for voltage_name in ("measured_voltage_V", "voltage_V", "voltage_v"):
+                if voltage_name in session_frame.columns:
+                    values["V_V"] = pd.to_numeric(
+                        session_frame[voltage_name], errors="coerce"
+                    )
+                    break
+            frame = pd.DataFrame(values)
+            frame = frame.replace([np.inf, -np.inf], np.nan)
+            frame = frame.dropna(subset=["I_mA", "R_Ohm"]).reset_index(drop=True)
+            frame = frame.loc[frame["I_mA"] != 0].reset_index(drop=True)
+            if frame.empty:
+                raise ValueError(f"{source}: no usable samples after filtering zeros")
+            currents = frame["I_mA"].to_numpy(dtype=float)
+            resistances = frame["R_Ohm"].to_numpy(dtype=float)
+            trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(
+                currents, resistances
+            )
+            if trimmed_currents.shape[0] != currents.shape[0]:
+                frame = frame.iloc[: trimmed_currents.shape[0]].copy()
+                frame["I_mA"] = trimmed_currents
+                frame["R_Ohm"] = trimmed_resistances
+            return frame[
+                [column for column in ("I_mA", "R_Ohm", "V_V") if column in frame]
+            ]
+
     def _read(sep: str | None) -> pd.DataFrame:
-        return pd.read_csv(
-            path,
-            sep=sep,
-            engine="python",
-            header=None,
-            comment="#",
-            dtype=str,
-        )
+        try:
+            return pd.read_csv(
+                source,
+                sep=sep,
+                engine="python",
+                header=None,
+                comment="#",
+                dtype=str,
+            )
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
 
     try:
         df = _read(None)
@@ -156,8 +273,10 @@ def load_file(path: str) -> pd.DataFrame:
     else:
         if df.shape[1] > 3:
             df = _read(r"\s+")
+    if df.empty and df.shape[1] == 0:
+        return pd.DataFrame(columns=["I_mA", "R_Ohm", "V_V"])
     if df.shape[1] < 3:
-        raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
+        raise ValueError(f"{source}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3].copy()
     df.columns = ["I_A", "V_V", "R_Ohm"]
 
@@ -177,8 +296,13 @@ def load_file(path: str) -> pd.DataFrame:
     while len(df) > 1 and float(df.loc[0, "R_Ohm"]) <= 0.0:
         df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
-        raise ValueError(f"{path}: no valid samples after parsing")
-    scale_to_mA = _infer_current_scale_to_mA(path, df["I_A"])
+        raise ValueError(f"{source}: no valid samples after parsing")
+    scale_hint = (
+        str(source.parent)
+        if source.name.casefold() == "measurement.txt"
+        else str(source)
+    )
+    scale_to_mA = _infer_current_scale_to_mA(scale_hint, df["I_A"])
     if scale_to_mA == 1000.0:
         df["I_mA"] = df["I_A"] * 1e3
     else:
@@ -187,7 +311,7 @@ def load_file(path: str) -> pd.DataFrame:
     max_current_mA = float(df["I_mA"].abs().max()) if not df["I_mA"].empty else 0.0
     if math.isfinite(max_current_mA) and max_current_mA > (_expected_current_limit_mA() + 1e-6):
         raise ValueError(
-            f"{path}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
+            f"{source}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
         )
     mask = (
         np.isfinite(df["I_mA"]) &
@@ -196,7 +320,7 @@ def load_file(path: str) -> pd.DataFrame:
     )
     df = df.loc[mask].reset_index(drop=True)
     if df.empty:
-        raise ValueError(f"{path}: no usable samples after filtering zeros")
+        raise ValueError(f"{source}: no usable samples after filtering zeros")
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents, resistances)
@@ -217,7 +341,170 @@ def load_file(path: str) -> pd.DataFrame:
                 mask[idx] = False
         if not mask.all():
             df = df.loc[mask].reset_index(drop=True)
-    return df[["I_mA", "R_Ohm"]]
+    return df[["I_mA", "R_Ohm", "V_V"]]
+
+
+@dataclass(frozen=True)
+class AnnealingReviewCycle:
+    """Physical branches for one Current Annealing review cycle."""
+
+    heating: pd.DataFrame
+    cooling: pd.DataFrame | None
+    cooling_recorded: bool
+    cooling_reason: str
+
+
+def _cooling_branch_evidence(
+    heating: pd.DataFrame,
+    candidate: pd.DataFrame,
+) -> tuple[bool, str]:
+    """Classify a falling-current tail using current, resistance, and voltage."""
+
+    if len(candidate.index) < 4:
+        return False, "No sustained cooling ramp was recorded."
+    peak_current = float(pd.to_numeric(heating["I_mA"], errors="coerce").max())
+    candidate_current = pd.to_numeric(candidate["I_mA"], errors="coerce")
+    candidate_resistance = pd.to_numeric(candidate["R_Ohm"], errors="coerce")
+    if not math.isfinite(peak_current) or peak_current <= 0.0:
+        return False, "No sustained cooling ramp was recorded."
+    current_drop = peak_current - float(candidate_current.min())
+    resistance_change = float(candidate_resistance.iloc[-1] - candidate_resistance.iloc[0])
+
+    voltage = (
+        pd.to_numeric(candidate["V_V"], errors="coerce").dropna()
+        if "V_V" in candidate.columns
+        else pd.Series(dtype=float)
+    )
+    if len(voltage.index) >= 4:
+        combined_voltage = pd.to_numeric(
+            pd.concat((heating["V_V"], candidate["V_V"])), errors="coerce"
+        ).dropna()
+        observed_ceiling = float(combined_voltage.max()) if not combined_voltage.empty else math.nan
+        voltage_median = float(voltage.median())
+        voltage_span = float(voltage.max() - voltage.min())
+        pinned_tolerance = max(0.15, 0.01 * abs(observed_ceiling))
+        pinned = (
+            math.isfinite(observed_ceiling)
+            and observed_ceiling > 0.0
+            and abs(observed_ceiling - voltage_median) <= pinned_tolerance
+            and voltage_span <= (2.0 * pinned_tolerance)
+        )
+        if pinned and resistance_change > 0.0:
+            return (
+                False,
+                f"No cooling ramp: voltage remained at its {observed_ceiling:.3g} V "
+                "ceiling while resistance increased.",
+            )
+
+    substantial_drop = current_drop >= max(5.0, 0.25 * peak_current)
+    resistance_tolerance = max(0.5, 0.005 * abs(float(candidate_resistance.iloc[0])))
+    resistance_fell = resistance_change < -resistance_tolerance
+    if substantial_drop and resistance_fell:
+        return True, "Cooling ramp detected from falling current and resistance."
+    return False, "No commanded cooling ramp was detected."
+
+
+def review_measurement_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return valid numeric rows used for scientific transition review.
+
+    Some acquisition files contain an initial zero-resistance placeholder,
+    sometimes with a tiny current readback such as ``0.2 mA``.  It is not a
+    physical resistance measurement and must not influence plots,
+    physical branch classification, or automatic transition estimates.
+    Legitimate zero-current rows with a measured nonzero resistance remain.
+    """
+
+    resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
+    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
+        return pd.DataFrame(columns=["I_mA", "R_Ohm"])
+    columns = ["I_mA", resistance_column]
+    if "V_V" in df.columns:
+        columns.append("V_V")
+    working = df.loc[:, columns].copy()
+    working = working.rename(columns={resistance_column: "R_Ohm"})
+    for column in working.columns:
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+    working = working.dropna(subset=["I_mA", "R_Ohm"]).reset_index(drop=True)
+    invalid_resistance = working["R_Ohm"].le(0.0)
+    return working.loc[~invalid_resistance].reset_index(drop=True)
+
+
+def split_review_cycles(df: pd.DataFrame) -> tuple[AnnealingReviewCycle, ...]:
+    """Split acquisition-order data into physical review cycles."""
+
+    working = review_measurement_frame(df)
+    if working.empty:
+        return ()
+
+    _directions, segments = _direction_profile(working["I_mA"].to_numpy(dtype=float))
+    cycles: list[AnnealingReviewCycle] = []
+    cycle_start = 0
+    for segment_index, (start, _end, direction) in enumerate(segments):
+        if direction >= 0 or start <= cycle_start:
+            continue
+        next_positive_start = len(working.index)
+        for next_start, _next_end, next_direction in segments[segment_index + 1 :]:
+            if next_direction >= 0:
+                next_positive_start = next_start
+                break
+        heating = working.iloc[cycle_start:start].copy()
+        candidate = working.iloc[start:next_positive_start].copy()
+        recorded, reason = _cooling_branch_evidence(heating, candidate)
+        if not recorded:
+            continue
+        cycles.append(
+            AnnealingReviewCycle(
+                heating=heating,
+                cooling=candidate,
+                cooling_recorded=True,
+                cooling_reason=reason,
+            )
+        )
+        cycle_start = next_positive_start
+
+    if cycle_start < len(working.index):
+        remainder = working.iloc[cycle_start:].copy()
+        reason = "No sustained cooling ramp was recorded."
+        heating_remainder = remainder
+        cooling_candidate: pd.DataFrame | None = None
+        negative_segments = [
+            (start, end)
+            for start, end, direction in segments
+            if direction < 0 and start >= cycle_start
+        ]
+        if negative_segments:
+            start, _end = negative_segments[0]
+            heating_remainder = working.iloc[cycle_start:start].copy()
+            cooling_candidate = working.iloc[start:].copy()
+            _recorded, reason = _cooling_branch_evidence(
+                heating_remainder,
+                cooling_candidate,
+            )
+        else:
+            remainder_current = remainder["I_mA"].to_numpy(dtype=float)
+            peak_offset = int(np.argmax(remainder_current))
+            tail = remainder.iloc[peak_offset:].copy()
+            peak_current = float(remainder_current[peak_offset])
+            tail_drop = peak_current - float(tail["I_mA"].min())
+            if (
+                len(tail.index) >= 4
+                and tail_drop >= max(1.0, 0.02 * peak_current)
+            ):
+                heating_remainder = remainder.iloc[: peak_offset + 1].copy()
+                cooling_candidate = tail
+                _recorded, reason = _cooling_branch_evidence(
+                    heating_remainder,
+                    cooling_candidate,
+                )
+        cycles.append(
+            AnnealingReviewCycle(
+                heating=heating_remainder,
+                cooling=cooling_candidate,
+                cooling_recorded=False,
+                cooling_reason=reason,
+            )
+        )
+    return tuple(cycles)
 
 
 def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int, int, float]]]:
@@ -273,18 +560,12 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
 def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSummary, ...]:
     """Estimate annealing As/Af/Ms/Mf currents for each paired R(I) loop.
 
-    The annealing traces are deliberately gated more conservatively than TMA:
-    a loop is emitted only when its increasing-current leg has an accepted
-    austenite tangent fit. Cooling points are added for that same loop when the
-    following decreasing-current leg has a clear martensite fit.
+    Heating and cooling legs are assessed independently. A loop is emitted
+    when either leg has a clear transition, so a missed heating fit does not
+    suppress an otherwise well-defined cooling transition.
     """
 
-    resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
-    if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
-        return ()
-    currents = pd.to_numeric(df["I_mA"], errors="coerce")
-    resistances = pd.to_numeric(df[resistance_column], errors="coerce")
-    working = pd.DataFrame({"I_mA": currents, "R_Ohm": resistances}).dropna()
+    working = review_measurement_frame(df).loc[:, ["I_mA", "R_Ohm"]]
     if len(working.index) < 48:
         return ()
 
@@ -296,22 +577,34 @@ def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSum
         if direction < 0:
             continue
         loop_index += 1
-        heating = _fit_heating_resistance_drop_segment(working.iloc[start:end].copy())
-        if heating is None:
-            continue
+        heating_segment = working.iloc[start:end].copy()
+        heating = _fit_heating_resistance_drop_segment(heating_segment)
+        wrong_signed_heating = (
+            _fit_annealing_transition_segment(
+                heating_segment,
+                transition_slope_sign=1,
+            )
+            if heating is None
+            else None
+        )
+        maximum_current_mA = (
+            heating.fit.finish_x
+            if heating is not None
+            else float(pd.to_numeric(heating_segment["I_mA"], errors="coerce").max())
+        )
         cooling_candidates: List[_AnnealingTransitionCandidate] = []
         for next_start, next_end, next_direction in segments[segment_index + 1 : segment_count]:
             if next_direction >= 0:
                 break
             candidate = _fit_cooling_resistance_increase_segment(
                 working.iloc[next_start:next_end].copy(),
-                max_current_mA=heating.fit.finish_x,
+                max_current_mA=maximum_current_mA,
             )
             if candidate is None:
                 continue
             if (
-                candidate.fit.finish_x < heating.fit.finish_x
-                and candidate.fit.start_x < heating.fit.finish_x
+                candidate.fit.finish_x < maximum_current_mA
+                and candidate.fit.start_x < maximum_current_mA
                 and candidate.fit.transition.slope < 0.0
             ):
                 cooling_candidates.append(candidate)
@@ -320,10 +613,14 @@ def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSum
             if cooling_candidates
             else None
         )
+        if heating is None and wrong_signed_heating is not None:
+            continue
+        if heating is None and cooling is None:
+            continue
         summaries.append(
             AnnealingTransitionSummary(
-                as_current_mA=heating.fit.start_x,
-                af_current_mA=heating.fit.finish_x,
+                as_current_mA=heating.fit.start_x if heating is not None else None,
+                af_current_mA=heating.fit.finish_x if heating is not None else None,
                 mf_current_mA=cooling.fit.start_x if cooling is not None else None,
                 ms_current_mA=cooling.fit.finish_x if cooling is not None else None,
                 loop_index=loop_index,
@@ -567,7 +864,7 @@ def _fit_cooling_resistance_increase_segment(
     min_rise = max(0.008 * median_resistance, 1.0 * noise, 0.8)
     min_span = max(0.8, scan_width * 0.04)
     max_span = max(3.5, scan_width * 0.25)
-    low_current_limit = float(np.nanmin(x)) + max(8.0, scan_width * 0.35)
+    low_current_limit = float(np.nanmin(x)) + max(8.0, scan_width * 0.60)
     candidates: List[tuple[float, int, int, float]] = []
     for start in range(2, len(x) - 5):
         if x[start] > low_current_limit:
@@ -593,7 +890,7 @@ def _fit_cooling_resistance_increase_segment(
                 if end < after_end
                 else float(smoothed[end])
             )
-            if after_peak > smoothed[end] + (0.7 * rise):
+            if after_peak > smoothed[end] + (0.9 * rise):
                 continue
             score = float(x[start]) + (span * 0.2) - (rise * 0.08)
             candidates.append((score, start, end, rise))
@@ -1832,13 +2129,14 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     try:
         for path in files:
             try:
-                df = load_file(path)
+                source = resolve_measurement_path(path)
+                df = load_file(source)
             except Exception as exc:
                 failures.append((path, f"load: {exc}"))
                 print(f"ERROR: Failed to read {Path(path).name}: {exc}")
                 continue
 
-            title = format_annealing_title(Path(path).stem)
+            title = format_annealing_title(measurement_display_name(source))
             success = True
             fig: Figure | None = None
             fname: str = ""

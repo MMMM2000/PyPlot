@@ -926,6 +926,11 @@ def _run_builder_update_section_command(
             flush=True,
         )
         section.import_project_payload(sections.get(section_name, {}))
+        existing_table = (
+            section.data.table.copy()
+            if isinstance(section.data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
         existing_payload = section.store.load_payload(payload_name)
         print(
             f"[builder-automation] {section_name}: saved section state loaded",
@@ -995,13 +1000,30 @@ def _run_builder_update_section_command(
                 str(graph_column),
                 sample_column="_sample",
             )
+        if section_name == "microscope" and not existing_table.empty:
+            merge_rows = getattr(section, "_merge_rows_into_frame", None)
+            if callable(merge_rows):
+                refresh_rows = []
+                for row in section.data.table.to_dict(orient="records"):
+                    refresh_rows.append(
+                        {
+                            column: value
+                            for column, value in row.items()
+                            if column == "_key"
+                            or not (pd.api.types.is_scalar(value) and pd.isna(value))
+                        }
+                    )
+                section.data.table = merge_rows(existing_table, refresh_rows)
         section.data.processed = {**section.data.processed, **result.processed}
         if isinstance(result.extra, dict):
             section.data.extra.update(result.extra)
         payload_refs: dict[str, str] = {payload_name: payload_name}
         for result_payload_name, result_payload in result.payloads.items():
             name = str(result_payload_name)
-            section.store.save_payload(name, result_payload)
+            payload_value = (
+                merged_records if name == payload_name else result_payload
+            )
+            section.store.save_payload(name, payload_value)
             payload_refs[name] = name
         if payload_name not in result.payloads:
             section.store.save_payload(payload_name, merged_records)
@@ -1922,6 +1944,10 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA Af",
     "TMA Ms",
     "TMA Mf",
+    "TMA strain at As (%)",
+    "TMA strain at Af (%)",
+    "TMA strain at Ms (%)",
+    "TMA strain at Mf (%)",
 ]
 ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Composition",
@@ -2016,6 +2042,10 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA Af": "TMA Af (mA)",
     "TMA Ms": "TMA Ms (mA)",
     "TMA Mf": "TMA Mf (mA)",
+    "TMA strain at As (%)": "TMA strain at As (%)",
+    "TMA strain at Af (%)": "TMA strain at Af (%)",
+    "TMA strain at Ms (%)": "TMA strain at Ms (%)",
+    "TMA strain at Mf (%)": "TMA strain at Mf (%)",
 }
 ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP = {
     "TMA As (mA)": "TMA J_As (A/mm^2)",
@@ -2586,6 +2616,9 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         if not values:
             values = _coerce_tma_values(review.get("auto_values_mA"))
         cleared = _coerce_tma_cleared_labels(review.get("cleared_labels"))
+        transition_strain = _coerce_tma_values(
+            review.get("strain_at_transition_pct")
+        )
         if status == "no_transition":
             for label in ("As", "Af", "Ms", "Mf"):
                 row[f"TMA {label}"] = "No transition"
@@ -2595,6 +2628,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                     row[f"TMA {label}"] = "Not observed"
                 elif label in values:
                     row[f"TMA {label}"] = values[label]
+                if label in transition_strain:
+                    row[f"TMA strain at {label} (%)"] = transition_strain[label]
         rows.append(row)
         reviewed_targets.add((composition, microwire, target_key))
         if source_key:

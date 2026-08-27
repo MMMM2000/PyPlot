@@ -7,6 +7,8 @@ param(
 
     [switch]$KeepPytestCache,
 
+    [int]$Workers = -1,
+
     [string]$RunId,
 
     [string]$ArtifactsDir,
@@ -28,6 +30,9 @@ if ($DryRun) {
 }
 if ($KeepPytestCache) {
     $scriptArgs += "--keep-pytest-cache"
+}
+if ($Workers -ge 0) {
+    $scriptArgs += @("--workers", $Workers)
 }
 if ($RunId) {
     $scriptArgs += @("--run-id", $RunId)

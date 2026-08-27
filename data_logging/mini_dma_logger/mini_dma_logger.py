@@ -1953,6 +1953,13 @@ class AutomationResumeState:
 
 
 @dataclass(frozen=True)
+class FatigueCycleStrainRange:
+    cycle_index: int
+    minimum_pct: float
+    maximum_pct: float
+
+
+@dataclass(frozen=True)
 class SetupUnloadBaselineFit:
     zero_position_mm: float
     slope_mpa_per_mm: float
@@ -8101,6 +8108,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_observer_keys: set[tuple[str, int, float]] = set()
         self._current_sweep_observed_strain_min_pct: float | None = None
         self._current_sweep_observed_strain_max_pct: float | None = None
+        self._fatigue_strain_reference_pct: float | None = None
+        self._fatigue_raw_strain_ranges: dict[int, tuple[float, float]] = {}
+        self._fatigue_cycle_strain_ranges: list[FatigueCycleStrainRange] = []
         self._current_sweep_cycle_center_motor_suppression_enabled = (
             os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "1").strip().lower()
             not in {"0", "false", "no", "off"}
@@ -11738,6 +11748,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
+        self.button_review_transitions = QtWidgets.QToolButton(hero_box)
+        self.button_review_transitions.setText("Review transitions...")
+        self.button_review_transitions.setToolTip(
+            "Review transition currents for the latest completed TMA run. "
+            "Use the arrow to choose an older run folder."
+        )
+        self.button_review_transitions.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
+        self.button_review_transitions.clicked.connect(
+            self._review_latest_tma_transitions
+        )
+        transition_menu = QtWidgets.QMenu(self.button_review_transitions)
+        choose_transition_run = transition_menu.addAction(
+            "Choose completed run folder..."
+        )
+        choose_transition_run.triggered.connect(
+            self._choose_tma_run_for_transition_review
+        )
+        choose_transition_parent = transition_menu.addAction(
+            "Review runs in parent folder..."
+        )
+        choose_transition_parent.triggered.connect(
+            self._choose_tma_parent_for_transition_review
+        )
+        self.button_review_transitions.setMenu(transition_menu)
+        hero_layout.addWidget(self.button_review_transitions)
 
         self.dashboard_status_box = QtWidgets.QFrame(hero_box)
         status_layout = QtWidgets.QGridLayout(self.dashboard_status_box)
@@ -11809,6 +11846,9 @@ class MainWindow(QtWidgets.QMainWindow):
         mechanical_preset_button = QtWidgets.QPushButton("Mechanical preset", plot_config_box)
         mechanical_preset_button.clicked.connect(lambda: self._apply_plot_preset("mechanical"))
         preset_row.addWidget(mechanical_preset_button)
+        fatigue_preset_button = QtWidgets.QPushButton("Fatigue preset", plot_config_box)
+        fatigue_preset_button.clicked.connect(lambda: self._apply_plot_preset("fatigue"))
+        preset_row.addWidget(fatigue_preset_button)
         preset_row.addStretch(1)
         plot_config_layout.addWidget(QtWidgets.QLabel("Presets", plot_config_box), 0, 0)
         plot_config_layout.addLayout(preset_row, 0, 1, 1, 5)
@@ -12309,6 +12349,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda point: point.strain_pct,
             ),
             PlotChannel(
+                "fatigue_cycle_index",
+                "Completed fatigue cycle",
+                "#a3a3a3",
+                lambda point: (
+                    None
+                    if point.fatigue_cycle_index is None
+                    else float(point.fatigue_cycle_index)
+                ),
+            ),
+            PlotChannel(
+                "fatigue_fixed_strain_range_pct",
+                "Fixed-reference strain range (%)",
+                "#22c55e",
+                lambda point: point.strain_pct,
+            ),
+            PlotChannel(
+                "fatigue_total_strain_pct",
+                "Total fatigue strain (%)",
+                "#14b8a6",
+                lambda point: point.strain_pct,
+            ),
+            PlotChannel(
                 "stress_mpa",
                 "Stress (MPa)",
                 "#a78bfa",
@@ -12333,7 +12395,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "#14b8a6",
                 self._plot_resistance_ohm,
             ),
-            PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
+            PlotChannel(
+                "power_mW_per_cm",
+                "Measured power per length (mW/cm)",
+                "#d8b4fe",
+                self._plot_power_mw_per_cm,
+            ),
+            PlotChannel(
+                "power_W",
+                "Measured electrical power (W)",
+                "#c084fc",
+                lambda point: point.power_W,
+            ),
             PlotChannel(
                 "temperature_c",
                 "Temperature (C)",
@@ -12396,6 +12469,20 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return None
         return point.resistance_ohm
+
+    def _plot_power_mw_per_cm(self, point: MeasurementPoint) -> float | None:
+        if point.power_W is None or not math.isfinite(float(point.power_W)):
+            return None
+        config = self._control_config()
+        initial_length_mm = (
+            config.initial_length_mm
+            if config is not None
+            else float(self.spin_initial_length.value())
+        )
+        current_length_mm = float(initial_length_mm) + float(point.position_mm)
+        if not math.isfinite(current_length_mm) or current_length_mm <= 0.0:
+            return None
+        return float(point.power_W) * 10_000.0 / current_length_mm
 
     def _plot_channel(self, key: str) -> PlotChannel | None:
         for channel in self._plot_channels():
@@ -12494,7 +12581,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"plot_tile_{index}"
         return f"plot_tile_recipe_{self._dashboard_plot_settings_mode_key(mode)}_{index}"
 
-    def _default_dashboard_plot_settings(self, _index: int) -> dict[str, object]:
+    def _default_dashboard_plot_settings(
+        self,
+        index: int,
+        mode: str | None = None,
+    ) -> dict[str, object]:
+        if mode == CURRENT_SWEEP_FATIGUE and index == 3:
+            return {
+                "visible": True,
+                "x": "fatigue_cycle_index",
+                "y_left": "fatigue_fixed_strain_range_pct",
+                "y_right": "",
+            }
         return {
             "visible": True,
             "x": "elapsed_s",
@@ -12505,7 +12603,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _capture_dashboard_plot_settings(self) -> list[dict[str, object]]:
         settings: list[dict[str, object]] = []
         for index, tile in enumerate(self._plot_tiles):
-            fallback = self._default_dashboard_plot_settings(index)
+            fallback = self._default_dashboard_plot_settings(
+                index,
+                str(self.combo_recipe_mode.currentData() or "ramp"),
+            )
             settings.append(
                 {
                     "visible": tile.visible.isChecked(),
@@ -12535,8 +12636,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._read_dashboard_plot_tile_settings(index, mode)
                     for index in range(len(self._plot_tiles))
                 ]
+                if mode == CURRENT_SWEEP_FATIGUE:
+                    settings = self._migrate_fatigue_dashboard_plot_settings(settings)
                 self._dashboard_plot_settings_by_mode[mode_key] = [dict(values) for values in settings]
                 return settings
+            if mode == CURRENT_SWEEP_FATIGUE:
+                return [
+                    self._default_dashboard_plot_settings(index, mode)
+                    for index in range(len(self._plot_tiles))
+                ]
         if self._settings_have_dashboard_plot_values(None):
             return [
                 self._read_dashboard_plot_tile_settings(index, None)
@@ -12544,8 +12652,40 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
         return [self._default_dashboard_plot_settings(index) for index in range(len(self._plot_tiles))]
 
+    def _migrate_fatigue_dashboard_plot_settings(
+        self,
+        settings: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        migration_key = "fatigue_cycle_strain_dashboard_plot_v1"
+        if bool(self.settings.value(migration_key, False, type=bool)):
+            return settings
+        self.settings.setValue(migration_key, True)
+        if any(
+            str(values.get("y_left", "")) == "fatigue_fixed_strain_range_pct"
+            for values in settings
+        ):
+            return settings
+        if len(settings) < 4:
+            return settings
+        fourth = settings[3]
+        fourth_signature = (
+            str(fourth.get("x", "")),
+            str(fourth.get("y_left", "")),
+            str(fourth.get("y_right", "")),
+        )
+        if fourth_signature not in {
+            ("elapsed_s", "load_g", ""),
+            ("elapsed_s", "resistance_ohm", ""),
+        }:
+            return settings
+        migrated = [dict(values) for values in settings]
+        migrated[3] = self._default_dashboard_plot_settings(3, CURRENT_SWEEP_FATIGUE)
+        self._write_dashboard_plot_settings(migrated, CURRENT_SWEEP_FATIGUE)
+        self.settings.sync()
+        return migrated
+
     def _read_dashboard_plot_tile_settings(self, index: int, mode: str | None = None) -> dict[str, object]:
-        defaults = self._default_dashboard_plot_settings(index)
+        defaults = self._default_dashboard_plot_settings(index, mode)
         prefix = self._dashboard_plot_settings_prefix(index, mode)
         return {
             "visible": bool(self.settings.value(f"{prefix}_visible", defaults["visible"], type=bool)),
@@ -12573,7 +12713,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         for index, values in enumerate(values_by_tile):
             prefix = self._dashboard_plot_settings_prefix(index, mode)
-            defaults = self._default_dashboard_plot_settings(index)
+            defaults = self._default_dashboard_plot_settings(index, mode)
             self.settings.setValue(f"{prefix}_visible", bool(values.get("visible", defaults["visible"])))
             self.settings.setValue(f"{prefix}_x", str(values.get("x", defaults["x"])))
             self.settings.setValue(f"{prefix}_y_left", str(values.get("y_left", defaults["y_left"])))
@@ -12609,7 +12749,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_settings_restore_in_progress = True
         try:
             for index, tile in enumerate(self._plot_tiles):
-                values = settings[index] if index < len(settings) else self._default_dashboard_plot_settings(index)
+                values = (
+                    settings[index]
+                    if index < len(settings)
+                    else self._default_dashboard_plot_settings(index, mode_text)
+                )
                 blockers = [
                     QtCore.QSignalBlocker(tile.visible),
                     QtCore.QSignalBlocker(tile.x_combo),
@@ -12644,7 +12788,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ],
             "heating": [
                 ("elapsed_s", "current_measured_mA", "temperature_c"),
-                ("elapsed_s", "voltage_V", "power_W"),
+                ("elapsed_s", "voltage_V", "power_mW_per_cm"),
                 ("elapsed_s", "load_g", "position_mm"),
                 ("strain_pct", "stress_mpa", "current_measured_mA"),
             ],
@@ -12653,6 +12797,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("strain_pct", "stress_mpa", ""),
                 ("elapsed_s", "load_g", ""),
                 ("elapsed_s", "position_mm", "strain_pct"),
+            ],
+            "fatigue": [
+                ("elapsed_s", "load_g", "stress_mpa"),
+                ("current_measured_mA", "strain_pct", ""),
+                ("elapsed_s", "current_measured_mA", "resistance_ohm"),
+                ("fatigue_cycle_index", "fatigue_fixed_strain_range_pct", ""),
             ],
         }
         config = presets.get(preset, presets["dma"])
@@ -14742,6 +14892,130 @@ class MainWindow(QtWidgets.QMainWindow):
         box.exec()
         if box.clickedButton() == return_position_button:
             self._start_recovery_displacement_zero()
+
+    def _offer_tma_transition_review(self, run_dir: Path) -> None:
+        if self._window_closing or not self.isVisible():
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Review transitions",
+            "The TMA run finished and all outputs are safely off. Review transition currents now?",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._open_tma_transition_review(Path(run_dir))
+
+    def _open_tma_transition_review(self, run_dir: Path) -> None:
+        try:
+            from plotting.shared.transition_review_dialog import review_tma_run
+
+            review_tma_run(self, Path(run_dir))
+        except Exception as exc:
+            self._log(f"Post-run TMA transition review failed for {run_dir}: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+    def _latest_completed_tma_run_dir(self) -> Path | None:
+        candidates: list[Path] = []
+        if self._session_base_path is not None and not self._session_active:
+            candidates.append(self._session_base_path.parent)
+        if self._tma_history_root == self._current_tma_history_root():
+            for record in self._tma_history_records:
+                try:
+                    candidates.append(Path(record.source).parent)
+                except (TypeError, ValueError):
+                    continue
+        existing = list(dict.fromkeys(path for path in candidates if path.is_dir()))
+        if not existing:
+            return None
+        return max(
+            existing,
+            key=lambda path: (
+                (path / SESSION_METADATA_JSON).stat().st_mtime_ns
+                if (path / SESSION_METADATA_JSON).exists()
+                else path.stat().st_mtime_ns
+            ),
+        )
+
+    def _review_latest_tma_transitions(self) -> None:
+        if self._session_active:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "Finish or stop the active TMA run before reviewing its transitions.",
+            )
+            return
+        run_dir = self._latest_completed_tma_run_dir()
+        if run_dir is None:
+            self._choose_tma_run_for_transition_review()
+            return
+        self._open_tma_transition_review(run_dir)
+
+    def _choose_tma_run_for_transition_review(self) -> None:
+        start_dir = self._latest_completed_tma_run_dir() or self._current_tma_history_root()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose completed TMA run folder",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        run_dir = Path(selected)
+        active_run = (
+            self._session_base_path.parent
+            if self._session_active and self._session_base_path is not None
+            else None
+        )
+        if active_run is not None and run_dir.resolve() == active_run.resolve():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "The selected TMA run is still active. Finish or stop it first.",
+            )
+            return
+        self._open_tma_transition_review(run_dir)
+
+    def _choose_tma_parent_for_transition_review(self) -> None:
+        if self._session_active:
+            self._review_latest_tma_transitions()
+            return
+        latest = self._latest_completed_tma_run_dir()
+        start_dir = latest.parent if latest is not None else self._current_tma_history_root()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose parent folder containing completed TMA runs",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        run_dirs: list[Path] = []
+        if (root / SESSION_MEASUREMENT_CSV).is_file():
+            run_dirs.append(root)
+        try:
+            children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+            return
+        run_dirs.extend(
+            child
+            for child in children
+            if child.is_dir() and (child / SESSION_MEASUREMENT_CSV).is_file()
+        )
+        if not run_dirs:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No completed runs found",
+                "No direct child run folders containing measurement.csv were found.",
+            )
+            return
+        try:
+            from plotting.shared.transition_review_dialog import review_tma_runs
+
+            review_tma_runs(self, run_dirs)
+        except Exception as exc:
+            self._log(f"TMA transition review queue failed for {root}: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
 
     def _maybe_offer_run_cleanup(self, current_run: Path | None = None) -> None:
         if not self._is_ui_thread():
@@ -27230,6 +27504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         payload["recipe_summary"] = self._last_recipe_summary
         payload["recipe_estimated_points"] = int(self._recipe_estimated_points)
         payload["fatigue_progress"] = self._fatigue_progress_snapshot()
+        payload["fatigue_strain_summary"] = self._fatigue_strain_summary_snapshot()
         payload["first_overheating_preflight"] = self._first_overheating_preflight_decision
         payload["stop"] = self._session_stop_metadata()
         payload["source_control"] = self._source_control_metadata()
@@ -27807,6 +28082,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_point_count_total = 0
         self._session_points_discarded_from_memory = 0
         self._live_plot_points = []
+        self._fatigue_strain_reference_pct = None
+        self._fatigue_raw_strain_ranges = {}
+        self._fatigue_cycle_strain_ranges = []
         self._last_live_plot_scale_timestamp = None
         self._last_dashboard_plot_refresh_s = None
         self._session_active = True
@@ -27940,6 +28218,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_point_count_total = 0
         self._session_points_discarded_from_memory = 0
         self._live_plot_points = []
+        self._fatigue_strain_reference_pct = None
+        self._fatigue_raw_strain_ranges = {}
+        self._fatigue_cycle_strain_ranges = []
         self._last_live_plot_scale_timestamp = None
         self._last_dashboard_plot_refresh_s = None
         self._session_logging_enabled = True
@@ -28281,6 +28562,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{summary['image_path']} and {summary['detail_image_path']}"
             )
             if offer_cleanup:
+                self._offer_tma_transition_review(run_dir)
                 self._maybe_offer_run_cleanup(run_dir)
         pending = self._run_summary_pending.popleft() if self._run_summary_pending else None
         if pending is not None and not self._window_closing:
@@ -29050,6 +29332,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     float(self._current_sweep_observed_strain_max_pct),
                     strain_pct,
                 )
+        if (
+            self._automation_name == CURRENT_SWEEP_FATIGUE
+            and point.fatigue_cycle_index is not None
+            and point.fatigue_leg in {"up", "down"}
+            and point.strain_pct is not None
+            and math.isfinite(float(point.strain_pct))
+        ):
+            cycle = int(point.fatigue_cycle_index)
+            strain_pct = float(point.strain_pct)
+            existing_range = self._fatigue_raw_strain_ranges.get(cycle)
+            self._fatigue_raw_strain_ranges[cycle] = (
+                strain_pct if existing_range is None else min(existing_range[0], strain_pct),
+                strain_pct if existing_range is None else max(existing_range[1], strain_pct),
+            )
         if (
             self._automation_name != CURRENT_SWEEP_FATIGUE
             or self._fatigue_cycle_index <= 0
@@ -30575,6 +30871,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if state == "running" and progress["active_leg"]:
             state = str(progress["active_leg"])
         return f"Progress: {completed_text} | cycle {int(active_cycle)} {state}"
+
+    def _fatigue_strain_summary_snapshot(self) -> dict[str, object] | None:
+        if (
+            self._automation_name != CURRENT_SWEEP_FATIGUE
+            and not self._fatigue_cycle_strain_ranges
+        ):
+            return None
+        config = self._control_config()
+        initial_length_mm = (
+            config.initial_length_mm
+            if config is not None
+            else float(self.spin_initial_length.value())
+        )
+        reference_length_mm = (
+            None
+            if self._fatigue_strain_reference_pct is None
+            else initial_length_mm * (1.0 + float(self._fatigue_strain_reference_pct) / 100.0)
+        )
+        return {
+            "reference": "minimum strain of first completed cycle",
+            "reference_raw_strain_pct": self._fatigue_strain_reference_pct,
+            "reference_length_mm": reference_length_mm,
+            "cycles": [
+                {
+                    "cycle_index": cycle_range.cycle_index,
+                    "minimum_strain_pct": cycle_range.minimum_pct,
+                    "maximum_strain_pct": cycle_range.maximum_pct,
+                    "strain_range_pct": cycle_range.maximum_pct - cycle_range.minimum_pct,
+                }
+                for cycle_range in self._fatigue_cycle_strain_ranges
+            ],
+        }
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
@@ -32368,6 +32696,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._fatigue_cycle_index = 0
         self._fatigue_cycles_completed = 0
+        self._fatigue_strain_reference_pct = None
+        self._fatigue_raw_strain_ranges = {}
+        self._fatigue_cycle_strain_ranges = []
         self._fatigue_cycle_limit = (
             None
             if fatigue_loop_step is None
@@ -33006,6 +33337,16 @@ class MainWindow(QtWidgets.QMainWindow):
         x_channel: PlotChannel,
         y_channel: PlotChannel,
     ) -> tuple[list[float], list[float]]:
+        if (
+            x_channel.key == "fatigue_cycle_index"
+            and y_channel.key == "fatigue_fixed_strain_range_pct"
+        ):
+            return self._fatigue_cycle_strain_range_plot_values()
+        if (
+            x_channel.key == "fatigue_cycle_index"
+            and y_channel.key == "fatigue_total_strain_pct"
+        ):
+            return self._fatigue_total_strain_plot_values()
         x_values: list[float] = []
         y_values: list[float] = []
         previous_elapsed_s: float | None = None
@@ -33027,6 +33368,63 @@ class MainWindow(QtWidgets.QMainWindow):
             y_values.append(float(y_value))
             previous_elapsed_s = elapsed_s
         return x_values, y_values
+
+    def _fatigue_cycle_strain_range_plot_values(self) -> tuple[list[float], list[float]]:
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for index, cycle_range in enumerate(self._fatigue_cycle_strain_ranges):
+            if index:
+                x_values.append(float("nan"))
+                y_values.append(float("nan"))
+            cycle = float(cycle_range.cycle_index)
+            x_values.extend((cycle, cycle))
+            y_values.extend((cycle_range.minimum_pct, cycle_range.maximum_pct))
+        return x_values, y_values
+
+    def _fatigue_total_strain_plot_values(self) -> tuple[list[float], list[float]]:
+        return (
+            [float(cycle_range.cycle_index) for cycle_range in self._fatigue_cycle_strain_ranges],
+            [
+                cycle_range.maximum_pct - cycle_range.minimum_pct
+                for cycle_range in self._fatigue_cycle_strain_ranges
+            ],
+        )
+
+    def _record_completed_fatigue_cycle_strain_range(self, cycle_index: int) -> bool:
+        cycle = int(cycle_index)
+        raw_range = self._fatigue_raw_strain_ranges.get(cycle)
+        if raw_range is None:
+            strains = [
+                float(point.strain_pct)
+                for point in (*self._session_points, *self._live_plot_points)
+                if point.fatigue_cycle_index == cycle
+                and point.fatigue_leg in {"up", "down"}
+                and point.strain_pct is not None
+                and math.isfinite(float(point.strain_pct))
+            ]
+            if not strains:
+                return False
+            raw_range = (min(strains), max(strains))
+        minimum_raw_pct, maximum_raw_pct = raw_range
+        if self._fatigue_strain_reference_pct is None:
+            self._fatigue_strain_reference_pct = minimum_raw_pct
+        reference_pct = float(self._fatigue_strain_reference_pct)
+        denominator = 100.0 + reference_pct
+        if not math.isfinite(denominator) or denominator <= 0.0:
+            return False
+        cycle_range = FatigueCycleStrainRange(
+            cycle_index=cycle,
+            minimum_pct=100.0 * (minimum_raw_pct - reference_pct) / denominator,
+            maximum_pct=100.0 * (maximum_raw_pct - reference_pct) / denominator,
+        )
+        self._fatigue_cycle_strain_ranges = [
+            existing
+            for existing in self._fatigue_cycle_strain_ranges
+            if existing.cycle_index != cycle
+        ]
+        self._fatigue_cycle_strain_ranges.append(cycle_range)
+        self._fatigue_cycle_strain_ranges.sort(key=lambda value: value.cycle_index)
+        return True
 
     def _time_axis_display_for_points(
         self,
@@ -35930,9 +36328,14 @@ class MainWindow(QtWidgets.QMainWindow):
         completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
         if completed_cycle > int(self._fatigue_cycles_completed):
+            strain_range_recorded = self._record_completed_fatigue_cycle_strain_range(
+                completed_cycle
+            )
             self._fatigue_cycles_completed = completed_cycle
             limit_text = "forever" if cycle_limit is None else str(cycle_limit)
             self._log(f"Completed fatigue cycle {completed_cycle}/{limit_text}.")
+            if strain_range_recorded:
+                self._refresh_plots()
             if self._session_active:
                 self._write_session_metadata()
         next_cycle_index = int(self._fatigue_cycle_index) + 1

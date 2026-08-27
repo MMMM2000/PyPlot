@@ -57,10 +57,11 @@ def _temp_root_for_run(run_id: str, run_root: Path) -> Path:
 
 def _basetemp_for_run(run_id: str, run_root: Path) -> Path:
     if os.name == "nt":
-        # Builder/package tests create several nested staging directories below
-        # pytest's base directory. Keep that root short as well as TEMP/TMP so
-        # a full run does not fail only because the checkout path is long.
-        return REPO_ROOT / "artifacts" / "t" / f"{_safe_path_token(run_id)}-pytest"
+        # xdist adds worker-specific paths and Builder fixtures intentionally
+        # reproduce deep Google Drive directory structures. Windows expands
+        # workspace 8.3 aliases before those fixtures are created, so use a
+        # genuinely short, disposable per-run base directory.
+        return Path("C:/tmp/pyt") / _safe_path_token(run_id)
     return run_root / "pytest-basetemp"
 
 
@@ -74,8 +75,6 @@ def _windows_short_path(path: Path) -> Path:
     if not length or length >= len(buffer):
         return path
     return Path(buffer.value)
-
-
 def _has_pytest_target(args: Iterable[str]) -> bool:
     skip_next = False
     value_options = {
@@ -155,6 +154,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not add '-p no:cacheprovider'. Disabled by default for Windows runs.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of pytest-xdist workers. Full mode defaults to 4; focused "
+            "mode defaults to 0. Use 0 to force one serial pytest process."
+        ),
+    )
+    parser.add_argument(
+        "--dist",
+        choices=("worksteal", "load", "loadfile", "loadscope"),
+        default="worksteal",
+        help="pytest-xdist distribution strategy for the parallel lane.",
+    )
     return parser
 
 
@@ -214,11 +228,52 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     return env, basetemp
 
 
-def build_pytest_command(args: argparse.Namespace, basetemp: Path) -> list[str]:
+def _resolved_workers(args: argparse.Namespace) -> int:
+    workers = args.workers
+    if workers is None:
+        workers = 4 if args.mode == "full" else 0
+    if workers < 0:
+        raise ValueError("--workers must be zero or greater")
+    return workers
+
+
+def _selected_pytest_args(args: argparse.Namespace) -> list[str]:
     pytest_args = [arg for arg in args.pytest_args if arg != "--"]
     if not _has_pytest_target(pytest_args):
         default_targets = ["tests"] if args.mode == "full" else DEFAULT_FOCUSED_TARGETS
         pytest_args = [*default_targets, *pytest_args]
+    return pytest_args
+
+
+def _with_marker_filter(pytest_args: list[str], lane_filter: str) -> list[str]:
+    result: list[str] = []
+    index = 0
+    combined = False
+    while index < len(pytest_args):
+        arg = pytest_args[index]
+        if arg in {"-m", "--markexpr"} and index + 1 < len(pytest_args):
+            result.extend([arg, f"({pytest_args[index + 1]}) and ({lane_filter})"])
+            combined = True
+            index += 2
+            continue
+        if arg.startswith("--markexpr="):
+            expression = arg.split("=", 1)[1]
+            result.append(f"--markexpr=({expression}) and ({lane_filter})")
+            combined = True
+            index += 1
+            continue
+        result.append(arg)
+        index += 1
+    if not combined:
+        result.extend(["-m", lane_filter])
+    return result
+
+
+def _base_pytest_command(
+    args: argparse.Namespace,
+    basetemp: Path,
+    pytest_args: list[str],
+) -> list[str]:
 
     command = [
         args.python,
@@ -233,12 +288,43 @@ def build_pytest_command(args: argparse.Namespace, basetemp: Path) -> list[str]:
     return command
 
 
-def print_dry_run(args: argparse.Namespace, env: dict[str, str], command: list[str]) -> None:
+def build_pytest_command(args: argparse.Namespace, basetemp: Path) -> list[str]:
+    """Build the legacy single-process command used when workers are disabled."""
+
+    return _base_pytest_command(args, basetemp, _selected_pytest_args(args))
+
+
+def build_pytest_commands(
+    args: argparse.Namespace,
+    basetemp: Path,
+) -> list[tuple[str, list[str]]]:
+    workers = _resolved_workers(args)
+    pytest_args = _selected_pytest_args(args)
+    if workers == 0:
+        return [("serial", _base_pytest_command(args, basetemp, pytest_args))]
+
+    parallel_args = _with_marker_filter(pytest_args, "not serial")
+    parallel = _base_pytest_command(args, basetemp / "parallel", parallel_args)
+    parallel[3:3] = ["-n", str(workers), "--dist", args.dist]
+
+    serial_args = _with_marker_filter(pytest_args, "serial")
+    serial = _base_pytest_command(args, basetemp / "serial", serial_args)
+    serial[3:3] = ["-n", "0"]
+    return [("parallel", parallel), ("serial", serial)]
+
+
+def print_dry_run(
+    args: argparse.Namespace,
+    env: dict[str, str],
+    commands: list[tuple[str, list[str]]],
+) -> None:
     print(f"mode={args.mode}")
     print(f"cwd={REPO_ROOT}")
-    print(f"command={_command_line(command)}")
-    basetemp_index = command.index("--basetemp") + 1
-    print(f"pytest_basetemp={command[basetemp_index]}")
+    for lane, command in commands:
+        print(f"lane={lane}")
+        print(f"command={_command_line(command)}")
+        basetemp_index = command.index("--basetemp") + 1
+        print(f"pytest_basetemp={command[basetemp_index]}")
     print("environment:")
     for key in SELECTED_ENV_KEYS:
         print(f"  {key}={env.get(key, '')}")
@@ -248,11 +334,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args, pytest_args = parser.parse_known_args(argv)
     args.pytest_args = [arg for arg in pytest_args if arg != "--"]
-    env, basetemp = prepare_environment(args)
-    command = build_pytest_command(args, basetemp)
+    try:
+        env, basetemp = prepare_environment(args)
+        commands = build_pytest_commands(args, basetemp)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.dry_run:
-        print_dry_run(args, env, command)
+        print_dry_run(args, env, commands)
         return 0
 
     print(f"PyPlot verification mode: {args.mode}", flush=True)
@@ -261,7 +350,22 @@ def main(argv: list[str] | None = None) -> int:
         f"Microwire Builder storage: {env['MICROWIRE_BUILDER_STORAGE_ROOT']}",
         flush=True,
     )
-    return subprocess.run(command, cwd=REPO_ROOT, env=env, check=False).returncode
+    saw_tests = False
+    for lane, command in commands:
+        print(f"Running {lane} lane: {_command_line(command)}", flush=True)
+        returncode = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+        ).returncode
+        if returncode == 5:
+            print(f"No tests selected for {lane} lane.", flush=True)
+            continue
+        saw_tests = True
+        if returncode != 0:
+            return returncode
+    return 0 if saw_tests else 5
 
 
 if __name__ == "__main__":

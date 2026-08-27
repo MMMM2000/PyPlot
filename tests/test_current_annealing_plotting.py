@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import importlib
+import json
 
 import matplotlib
 import numpy as np
@@ -48,11 +49,40 @@ def test_load_file_handles_decimal_commas(tmp_path: Path) -> None:
     assert df["R_Ohm"].tolist() == pytest.approx([1000.5, 1001.5])
 
 
+def test_load_file_returns_empty_review_frame_for_header_only_run(tmp_path: Path) -> None:
+    path = tmp_path / "interrupted.txt"
+    path.write_text(
+        "# Current (mA)\tVoltage (V)\tResistance (Ohm)\n",
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(path)
+
+    assert frame.empty
+    assert frame.columns.tolist() == ["I_mA", "R_Ohm", "V_V"]
+
+
 def test_load_file_keeps_milliamp_input_without_multiplying_by_1000(tmp_path: Path) -> None:
     path = tmp_path / "already_ma_80mA.txt"
     path.write_text("2 0.1 100\n4 0.2 110\n6 0.3 120\n")
     df = anneal_core.load_file(path)
     assert df["I_mA"].tolist() == pytest.approx([2.0, 4.0, 6.0])
+
+
+def test_load_file_reads_labelled_kosice_dat_columns(tmp_path: Path) -> None:
+    path = tmp_path / 'Ni44Fe27Ga23Cu3Co3_1-5.dat'
+    path.write_text(
+        'Cycle\tIset_mA\tIreal_mA\tVoltage_V\tResistance_Ohm\tPower_W\n'
+        '1\t1.00\t1.00\t0.09300\t93.00000\t0.00009\n'
+        '1\t2.00\t1.90\t0.20700\t108.94737\t0.00039\n'
+        '2\t2.00\t1.80\t0.17300\t96.11111\t0.00031\n',
+        encoding='utf-8',
+    )
+
+    frame = anneal_core.load_file(path)
+
+    assert frame['I_mA'].tolist() == pytest.approx([1.0, 1.9, 1.8])
+    assert frame['R_Ohm'].tolist() == pytest.approx([93.0, 108.94737, 96.11111])
 
 
 def test_load_file_uses_filename_target_to_keep_amp_input_in_physical_range(tmp_path: Path) -> None:
@@ -753,3 +783,184 @@ def test_current_annealing_open_origin_delegates_to_shared_host_export() -> None
     plugin._plot_tabs = [object()]  # noqa: SLF001 - bypass generate() for delegation check
     plugin.open_origin()
     assert host.called is True
+
+
+def test_current_annealing_core_loads_logger_run_folder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text(
+        "0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n",
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(run_dir)
+
+    assert frame["I_mA"].tolist() == pytest.approx([20.0, 50.0, 100.0])
+    assert anneal_core.resolve_measurement_path(run_dir) == measurement
+    assert anneal_core.measurement_display_name(measurement) == run_dir.name
+
+
+def test_current_annealing_core_loads_session_v2_csv_folder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "Ni48Fe27Ga23Cu1Co1 1_1 60mA VSM 2loops_run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.csv"
+    pd.DataFrame(
+        {
+            "measured_current_mA": [1.2, 20.0, 30.0],
+            "resistance_ohm": [66.7, 70.0, 69.0],
+        }
+    ).to_csv(measurement, index=False)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema": "current_annealing_session_v2",
+                "data_file": "measurement.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    frame = anneal_core.load_file(run_dir)
+
+    assert frame["I_mA"].tolist() == pytest.approx([1.2, 20.0, 30.0])
+    assert anneal_core.resolve_measurement_path(run_dir) == measurement
+    assert anneal_core.measurement_display_name(measurement) == run_dir.name
+
+
+def test_split_review_cycles_rejects_voltage_limited_continued_heating() -> None:
+    heating_current = np.linspace(2.0, 100.0, 100)
+    limited_current = np.linspace(100.0, 90.0, 30)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[heating_current, limited_current],
+            "R_Ohm": np.r_[
+                np.linspace(80.0, 150.0, heating_current.size),
+                np.linspace(150.0, 170.0, limited_current.size),
+            ],
+            "V_V": np.r_[
+                np.linspace(0.2, 30.0, heating_current.size),
+                np.full(limited_current.size, 30.0),
+            ],
+        }
+    )
+
+    cycles = anneal_core.split_review_cycles(frame)
+
+    assert len(cycles) == 1
+    assert cycles[0].cooling_recorded is False
+    assert cycles[0].cooling is not None
+    assert "30 V ceiling" in cycles[0].cooling_reason
+
+
+def test_split_review_cycles_accepts_commanded_cooling_ramp() -> None:
+    heating_current = np.linspace(2.0, 100.0, 100)
+    cooling_current = np.linspace(100.0, 2.0, 100)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[heating_current, cooling_current],
+            "R_Ohm": np.r_[
+                np.linspace(80.0, 150.0, heating_current.size),
+                np.linspace(150.0, 82.0, cooling_current.size),
+            ],
+            "V_V": np.r_[
+                np.linspace(0.2, 20.0, heating_current.size),
+                np.linspace(20.0, 0.2, cooling_current.size),
+            ],
+        }
+    )
+
+    cycles = anneal_core.split_review_cycles(frame)
+
+    assert len(cycles) == 1
+    assert cycles[0].cooling_recorded is True
+    assert cycles[0].cooling is not None
+    assert cycles[0].cooling["I_mA"].iloc[-1] == pytest.approx(2.0)
+
+
+def test_review_measurement_frame_drops_nonpositive_resistance_placeholders() -> None:
+    frame = pd.DataFrame(
+        {
+            "I_mA": [0.0, 0.2, 0.0, 10.0, 0.0],
+            "R_Ohm": [0.0, 0.0, 100.0, 120.0, 110.0],
+            "V_V": [0.0, 0.0, 0.0, 1.2, 0.0],
+        }
+    )
+
+    reviewed = anneal_core.review_measurement_frame(frame)
+
+    assert reviewed["I_mA"].tolist() == pytest.approx([0.0, 10.0, 0.0])
+    assert reviewed["R_Ohm"].tolist() == pytest.approx([100.0, 120.0, 110.0])
+    assert (reviewed["R_Ohm"] > 0.0).all()
+
+
+def test_current_annealing_plugin_treats_run_folder_as_one_measurement(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text(
+        "0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n",
+        encoding="utf-8",
+    )
+    notes = run_dir / "operator_notes.txt"
+    notes.write_text("not measurement data\n", encoding="utf-8")
+    plugin = _current_annealing_load_plugin()
+
+    assert plugin._is_data_source_path(measurement) is True  # noqa: SLF001
+    assert plugin._is_data_source_path(notes) is False  # noqa: SLF001
+    assert plugin._candidate_data_paths([run_dir]) == [  # noqa: SLF001
+        measurement.resolve()
+    ]
+    assert plugin._load_data_from_paths([run_dir], show_errors=False) is True  # noqa: SLF001
+    assert list(plugin._data_by_file) == [str(measurement.resolve())]  # noqa: SLF001
+
+def test_current_annealing_plugin_reviews_loaded_run_into_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    run_dir = tmp_path / "Ni50Fe27Ga23 12_2 100mA run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.txt"
+    measurement.write_text("0.02 0.10 5\n", encoding="utf-8")
+    plugin = _current_annealing_load_plugin()
+    plugin._loaded_files = [str(measurement)]  # noqa: SLF001
+    logged: list[str] = []
+    reviewed: list[Path] = []
+    plugin._log = lambda message, **_kwargs: logged.append(message)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        transition_review_dialog,
+        "review_current_annealing_file",
+        lambda _parent, path: reviewed.append(Path(path)) or True,
+    )
+
+    plugin._review_loaded_transitions()  # noqa: SLF001
+
+    assert reviewed == [measurement]
+    assert logged == [f"Saved transition review: {run_dir / 'transition_review.json'}"]
+
+
+def test_summarize_transition_loops_keeps_clear_cooling_without_heating_fit() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_resistance = 100.0 + (0.12 * up_current)
+    down_rise = np.clip((30.0 - down_current) / 6.0, 0.0, 1.0)
+    down_resistance = 80.0 + (10.0 * down_rise)
+    frame = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_Ohm": np.r_[up_resistance, down_resistance],
+        }
+    )
+
+    summaries = anneal_core.summarize_transition_loops(frame)
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary.as_current_mA is None
+    assert summary.af_current_mA is None
+    assert summary.ms_current_mA == pytest.approx(28.0, abs=1.5)
+    assert summary.mf_current_mA == pytest.approx(23.5, abs=1.5)

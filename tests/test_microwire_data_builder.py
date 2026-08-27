@@ -72,6 +72,31 @@ _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
 
 
+def _reset_builder_store_memory() -> None:
+    store = builder_storage.MiniDatabaseStore
+    store._memory_data = {}
+    store._memory_payloads = {}
+    store._disk_writes_suspended = 0
+    store._pending_sections = set()
+    store._pending_payloads = set()
+    store._pending_section_values = {}
+    store._pending_payload_values = {}
+    store._memory_transactions = []
+    store._discard_writes_depth = 0
+    store._blocked_sections = set()
+    store._blocked_payloads = set()
+    store._payload_loaders = {}
+    store._payload_tombstones = set()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_builder_store_memory() -> object:
+    """Prevent one Builder GUI test from leaking cached records into another."""
+    _reset_builder_store_memory()
+    yield
+    _reset_builder_store_memory()
+
+
 def test_microscope_key_preserves_decimal_composition_token() -> None:
     parsed = core._microscope_key(Path("Mn58.1Ni4.3Si18.5Sn18.8 3_2 glass.jpg"))
     assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
@@ -990,12 +1015,14 @@ def test_annealing_transition_review_entries_show_multi_loop_auto_summary(
     )
 
 
-def test_annealing_section_opens_transition_review_for_visible_records(
+def test_annealing_section_opens_shared_transition_review_for_visible_records(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
-    path = Path("Ni50Fe27Ga23 11_1 1000mA.txt")
+    path = tmp_path / "Ni50Fe27Ga23 11_1 1000mA.txt"
+    path.write_text("test", encoding="utf-8")
     record = MeasurementRecord(
         path=path,
         metadata=MeasurementMetadata(
@@ -1014,32 +1041,21 @@ def test_annealing_section_opens_transition_review_for_visible_records(
         sanity_error=None,
         transition_summary=("1000mA: As 11 mA, Af 13 mA",),
     )
-    opened: list[list[MeasurementRecord]] = []
-
-    class _FakeDialog:
-        def __init__(
-            self,
-            records: list[MeasurementRecord],
-            *_args: object,
-            **_kwargs: object,
-        ) -> None:
-            opened.append(list(records))
-
-        def exec(self) -> int:
-            return 0
-
+    opened: list[list[Path]] = []
     try:
         section._all_records = [record]
         section._record_groups = {"Ni50Fe27Ga23|11|1": [record]}
-        monkeypatch.setattr(builder_ui, "_AnnealingTransitionReviewDialog", _FakeDialog)
+        monkeypatch.setattr(
+            "plotting.shared.transition_review_dialog.review_current_annealing_files",
+            lambda _parent, paths: opened.append(list(paths)) or 0,
+        )
 
         section._open_transition_review()
 
-        assert opened == [[record]]
+        assert opened == [[path]]
     finally:
         section._shutdown_background_threads()
         section.close()
-
 
 def test_annealing_section_preview_uses_row_diameter(
     monkeypatch: pytest.MonkeyPatch,
@@ -1529,6 +1545,103 @@ def test_microscope_section_can_hide_other_ends() -> None:
         section.close()
 
 
+def test_microscope_section_can_show_only_image_backed_rows_missing_dimensions() -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 10.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "_key": "TestComp|1|1",
+                    "_core_image": "core.jpg",
+                    "_glass_image": "glass.jpg",
+                    "_images": ["core.jpg", "glass.jpg"],
+                },
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 11.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 44.0,
+                    "_key": "TestComp|1|2",
+                    "_core_image": "core.jpg",
+                    "_glass_image": "glass.jpg",
+                    "_images": ["core.jpg", "glass.jpg"],
+                },
+                {
+                    "Composition": "TestComp",
+                    "Microwire": "1/3",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "_key": "TestComp|1|3",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        assert section.table_view.model().rowCount() == 3
+
+        section._toggle_missing_dimensions_only(True)
+
+        assert section.table_view.model().rowCount() == 1
+        assert section.table_view.model().index(0, 1).data() == "1/1"
+        assert section.data.extra["show_missing_dimensions_only"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_refresh_preserves_displayed_pair_and_collects_repeat_images(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        old_core = tmp_path / "Ni50Fe27Ga23 11_2 core.jpg"
+        old_glass = tmp_path / "Ni50Fe27Ga23 11_2 glass.jpg"
+        new_core = tmp_path / "Ni50Fe27Ga23 11-2 core.jpg"
+        new_glass = tmp_path / "Ni50Fe27Ga23 11-2 glass.jpg"
+        for path in (old_core, old_glass, new_core, new_glass):
+            path.write_bytes(b"image")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 14.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 48.7,
+                    "_key": "Ni50Fe27Ga23|11|2",
+                    "_core_image": str(old_core),
+                    "_glass_image": str(old_glass),
+                    "_images": [str(old_core), str(old_glass)],
+                }
+            ]
+        )
+
+        rows = section._build_image_ref_rows(  # noqa: SLF001
+            [new_core, new_glass],
+            {("Ni50Fe27Ga23", 11, 2, None)},
+            frame,
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["_core_image"] == str(old_core)
+        assert rows[0]["_glass_image"] == str(old_glass)
+        assert rows[0]["_images"] == [
+            str(old_core),
+            str(old_glass),
+            str(new_core),
+            str(new_glass),
+        ]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
 def test_microscope_expected_keys_ignore_annealing_filename_notes(tmp_path: Path) -> None:
     _ensure_qapp()
     section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
@@ -1922,6 +2035,31 @@ def test_mini_dma_section_frame_accepts_multiple_break_summaries(tmp_path: Path)
     assert frame.iloc[0][MINI_DMA_BREAK_COLUMN] == [
         "400 MPa / 11.69 g @ 35 mA",
         "450 MPa / 13.15 g @ 42 mA",
+    ]
+
+
+def test_mini_dma_section_frame_uses_cached_strain_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run01",
+        strain_summary=("100 MPa / 1.5 g: 0.08% @ 80 mA",),
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_peak_strain_summary",
+        lambda _record: pytest.fail("table reconstruction must not reload source runs"),
+    )
+
+    frame = builder_ui._mini_dma_records_to_frame([record])
+
+    assert frame.iloc[0][MINI_DMA_STRAIN_COLUMN] == [
+        "100 MPa / 1.5 g: 0.08% @ 80 mA"
     ]
 
 
@@ -2349,6 +2487,16 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         assert dialog._tree_items[first_ref].text(1) == "No transition"  # noqa: SLF001
         expected = builder_ui._transition_review_status_color("No transition")  # noqa: SLF001
         assert dialog._tree_items[first_ref].foreground(1).color().name() == expected  # noqa: SLF001
+
+        dialog._handle_transition_values_edited({"As": 42.0})  # noqa: SLF001
+        dialog._set_current_review(  # noqa: SLF001
+            builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED,
+            move_next=False,
+        )
+        excluded = next(iter(stored.values()))
+        assert excluded["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED
+        assert excluded["values"]["As"] == pytest.approx(42.0)
+        assert dialog._tree_items[first_ref].text(1) == "Excluded"  # noqa: SLF001
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -2735,6 +2883,64 @@ def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) 
     assert entries == []
 
 
+def test_mini_dma_transition_workspace_filter_skips_unsupported_run_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    current_sweep = MiniDmaRecord(
+        path=_write_current_sweep_mini_dma_run_with_iso_columns(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="current-sweep",
+    )
+    iso_current = MiniDmaRecord(
+        path=_write_iso_current_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="iso-current",
+    )
+
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    section._all_mini_dma_records = [current_sweep, iso_current]  # noqa: SLF001
+    support_calls: list[MiniDmaRecord] = []
+    real_support_check = builder_ui._mini_dma_record_supports_transition_review  # noqa: SLF001
+
+    def counted_support_check(record: MiniDmaRecord) -> bool:
+        support_calls.append(record)
+        return real_support_check(record)
+
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_record_supports_transition_review",
+        counted_support_check,
+    )
+    workspace = builder_ui._MiniDmaTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        assert workspace._review_paths() == [current_sweep.path]  # noqa: SLF001
+        assert workspace._review_paths() == [current_sweep.path]  # noqa: SLF001
+        workspace._update_review_buttons()  # noqa: SLF001
+        assert support_calls == [current_sweep, iso_current]
+    finally:
+        workspace.close()
+        section.close()
+        workspace.deleteLater()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_source_check_rejects_unsupported_run_modes(tmp_path: Path) -> None:
+    current_sweep = _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path)
+    iso_current = _write_iso_current_mini_dma_run(tmp_path)
+
+    availability = builder_ui._check_transition_source_paths(  # noqa: SLF001
+        [str(current_sweep), str(iso_current)],
+        "tma",
+    )
+
+    assert availability[str(current_sweep)] is True
+    assert availability[str(iso_current)] is False
+
 def test_dma_transitions_view_lists_run_target_rows() -> None:
     _ensure_qapp()
     record = _sample_mini_dma_record()
@@ -2772,7 +2978,7 @@ def test_dma_transitions_view_lists_run_target_rows() -> None:
         section.refresh_data()
         table = section.summary_table
 
-        assert table.rowCount() == len(entries)
+        assert table.rowCount() == sum(bool(line) for line in record.transition_summary)
         assert table.item(0, 0).text() == "Ni50Fe27Ga23"
         assert table.item(0, 1).text() == "12/2"
         assert table.item(0, 2).text() == record.label
@@ -2891,39 +3097,41 @@ def test_mini_dma_transition_review_dialog_shows_empty_state_for_unsupported_run
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_section_opens_transition_review_for_all_records_without_selection(
+def test_mini_dma_section_opens_shared_transition_review_for_all_records_without_selection(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
-    opened: list[MiniDmaRecord] = []
-
-    class FakeReviewDialog:
-        def __init__(
-            self,
-            records: list[MiniDmaRecord],
-            _logger: logging.Logger,
-            _parent: QtWidgets.QWidget | None = None,
-            **_kwargs: object,
-        ) -> None:
-            opened.extend(records)
-
-        def exec(self) -> int:
-            return int(QtWidgets.QDialog.DialogCode.Accepted)
-
+    opened: list[Path] = []
     try:
-        record = _sample_mini_dma_record()
+        run_path = tmp_path / "Ni50Fe27Ga23 12_2 run"
+        run_path.mkdir()
+        record = MiniDmaRecord(
+            path=run_path,
+            sample="Ni50Fe27Ga23 12_2",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            label=run_path.name,
+        )
         section._record_groups = {record.sample: [record]}  # noqa: SLF001
-        monkeypatch.setattr(builder_ui, "_MiniDmaTransitionReviewDialog", FakeReviewDialog)
+        monkeypatch.setattr(
+            builder_ui,
+            "_mini_dma_record_supports_transition_review",
+            lambda _record: True,
+        )
+        monkeypatch.setattr(
+            "plotting.shared.transition_review_dialog.review_tma_runs",
+            lambda _parent, paths: opened.extend(paths) or 0,
+        )
 
         section._open_transition_review()  # noqa: SLF001
 
-        assert opened == [record]
+        assert opened == [run_path]
     finally:
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
-
 
 def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
     _ensure_qapp()
@@ -2944,6 +3152,8 @@ def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
         assert snapshot["run::50 MPa"]["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED
         assert snapshot["run::50 MPa"]["values"] == {"As": 30.0, "Af": 70.0}
     finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
@@ -2991,7 +3201,7 @@ def test_mini_dma_section_applies_reviewed_transition_values_to_records(
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_reviewed_transition_records_keep_recalculated_strain(
+def test_mini_dma_reviewed_transition_records_preserve_cached_strain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
@@ -3021,12 +3231,12 @@ def test_mini_dma_reviewed_transition_records_keep_recalculated_strain(
         monkeypatch.setattr(
             builder_ui,
             "_mini_dma_peak_strain_summary",
-            lambda _record: ("100 MPa / 1.5 g: 10.74% @ 2 mA",),
+            lambda _record: pytest.fail("transition reconciliation must not reload source runs"),
         )
 
         reviewed = section.records_with_reviewed_transitions([record])
 
-        assert reviewed[0].strain_summary == ("100 MPa / 1.5 g: 10.74% @ 2 mA",)
+        assert reviewed[0].strain_summary == ("100 MPa / 1.5 g: 0.08% @ 80 mA",)
     finally:
         section._transition_review_store_timer.stop()  # noqa: SLF001
         section._transition_table_apply_timer.stop()  # noqa: SLF001
@@ -3076,13 +3286,7 @@ def test_mini_dma_transition_review_defers_heavy_store_and_table_apply(
         QtWidgets.QApplication.processEvents()
 
 
-def test_transition_temps_counts_auto_estimated_unannotated_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeProcessor:
-        def estimate_transition_points(self, _data: pd.DataFrame) -> dict[str, float]:
-            return {"As": 30.0, "Af": 70.0}
-
+def test_transition_temps_counts_only_available_auto_estimates() -> None:
     section = builder_ui.TransitionTempsSection.__new__(builder_ui.TransitionTempsSection)
     section.logger = logging.getLogger("test")
     section._record_groups = {  # noqa: SLF001
@@ -3105,7 +3309,9 @@ def test_transition_temps_counts_auto_estimated_unannotated_rows(
             )
         ],
     }
-    monkeypatch.setattr(builder_ui, "_get_vsm_temp_processor", lambda _logger: FakeProcessor())
+    section._available_auto_values_for_records = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda _records: {"As": 30.0, "Af": 70.0}
+    )
     frame = pd.DataFrame(
         {
             "_group_key": ["Ni50Fe27Ga23|12|2|", "Ni50Fe27Ga23|12|3|"],
@@ -3475,7 +3681,7 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         frame = section.model.frame()
         assert len(frame.index) == 2
         assert frame.iloc[0]["Scans"] == 1
-        assert frame.iloc[0]["Review status"] == "Auto candidates"
+        assert frame.iloc[0]["Review status"] == "Unreviewed"
         assert "Total 2" in section._preview_panel.review_counts_label.text()  # noqa: SLF001
 
         section._mark_current_scan_no_transition()  # noqa: SLF001
@@ -3490,7 +3696,7 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         assert frame.iloc[0]["Unreviewed"] == 0
         assert frame.iloc[0]["Review status"] == "No transition"
         assert frame.iloc[1]["Unreviewed"] == 1
-        assert frame.iloc[1]["Review status"] == "Auto candidates"
+        assert frame.iloc[1]["Review status"] == "Unreviewed"
     finally:
         section.close()
         section.deleteLater()
@@ -3834,6 +4040,72 @@ def test_mini_dma_lazy_project_preview_uses_placeholder_without_loading_source(
         QtWidgets.QApplication.processEvents()
 
 
+def test_dma_lazy_project_preview_requests_only_the_visible_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.DmaIsoStressSection(logging.getLogger("test"), lambda *_args: None)
+    request = Mock(return_value=True)
+    try:
+        section._project_previews_deferred = True  # noqa: SLF001
+        monkeypatch.setattr(
+            section,
+            "_request_project_overview_records",
+            request,
+        )
+        source = Path("D:/measurements/sample.txt")
+        row = pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "_sample": "Ni50Fe27Ga23 12/2",
+                "_sources": [str(source)],
+            }
+        )
+
+        preview = section._preview_decoration(row, builder_ui.DMA_ISOSTRESS_COLUMN)  # noqa: SLF001
+
+        assert isinstance(preview, QtGui.QPixmap)
+        assert not preview.isNull()
+        request.assert_called_once_with(
+            f"Ni50Fe27Ga23 12/2|Ni50Fe27Ga23|12|2|{builder_ui.DMA_ISOSTRESS_COLUMN}",
+            [source],
+        )
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_packaged_preview_uses_ready_card_instead_of_blocking_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.VsmHysteresisSection(logging.getLogger("test"), lambda *_args: None)
+    record = builder_ui.VsmHysteresisRecord(
+        path=Path("D:/measurements/sample.vsm-hyst-data"),
+        sample="Ni50Fe27Ga23 12/2",
+        data=pd.DataFrame({"Applied Field": [-1.0, 1.0], "Signal": [-0.1, 0.1]}),
+    )
+    render = Mock(side_effect=AssertionError("packaged table paint must not render Matplotlib"))
+    monkeypatch.setattr(section, "_render_preview_pixmap", render)
+    section._record_groups = {record.sample: [record]}  # noqa: SLF001
+    section._project_previews_deferred = True  # noqa: SLF001
+    row = pd.Series({"_sample": record.sample})
+    try:
+        preview = section._preview_decoration(  # noqa: SLF001
+            row, builder_ui.VSM_HYSTERESIS_COLUMN
+        )
+
+        assert isinstance(preview, QtGui.QPixmap)
+        assert not preview.isNull()
+        render.assert_not_called()
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_packaged_preview_requests_are_coalesced_into_one_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4066,6 +4338,35 @@ def test_compare_section_defers_matrix_build_until_visible() -> None:
         section.close()
 
 
+def test_compare_does_not_force_deferred_graph_payload_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.CompareSection({}, logging.getLogger("test"), lambda *_args: None)
+    source = Mock()
+    source.store.has_payload_loader.return_value = True
+    source.store.load_payload.side_effect = AssertionError(
+        "Compare must not decode a deferred packaged graph payload"
+    )
+    source._all_records = ["already loaded"]
+    section.sections["vsm_hysteresis"] = source
+    try:
+        assert section._load_payload(  # noqa: SLF001
+            "vsm_hysteresis", "vsm_hysteresis_records"
+        ) == ["already loaded"]
+        source.store.load_payload.assert_not_called()
+
+        source._all_records = []
+        assert section._load_payload(  # noqa: SLF001
+            "vsm_hysteresis", "vsm_hysteresis_records"
+        ) is None
+        source.store.load_payload.assert_not_called()
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
     path = tmp_path / "Ni50Fe27Ga23 6_4a s2 30mA.txt"
     path.write_text("0.1 0.2 2.0\n")
@@ -4087,6 +4388,60 @@ def test_filename_parser_extracts_kosice_dat_metadata(tmp_path: Path) -> None:
     assert metadata.draw_x == 1
     assert metadata.piece_y == 5
     assert metadata.setpoint_mA is None
+
+
+def test_annealing_session_v2_folder_is_one_parseable_measurement(tmp_path: Path) -> None:
+    _ensure_qapp()
+    run_dir = tmp_path / "Ni48Fe27Ga23Cu1Co1 1_1 60mA VSM 2loops_run01"
+    run_dir.mkdir()
+    measurement = run_dir / "measurement.csv"
+    pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0],
+            "cycle_index": [1, 1, 2],
+            "measured_current_mA": [1.2, 20.0, 30.0],
+            "voltage_V": [0.08, 1.4, 2.1],
+            "resistance_ohm": [66.7, 70.0, 70.0],
+        }
+    ).to_csv(measurement, index=False)
+    (run_dir / "run_log.txt").write_text("not measurement data\n", encoding="utf-8")
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "schema": "current_annealing_session_v2",
+                "data_file": "measurement.csv",
+                "composition": "Ni48Fe27Ga23Cu1Co1",
+                "microwire": "1/1",
+                "max_current_mA": 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = _metadata_from_path(measurement, tmp_path)
+    frame = _load_annealing(measurement)
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data.sources = [str(tmp_path)]
+        candidates = section._collect_candidates()
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+    assert metadata.composition_token == "Ni48Fe27Ga23Cu1Co1"
+    assert (metadata.draw_x, metadata.piece_y, metadata.setpoint_mA) == (1, 1, 60)
+    assert metadata.file_name == run_dir.name
+    assert frame["I_mA"].tolist() == pytest.approx([1.2, 20.0, 30.0])
+    assert frame["Cycle"].tolist() == pytest.approx([1.0, 1.0, 2.0])
+    assert candidates == [measurement]
+
+
+def test_sample_from_path_uses_direct_child_run_folder_name(tmp_path: Path) -> None:
+    root = tmp_path / "mini DMA"
+    run = root / "Ni50Fe27Ga23 12_5 iso-stress_run06"
+    run.mkdir(parents=True)
+
+    assert builder_ui._sample_from_path(run, [str(root)]) == run.name
 
 
 def test_split_microwire_key_rejects_non_integral_or_boolean_indices() -> None:
@@ -4574,6 +4929,8 @@ def test_microscope_apply_override_skips_autosize_for_enter(
 
         full_resets: list[bool] = []
         saves: list[bool] = []
+        updates: list[bool] = []
+        section.data_updated.connect(lambda: updates.append(True))
         original_set_frame = section.model.set_frame
 
         def _count_set_frame(frame: pd.DataFrame | None) -> None:
@@ -4589,6 +4946,7 @@ def test_microscope_apply_override_skips_autosize_for_enter(
         updated = section.model.frame()
         assert full_resets == []
         assert saves == []
+        assert updates == [True]
         assert updated.at[0, builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(31.0)
         assert section._validated["Ni50Fe27Ga23|2|4"]["d_reviewed"] is True
 
@@ -6687,6 +7045,36 @@ def test_video_import_project_payload_preserves_saved_rows_with_fabrication_pres
         assert section._row_missing_video_files(row) is False
     finally:
         section.close()
+
+
+def test_video_autosize_is_debounced_and_bounds_resize_precision() -> None:
+    _ensure_qapp()
+    section = builder_ui.VideoSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section.model.set_frame(
+            pd.DataFrame(
+                {
+                    "Composition": ["Ni50Fe27Ga23"] * 200,
+                    "Microwire": [f"1/{index}" for index in range(200)],
+                    "Notes": ["x" * 500] * 200,
+                }
+            )
+        )
+        section._schedule_autosize_video_table()  # noqa: SLF001
+        section._schedule_autosize_video_table()  # noqa: SLF001
+        assert section._autosize_timer.isActive()  # noqa: SLF001
+
+        QtWidgets.QApplication.processEvents()
+
+        header = section.table_view.horizontalHeader()
+        assert not section._autosize_timer.isActive()  # noqa: SLF001
+        assert header.resizeContentsPrecision() == 24
+        assert header.sectionResizeMode(0) == QtWidgets.QHeaderView.ResizeMode.Interactive
+        assert all(section.table_view.columnWidth(i) <= 360 for i in range(3))
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_video_filter_candidates_for_relevance_keeps_piece_paths_present_in_relevant_map(
@@ -8821,24 +9209,59 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.widget(0) is not window.current_density_section
         assert transitions.tab_widget.widget(1) is not window.transition_temps_section
         assert transitions.tab_widget.widget(2) is not window.dma_transitions_section
-        assert transitions.annealing_workspace._dialog is None  # noqa: SLF001
-        assert transitions.vsm_workspace.tree.headerItem().text(0) == "VSM scan"
-        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+        assert transitions.annealing_workspace.review_button.text() == "Review all..."
+        assert transitions.vsm_workspace.summary_table.horizontalHeaderItem(0).text() == "Sample"
+        assert transitions.dma_workspace.review_button.text() == "Review all..."
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
+        for index in range(window.tab_widget.count()):
+            assert window.tab_widget.tabIcon(index).isNull()
+            assert not window.tab_widget.tabToolTip(index)
+            widget = window.tab_widget.widget(index)
+            if widget is not transitions:
+                assert widget.data_state_label.text()
+        for index in range(transitions.tab_widget.count()):
+            assert transitions.tab_widget.tabIcon(index).isNull()
+            assert not transitions.tab_widget.tabToolTip(index)
+            workspace = transitions.tab_widget.widget(index)
+            assert workspace.data_state_label.text() == "\u25cf Refresh needed"
+
+        fabrication = window.fabrication_section
+        window._set_builder_tab_state(
+            fabrication, "current", "Table matches current project data"
+        )
+        other_index = window.tab_widget.indexOf(window.video_section)
+        window.tab_widget.setCurrentIndex(other_index)
+        QtWidgets.QApplication.processEvents()
+        assert fabrication.data_state_label.property("dataState") == "current"
+        assert fabrication.data_state_label.text() == "\u25cf Up to date"
+
+        assembly = window.assembly_section
+        compare = window.compare_section
+        assembly._preview_stale_reason = "Source data changed"  # noqa: SLF001
+        compare._matrix_view_dirty = True  # noqa: SLF001
+        window._refresh_builder_tab_states()  # noqa: SLF001
+        assert assembly.data_state_label.text() == "\u25cf Refresh needed"
+        assert compare.data_state_label.text() == "\u25cf Refresh needed"
+        assembly._preview_stale_reason = ""  # noqa: SLF001
+        compare._matrix_view_dirty = False  # noqa: SLF001
+        window._refresh_builder_tab_states()  # noqa: SLF001
+        assert assembly.data_state_label.text() == "\u25cf Up to date"
+        assert compare.data_state_label.text() == "\u25cf Up to date"
 
         window.show_transitions_view("vsm")
         assert window.tab_widget.currentWidget() is transitions
         assert transitions.tab_widget.currentIndex() == 1
 
         window.show_transitions_view("annealing")
-        assert transitions.annealing_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.annealing_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
-        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+        assert "Browse every saved result here" in (
+            transitions.annealing_workspace.findChildren(QtWidgets.QLabel)[1].text()
+        )
 
         window.show_transitions_view("dma")
-        assert transitions.dma_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.dma_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert "Browse every saved result here" in (
+            transitions.dma_workspace.findChildren(QtWidgets.QLabel)[1].text()
+        )
 
         assert window.annealing_section.review_transitions_button.text() == "Transitions..."
         assert window.mini_dma_section.review_transitions_button.text() == "Transitions..."
@@ -8872,27 +9295,222 @@ def test_transition_workspace_loads_only_selected_peer_dependencies_lazily(
             "mini_dma",
         }
 
+        calls.clear()
         window.transitions_section.tab_widget.setCurrentIndex(2)
-        calls.clear()
-        window._load_current_deferred_project_sections()
         assert calls == [("mini_dma", False)]
+        assert window.transitions_section.dma_workspace.loading_bar.isHidden() is False
+        assert (
+            window.transitions_section.dma_workspace.status_label.text()
+            == "Loading transition review data..."
+        )
 
-        window.transitions_section.tab_widget.setCurrentIndex(1)
         calls.clear()
-        window._load_current_deferred_project_sections()
+        window.transitions_section.tab_widget.setCurrentIndex(1)
         assert calls == [
             ("transition_temps", False),
             ("vsm_temperature_scan", True),
         ]
+        assert window.transitions_section.vsm_workspace.loading_bar.isHidden() is False
 
-        window.transitions_section.tab_widget.setCurrentIndex(0)
         calls.clear()
-        window._load_current_deferred_project_sections()
+        window.transitions_section.tab_widget.setCurrentIndex(0)
         assert calls == [("annealing", True), ("current_density", False)]
+        assert window.transitions_section.annealing_workspace.loading_bar.isHidden() is False
     finally:
         window._dirty = False
         window.close()
 
+
+def test_transition_workspace_refresh_requests_current_deferred_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        window,
+        "_load_deferred_project_section_async",
+        lambda key, *, decode_payloads=False: calls.append((key, decode_payloads)),
+    )
+    try:
+        transitions = window.transitions_section
+        window.tab_widget.setCurrentWidget(transitions)
+        transitions.tab_widget.setCurrentIndex(1)
+        window._deferred_project_section_keys = {
+            "vsm_temperature_scan",
+            "transition_temps",
+        }
+        calls.clear()
+
+        transitions.vsm_workspace.refresh_button.click()
+
+        assert calls == [
+            ("transition_temps", False),
+            ("vsm_temperature_scan", True),
+        ]
+        assert transitions.vsm_workspace.loading_bar.isHidden() is False
+        assert not transitions.vsm_workspace.refresh_button.isEnabled()
+        assert "Loading transition review data" in transitions.vsm_workspace.status_label.text()
+
+        transitions.show_load_error(
+            "Could not load transition review data. Click Refresh to try again."
+        )
+        assert transitions.vsm_workspace.loading_bar.isHidden()
+        assert transitions.vsm_workspace.refresh_button.isEnabled()
+        assert "Click Refresh to try again" in transitions.vsm_workspace.status_label.text()
+        assert not transitions.tab_widget.tabToolTip(1)
+        assert transitions.vsm_workspace.data_state_label.text() == "\u25cf Load failed"
+        assert transitions.vsm_workspace.data_state_label.property("dataState") == "error"
+    finally:
+        window._dirty = False
+        window.close()
+
+def test_deferred_project_section_refreshes_restored_source_controls(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    section = window.microscope_section
+    try:
+        section.apply_data(
+            MiniDatabaseData(
+                sources=[str(tmp_path)],
+                table=pd.DataFrame({"Composition": ["Ni50Fe27Ga23"]}),
+            )
+        )
+        section.refresh_button.setEnabled(False)
+        section.status_label.setText("Connect one or more folders to begin.")
+        section._suppress_pending_scan_once = True
+        previous_batch_mode = builder_ui.MiniDatabaseSection._project_load_batch_mode
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        try:
+            window._refresh_loaded_project_section_ui("microscope", section)
+        finally:
+            builder_ui.MiniDatabaseSection._project_load_batch_mode = previous_batch_mode
+        assert section.refresh_button.isEnabled()
+        assert section.status_label.text() == "Up to date (1 record(s))."
+    finally:
+        window._dirty = False
+
+        window.close()
+
+
+
+
+
+def test_synchronous_project_load_restores_annealing_transition_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    _ensure_qapp()
+    measurement = tmp_path / "Ni50Fe27Ga23 1_1 70mA.txt"
+    measurement.write_text("synthetic", encoding="utf-8")
+    from microwire_data_builder.core import MeasurementMetadata as CanonicalMeasurementMetadata
+
+    record = builder_ui.MeasurementRecord(
+        path=measurement,
+        metadata=CanonicalMeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=1,
+            piece_y=1,
+            setpoint_mA=70,
+            alt_variant=False,
+            measurement_id="sync-transition-record",
+            file_name=measurement.name,
+            relpath=measurement.name,
+            timestamp_mtime_utc="2026-08-12T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(
+            {
+                "Current": [1.0, 2.0, 1.0],
+                "Resistance": [100.0, 110.0, 101.0],
+            }
+        ),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    project = tmp_path / "sync-transition.pydpj"
+    builder_ui.write_project_package(
+        project,
+        {
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": BuilderWindow.PROJECT_VERSION,
+            "sections": {
+                "annealing": {
+                    "section": "annealing",
+                    "title": "Current annealing",
+                    "columns": ["Composition", "Microwire"],
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "1/1",
+                        }
+                    ],
+                    "index": [0],
+                    "sources": [str(tmp_path)],
+                    "processed": {str(measurement): measurement.stat().st_mtime},
+                    "payloads": {
+                        "annealing_records": builder_ui._encode_project_payload(  # noqa: SLF001
+                            [record]
+                        )
+                    },
+                }
+            },
+        },
+    )
+
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        window.load_project_synchronously_for_automation(project)
+
+        assert len(window.annealing_section._all_records) == 1  # noqa: SLF001
+        window.transitions_section.refresh_current_workspace(force=True)
+        assert window.transitions_section.annealing_workspace.summary_table.rowCount() == 1
+    finally:
+        window._dirty = False
+        window.close()
+
+def test_deferred_vsm_source_load_rebuilds_cycle_transition_records() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+    source_section = window.vsm_temperature_section
+    try:
+        source_section._all_records = [record]  # noqa: SLF001
+
+        window._refresh_loaded_project_section_ui(  # noqa: SLF001
+            "vsm_temperature_scan", source_section
+        )
+
+        cycles = window.transition_temps_section._all_transition_records  # noqa: SLF001
+        assert len(cycles) == 2
+        assert [
+            builder_ui._vsm_transition_cycle_target_label(cycle)  # noqa: SLF001
+            for cycle in cycles
+        ] == ["Cycle 1", "Cycle 2"]
+    finally:
+        window._dirty = False
+        window.close()
 
 def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
     _ensure_qapp()
@@ -8934,18 +9552,303 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
         window.transitions_section.tab_widget.setCurrentIndex(0)
         window._refresh_sections_after_project_load()  # noqa: SLF001
 
-        dialog = window.transitions_section.annealing_workspace._dialog  # noqa: SLF001
-        assert dialog is not None
-        tree = dialog.findChild(QtWidgets.QTreeWidget)
-        assert tree is not None
-        assert tree.topLevelItemCount() == 1
-        assert tree.topLevelItem(0).text(1) == "No transition"
-        assert "Done 1" in dialog._counts_label.text()  # noqa: SLF001
+        workspace = window.transitions_section.annealing_workspace
+        assert "1 result row(s) in project" in workspace.status_label.text()
+        assert "1 reviewed in project" in workspace.status_label.text()
+        assert "0 with available source data" in workspace.status_label.text()
+        assert workspace.review_button.isEnabled() is False
     finally:
         window._dirty = False
         window.hide()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_transition_lab_filter_limits_rows_and_review_queue(tmp_path: Path) -> None:
+    _ensure_qapp()
+    prague = tmp_path / "Praha" / "data" / "current annealing" / "run.txt"
+    kosice = tmp_path / "Kosice" / "Current Annealing" / "run.txt"
+    reviewed: list[list[Path]] = []
+    workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
+        "Transitions", "current_annealing", lambda: [prague, kosice],
+        lambda paths: reviewed.append(list(paths)) or 0,
+    )
+    workspace._source_availability = {  # noqa: SLF001
+        workspace._path_key(prague): True,  # noqa: SLF001
+        workspace._path_key(kosice): True,  # noqa: SLF001
+    }
+    rows = [
+        {"sample": "Prague sample", "run": "Prague run", "target": "Cycle 1",
+         "status": "Unreviewed", "lab": "Prague", "path": prague, "source": "Available"},
+        {"sample": "Košice sample", "run": "Košice run", "target": "Cycle 1",
+         "status": "Unreviewed", "lab": "Košice", "path": kosice, "source": "Available"},
+    ]
+    workspace._overview_rows = lambda: rows  # type: ignore[method-assign]
+    try:
+        workspace.refresh_workspace()
+        assert workspace.summary_table.horizontalHeaderItem(8).text() == "Lab"
+        assert workspace.summary_table.horizontalHeaderItem(9).text() == "Data file"
+        workspace.lab_filter.setCurrentText("Prague")
+        assert workspace.summary_table.isRowHidden(0) is False
+        assert workspace.summary_table.isRowHidden(1) is True
+        workspace._open_review()  # noqa: SLF001
+        assert reviewed == [[prague]]
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_lab_detection_handles_prague_and_kosice_paths() -> None:
+    assert builder_ui._transition_lab_for_path(  # noqa: SLF001
+        Path(r"G:\My Drive\1 Projects\Praha\data\current annealing")
+    ) == "Prague"
+    assert builder_ui._transition_lab_for_path(  # noqa: SLF001
+        Path(r"G:\Shared drives\database\Kosice\Current Annealing")
+    ) == "Košice"
+
+
+def test_transition_review_queue_units_preserve_project_review_history(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "reviewed-run.txt"
+    rows = [
+        {
+            "path": source,
+            "target": "Cycle 1",
+            "status": "Accepted",
+            "As": 25.0,
+            "Af": 40.0,
+        },
+        {
+            "path": source,
+            "target": "Cycle 2",
+            "status": "No transition",
+        },
+    ]
+
+    units_by_path = builder_ui._transition_review_units_by_path(rows)  # noqa: SLF001
+    units = builder_ui._transition_review_units_for_path(  # noqa: SLF001
+        units_by_path, source
+    )
+
+    assert [(unit.label, unit.state) for unit in units] == [
+        ("Cycle 1", "accepted"),
+        ("Cycle 2", "no_transition"),
+    ]
+    assert units[0].tooltip == "As=25; Af=40"
+
+
+def test_mini_dma_legacy_review_id_uses_normalized_payload_target_label() -> None:
+    stored_id = r"C:\data\run::50 MPa \ 0.83 g"
+    payload = {
+        "record_path": r"C:\data\run",
+        "target_label": "50 MPa / 0.83 g",
+    }
+
+    assert builder_ui._canonical_mini_dma_review_record_id(  # noqa: SLF001
+        stored_id, payload
+    ) == f'{os.path.normpath(r"C:\data\run")}::50 MPa / 0.83 g'
+
+
+def test_annealing_project_review_preloads_shared_editor_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from plotting.shared import transition_review_adapters
+
+    source = tmp_path / "Ni50Fe27Ga23 1_2 100mA.txt"
+    record = MeasurementRecord(
+        path=source,
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100.0,
+            alt_variant=False,
+            measurement_id=source.stem,
+            file_name=source.name,
+            relpath=source.name,
+            timestamp_mtime_utc="2026-08-14T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    monkeypatch.setattr(
+        transition_review_adapters,
+        "current_annealing_review_draft",
+        lambda *_args, **_kwargs: {
+            "experiment_family": "current_annealing",
+            "measurement_fingerprint": "sha256:" + "a" * 64,
+            "targets": [
+                {
+                    "status": "unreviewed",
+                    "auto_values": {},
+                    "manual_values": {},
+                    "final_values": {},
+                    "cleared_labels": [],
+                }
+            ],
+        },
+    )
+
+    payload = builder_ui._annealing_project_review_payload(  # noqa: SLF001
+        record,
+        {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "final_values_mA": {"As1": 94.0, "Af1": 96.0},
+        },
+        {"composition": "Ni50Fe27Ga23", "microwire": "1/2"},
+    )
+
+    target = payload["targets"][0]
+    assert target["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+    assert target["manual_values"] == {"As1": 94.0, "Af1": 96.0}
+    assert target["final_values"] == {"As1": 94.0, "Af1": 96.0}
+    assert target["cleared_labels"] == ["Mf1", "Ms1"]
+
+
+def test_mini_dma_project_review_preloads_shared_editor_payload(
+    tmp_path: Path,
+) -> None:
+    run_path = _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path)
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record], logging.getLogger("test")
+    )
+    assert entries
+    review_id = builder_ui._mini_dma_review_record_id(  # noqa: SLF001
+        record, entries[0].target_label
+    )
+    payload = builder_ui._mini_dma_project_review_payload(  # noqa: SLF001
+        record,
+        {
+            review_id: {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "target_label": entries[0].target_label,
+                "values": {"As": 20.0, "Af": 35.0},
+                "manual_values_mA": {"As": 20.0, "Af": 35.0},
+            }
+        },
+        logging.getLogger("test"),
+    )
+
+    target = payload["targets"][0]
+    assert target["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+    assert target["final_values"] == {"As": 20.0, "Af": 35.0}
+    assert target["manual_values"] == {"As": 20.0, "Af": 35.0}
+    assert target["cleared_labels"] == ["Mf", "Ms"]
+
+
+def test_annealing_transition_update_flush_stops_late_dirty_timer() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    emitted: list[bool] = []
+    window.annealing_section.data_updated.connect(lambda: emitted.append(True))
+    try:
+        window.annealing_section._schedule_transition_review_dependents_update()  # noqa: SLF001
+        assert window.annealing_section._transition_review_update_timer.isActive()  # noqa: SLF001
+        window.annealing_section._flush_transition_review_dependents_update()  # noqa: SLF001
+        assert not window.annealing_section._transition_review_update_timer.isActive()  # noqa: SLF001
+        assert emitted == [True]
+        transitions = window.transitions_section
+        transitions.mark_workspaces_dirty("annealing")
+        transitions.annealing_workspace.refresh_workspace()
+        assert 0 not in transitions._dirty_view_indexes  # noqa: SLF001
+        assert transitions.annealing_workspace.data_state_label.property("dataState") == "current"
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_transition_source_checks_do_not_block_workspace_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    source = tmp_path / 'run.txt'
+    source.write_text('data', encoding='utf-8')
+    original_check = builder_ui._check_transition_source_paths  # noqa: SLF001
+
+    def _slow_check(
+        paths: tuple[str, ...], family: str = ""
+    ) -> dict[str, bool]:
+        time.sleep(0.25)
+        return original_check(paths, family)
+
+    monkeypatch.setattr(builder_ui, '_check_transition_source_paths', _slow_check)
+    workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
+        'Transitions',
+        'current_annealing',
+        lambda: [source],
+        lambda _paths: 0,
+    )
+    monkeypatch.setattr(
+        workspace,
+        '_overview_rows',
+        lambda: [
+            {
+                'sample': 'Ni50Fe27Ga23 1/1',
+                'run': source.name,
+                'target': 'Cycle 1',
+                'status': 'Unreviewed',
+                'path': source,
+                'source': workspace._source_label(source),  # noqa: SLF001
+            }
+        ],
+    )
+    try:
+        started = time.perf_counter()
+        workspace.refresh_workspace()
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.15
+        assert 'checking source data' in workspace.status_label.text()
+        assert workspace.loading_bar.isHidden()
+        _wait_for_qt(
+            lambda: 'checking source data' not in workspace.status_label.text(),
+            timeout_ms=3000,
+        )
+        assert '1 with available source data' in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_switching_loaded_transition_tabs_does_not_rebuild_clean_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    transitions = window.transitions_section
+    refreshes: list[str] = []
+    try:
+        window.tab_widget.setCurrentWidget(transitions)
+        transitions.set_active(True, refresh=False)
+        transitions._dirty_view_indexes.clear()  # noqa: SLF001
+        monkeypatch.setattr(
+            transitions.vsm_workspace,
+            'refresh_workspace',
+            lambda: refreshes.append('vsm'),
+        )
+
+        transitions.tab_widget.setCurrentIndex(1)
+        QtWidgets.QApplication.processEvents()
+
+        assert refreshes == []
+        assert transitions.vsm_workspace.loading_bar.isHidden()
+    finally:
+        window._dirty = False
+        window.close()
 
 
 def test_annealing_transition_review_defers_dependent_refresh() -> None:
@@ -9058,6 +9961,40 @@ def test_annealing_transition_no_transition_defers_next_graph_render(
         dialog.deleteLater()
         QtWidgets.QApplication.processEvents()
 
+
+def test_current_density_source_refresh_waits_until_hidden_tab_is_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        app.processEvents()
+        section.hide()
+        refreshes: list[bool] = []
+        monkeypatch.setattr(section, "refresh_data", lambda: refreshes.append(True))
+
+        section._source_data_changed()  # noqa: SLF001
+        app.processEvents()
+
+        assert section._source_refresh_dirty is True  # noqa: SLF001
+        assert refreshes == []
+
+        section.show()
+        app.processEvents()
+
+        assert refreshes == [True]
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
+        app.processEvents()
 
 def test_annealing_transition_view_uses_one_row_per_graph() -> None:
     _ensure_qapp()
@@ -9639,13 +10576,20 @@ def test_annealing_transition_review_actions_update_visible_statuses() -> None:
         dialog._phase_controls.set_target("As1")  # noqa: SLF001
         dialog._handle_plot_pick(12.5)  # noqa: SLF001
         dialog._accept_current_and_next()  # noqa: SLF001
-        assert dialog._tree.topLevelItem(0).text(1) == "Accepted"  # noqa: SLF001
+        assert dialog._tree.topLevelItem(0).text(1) == "Manual adjusted"  # noqa: SLF001
+        first_id = builder_ui._transition_record_id_for_annealing_record(records[0])  # noqa: SLF001
+        assert stored[first_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
 
         dialog._mark_current_no_transition()  # noqa: SLF001
         assert dialog._tree.topLevelItem(1).text(1) == "No transition"  # noqa: SLF001
 
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(22.5)  # noqa: SLF001
         dialog._exclude_current_graph()  # noqa: SLF001
         assert dialog._tree.topLevelItem(2).text(1) == "Excluded"  # noqa: SLF001
+        third_id = builder_ui._transition_record_id_for_annealing_record(records[2])  # noqa: SLF001
+        assert stored[third_id]["included"] is False
+        assert stored[third_id]["final_values_mA"]["As1"] == pytest.approx(22.5)
         detail = dialog._summary_label.text()  # noqa: SLF001
         assert "Review state: Excluded" in detail
         assert "Review state: Unreviewed" not in detail
@@ -10031,6 +10975,110 @@ def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> N
         dialog.hide()
         dialog.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_review_prune_preserves_reviews_without_materialized_records() -> None:
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    review = {
+        "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        "source_path": "C:/measurements/legacy.txt",
+    }
+    section._all_records = []  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {"ca:legacy": dict(review)}  # noqa: SLF001
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    assert section._transition_reviews == {"ca:legacy": review}  # noqa: SLF001
+
+
+def test_annealing_review_prune_remaps_legacy_id_by_exact_source_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt"
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100,
+            alt_variant=False,
+            measurement_id="current-id",
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-08-27T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    section._all_records = [record]  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {  # noqa: SLF001
+        "ca:legacy": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "included": False,
+            "source_path": str(path),
+            "sample_key": "Ni44Fe27Ga23Cu3Co3|1|2",
+            "graph_label": path.name,
+            "updated_at": "2026-08-01T12:00:00+00:00",
+        }
+    }
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    current_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+    assert set(section._transition_reviews) == {current_id}  # noqa: SLF001
+    assert section._transition_reviews[current_id]["status"] == (  # noqa: SLF001
+        builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+    )
+    assert section._transition_reviews[current_id]["updated_at"] == (  # noqa: SLF001
+        "2026-08-01T12:00:00+00:00"
+    )
+
+
+def test_annealing_review_prune_keeps_unmatched_history_as_stable_orphan(
+    tmp_path: Path,
+) -> None:
+    record = MeasurementRecord(
+        path=tmp_path / "current.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100,
+            alt_variant=False,
+            measurement_id="current-id",
+            file_name="current.txt",
+            relpath="current.txt",
+            timestamp_mtime_utc="2026-08-27T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    section._all_records = [record]  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {  # noqa: SLF001
+        "ca:legacy": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            "source_path": str(tmp_path / "missing.txt"),
+            "manual_values_mA": {"As1": 25.0},
+        }
+    }
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+    first_snapshot = dict(section._transition_reviews)  # noqa: SLF001
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    assert section._transition_reviews == first_snapshot  # noqa: SLF001
+    assert len(first_snapshot) == 1
+    orphan_id, payload = next(iter(first_snapshot.items()))
+    assert orphan_id.startswith("unmatched:current-annealing:")
+    assert payload["manual_values_mA"] == {"As1": 25.0}
 
 
 def test_current_density_ignores_excluded_transition_review_records() -> None:
@@ -11119,6 +12167,130 @@ def test_auto_open_project_failure_does_not_show_modal(
         window.close()
 
 
+def test_project_save_keeps_qt_event_loop_responsive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    original_write = builder_ui.write_project_package
+    worker_threads: list[int] = []
+    gui_thread = threading.get_ident()
+
+    def _slow_write(*args: object, **kwargs: object) -> object:
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.15)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(builder_ui, "write_project_package", _slow_write)
+    window = BuilderWindow()
+    target = tmp_path / "responsive-save.pydpj"
+    timer_fired: list[bool] = []
+    monkeypatch.setattr(
+        window, "_build_project_payload",
+        lambda _staging, progress=None: {
+            "version": window.PROJECT_VERSION, "kind": window.PROJECT_KIND,
+            "saved_at": "2026-08-13 12:00",
+            "sections": {"fabrication": {"columns": [], "rows": []}},
+        },
+    )
+    try:
+        QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
+        window._dirty = True
+        window._write_project_file(target)
+        assert target.exists()
+        assert timer_fired == [True]
+        assert worker_threads and worker_threads[0] != gui_thread
+        assert window._project_save_in_progress is False
+        assert window._dirty is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_project_save_preparation_yields_to_qt_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    target = tmp_path / "responsive-preparation.pydpj"
+    timer_fired: list[bool] = []
+    section = window.fabrication_section
+    section.data.table = pd.DataFrame(
+        {"value": list(range(750)), "label": ["row"] * 750}
+    )
+    original_json_safe = builder_ui._json_safe
+
+    def _slow_json_safe(value: object) -> object:
+        time.sleep(0.0001)
+        return original_json_safe(value)
+
+    monkeypatch.setattr(builder_ui, "_json_safe", _slow_json_safe)
+    try:
+        QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
+        window._dirty = True
+        window._write_project_file(target)
+        assert target.exists()
+        assert timer_fired == [True]
+        assert window._project_save_in_progress is False
+        assert window._dirty is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_project_save_payload_staging_runs_off_gui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    target = tmp_path / "responsive-staging.pydpj"
+    timer_fired: list[bool] = []
+    worker_threads: list[int] = []
+    gui_thread = threading.get_ident()
+    original_stage = builder_ui.stage_payload_value
+
+    def _slow_stage(*args: object, **kwargs: object) -> object:
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.15)
+        return original_stage(*args, **kwargs)
+
+    monkeypatch.setattr(builder_ui, "stage_payload_value", _slow_stage)
+    section = window.fabrication_section
+    window._deferred_project_section_keys = set()
+    section.data.table = pd.DataFrame({"value": [1]})
+
+    def _export_staged_payload() -> dict[str, object]:
+        stager = builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER
+        assert callable(stager)
+        return {
+            "payloads": {
+                "synthetic-payload": stager({"values": list(range(100))}),
+            }
+        }
+
+    monkeypatch.setattr(section, "export_project_payload", _export_staged_payload)
+    try:
+        QtCore.QTimer.singleShot(25, lambda: timer_fired.append(True))
+        window._dirty = True
+        window._write_project_file(target)
+        assert target.exists()
+        assert timer_fired == [True]
+        assert worker_threads and worker_threads[0] != gui_thread
+        assert window._project_save_in_progress is False
+        assert window._dirty is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
 def test_project_load_disables_save_until_background_failure_finishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11490,14 +12662,17 @@ def test_vsm_transition_workspace_refresh_preserves_selected_scan(tmp_path: Path
     try:
         section.refresh_data()
         workspace.refresh_workspace()
-        second_item = workspace.tree.topLevelItem(1)
-        assert second_item is not None
-        workspace.tree.setCurrentItem(second_item)
-        selected_ref = workspace._current_ref()  # noqa: SLF001
+        assert workspace.summary_table.rowCount() == 2
+        workspace.summary_table.selectRow(1)
+        selected = workspace._selected_row()  # noqa: SLF001
+        assert selected is not None
+        selected_ref = selected["record_id"]
 
         workspace.refresh_workspace()
 
-        assert workspace._current_ref() == selected_ref  # noqa: SLF001
+        selected = workspace._selected_row()  # noqa: SLF001
+        assert selected is not None
+        assert selected["record_id"] == selected_ref
     finally:
         workspace.close()
         workspace.deleteLater()
@@ -11505,6 +12680,667 @@ def test_vsm_transition_workspace_refresh_preserves_selected_scan(tmp_path: Path
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
 
+
+def test_vsm_transition_workspace_lists_saved_reviews_without_loaded_scans() -> None:
+    _ensure_qapp()
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    section._transition_reviews = {  # noqa: SLF001
+        "vsm:deferred": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "included": False,
+            "sample": "Ni50Fe27Ga23 12/2",
+            "record_label": "10 kOe scan",
+            "record_path": "missing-vsm-source.txt",
+        }
+    }
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace.summary_table.item(0, 0).text() == "Ni50Fe27Ga23 12/2"
+        assert workspace.summary_table.item(0, 3).text() == "No transition"
+        assert "1 result row(s) in project" in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_legacy_review_prefers_unique_exact_path_over_stale_sample_metadata(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    path = tmp_path / "202610021306-TSCN-a000-T025-00.VSM-TSCN-Data"
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=path,
+        sample="Ni50Fe23Ga27 5-4 no glass 2",
+        data=pd.DataFrame(
+            {
+                "temperature": [25.0, 150.0, 150.0, 25.0],
+                "field": [50.0] * 4,
+                "signal": [1.0, 2.0, 2.0, 1.0],
+                "section_index": [0, 0, 1, 1],
+            }
+        ),
+        key=("Ni50Fe23Ga27", 5, 4),
+        label=path.stem,
+    )
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[record],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        payload = {
+            "record_path": str(path),
+            "record_label": record.label,
+            "sample": "Ni50Fe27Ga23 5-4 no glass (0°)",
+            "group_key": "Ni50Fe23Ga27|5|4",
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            "manual_values_C": {"As": 79.752, "Af": 106.835},
+            "final_values_C": {"As": 79.752, "Af": 106.835},
+        }
+        candidates = section._vsm_review_candidates(  # noqa: SLF001
+            payload,
+            [record],
+            {"Ni50Fe23Ga27|5|4": [record]},
+        )
+        assert candidates == [record]
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_shared_editor_uses_portable_design_and_real_cycles(tmp_path: Path) -> None:
+    _ensure_qapp()
+    path = tmp_path / '202601011200-TSCN-a000-RT-00.VSM-TSCN-Data'
+    path.write_text('synthetic VSM fixture', encoding='utf-8')
+    frame = pd.DataFrame(
+        {
+            'temperature': [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            'field': [5.0] * 8,
+            'signal': [0.0, 1.0, 1.0, 0.0, 0.2, 1.2, 1.2, 0.2],
+            'section_index': [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=path,
+        sample='Ni50Fe27Ga23 1_1',
+        data=frame,
+        key=('Ni50Fe27Ga23', 1, 1),
+        label=path.stem,
+    )
+    cycles = builder_ui._vsm_transition_cycle_records(record)  # noqa: SLF001
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[record],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section, logging.getLogger('test'), lambda *_args: None
+    )
+    section._record_groups = {'sample': cycles}  # noqa: SLF001
+    try:
+        editor = builder_ui._build_shared_vsm_transition_editor(  # noqa: SLF001
+            section,
+            [('sample', cycle) for cycle in cycles],
+            section,
+        )
+        assert editor.target_list.count() == 2
+        assert editor.values_box.title() == 'Transition choices (°C)'
+        assert editor.plot_item.getAxis('bottom').labelText == 'Temperature'
+        editor.target_list.setCurrentRow(1)
+        assert editor._target_index == 1  # noqa: SLF001
+        heating_x, heating_y = editor.heating_curve_item.getData()
+        cooling_x, cooling_y = editor.cooling_curve_item.getData()
+        assert heating_x.tolist() == pytest.approx([20.0, 100.0])
+        assert heating_y.tolist() == pytest.approx([0.2, 1.2])
+        assert cooling_x.tolist() == pytest.approx([20.0, 100.0])
+        assert cooling_y.tolist() == pytest.approx([0.2, 1.2])
+        assert editor.heating_curve_item.opts['pen'].color().name() == '#ef4444'
+        assert editor.cooling_curve_item.opts['pen'].color().name() == '#3b82f6'
+    finally:
+        if 'editor' in locals():
+            editor.close()
+            editor.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+def test_tma_review_save_imports_only_the_saved_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    run_path = _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path)
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        label="current-sweep",
+    )
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    section._all_mini_dma_records = [record]  # noqa: SLF001
+    workspace = builder_ui._MiniDmaTransitionWorkspace(section)  # noqa: SLF001
+    scheduled: list[str] = []
+    payload = {
+        "review_revision": 1,
+        "measurement_fingerprint": "saved-fingerprint",
+        "targets": [
+            {
+                "display_label": "50 MPa / 1 g",
+                "status": "manual_adjusted",
+                "analysis_included": True,
+                "auto_values": {"As": 10.0},
+                "manual_values": {"As": 11.0},
+                "final_values": {"As": 11.0},
+            }
+        ],
+    }
+
+    def fake_review_tma_runs(_parent, paths, **kwargs):
+        assert list(paths) == [run_path]
+        kwargs["review_saved_callback"](run_path, payload)
+        return 1
+
+    monkeypatch.setattr(
+        "plotting.shared.transition_review_dialog.review_tma_runs",
+        fake_review_tma_runs,
+    )
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "load_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("saving a prepared review must not reopen source data")
+        ),
+    )
+    monkeypatch.setattr(
+        section,
+        "_reconcile_transition_reviews",
+        lambda _records: (_ for _ in ()).throw(
+            AssertionError("all-run reconciliation must not run on close")
+        ),
+    )
+    monkeypatch.setattr(
+        section,
+        "_schedule_transition_review_store",
+        lambda: scheduled.append("store"),
+    )
+    monkeypatch.setattr(
+        section,
+        "_schedule_transition_table_apply",
+        lambda: scheduled.append("table"),
+    )
+    try:
+        assert workspace._review([run_path]) == 1  # noqa: SLF001
+        review_id = builder_ui._mini_dma_review_record_id(  # noqa: SLF001
+            record, "50 MPa / 1 g"
+        )
+        assert section._transition_reviews[review_id]["values"] == {"As": 11.0}  # noqa: SLF001
+        assert scheduled == ["store", "table"]
+    finally:
+        workspace.close()
+        section.close()
+        workspace.deleteLater()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_workspace_defers_post_review_refresh(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "run"
+    workspace = builder_ui._PortableTransitionReviewWorkspace(  # noqa: SLF001
+        "Transitions",
+        "tma",
+        lambda: [run_path],
+        lambda _paths: 1,
+    )
+    refreshes: list[str] = []
+    workspace._lab_filtered_available_paths = lambda: [run_path]  # type: ignore[method-assign]  # noqa: SLF001
+    workspace.refresh_workspace = lambda: refreshes.append("refresh")  # type: ignore[method-assign]
+    try:
+        workspace._open_review()  # noqa: SLF001
+        assert refreshes == []
+        QtWidgets.QApplication.processEvents()
+        assert refreshes == ["refresh"]
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+def test_tma_transition_workspace_uses_lazy_project_table_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 TMA"
+    run_path.mkdir()
+    record = builder_ui.MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="fatigue run",
+        transition_summary=("50 MPa: As 10 mA, Af 20 mA",),
+    )
+    frame = pd.DataFrame({"TMA": ["cached"]})
+    fake_section = SimpleNamespace(
+        _all_mini_dma_records=[],
+        model=SimpleNamespace(frame=lambda: frame),
+        transition_reviews_snapshot=lambda: {},
+    )
+    fake_section._set_record_groups = lambda records, **_kwargs: setattr(
+        fake_section, "_all_mini_dma_records", list(records)
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_mini_dma_records_from_project_table",
+        lambda _frame: [record],
+    )
+    workspace = builder_ui._MiniDmaTransitionWorkspace(fake_section)  # noqa: SLF001
+    try:
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace._records() == [record]  # noqa: SLF001
+        assert "1 result row(s) in project" in workspace.status_label.text()
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_bulk_refresh_defers_auto_detection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0],
+            "field": [5.0, 5.0, 5.0, 5.0],
+            "signal": [0.0, 1.0, 1.0, 0.0],
+            "section_index": [0, 0, 1, 1],
+        }
+    )
+    records = [
+        builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / f"202601011200-TSCN-a000-RT-0{index}.VSM-TSCN-Data",
+            sample="Ni50Fe27Ga23 1_1",
+            data=frame.copy(),
+            key=("Ni50Fe27Ga23", 1, 1),
+            label=f"202601011200-TSCN-a000-RT-0{index}",
+        )
+        for index in range(2)
+    ]
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=records,
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    detector_calls: list[int] = []
+
+    class _Processor:
+        def estimate_transition_points(self, _frame: pd.DataFrame) -> dict[str, float]:
+            detector_calls.append(1)
+            return {"As": 50.0, "Af": 80.0}
+
+    monkeypatch.setattr(builder_ui, "_get_vsm_temp_processor", lambda _logger: _Processor())
+    previous_batch_mode = builder_ui.MiniDatabaseSection._project_load_batch_mode
+    builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        section._transition_reviews = {}  # noqa: SLF001
+        section.refresh_data()
+        workspace.refresh_workspace()
+
+        assert detector_calls == []
+        assert workspace.summary_table.rowCount() == 2
+
+        assert section._auto_values_for_record(records[0]) == {"As": 50.0, "Af": 80.0}  # noqa: SLF001
+        assert detector_calls == [1]
+        assert section._auto_values_for_record(records[0]) == {"As": 50.0, "Af": 80.0}  # noqa: SLF001
+        assert detector_calls == [1]
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = previous_batch_mode
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_target_label_counts_actual_cycles() -> None:
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        label="202601011200-TSCN-a000-RT-00",
+    )
+
+    assert builder_ui._vsm_transition_cycle_target_label(record) == "2 cycles"  # noqa: SLF001
+    assert (
+        builder_ui._vsm_transition_cycle_target_label(
+            "202601011200-TSCN-a000-T150-00"
+        )
+        == "Temperature scan"
+    )
+
+
+def test_vsm_transition_cycle_precompute_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            'temperature': [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            'field': [5.0] * 8,
+            'signal': [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            'section_index': [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path('202601011200-TSCN-a000-RT-00.VSM-TSCN-Data'),
+        sample='Ni50Fe27Ga23 1_1',
+        data=frame,
+        key=('Ni50Fe27Ga23', 1, 1),
+        label='202601011200-TSCN-a000-RT-00',
+    )
+    calls: list[int] = []
+    original_split = builder_ui._vsm_temperature_cycle_frames  # noqa: SLF001
+
+    def _counted_split(value: pd.DataFrame):
+        calls.append(1)
+        return original_split(value)
+
+    monkeypatch.setattr(builder_ui, '_vsm_temperature_cycle_frames', _counted_split)
+    builder_ui._precompute_vsm_transition_cycles(  # noqa: SLF001
+        {
+            builder_ui.PROJECT_DECODED_PAYLOADS_KEY: {
+                'vsm_temperature_scan_records': [record]
+            }
+        }
+    )
+
+    assert len(builder_ui._vsm_transition_cycle_records(record)) == 2  # noqa: SLF001
+    assert calls == [1]
+
+
+def test_vsm_transition_cycle_count_does_not_count_fields_as_cycles() -> None:
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0] * 2,
+            "field": [5.0] * 4 + [10.0] * 4,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.2, 1.2, 1.2, 0.2],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        label="202601011200-TSCN-a000-RT-00",
+    )
+
+    assert len(builder_ui._vsm_transition_cycle_records(record)) == 1  # noqa: SLF001
+    assert builder_ui._vsm_transition_cycle_target_label(record) == "Cycle 1"  # noqa: SLF001
+
+
+def test_vsm_transition_records_split_heating_cooling_pairs() -> None:
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    record = builder_ui.VsmTemperatureScanRecord(
+        path=Path("202601011200-TSCN-a000-RT-00.VSM-TSCN-Data"),
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+
+    cycles = builder_ui._vsm_transition_cycle_records(record)  # noqa: SLF001
+
+    assert len(cycles) == 2
+    assert [entry["section_index"].unique().tolist() for entry in (cycle.data for cycle in cycles)] == [
+        [0, 1],
+        [2, 3],
+    ]
+    assert [builder_ui._vsm_transition_cycle_target_label(cycle) for cycle in cycles] == [  # noqa: SLF001
+        "Cycle 1",
+        "Cycle 2",
+    ]
+    assert len({builder_ui._vsm_transition_review_record_id(cycle) for cycle in cycles}) == 2  # noqa: SLF001
+
+
+def test_vsm_scan_review_is_copied_to_each_cycle_with_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    frame = pd.DataFrame(
+        {
+            "temperature": [20.0, 100.0, 100.0, 20.0, 20.0, 100.0, 100.0, 20.0],
+            "field": [5.0] * 8,
+            "signal": [0.0, 1.0, 1.0, 0.0, 0.1, 1.1, 1.1, 0.1],
+            "section_index": [0, 0, 1, 1, 2, 2, 3, 3],
+        }
+    )
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "202601011200-TSCN-a000-RT-00.VSM-TSCN-Data",
+        sample="Ni50Fe27Ga23 1_1",
+        data=frame,
+        key=("Ni50Fe27Ga23", 1, 1),
+        label="202601011200-TSCN-a000-RT-00",
+    )
+    scan.path.touch()
+    source = SimpleNamespace(
+        store=SimpleNamespace(
+            load_payload=lambda name: [scan]
+            if name == "vsm_temperature_scan_records"
+            else None
+        ),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        data=MiniDatabaseData(extra={"hidden_paths": []}),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    panel = builder_ui._VsmTransitionReviewPanel(section)  # noqa: SLF001
+    try:
+        parent_id = builder_ui._vsm_transition_review_record_id(scan)  # noqa: SLF001
+        group_key = "Ni50Fe27Ga23|1|1"
+        section._transition_reviews = {  # noqa: SLF001
+            parent_id: section._clean_transition_review_payload(  # noqa: SLF001
+                parent_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    "included": True,
+                    "auto_values_C": {"As": 42.0, "Af": 68.0},
+                    **section._record_review_metadata(group_key, scan),  # noqa: SLF001
+                },
+            )
+        }
+
+        section.refresh_data()
+        workspace.refresh_workspace()
+        panel.refresh_workspace()
+
+        cycles = section._all_transition_records  # noqa: SLF001
+        assert len(cycles) == 2
+        cycle_ids = [
+            builder_ui._vsm_transition_review_record_id(cycle)  # noqa: SLF001
+            for cycle in cycles
+        ]
+        reviews = section.transition_reviews_snapshot()
+        assert reviews[parent_id]["superseded_by_cycle_ids"] == cycle_ids
+        for cycle_index, cycle_id in enumerate(cycle_ids, start=1):
+            assert reviews[cycle_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO
+            assert reviews[cycle_id]["final_values_C"] == {"As": 42.0, "Af": 68.0}
+            assert reviews[cycle_id]["cycle_index"] == cycle_index
+            assert reviews[cycle_id]["migrated_from_record_id"] == parent_id
+            assert reviews[cycle_id]["migration_strategy"] == "copied_to_each_cycle"
+        assert workspace.summary_table.rowCount() == 2
+        assert panel.tree.topLevelItemCount() == 1
+        sample_item = panel.tree.topLevelItem(0)
+        assert sample_item.childCount() == 1
+        assert sample_item.child(0).childCount() == 2
+    finally:
+        panel.close()
+        panel.deleteLater()
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_drop_visible_sample_column_preserves_hidden_sample_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "Sample": ["visible alias"],
+            "_sample": ["Ni50Fe27Ga23 12-2"],
+            "_group_key": ["Ni50Fe27Ga23|12|2"],
+        }
+    )
+    saved: list[pd.DataFrame] = []
+    section = SimpleNamespace(
+        model=SimpleNamespace(
+            frame=lambda: frame,
+            set_frame=lambda updated: saved.append(updated.copy()),
+        ),
+        data=SimpleNamespace(table=frame),
+        store=SimpleNamespace(save=lambda _data: None),
+    )
+
+    builder_ui._drop_visible_sample_column(section)  # noqa: SLF001
+
+    assert saved
+    assert "Sample" not in saved[-1].columns
+    assert saved[-1]["_sample"].tolist() == ["Ni50Fe27Ga23 12-2"]
+
+
+def test_tma_lazy_records_preserve_saved_reviews_and_real_targets(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress"
+    run_path.mkdir()
+    record = builder_ui.MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12-2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="iso-stress",
+    )
+    target = "200 MPa / 3.09 g"
+    review_id = builder_ui._mini_dma_review_record_id(record, target)  # noqa: SLF001
+    fake_section = SimpleNamespace(
+        _all_mini_dma_records=[record],
+        model=SimpleNamespace(frame=lambda: pd.DataFrame()),
+        transition_reviews_snapshot=lambda: {
+            review_id: {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "target_label": target,
+                "values": {"As": 18.0, "Af": 25.0},
+            }
+        },
+    )
+    workspace = builder_ui._MiniDmaTransitionWorkspace(fake_section)  # noqa: SLF001
+    try:
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace.summary_table.item(0, 0).text() == "Ni50Fe27Ga23 12-2"
+        assert workspace.summary_table.item(0, 2).text() == target
+        assert workspace.summary_table.item(0, 3).text() == "Accepted"
+        assert workspace.summary_table.item(0, 4).text() == "18"
+        assert workspace.summary_table.item(0, 5).text() == "25"
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_workspace_uses_metadata_sample_before_folder_name(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    folder = tmp_path / "current annealing data"
+    folder.mkdir()
+    path = folder / "Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt"
+    path.write_text("test", encoding="utf-8")
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100,
+            alt_variant=False,
+            measurement_id="metadata-sample",
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-08-11T08:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [1.0, 100.0], "R_Ohm": [100.0, 200.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    try:
+        window.annealing_section._all_records = [record]  # noqa: SLF001
+        window.annealing_section._transition_reviews = {}  # noqa: SLF001
+        workspace = window.transitions_section.annealing_workspace
+        workspace.refresh_workspace()
+
+        assert workspace.summary_table.rowCount() == 1
+        assert workspace.summary_table.item(0, 0).text() == "Ni44Fe27Ga23Cu3Co3 1/2"
+        assert workspace.summary_table.item(0, 0).text() != "current annealing data"
+    finally:
+        window._dirty = False
+        window.close()
 
 def test_project_load_defers_hidden_transition_workspace_refresh(
     monkeypatch: pytest.MonkeyPatch,
@@ -11541,11 +13377,7 @@ def test_project_load_batch_suppresses_hidden_vsm_preview_render(
     window._auto_open_last = False
     preview_updates: list[str] = []
     try:
-        monkeypatch.setattr(
-            window.transitions_section.vsm_workspace.preview_panel,
-            "update_selection",
-            lambda *args, **kwargs: preview_updates.append("preview"),
-        )
+        assert not hasattr(window.transitions_section.vsm_workspace, "preview_panel")
         builder_ui.MiniDatabaseSection._project_load_batch_mode = True
 
         window.transition_temps_section.refresh_data()
@@ -11795,6 +13627,68 @@ def test_store_memory_transaction_nested_rollback_and_memory_commit(
             transactions,
         ) = original
         store_cls._memory_transactions = transactions
+
+
+def test_memory_only_payload_skips_redundant_disk_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("memory_only_payload")
+    store.keep_payload_in_memory("records")
+    path = store.payload_path("records")
+    path.write_text("stale", encoding="utf-8")
+    payload = {"records": [1, 2, 3]}
+    monkeypatch.setattr(
+        store,
+        "_write_payload_to_disk",
+        lambda *_args: pytest.fail("memory-only payload was encoded for disk"),
+    )
+
+    assert store.save_payload("records", payload) == path
+
+    assert store.load_payload("records") == payload
+    assert not path.exists()
+
+
+def test_oversized_payload_cache_falls_back_to_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("oversized_payload")
+    path = store.payload_path("records")
+    path.write_text("stale", encoding="utf-8")
+    payload = {"records": [1, 2, 3]}
+
+    def fail_oversized(_name: str, _payload: object) -> Path:
+        raise builder_ui.SafeCodecError(
+            "Encoded JSON exceeds the safe file limit of 268435456 bytes"
+        )
+
+    monkeypatch.setattr(store, "_write_payload_to_disk", fail_oversized)
+    with caplog.at_level(logging.WARNING):
+        assert store.save_payload("records", payload) == path
+
+    assert store.load_payload("records") == payload
+    assert not path.exists()
+    assert "keeping it in memory for this session" in caplog.text
+
+
+def test_payload_cache_does_not_hide_other_safe_codec_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store = builder_ui.MiniDatabaseStore("failed_payload")
+
+    def fail_decode(_name: str, _payload: object) -> Path:
+        raise builder_ui.SafeCodecError("checksum mismatch")
+
+    monkeypatch.setattr(store, "_write_payload_to_disk", fail_decode)
+    with pytest.raises(builder_ui.SafeCodecError, match="checksum mismatch"):
+        store.save_payload("records", {"records": [1]})
 
 
 @pytest.mark.parametrize("failure_target", ["fabrication", "mini_dma", "assemble"])

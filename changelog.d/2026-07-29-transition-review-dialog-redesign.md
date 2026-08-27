@@ -1,0 +1,1 @@
+- Redesign the logger transition editor around **Accept automatic**, **Adjust manually**, and **No transition**, with a compact relevant-values table and secondary analysis exclusion.

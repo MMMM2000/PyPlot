@@ -24,6 +24,9 @@ from microwire_data_builder import ui as builder_ui
 from microwire_eda import core as eda_core
 
 
+pytestmark = pytest.mark.serial
+
+
 def _payload(*, marker: str = "one") -> dict[str, object]:
     encoded = safe_codec.encode_envelope(
         {
@@ -97,7 +100,11 @@ def test_v3_round_trip_uses_split_entries_and_content_addressed_blobs(tmp_path: 
         assert "sections/annealing/state.json" in names
         assert "sections/annealing/table.json" in names
         assert "sections/annealing/payloads/annealing_records.json" in names
-        assert any(name.startswith("blobs/sha256/") for name in names)
+        blob_infos = [
+            info for info in infos if info.filename.startswith("blobs/sha256/")
+        ]
+        assert blob_infos
+        assert all(info.compress_type == zipfile.ZIP_DEFLATED for info in blob_infos)
 
     materialized = index.materialize()
     section = materialized["sections"]["annealing"]
@@ -193,6 +200,36 @@ def test_streaming_codec_uses_columnar_dataframe_blobs_without_row_expansion() -
         encoded,
         blob_resolver=lambda digest, size: blobs[digest],
     )
+    pd.testing.assert_frame_equal(restored, frame)
+
+
+def test_streaming_codec_dictionary_compresses_repeated_string_columns() -> None:
+    count = 20_000
+    frame = pd.DataFrame(
+        {
+            "phase": pd.Series(
+                ["current_ramp", "stress_hold"] * (count // 2), dtype=object
+            ),
+            "value": np.arange(count, dtype=np.float64),
+        }
+    )
+    blobs: dict[str, bytes] = {}
+
+    def sink(buffer: memoryview) -> tuple[str, int]:
+        raw = bytes(buffer)
+        digest = hashlib.sha256(raw).hexdigest()
+        blobs[digest] = raw
+        return digest, len(raw)
+
+    encoded_text = "".join(safe_codec.iterencode_envelope_with_blobs(frame, sink))
+    restored = safe_codec.decode_envelope(
+        json.loads(encoded_text),
+        blob_resolver=lambda digest, _size: blobs[digest],
+    )
+
+    assert "dictionary-string-v1" in encoded_text
+    assert len(encoded_text) < 4_000
+    assert len(blobs) == 2
     pd.testing.assert_frame_equal(restored, frame)
 
 
@@ -612,6 +649,20 @@ def test_v3_prepare_and_section_worker_leave_payload_lazy(tmp_path: Path) -> Non
     assert decoded["raw"] == b"binary-data"
 
 
+def test_v3_prepare_bypasses_legacy_json_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "large-package.pydpj"
+    project_package.write_project_package(target, _payload())
+    monkeypatch.setattr(builder_ui, "MAX_JSON_BYTES", 1)
+
+    prepared = builder_ui._prepare_project_payload_for_gui(target)  # noqa: SLF001
+
+    assert prepared.package_index is not None
+    assert prepared.payload_resolver is not None
+    assert prepared.byte_count == target.stat().st_size
+
+
 def test_store_lazy_payload_loader_is_transactional_and_resolves_once(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
     store_cls = builder_storage.MiniDatabaseStore
@@ -717,6 +768,14 @@ def test_trusted_migration_reencodes_safe_payload_in_child_and_externalizes_bina
     result = migrate_legacy_project_trusted(source, output)
 
     migrated = project_package.inspect_project_package(output, verify_entries=True)
+    with zipfile.ZipFile(output, "r") as archive:
+        blob_infos = [
+            info
+            for info in archive.infolist()
+            if info.filename.startswith("blobs/sha256/")
+        ]
+    assert len(blob_infos) == 1
+    assert blob_infos[0].compress_type == zipfile.ZIP_STORED
     assert result["legacy_payloads_migrated"] == 0
     assert migrated.manifest["migration"]["pickle_payload_count"] == 0
     assert len(migrated.blobs) == 1
@@ -1093,7 +1152,8 @@ def test_deferred_transition_completion_forces_workspace_rebuild(
 
         assert not window._deferred_project_section_pending
         assert "mini_dma" not in window._deferred_project_section_keys
-        assert dirty_calls == [None]
+        assert "mini_dma" not in window._section_load_errors
+        assert dirty_calls == ["mini_dma"]
         assert refresh_calls == [{"force": True}]
     finally:
         deadline = time.monotonic() + 10

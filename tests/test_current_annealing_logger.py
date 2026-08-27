@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import gc
 import json
+import os
 import sys
 import threading
 import time
@@ -577,6 +578,67 @@ def test_current_annealing_uses_recipe_and_hardware_tabs(qtbot) -> None:
     assert window.ui.checkBox_reverse.isHidden()
     assert window.ui.frame_process_settings.isEnabled()
     assert not window._overlay.isVisible()
+
+
+def test_current_annealing_transition_button_opens_latest_completed_measurement(
+    tmp_path, qtbot
+) -> None:
+    older = tmp_path / "older" / "measurement.txt"
+    latest = tmp_path / "latest" / "measurement.txt"
+    older.parent.mkdir()
+    latest.parent.mkdir()
+    older.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    latest.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    os.utime(older, (1, 1))
+    os.utime(latest, (2, 2))
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.process_running = False
+    window.f_name = ""
+    window._measurement_history = [
+        {"source": str(older)},
+        {"source": str(latest)},
+    ]
+    opened = []
+    window._open_transition_review = opened.append
+
+    assert window.ui.pushButton_review_transitions.text() == "Review transitions..."
+    assert [
+        action.text() for action in window.ui.pushButton_review_transitions.menu().actions()
+    ] == [
+        "Choose run folder...",
+        "Review runs in parent folder...",
+        "Choose legacy measurement file...",
+    ]
+
+    window.ui.pushButton_review_transitions.click()
+
+    assert opened == [latest]
+    window.close()
+
+
+def test_current_annealing_transition_button_can_choose_run_folder(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    measurement = tmp_path / "run" / "measurement.txt"
+    measurement.parent.mkdir()
+    measurement.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    opened = []
+    window._open_transition_review = opened.append
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(measurement.parent),
+    )
+
+    window._choose_transition_run_folder()
+
+    assert opened == [measurement]
+    window.close()
 
 
 def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:
@@ -2104,13 +2166,23 @@ def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path
 
     data_path = logger_mod.Path(window.f_name)
     assert data_path.exists()
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     assert metadata_path.exists()
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["data_file"] == data_path.name
     assert payload["supply"]["profile_id"] == "shared_hmp_broker"
     assert payload["supply"]["channel"] == 1
     assert "hold_duration_s" not in payload
+    assert payload["session_state"] == "running"
+    assert payload["run_folder"] == "sample_run01"
+
+    window._finalize_metadata_file(
+        str(data_path), final_state="completed", detail="Run complete"
+    )
+    finalized = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert finalized["session_state"] == "finished"
+    assert finalized["stop"] == {"state": "completed", "detail": "Run complete"}
+    assert finalized["finished_utc"].endswith("Z")
 
 
 def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
@@ -2123,9 +2195,9 @@ def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("replace_me")
     data_path = logger_mod.Path(window.build_log_path())
+    data_path.parent.mkdir(parents=True)
     data_path.write_text("old data\n", encoding="utf-8")
-    metadata_dir = data_path.parent / "metadata" / data_path.stem
-    metadata_dir.mkdir(parents=True)
+    metadata_dir = data_path.parent
     (metadata_dir / "metadata.json").write_text('{"old": true}\n', encoding="utf-8")
     moved: list[logger_mod.Path] = []
 
@@ -2181,10 +2253,12 @@ def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
 
     assert window.prepare_output_file() is True
 
-    assert moved == [data_path, metadata_dir]
+    assert moved == [metadata_dir]
     assert data_path.read_text(encoding="utf-8").startswith("# Current (mA)")
     assert (metadata_dir / "metadata.json").exists()
-    assert (tmp_path / "trash" / data_path.name).read_text(encoding="utf-8") == "old data\n"
+    assert (
+        tmp_path / "trash" / data_path.parent.name / data_path.name
+    ).read_text(encoding="utf-8") == "old data\n"
 
 
 def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:
@@ -2206,7 +2280,7 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     supply = payload["supply"]
     assert supply["detected_model"] == "hmp4040"
@@ -2233,7 +2307,7 @@ def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot)
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["step_mA"] == pytest.approx(0.2)
     assert payload["recipe"]["current_ramp_rate_mA_s"] == pytest.approx(0.2)
@@ -2253,7 +2327,7 @@ def test_current_annealing_metadata_records_source_control_snapshot(
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
-    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(data_path))
     pending = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     token = window._source_provenance_token
     assert pending["source_control"]["capture_state"] == "pending"
@@ -3666,7 +3740,7 @@ def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None
     assert window.prepare_output_file() is True
 
     output = logger_mod.Path(window.f_name)
-    metadata_path = tmp_path / "metadata" / output.stem / "metadata.json"
+    metadata_path = window._metadata_path(str(output))
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["output_file"] == str(output)
     assert payload["composition"] == "Ni50Fe27Ga23"
@@ -3701,3 +3775,35 @@ def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pyte
 
     window.send_safe_end_commands()
     assert calls == ["acquire", "release"]
+
+
+def test_current_annealing_parent_folder_queue_is_bounded_to_direct_runs(
+    tmp_path, qtbot, monkeypatch
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    direct = tmp_path / "run-a" / "measurement.txt"
+    nested = tmp_path / "group" / "run-b" / "measurement.txt"
+    direct.parent.mkdir()
+    nested.parent.mkdir(parents=True)
+    direct.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+    nested.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    queued = []
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        transition_review_dialog,
+        "review_current_annealing_files",
+        lambda parent, paths, **kwargs: queued.extend(paths) or len(paths),
+    )
+
+    window._choose_transition_parent_folder()
+
+    assert queued == [direct]
+    window.close()
