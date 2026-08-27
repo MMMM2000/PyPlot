@@ -1924,19 +1924,28 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         summaries: Sequence[ReviewUnitSummary],
     ) -> None:
         run_item = self._run_items[run_index]
+        existing_count = run_item.childCount()
+        scroll_bar = self.tree.verticalScrollBar()
+        scroll_value = scroll_bar.value()
         blocker = QtCore.QSignalBlocker(self.tree)
         try:
-            while run_item.childCount():
-                run_item.removeChild(run_item.child(0))
             for navigation_row, summary in enumerate(summaries):
-                child = QtWidgets.QTreeWidgetItem([summary.label, ""])
+                child = (
+                    run_item.child(navigation_row)
+                    if navigation_row < existing_count
+                    else QtWidgets.QTreeWidgetItem([summary.label, ""])
+                )
+                child.setText(0, summary.label)
                 child.setData(
                     0,
                     QtCore.Qt.ItemDataRole.UserRole,
                     ("unit", run_index, navigation_row),
                 )
                 self._set_review_state(child, summary.state, summary.tooltip)
-                run_item.addChild(child)
+                if navigation_row >= existing_count:
+                    run_item.addChild(child)
+            while run_item.childCount() > len(summaries):
+                run_item.removeChild(run_item.child(run_item.childCount() - 1))
             run_item.setExpanded(True)
             if not summaries:
                 run_item.setData(
@@ -1944,6 +1953,10 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
                 )
         finally:
             del blocker
+        # Updating lazy-loaded review details must not move the user's viewport.
+        # Restore after the model change because QTreeWidget may otherwise scroll
+        # the current item into view even when its row object was preserved.
+        scroll_bar.setValue(scroll_value)
 
     def _run_unit_states(
         self, run_item: QtWidgets.QTreeWidgetItem
@@ -2109,14 +2122,19 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         return tuple(summaries)
 
     def _refresh_run_from_editor(
-        self, run_index: int, *, select_if_hidden: bool = False
+        self,
+        run_index: int,
+        *,
+        apply_filter: bool = True,
+        select_if_hidden: bool = False,
     ) -> None:
         editor = self._editors.get(run_index)
         if editor is None:
             return
         self._populate_run_units(run_index, self._review_units_from_editor(editor))
         self._refresh_review_hierarchy()
-        self._apply_review_filter(select_if_hidden=select_if_hidden)
+        if apply_filter:
+            self._apply_review_filter(select_if_hidden=select_if_hidden)
 
     def _build_editor(self, run_index: int) -> PortableTransitionReviewDialog | None:
         existing = self._editors.get(run_index)
@@ -2170,7 +2188,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         editor.hide()
         self._editors[run_index] = editor
 
-        self._refresh_run_from_editor(run_index)
+        # Loading a run only refines the lightweight queue summaries. It must
+        # not re-filter or move the tree before the user saves a decision.
+        self._refresh_run_from_editor(run_index, apply_filter=False)
         return editor
 
     def _editor_load_finished(
@@ -2213,7 +2233,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         self.editor_layout.addWidget(editor, 1)
         editor.hide()
         self._editors[run_index] = editor
-        self._refresh_run_from_editor(run_index)
+        # Keep selection, expansion and ordering stable when the background
+        # loader replaces lightweight summaries with the prepared run details.
+        self._refresh_run_from_editor(run_index, apply_filter=False)
         if self._current_index == run_index:
             navigation_row = self._requested_navigation_rows.pop(run_index, 0)
             run_item = self._run_items[run_index]
@@ -2245,7 +2267,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             if current is not None:
                 current._store_target_controls()  # noqa: SLF001
                 self._refresh_run_from_editor(
-                    self._current_index, select_if_hidden=False
+                    self._current_index,
+                    apply_filter=False,
+                    select_if_hidden=False,
                 )
                 current.hide()
         self._current_index = run_index
@@ -2254,7 +2278,8 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
         if editor is None:
             self.placeholder.setText(
                 f"Loading {self.entries[run_index].label}…\n\n"
-                "You can continue navigating while the measurement is prepared."
+                "The raw measurement is being prepared in the background. "
+                "This is not an error, and you can continue navigating."
             )
             self.placeholder.show()
             self._update_status(f"Loading {self.entries[run_index].label}…")
@@ -2484,7 +2509,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
             return
         current_row = max(editor.target_list.currentRow(), 0)
         run_item = self._run_items[run_index]
-        self._refresh_run_from_editor(run_index, select_if_hidden=False)
+        self._refresh_run_from_editor(
+            run_index, apply_filter=False, select_if_hidden=False
+        )
         if editor._archive_requested():  # noqa: SLF001
             self._editor_saved(run_index)
             return
@@ -2505,7 +2532,9 @@ class PortableTransitionReviewQueueDialog(QtWidgets.QDialog):
 
     def _editor_saved(self, run_index: int) -> None:
         self._saved_indices.add(run_index)
-        self._refresh_run_from_editor(run_index, select_if_hidden=False)
+        self._refresh_run_from_editor(
+            run_index, apply_filter=False, select_if_hidden=False
+        )
         self._update_status(f"Saved {self.entries[run_index].label}.")
         self._apply_review_filter()
         # Completing a run can hide it under the default Unreviewed filter.

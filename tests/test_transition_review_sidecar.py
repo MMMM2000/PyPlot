@@ -1341,6 +1341,7 @@ def test_review_queue_prepares_measurement_without_blocking_gui(
         PreparedTransitionReview,
         ReviewPlot,
         ReviewQueueEntry,
+        ReviewUnitSummary,
     )
 
     frame = pd.DataFrame(
@@ -1354,7 +1355,11 @@ def test_review_queue_prepares_measurement_without_blocking_gui(
         family="tma",
         measurement_fingerprint=fingerprint,
         target_key="stress_mpa:100",
+        status="manual_adjusted",
         auto_values={"As": 12.0, "Af": 18.0},
+        manual_values={"As": 12.0, "Af": 18.0},
+        final_values={"As": 12.0, "Af": 18.0},
+        cleared_labels=("Ms", "Mf"),
     )
     payload = make_review(
         family="tma",
@@ -1392,6 +1397,9 @@ def test_review_queue_prepares_measurement_without_blocking_gui(
                 "TMA run",
                 unexpected_builder,
                 loader=loader,
+                review_units=(
+                    ReviewUnitSummary("100 MPa", "unreviewed"),
+                ),
             )
         ]
     )
@@ -1405,14 +1413,25 @@ def test_review_queue_prepares_measurement_without_blocking_gui(
         assert 0 not in dialog._editors  # noqa: SLF001
 
         assert "Loading" in dialog.placeholder.text()
+        assert "not an error" in dialog.placeholder.text()
+        run_item = dialog._run_items[0]  # noqa: SLF001
+        original_unit_item = run_item.child(0)
+        assert dialog.tree.currentItem() is original_unit_item
 
         release.set()
         qtbot.waitUntil(
             lambda: 0 in dialog._editors,  # noqa: SLF001
             timeout=3_000,
         )
-        run_item = dialog._run_items[0]  # noqa: SLF001
-        assert dialog.tree.currentItem() is run_item.child(0)
+        # Loading refines the review state without rebuilding, hiding, or
+        # reselecting the queue row under the default Unreviewed filter.
+        assert run_item.child(0) is original_unit_item
+        assert dialog.tree.currentItem() is original_unit_item
+        assert not run_item.isHidden()
+        assert not original_unit_item.isHidden()
+        assert dialog._is_reviewed_state(  # noqa: SLF001
+            original_unit_item.data(1, QtCore.Qt.ItemDataRole.UserRole)
+        )
     finally:
         release.set()
 
