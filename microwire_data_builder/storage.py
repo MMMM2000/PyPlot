@@ -115,6 +115,7 @@ class MiniDatabaseStore:
         self._data_path = base / f"{section}.store.json"
         self._legacy_table_path = base / f"{section}.pkl"
         self._payload_dir = base / "payloads"
+        self._memory_only_payloads: set[str] = set()
         try:
             self._payload_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -207,7 +208,12 @@ class MiniDatabaseStore:
                 payload = cls._memory_payloads.get(cache_key, _TRANSACTION_MISSING)
             if payload is _TRANSACTION_MISSING:
                 continue
-            cls(section)._write_payload_to_disk(name, payload)
+            store = cls(section)
+            try:
+                store._write_payload_to_disk(name, payload)
+            except SafeCodecError as exc:
+                if not store._keep_oversized_payload_memory_only(name, exc):
+                    raise
 
     def load(self) -> MiniDatabaseData:
         cached: Any = _TRANSACTION_MISSING
@@ -388,12 +394,20 @@ class MiniDatabaseStore:
         if self._memory_transactions:
             self._memory_transactions[-1].save_payload(cache_key, payload)
             return path
+        if name in self._memory_only_payloads:
+            self._discard_stale_payload_file(name)
+            self._memory_payloads[cache_key] = payload
+            return path
         if self._disk_writes_suspended:
             self._memory_payloads[cache_key] = payload
             self._pending_payloads.add((self.section, name))
             self._pending_payload_values[cache_key] = copy.deepcopy(payload)
             return path
-        self._write_payload_to_disk(name, payload)
+        try:
+            self._write_payload_to_disk(name, payload)
+        except SafeCodecError as exc:
+            if not self._keep_oversized_payload_memory_only(name, exc):
+                raise
         self._memory_payloads[cache_key] = payload
         return path
 
@@ -401,6 +415,35 @@ class MiniDatabaseStore:
         path = self.payload_path(name)
         atomic_write_json(path, encode_envelope(payload))
         return path
+
+    def keep_payload_in_memory(self, name: str) -> None:
+        """Avoid persisting a redundant derived payload in the local JSON cache."""
+
+        self.payload_path(name)
+        self._memory_only_payloads.add(str(name))
+
+    def _discard_stale_payload_file(self, name: str) -> None:
+        path = self.payload_path(name)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _keep_oversized_payload_memory_only(
+        self,
+        name: str,
+        exc: SafeCodecError,
+    ) -> bool:
+        if "exceeds the safe file limit" not in str(exc):
+            return False
+        self._discard_stale_payload_file(name)
+        LOGGER.warning(
+            "Builder payload %s.%s exceeds the safe local cache limit; "
+            "keeping it in memory for this session",
+            self.section,
+            name,
+        )
+        return True
 
     def load_payload(self, name: str) -> Any:
         cache_key = (self.section, name)

@@ -1521,6 +1521,73 @@ print("daemon-started", flush=True)
     assert "daemon-started" in result.stdout
 
 
+def test_transition_review_button_opens_latest_completed_run(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    older = tmp_path / "older"
+    latest = tmp_path / "latest"
+    older.mkdir()
+    latest.mkdir()
+    older_metadata = older / mini_dma_mod.SESSION_METADATA_JSON
+    latest_metadata = latest / mini_dma_mod.SESSION_METADATA_JSON
+    older_metadata.write_text("{}", encoding="utf-8")
+    latest_metadata.write_text("{}", encoding="utf-8")
+    os.utime(older_metadata, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(latest_metadata, ns=(2_000_000_000, 2_000_000_000))
+
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._tma_history_root = tmp_path
+        window._tma_history_records = (
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+                source=str(older_metadata),
+            ),
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/3"),
+                source=str(latest_metadata),
+            ),
+        )
+        opened: list[Path] = []
+        window._open_tma_transition_review = opened.append  # type: ignore[method-assign]
+
+        assert window.button_review_transitions.text() == "Review transitions..."
+        assert window.button_review_transitions.menu() is not None
+        assert [action.text() for action in window.button_review_transitions.menu().actions()] == [
+            "Choose completed run folder...",
+            "Review runs in parent folder...",
+        ]
+        window.button_review_transitions.click()
+
+        assert opened == [latest]
+    finally:
+        _close_test_window(window)
+
+
+def test_transition_review_button_can_choose_older_run_folder(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = tmp_path / "selected-run"
+    selected.mkdir()
+    window = _build_window(tmp_path, qtbot)
+    opened: list[Path] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getExistingDirectory",
+            lambda *_args, **_kwargs: str(selected),
+        )
+        window._open_tma_transition_review = opened.append  # type: ignore[method-assign]
+
+        window._choose_tma_run_for_transition_review()
+
+        assert opened == [selected]
+    finally:
+        _close_test_window(window)
+
 def test_tma_history_scan_keeps_only_latest_pending_root(
     tmp_path: Path,
     qtbot,
@@ -6691,6 +6758,101 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         assert list(right_y_values) == pytest.approx(
             [point.position_mm for point in window._session_points]
         )
+    finally:
+        _close_test_window(window)
+
+
+def test_fatigue_dashboard_defaults_to_completed_cycle_strain_ranges(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        tile = window._plot_tiles[3]
+        assert tile.x_combo.currentData() == "fatigue_cycle_index"
+        assert tile.y_left_combo.currentData() == "fatigue_fixed_strain_range_pct"
+        assert tile.y_right_combo.currentData() == ""
+        assert tile.y_left_combo.findData("fatigue_total_strain_pct") >= 0
+        assert tile.x_combo.findData("power_W") >= 0
+        assert tile.y_left_combo.findData("power_W") >= 0
+        assert tile.y_right_combo.findData("power_W") >= 0
+        assert tile.x_combo.findData("power_mW_per_cm") >= 0
+        assert tile.y_left_combo.findData("power_mW_per_cm") >= 0
+        assert tile.y_right_combo.findData("power_mW_per_cm") >= 0
+        power_channel = window._plot_channel("power_W")
+        assert power_channel is not None
+        point = window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=1.0,
+            load_g=1.0,
+        )
+        point.power_W = 0.123
+        assert power_channel.getter(point) == pytest.approx(0.123)
+        window.spin_initial_length.setValue(30.0)
+        point.position_mm = 2.0
+        power_per_length_channel = window._plot_channel("power_mW_per_cm")
+        assert power_per_length_channel is not None
+        assert power_per_length_channel.getter(point) == pytest.approx(38.4375)
+    finally:
+        _close_test_window(window)
+
+
+def test_fatigue_cycle_plot_uses_fixed_first_cycle_minimum_reference(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(cycle: int, leg: str, strain_pct: float) -> mini_dma_mod.MeasurementPoint:
+        point = window._capture_measurement_point(
+            elapsed_s=float(cycle),
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=1.0,
+            load_g=1.0,
+        )
+        point.fatigue_cycle_index = cycle
+        point.fatigue_leg = leg
+        point.strain_pct = strain_pct
+        return point
+
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._retain_session_point(_point(1, "up", 2.0))
+        window._retain_session_point(_point(1, "down", 8.0))
+        assert window._record_completed_fatigue_cycle_strain_range(1) is True
+        window._retain_session_point(_point(2, "up", 1.0))
+        window._retain_session_point(_point(2, "down", 7.0))
+        assert window._record_completed_fatigue_cycle_strain_range(2) is True
+
+        x_values, y_values = window._fatigue_cycle_strain_range_plot_values()
+
+        assert x_values[:2] == pytest.approx([1.0, 1.0])
+        assert math.isnan(x_values[2])
+        assert x_values[3:] == pytest.approx([2.0, 2.0])
+        assert y_values[:2] == pytest.approx([0.0, 100.0 * 6.0 / 102.0])
+        assert math.isnan(y_values[2])
+        assert y_values[3:] == pytest.approx(
+            [100.0 * -1.0 / 102.0, 100.0 * 5.0 / 102.0]
+        )
+        total_x, total_y = window._fatigue_total_strain_plot_values()
+        assert total_x == pytest.approx([1.0, 2.0])
+        assert total_y == pytest.approx([100.0 * 6.0 / 102.0, 100.0 * 6.0 / 102.0])
+        cycle_channel = window._plot_channel("fatigue_cycle_index")
+        total_channel = window._plot_channel("fatigue_total_strain_pct")
+        assert cycle_channel is not None
+        assert total_channel is not None
+        configured_x, configured_y = window._plot_xy_values([], cycle_channel, total_channel)
+        assert configured_x == pytest.approx(total_x)
+        assert configured_y == pytest.approx(total_y)
+        summary = window._fatigue_strain_summary_snapshot()
+        assert summary is not None
+        assert summary["reference_raw_strain_pct"] == pytest.approx(2.0)
+        assert summary["reference_length_mm"] == pytest.approx(
+            window.spin_initial_length.value() * 1.02
+        )
+        assert [cycle["cycle_index"] for cycle in summary["cycles"]] == [1, 2]
     finally:
         _close_test_window(window)
 
@@ -36859,6 +37021,7 @@ def test_late_session_source_provenance_never_recreates_missing_or_malformed_met
         _close_test_window(window)
 
 
+@pytest.mark.serial
 def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_tick(
     tmp_path: Path,
     qtbot,
@@ -39816,5 +39979,38 @@ def test_load_target_ramp_waits_for_new_scale_sample_even_as_target_changes(tmp_
         ) is False
         assert len(moves) == 1
         assert "new scale sample" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_tma_parent_folder_queue_is_bounded_to_direct_runs(
+    tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from plotting.shared import transition_review_dialog
+
+    direct = tmp_path / "run-a"
+    nested = tmp_path / "group" / "run-b"
+    direct.mkdir()
+    nested.mkdir(parents=True)
+    (direct / mini_dma_mod.SESSION_MEASUREMENT_CSV).write_text("time_s\n", encoding="utf-8")
+    (nested / mini_dma_mod.SESSION_MEASUREMENT_CSV).write_text("time_s\n", encoding="utf-8")
+
+    window = _build_window(tmp_path, qtbot)
+    queued: list[Path] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getExistingDirectory",
+            lambda *_args, **_kwargs: str(tmp_path),
+        )
+        monkeypatch.setattr(
+            transition_review_dialog,
+            "review_tma_runs",
+            lambda parent, paths: queued.extend(paths) or len(paths),
+        )
+
+        window._choose_tma_parent_for_transition_review()
+
+        assert queued == [direct]
     finally:
         _close_test_window(window)

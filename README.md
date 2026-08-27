@@ -84,13 +84,19 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 ### Windows Verification
 
 Use the Windows runner when invoking pytest from Codex or a local PowerShell
-session. It forces headless Qt/Matplotlib defaults, stores pytest temp files and
-Microwire Data Builder state under `artifacts/test-runs/`, and keeps tool caches
-inside the workspace:
+session. It forces headless Qt/Matplotlib defaults, stores Microwire Data Builder
+state under `artifacts/test-runs/`, and keeps tool caches inside the workspace.
+On Windows, pytest's disposable base temp uses a short `C:\tmp\pyt\` path so
+xdist worker suffixes do not exceed the platform path limit. Full mode uses four
+pytest-xdist workers by default, with
+private temp, Qt settings, Matplotlib, and Builder storage for every worker.
+Tests marked `serial` run afterward in a separate single-process lane:
 
 ```powershell
 .\scripts\run_tests.ps1 -Mode focused tests\test_launcher.py::test_launcher_detects_pyplot_automation_flags
 .\scripts\run_tests.ps1 -Mode full
+.\scripts\run_tests.ps1 -Mode full -Workers 8
+.\scripts\run_tests.ps1 -Mode full -Workers 0
 .\scripts\run_tests.ps1 -Mode focused -DryRun tests\test_launcher.py
 ```
 
@@ -106,3 +112,8 @@ The underlying Python entrypoint is also available for CI-like callers:
 uv run python scripts\ci_verify.py --mode focused --dry-run tests\test_launcher.py
 uv run python scripts\ci_verify.py --mode full
 ```
+
+Use `-Workers 0` (or `--workers 0` with the Python entrypoint) when diagnosing
+an order-dependent failure. Focused mode remains serial unless workers are
+requested explicitly. The parallel distribution strategy defaults to
+`worksteal` and can be changed with the Python runner's `--dist` option.

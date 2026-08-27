@@ -41,6 +41,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._workbook_keys: dict[str, str] = {}
         self._panel_widget: QtWidgets.QWidget | None = None
         self._show_power_top_axis_checkbox: QtWidgets.QCheckBox | None = None
+        self._review_button: QtWidgets.QPushButton | None = None
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
@@ -60,7 +61,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
         window_module = window_api()
         overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
-        summary = QtWidgets.QLabel("Load current annealing files to plot traces or export to Origin.")
+        summary = QtWidgets.QLabel(
+            "Load current annealing files or run folders to plot traces or export to Origin."
+        )
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
         show_power = QtWidgets.QCheckBox("Show power top axis")
@@ -69,6 +72,14 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         )
         overview_layout.addWidget(show_power)
         self._show_power_top_axis_checkbox = show_power
+        review_button = QtWidgets.QPushButton("Review loaded transitions...")
+        review_button.setToolTip(
+            "Review transition currents for a loaded run and save transition_review.json "
+            "beside its measurement."
+        )
+        review_button.clicked.connect(self._review_loaded_transitions)
+        self._review_button = review_button
+        overview_layout.addWidget(review_button)
         overview_layout.addStretch(1)
         layout.addWidget(overview_section)
         layout.addStretch(1)
@@ -136,10 +147,16 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     def _is_data_source_path(cls, path: Path) -> bool:
         if cls._is_metadata_sidecar_path(path):
             return False
-        if path.name.casefold() == "measurement.csv":
-            return anneal_core.current_annealing_session_metadata(path) is not None
-        if path.suffix.lower() in {".csv", ".tsv"} and anneal_core.current_annealing_session_metadata(path) is not None:
-            return False
+        run_measurements = [
+            path.parent / name for name in ("measurement.csv", "measurement.txt")
+        ]
+        if any(candidate.is_file() for candidate in run_measurements):
+            try:
+                selected = anneal_core.resolve_measurement_path(path.parent).resolve()
+                if path.resolve() != selected:
+                    return False
+            except Exception:
+                return False
         return path.suffix.lower() in cls._DATA_SUFFIXES
 
     def _candidate_data_paths(self, paths: list[Path]) -> list[Path]:
@@ -169,6 +186,13 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 resolved = anneal_core.resolve_current_annealing_source(path)
                 if resolved != path:
                     _push(resolved)
+                    continue
+                try:
+                    direct_measurement = anneal_core.resolve_measurement_path(path)
+                except Exception:
+                    direct_measurement = None
+                if direct_measurement is not None and direct_measurement.is_file():
+                    _push(direct_measurement)
                     continue
                 try:
                     children = sorted(path.rglob("*"), key=lambda item: str(item))
@@ -253,7 +277,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
         window_module = window_api()
-        title = format_annealing_title(anneal_core.current_annealing_source_label(path_str))
+        display_name = anneal_core.measurement_display_name(path_str)
+        title = format_annealing_title(display_name)
         wire_diameter_um = self._wire_diameter_um_for_frame(df)
         try:
             fig, _ = anneal_core.plot_one(
@@ -292,7 +317,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         descriptor = window_module.TabDescriptor(
             kind="current_annealing",
             title=ax.get_title() if ax else title,
-            root_label=anneal_core.current_annealing_source_label(path_str),
+            root_label=display_name,
             x_label=ax.get_xlabel() if ax else "Current [mA]",
             y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
             canvas=canvas,
@@ -305,7 +330,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 "wire_diameter_um": wire_diameter_um,
             },
         )
-        self.host.tab_widget.addTab(tab, anneal_core.current_annealing_source_label(path_str))
+        self.host.tab_widget.addTab(tab, display_name)
         self.host._register_plot_tab(tab, canvas, ax, descriptor)
         self._plot_tabs.append(tab)
         return tab
@@ -556,8 +581,56 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             return
         super().open_origin()
 
+    def _review_loaded_transitions(self) -> None:
+        paths = [Path(path) for path in self._loaded_files if Path(path).is_file()]
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load a current annealing file or run folder first.",
+            )
+            return
+        selected = paths[0]
+        if len(paths) > 1:
+            labels = [
+                f"{anneal_core.measurement_display_name(path)} — {path.parent}"
+                for path in paths
+            ]
+            label, accepted = QtWidgets.QInputDialog.getItem(
+                self.host,
+                "Review transitions",
+                "Run",
+                labels,
+                0,
+                False,
+            )
+            if not accepted:
+                return
+            selected = paths[labels.index(label)]
+        try:
+            from plotting.shared.transition_review import sidecar_path_for_measurement
+            from plotting.shared.transition_review_dialog import (
+                review_current_annealing_file,
+            )
+
+            saved = review_current_annealing_file(self.host, selected)
+            if saved:
+                sidecar = sidecar_path_for_measurement(
+                    selected, family="current_annealing"
+                )
+                self._log(f"Saved transition review: {sidecar}")
+        except Exception as exc:
+            self._log(f"Transition review failed for {selected}: {exc}", level="error")
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                "Transition review unavailable",
+                str(exc),
+            )
+
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
+        if self._review_button is not None:
+            self._review_button.setEnabled(has_data)
         ready_to_plot = True
         self.apply_shared_action_state(
             can_plot=ready_to_plot,
@@ -583,13 +656,14 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         created: list[str] = []
         for path_str, df in self._data_by_file.items():
             path = Path(path_str)
+            display_name = anneal_core.measurement_display_name(path)
             key = self._workbook_keys.get(path_str)
             if not key:
                 key = f"annealing::{path_str}"
                 self._workbook_keys[path_str] = key
             workbook = window_module.WorkbookData(
                 key=key,
-                name=f"{path.stem} (annealing)",
+                name=f"{display_name} (annealing)",
                 worksheets=[],
                 source=None,
                 folder=None,
@@ -612,7 +686,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 continue
             workbook.worksheets = [ws.key for ws in worksheet_objects]
             host._register_imported_workbook(workbook, worksheet_objects)
-            created.append(path.name)
+            created.append(display_name)
         if created:
             host._refresh_imported_data_summary()
             host._sync_selected_paths_with_imports()

@@ -4076,6 +4076,34 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
+    logger_metadata: Dict[str, Any] = {}
+    if path.name.casefold() in {"measurement.txt", "measurement.csv"}:
+        metadata_path = path.parent / "metadata.json"
+        try:
+            candidate = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("schema") in {
+                    "current_annealing_logger_metadata_v1",
+                    "current_annealing_session_v2",
+                }
+                and str(candidate.get("data_file") or path.name).casefold()
+                == path.name.casefold()
+            ):
+                logger_metadata = candidate
+                base = " ".join(
+                    str(value).strip()
+                    for value in (
+                        candidate.get("composition"),
+                        candidate.get("microwire"),
+                        f"{candidate.get('max_current_mA')}mA"
+                        if candidate.get("max_current_mA") not in (None, "")
+                        else "",
+                    )
+                    if str(value).strip()
+                )
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger_metadata = {}
     parts = base.split()
     composition_match = COMPOSITION_TOKEN_PATTERN.search(base)
     composition = (
@@ -4089,6 +4117,11 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     xy_match = DRAW_PIECE_AFTER_COMPOSITION_PATTERN.search(identity_tail)
     if xy_match is None:
         xy_match = XY_PATTERN.search(base)
+    if xy_match is None and logger_metadata.get("microwire"):
+        xy_match = re.search(
+            r"(?<!\d)(\d+)\s*[/_-]\s*(\d+)(?!\d)",
+            str(logger_metadata["microwire"]),
+        )
     draw_x: Optional[int] = int(xy_match.group(1)) if xy_match else None
     piece_y: Optional[int] = int(xy_match.group(2)) if xy_match else None
     setpoint_match = SETPOINT_PATTERN.search(base)
@@ -4096,13 +4129,13 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     alt_variant = bool(ALT_VARIANT_PATTERN.search(base))
     relpath = os.fspath(path.relative_to(root)) if root and path.is_relative_to(root) else path.as_posix()
     return MeasurementMetadata(
-        composition_token=composition,
+        composition_token=str(logger_metadata.get("composition") or composition),
         draw_x=draw_x,
         piece_y=piece_y,
         setpoint_mA=setpoint,
         alt_variant=alt_variant,
         measurement_id=_hash_file(path),
-        file_name=path.name,
+        file_name=path.parent.name if logger_metadata else path.name,
         relpath=relpath,
         timestamp_mtime_utc=timestamp,
     )
@@ -4236,6 +4269,20 @@ def _load_annealing(
         return _trim_annealing_burnthrough(frame)
     if path.suffix.lower() == ".dat":
         return _trim_annealing_burnthrough(_load_annealing_dat(path))
+
+    if path.name.casefold() == "measurement.csv":
+        session_frame = pd.read_csv(path)
+        required = {"measured_current_mA", "voltage_V", "resistance_ohm"}
+        if required.issubset(session_frame.columns):
+            cycle = session_frame.get("cycle_index")
+            return _trim_annealing_burnthrough(
+                _normalise_annealing_columns(
+                    current_mA=session_frame["measured_current_mA"],
+                    voltage_v=session_frame["voltage_V"],
+                    resistance_ohm=session_frame["resistance_ohm"],
+                    cycle=cycle,
+                )
+            )
 
     try:
         df = pd.read_csv(path, sep=None, engine="python", names=ANNEALING_COLUMNS, header=None)
@@ -8128,6 +8175,13 @@ def build_database(
             path_text = repr(record)
         return f"{path_text}::"
 
+    def _mini_dma_transition_target_from_text(line: object) -> str:
+        text = str(line or "").strip()
+        match = re.search(r":\s*(?:As|Af|Ms|Mf)\s+", text, flags=re.IGNORECASE)
+        if match is None:
+            return ""
+        return text[: match.start()].strip()
+
     def _mini_dma_transition_status_for_records(
         records: Sequence[MiniDmaRecord],
     ) -> Tuple[str, str]:
@@ -8139,7 +8193,7 @@ def build_database(
             prefix = _mini_dma_review_record_prefix(record)
             target_labels: List[str] = []
             for line in getattr(record, "transition_summary", ()) or ():
-                target = str(line).split(":", 1)[0].strip()
+                target = _mini_dma_transition_target_from_text(line)
                 if target and target not in target_labels:
                     target_labels.append(target)
             matching_reviews: Dict[str, Mapping[str, object]] = {}

@@ -211,7 +211,32 @@ def test_atomic_replace_failure_preserves_previous_valid_checkpoint(
         metadata_checkpoints._atomic_replace_text(checkpoint, '{"point_count": 2}')
 
     assert json.loads(checkpoint.read_text(encoding="utf-8"))["point_count"] == 1
-    assert not checkpoint.with_name(f".{checkpoint.name}.pending").exists()
+    assert not list(checkpoint.parent.glob(f".{checkpoint.name}.*.pending"))
+
+
+def test_atomic_replace_retries_transient_windows_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    original_replace = metadata_checkpoints.os.replace
+    attempts = 0
+
+    def _temporarily_denied(source: str | Path, destination: str | Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "synthetic transient access denial")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(metadata_checkpoints.os, "replace", _temporarily_denied)
+    monkeypatch.setattr(metadata_checkpoints.time, "sleep", lambda _seconds: None)
+
+    metadata_checkpoints._atomic_replace_text(checkpoint, '{"point_count": 2}')
+
+    assert attempts == 3
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["point_count"] == 2
+    assert not list(checkpoint.parent.glob(f".{checkpoint.name}.*.pending"))
 
 
 def test_checkpoint_rejects_mismatched_session_identity(tmp_path: Path) -> None:

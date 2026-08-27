@@ -255,6 +255,7 @@ def test_repeated_measurement_aggregation_preserves_rows_without_complete_wire_k
     assert pd.isna(median.loc[1, "Composition"])
 
 
+@pytest.mark.serial
 def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path) -> None:
     frame = _sample_dataframe()
     config = MicrowireEdaConfig(

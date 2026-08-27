@@ -26,6 +26,9 @@ from microwire_data_builder.legacy_migration import (
 )
 
 
+pytestmark = pytest.mark.serial
+
+
 class _MaliciousPayload:
     def __init__(self, marker: Path) -> None:
         self.marker = marker
@@ -285,6 +288,8 @@ def test_project_export_exception_preserves_existing_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "settings.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
     target = tmp_path / "existing.pydpj"
     target.write_bytes(b"existing-project")
     critical: list[str] = []
@@ -293,15 +298,23 @@ def test_project_export_exception_preserves_existing_target(
         "critical",
         lambda _parent, _title, message: critical.append(str(message)),
     )
-    fake = SimpleNamespace(
-        _project_degraded_safe_mode=False,
-        _build_project_payload=lambda _staging_root=None: (
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = builder_ui.BuilderWindow()
+    monkeypatch.setattr(
+        window,
+        "_build_project_payload",
+        lambda _staging_root=None, progress=None: (
             _ for _ in ()
         ).throw(RuntimeError("export failed")),
-        logger=SimpleNamespace(exception=lambda *_args, **_kwargs: None),
     )
 
-    builder_ui.BuilderWindow._write_project_file(fake, target)  # noqa: SLF001
+    try:
+        window._write_project_file(target)  # noqa: SLF001
+    finally:
+        window._dirty = False
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
     assert target.read_bytes() == b"existing-project"
     assert critical and "existing file was not changed" in critical[0]

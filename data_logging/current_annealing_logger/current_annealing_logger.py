@@ -5932,7 +5932,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_loop_tracking()
         if final_state is None:
             final_state = "completed" if message.startswith("Run complete") else "idle"
+        finished_output = str(self.f_name or "")
+        if finished_output:
+            self._finalize_metadata_file(finished_output, final_state=final_state, detail=message)
         self._set_process_state(final_state, message)
+        if final_state == "completed" and finished_output:
+            QtCore.QTimer.singleShot(0, lambda path=finished_output: self._offer_transition_review(path))
         self._show_status_message(message, timeout_ms=0 if final_state == "failed" else 15000)
         if show_dialog:
             try:
@@ -6519,9 +6524,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
                 self.ui.pushButton_configure_plots.setObjectName("pushButton_configure_plots")
                 self.ui.pushButton_configure_plots.clicked.connect(self.handle_configure_plots_clicked)
+                self.ui.pushButton_review_transitions = QtWidgets.QToolButton(container)
+                self.ui.pushButton_review_transitions.setText("Review transitions...")
+                self.ui.pushButton_review_transitions.setToolTip(
+                    "Review the latest completed Current Annealing run. "
+                    "Use the arrow to choose an older measurement."
+                )
+                self.ui.pushButton_review_transitions.setPopupMode(
+                    QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+                )
+                self.ui.pushButton_review_transitions.clicked.connect(
+                    self._review_latest_transition_measurement
+                )
+                transition_menu = QtWidgets.QMenu(self.ui.pushButton_review_transitions)
+                choose_run_folder = transition_menu.addAction("Choose run folder...")
+                choose_run_folder.triggered.connect(self._choose_transition_run_folder)
+                choose_parent_folder = transition_menu.addAction("Review runs in parent folder...")
+                choose_parent_folder.triggered.connect(self._choose_transition_parent_folder)
+                choose_legacy_file = transition_menu.addAction("Choose legacy measurement file...")
+                choose_legacy_file.triggered.connect(self._choose_transition_measurement_file)
+                self.ui.pushButton_review_transitions.setMenu(transition_menu)
                 header_row.addStretch(1)
                 header_row.addWidget(title_label, 3)
                 header_row.addWidget(self.ui.pushButton_configure_plots, 0)
+                header_row.addWidget(self.ui.pushButton_review_transitions, 0)
                 layout.addLayout(header_row)
                 self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
                 self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
@@ -6786,7 +6812,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 base = "anneal_log"
             if d:
                 os.makedirs(d, exist_ok=True)
-                return os.path.join(d, f"{base}.txt")
+                return os.path.join(d, base, "measurement.txt")
         except Exception:
             pass
         # Fallback to legacy full-path field if present
@@ -6930,8 +6956,10 @@ class MainWindow(QtWidgets.QMainWindow):
         diameter_um = self._diameter_um()
         return {
             "schema": "current_annealing_logger_metadata_v1",
+            "session_state": "running",
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "data_file": output.name,
+            "run_folder": output.parent.name if output.name.casefold() == "measurement.txt" else "",
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "output_file": str(output_path),
             "composition": self._ui_text("lineEdit_composition"),
@@ -6971,6 +6999,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _metadata_path(self, output_path: str) -> Path:
         output = Path(output_path)
+        if output.name.casefold() == "measurement.txt":
+            return output.parent / "metadata.json"
         return output.parent / "metadata" / output.stem / "metadata.json"
 
     def _write_metadata_file(
@@ -6980,7 +7010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         source_provenance_token: object | None = None,
     ) -> bool:
         output = Path(output_path)
-        metadata_dir = output.parent / "metadata" / output.stem
+        metadata_dir = self._metadata_path(output_path).parent
         try:
             metadata_dir.mkdir(parents=True, exist_ok=True)
             self._metadata_path(output_path).write_text(
@@ -7008,6 +7038,183 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
+    def _finalize_metadata_file(self, output_path: str, *, final_state: str, detail: str) -> None:
+        metadata_path = self._metadata_path(output_path)
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("metadata JSON root is not an object")
+            payload["session_state"] = "finished"
+            payload["finished_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            payload["stop"] = {"state": str(final_state), "detail": str(detail)}
+            temporary = metadata_path.with_name(f".{metadata_path.name}.tmp")
+            temporary.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, metadata_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.error("Current Annealing metadata finalization failed for %s: %s", metadata_path, exc)
+            self._show_status_message(f"Metadata finalization failed: {exc}", timeout_ms=12000)
+
+    def _offer_transition_review(self, output_path: str) -> None:
+        if self._window_closing or not self.isVisible():
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Review transitions",
+            "The run finished and the output is safely off. Review transition currents now?",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._open_transition_review(Path(output_path))
+
+    def _transition_review_sample(self, output_path: Path) -> Dict[str, str]:
+        try:
+            payload = json.loads(self._metadata_path(str(output_path)).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            key: str(payload.get(key) or self._ui_text(widget_name))
+            for key, widget_name in (
+                ("composition", "lineEdit_composition"),
+                ("microwire", "lineEdit_microwire"),
+                ("sample", "lineEdit_sample"),
+                ("load", "lineEdit_load"),
+            )
+        }
+
+    def _open_transition_review(self, output_path: Path) -> None:
+        try:
+            from plotting.shared.transition_review_dialog import review_current_annealing_file
+
+            path = Path(output_path)
+            review_current_annealing_file(
+                self,
+                path,
+                sample=self._transition_review_sample(path),
+            )
+        except Exception as exc:
+            LOGGER.exception("Post-run Current Annealing transition review failed")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+    def _latest_completed_transition_measurement(self) -> Path | None:
+        candidates: list[Path] = []
+        if not self.process_running and self.f_name:
+            candidates.append(Path(self.f_name))
+        for entry in self._measurement_history:
+            source = str(entry.get("source") or "").strip()
+            if source:
+                candidates.append(Path(source))
+        existing = list(dict.fromkeys(path for path in candidates if path.is_file()))
+        if not existing:
+            return None
+        return max(existing, key=lambda path: path.stat().st_mtime_ns)
+
+    def _review_latest_transition_measurement(self) -> None:
+        if self.process_running:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "Finish or stop the active Current Annealing run before reviewing transitions.",
+            )
+            return
+        output_path = self._latest_completed_transition_measurement()
+        if output_path is None:
+            self._choose_transition_run_folder()
+            return
+        self._open_transition_review(output_path)
+
+    def _choose_transition_run_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose completed Current Annealing run folder",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        measurement = Path(selected) / "measurement.txt"
+        if not measurement.is_file():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Transition review unavailable",
+                "The selected folder does not contain measurement.txt.",
+            )
+            return
+        self._open_transition_review(measurement)
+
+    def _choose_transition_parent_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose parent folder containing Current Annealing runs",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        measurements: list[Path] = []
+        own_measurement = root / "measurement.txt"
+        if own_measurement.is_file():
+            measurements.append(own_measurement)
+        try:
+            children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+            return
+        measurements.extend(
+            child / "measurement.txt"
+            for child in children
+            if child.is_dir() and (child / "measurement.txt").is_file()
+        )
+        if not measurements:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No completed runs found",
+                "No direct child run folders containing measurement.txt were found.",
+            )
+            return
+        try:
+            from plotting.shared.transition_review_dialog import (
+                review_current_annealing_files,
+            )
+
+            review_current_annealing_files(
+                self,
+                measurements,
+                sample_for_path=self._transition_review_sample,
+            )
+        except Exception as exc:
+            LOGGER.exception("Current Annealing transition review queue failed")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+
+    def _choose_transition_measurement_file(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose Current Annealing measurement",
+            str(start_dir),
+            "Current Annealing measurements (*.txt *.dat *.csv);;All files (*)",
+        )
+        if selected:
+            self._open_transition_review(Path(selected))
+
     def _write_source_provenance_completion(self, output_path: str, token: object) -> None:
         if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
             return
@@ -7030,7 +7237,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
         moved: list[str] = []
-        metadata_dir = output.parent / "metadata" / output.stem
+        if output.name.casefold() == "measurement.txt" and output.parent.exists():
+            destination = _move_path_to_trash(output.parent)
+            moved.append(str(destination or output.parent))
+            self._show_status_message(
+                "Moved previous output to Trash before replacing: " + "; ".join(moved),
+                timeout_ms=12000,
+            )
+            return
+        metadata_dir = self._metadata_path(output_path).parent
         for path in (output, metadata_dir):
             if not path.exists():
                 continue
@@ -7050,13 +7265,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_runtime_settings()
         self._store_loop_preferences()
         path = self.build_log_path()
+        output_path = Path(path)
+        run_folder_existed = (
+            output_path.name.casefold() == "measurement.txt"
+            and output_path.parent.exists()
+        )
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
         except Exception:
             pass
 
         mode = "w"
-        if os.path.exists(path):
+        output_exists = os.path.exists(path) or (
+            output_path.name.casefold() == "measurement.txt" and run_folder_existed
+        )
+        if output_exists:
             msg = QtWidgets.QMessageBox(self)
             msg.setWindowTitle("File exists")
             msg.setIcon(QtWidgets.QMessageBox.Icon.Question)
@@ -7083,6 +7306,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"Failed to move previous output to Trash before replacing {path}: {exc}",
                     )
                     return False
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to create run folder: {exc}")
+            return False
         try:
             if mode == "a":
                 self._ensure_log_header(path)

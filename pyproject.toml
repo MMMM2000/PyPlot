@@ -67,3 +67,6 @@ build-backend = "setuptools.build_meta"
 addopts = "--capture=sys"
 testpaths = ["tests"]
 norecursedirs = ["artifacts", ".git", ".venv"]
+markers = [
+    "serial: run in the serial verification lane because the test uses process-wide or filesystem lock state",
+]

@@ -574,7 +574,35 @@ def decode_value(
         )
         series: list[pd.Series] = []
         for position, values in enumerate(data):
-            if isinstance(values, np.ndarray):
+            if isinstance(values, dict) and set(values) == {
+                "encoding",
+                "codes",
+                "values",
+            }:
+                if values.get("encoding") != "dictionary-string-v1":
+                    raise SafeCodecError("Unknown columnar string encoding")
+                codes = values.get("codes")
+                categories = values.get("values")
+                if (
+                    not isinstance(codes, np.ndarray)
+                    or codes.ndim != 1
+                    or len(codes) != len(index)
+                    or codes.dtype.kind not in {"i", "u"}
+                    or not isinstance(categories, list)
+                    or not all(isinstance(item, str) for item in categories)
+                ):
+                    raise SafeCodecError("Malformed dictionary string column")
+                if len(codes):
+                    minimum = int(codes.min())
+                    maximum = int(codes.max())
+                    if minimum < -1 or maximum >= len(categories):
+                        raise SafeCodecError("Dictionary string code is out of range")
+                decoded_values = [
+                    None if int(code) == -1 else categories[int(code)]
+                    for code in codes
+                ]
+                column = pd.Series(decoded_values, index=index, dtype=object)
+            elif isinstance(values, np.ndarray):
                 if values.ndim != 1 or len(values) != len(index):
                     raise SafeCodecError("Columnar DataFrame ndarray length is invalid")
                 column = pd.Series(values, index=index, copy=False)
@@ -746,7 +774,37 @@ def _iter_encode_value_with_blobs(
         for position in range(value.shape[1]):
             series = value.iloc[:, position]
             array = series.to_numpy(copy=False)
-            column_data.append(series.tolist() if array.dtype.hasobject else array)
+            encoded_column: Any = None
+            if array.dtype.hasobject and len(series.index) >= 256:
+                non_missing = series[~series.isna()]
+                if not non_missing.empty and non_missing.map(
+                    lambda item: isinstance(item, str)
+                ).all():
+                    codes, categories = pd.factorize(series, sort=False)
+                    category_values = [str(item) for item in categories.tolist()]
+                    raw_chars = int(non_missing.map(len).sum())
+                    category_chars = sum(len(item) for item in category_values)
+                    if category_chars + len(category_values) * 3 < raw_chars:
+                        max_code = max(len(category_values) - 1, 0)
+                        code_dtype = (
+                            np.int8
+                            if max_code <= np.iinfo(np.int8).max
+                            else np.int16
+                            if max_code <= np.iinfo(np.int16).max
+                            else np.int32
+                        )
+                        encoded_column = {
+                            "encoding": "dictionary-string-v1",
+                            "codes": codes.astype(code_dtype, copy=False),
+                            "values": category_values,
+                        }
+            column_data.append(
+                encoded_column
+                if encoded_column is not None
+                else series.tolist()
+                if array.dtype.hasobject
+                else array
+            )
         parts = (
             ("index", value.index),
             ("columns", value.columns),

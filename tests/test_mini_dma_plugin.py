@@ -653,6 +653,31 @@ def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
         plt.close(fig)
 
 
+def test_transition_strain_interpolation_uses_heating_and_cooling_legs() -> None:
+    current = pd.Series([0.0, 10.0, 20.0, 10.0, 0.0])
+    strain = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    values = core.interpolate_transition_strain_pct(
+        current,
+        strain,
+        {"As": 5.0, "Af": 15.0, "Ms": 15.0, "Mf": 5.0},
+    )
+
+    assert values == pytest.approx(
+        {"As": 0.5, "Af": 1.5, "Ms": 2.5, "Mf": 3.5}
+    )
+
+
+def test_transition_strain_interpolation_does_not_extrapolate() -> None:
+    values = core.interpolate_transition_strain_pct(
+        pd.Series([0.0, 10.0, 20.0, 10.0]),
+        pd.Series([0.0, 1.0, 2.0, 3.0]),
+        {"As": 25.0, "Mf": -1.0},
+    )
+
+    assert values == {}
+
+
 def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     run = core.load_run(SAMPLE_RUN)
     frame = core.build_plot_frame(run, y_column="strain_pct")
@@ -761,6 +786,7 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
 
 
+@pytest.mark.serial
 def test_summarize_current_sweep_large_multi_target_trace_stays_fast() -> None:
     rows: list[dict[str, float | str | int]] = []
 
@@ -993,3 +1019,39 @@ def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
     finally:
         host.close()
         app.processEvents()
+
+
+def test_tma_transition_signal_gate_rejects_trace_noise() -> None:
+    before = core.LinearSegmentFit(0.001, 0.0, 0.0, 20.0, 0.01)
+    transition = core.LinearSegmentFit(-0.01, 0.0, 20.0, 30.0, 0.01)
+    after = core.LinearSegmentFit(0.001, 0.0, 30.0, 50.0, 0.01)
+    fit = core.TangentTransitionFit(
+        start_x=20.0,
+        finish_x=30.0,
+        before=before,
+        transition=transition,
+        after=after,
+        rmse=0.01,
+    )
+
+    assert not core._mini_dma_transition_signal_is_large_enough(
+        fit,
+        pd.Series([0.0, 0.3]),
+    )
+    assert not core._mini_dma_transition_signal_is_large_enough(
+        fit,
+        pd.Series([0.0, 0.6]),
+    )
+
+    strong_fit = core.TangentTransitionFit(
+        start_x=20.0,
+        finish_x=30.0,
+        before=before,
+        transition=core.LinearSegmentFit(-0.02, 0.0, 20.0, 30.0, 0.01),
+        after=after,
+        rmse=0.01,
+    )
+    assert core._mini_dma_transition_signal_is_large_enough(
+        strong_fit,
+        pd.Series([0.0, 0.6]),
+    )

@@ -6,10 +6,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 
 CHECKPOINT_FORMAT_VERSION = 1
 DEFAULT_CANONICAL_WRITE_INTERVAL_S = 60.0
+ATOMIC_REPLACE_RETRY_DELAYS_S = (0.01, 0.02, 0.05, 0.1)
 
 
 def default_checkpoint_root() -> Path:
@@ -27,10 +29,17 @@ def default_checkpoint_root() -> Path:
 
 def _atomic_replace_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.pending")
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.pending")
     try:
         temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
+        for retry_delay_s in (*ATOMIC_REPLACE_RETRY_DELAYS_S, None):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if retry_delay_s is None:
+                    raise
+                time.sleep(retry_delay_s)
     finally:
         try:
             temporary.unlink(missing_ok=True)
