@@ -1770,6 +1770,60 @@ def test_review_queue_wrappers_construct_lazy_entries(tmp_path, monkeypatch) -> 
     assert [event[1]["target"] for event in saved_events] == ["first", "second"]
     assert [event[0].parent for event in written] == tma_paths
 
+
+def test_tma_queue_prefers_saved_sidecar_units_over_stale_project_summary(
+    tmp_path, monkeypatch
+) -> None:
+    from plotting.shared import transition_review_dialog as review_dialog
+    from plotting.shared.transition_review_dialog import ReviewUnitSummary
+
+    run_path = tmp_path / "Sample" / "Run"
+    run_path.mkdir(parents=True)
+    sidecar = review_dialog.sidecar_path_for_measurement(run_path, family="tma")
+    fingerprint = "sha256:" + "a" * 64
+    target = make_target(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        target_key="50-mpa",
+        status="no_transition",
+    )
+    target["target"] = {"stress_mpa": 50.0}
+    review_dialog.atomic_write_review(
+        sidecar,
+        make_review(
+            family="tma",
+            measurement_fingerprint=fingerprint,
+            targets=[target],
+        ),
+    )
+    captured = []
+
+    class FakeQueue:
+        def __init__(self, entries, _parent):
+            captured.extend(entries)
+            self.completed_count = len(entries)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(review_dialog, "PortableTransitionReviewQueueDialog", FakeQueue)
+
+    assert (
+        review_dialog.review_tma_runs(
+            None,
+            [run_path],
+            review_units_for_path=lambda _path: (
+                ReviewUnitSummary("50 MPa", "needs_attention"),
+            ),
+        )
+        == 1
+    )
+    assert captured[0].saved is True
+    assert [(unit.label, unit.state) for unit in captured[0].review_units] == [
+        ("50-mpa", "no_transition")
+    ]
+
+
 def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatch) -> None:
     import logging
     from types import SimpleNamespace

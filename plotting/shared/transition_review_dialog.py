@@ -2940,12 +2940,20 @@ def review_tma_runs(
             if review_units_for_path is not None
             else ()
         )
-        if project_units:
+        # A portable sidecar is the authoritative saved review.  The Builder's
+        # lightweight overview can lag behind it until the raw TMA run has been
+        # prepared, which used to make reviewed targets briefly appear as
+        # "Needs attention" while loading.
+        sidecar_units = _saved_review_units(sidecar)
+        if sidecar_units:
+            review_units = sidecar_units
+            saved = True
+        elif project_units:
             review_units = project_units
             saved = _review_units_have_completed_review(review_units)
         else:
-            review_units = _saved_review_units(sidecar)
-            saved = sidecar.exists() or _review_units_have_completed_review(review_units)
+            review_units = ()
+            saved = sidecar.exists()
 
         def payload_for_selected_path(selected_path: Path) -> Mapping[str, Any] | None:
             value = (
