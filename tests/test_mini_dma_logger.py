@@ -32016,6 +32016,7 @@ def test_late_session_source_provenance_never_recreates_missing_or_malformed_met
         _close_test_window(window)
 
 
+@pytest.mark.serial
 def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_tick(
     tmp_path: Path,
     qtbot,

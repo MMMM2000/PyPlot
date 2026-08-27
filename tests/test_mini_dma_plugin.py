@@ -786,6 +786,7 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
 
 
+@pytest.mark.serial
 def test_summarize_current_sweep_large_multi_target_trace_stays_fast() -> None:
     rows: list[dict[str, float | str | int]] = []
 
