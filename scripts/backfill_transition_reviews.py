@@ -171,6 +171,15 @@ def _apply_ca_review(draft: dict[str, Any], review: Mapping[str, Any]) -> None:
 
 
 def _stress_from_label(label: str) -> float | None:
+    # Historical first-sweep labels start with ``1st:``, so taking the first
+    # number would incorrectly read the ordinal as 1 MPa. Prefer the value
+    # explicitly carrying the stress unit and retain the legacy fallback for
+    # unusual labels without a unit.
+    unit_match = re.search(
+        r"([-+]?\d+(?:\.\d+)?)\s*MPa\b", label, re.IGNORECASE
+    )
+    if unit_match is not None:
+        return float(unit_match.group(1))
     match = re.search(r"[-+]?\d+(?:\.\d+)?", label)
     return float(match.group(0)) if match else None
 

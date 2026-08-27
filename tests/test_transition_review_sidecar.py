@@ -1116,6 +1116,56 @@ def test_backfill_candidate_never_uses_an_exact_path_outside_roots(tmp_path) -> 
     assert candidate is None
     assert match == "outside_roots"
 
+
+def test_backfill_maps_first_sweep_label_to_stress_value() -> None:
+    from scripts.backfill_transition_reviews import _apply_tma_reviews, _stress_from_label
+
+    assert _stress_from_label("1st: 20MPa / 0.31g") == 20.0
+    assert _stress_from_label("50 MPa / 0.77 g") == 50.0
+
+    fingerprint = "sha256:" + "c" * 64
+    targets = []
+    for sweep_index in (1, 2):
+        target = make_target(
+            family="tma",
+            measurement_fingerprint=fingerprint,
+            target_key=f"stress_mpa:50:sweep:{sweep_index}",
+            auto_values={"As": 20.0},
+        )
+        target["target"] = {
+            "stress_mpa": 50.0,
+            "sweep_index": sweep_index,
+            "sweep_count": 2,
+        }
+        targets.append(target)
+    draft = make_review(
+        family="tma",
+        measurement_fingerprint=fingerprint,
+        targets=targets,
+    )
+
+    _apply_tma_reviews(
+        draft,
+        [
+            {
+                "status": "accepted",
+                "target_label": "1st: 50MPa / 0.83g",
+                "values": {"As": 21.0},
+            },
+            {
+                "status": "accepted",
+                "target_label": "50 MPa / 0.83 g",
+                "values": {"As": 31.0},
+            },
+        ],
+    )
+
+    assert [target["final_values"] for target in draft["targets"]] == [
+        {"As": 21.0},
+        {"As": 31.0},
+    ]
+
+
 def test_backfill_distinguishes_no_transition_from_excluded_values() -> None:
     from scripts.backfill_transition_reviews import _apply_ca_review, _apply_tma_reviews
 
