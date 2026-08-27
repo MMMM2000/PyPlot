@@ -15818,16 +15818,17 @@ class AnnealingSection(MiniDatabaseSection):
                 portable_changed = True
         valid_ids = set(records_by_id)
         if not valid_ids:
-            if self._transition_reviews:
-                self._transition_reviews.clear()
-                if store:
-                    self._store_transition_reviews()
+            # A lazy or in-progress refresh can temporarily leave the section
+            # without materialized records. The saved reviews are still
+            # authoritative project data, so never erase them merely because
+            # there is nothing available to reconcile against yet.
             return
         removed = False
         for record_id in list(self._transition_reviews.keys()):
+            if record_id.startswith("unmatched:current-annealing:"):
+                continue
             if record_id not in valid_ids:
-                payload = self._transition_reviews.pop(record_id, None)
-                removed = True
+                payload = self._transition_reviews.get(record_id)
                 if not isinstance(payload, Mapping):
                     continue
                 new_id = aliases.get(("source_path", _path_alias(payload.get("source_path"))))
@@ -15839,10 +15840,20 @@ class AnnealingSection(MiniDatabaseSection):
                         )
                     )
                 if not new_id or new_id in self._transition_reviews:
+                    removed = (
+                        _move_transition_review_to_orphan(
+                            self._transition_reviews,
+                            record_id,
+                            "current-annealing",
+                        )
+                        or removed
+                    )
                     continue
                 remapped = self._clean_transition_review_payload(new_id, payload)
                 record = records_by_id.get(new_id)
                 if remapped and record is not None:
+                    self._transition_reviews.pop(record_id, None)
+                    removed = True
                     preserved_updated_at = remapped.get("updated_at")
                     remapped.update(self._transition_review_metadata(new_id, record))
                     if preserved_updated_at:

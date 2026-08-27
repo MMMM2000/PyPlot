@@ -10977,6 +10977,110 @@ def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> N
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_review_prune_preserves_reviews_without_materialized_records() -> None:
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    review = {
+        "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        "source_path": "C:/measurements/legacy.txt",
+    }
+    section._all_records = []  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {"ca:legacy": dict(review)}  # noqa: SLF001
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    assert section._transition_reviews == {"ca:legacy": review}  # noqa: SLF001
+
+
+def test_annealing_review_prune_remaps_legacy_id_by_exact_source_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt"
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100,
+            alt_variant=False,
+            measurement_id="current-id",
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-08-27T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    section._all_records = [record]  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {  # noqa: SLF001
+        "ca:legacy": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "included": False,
+            "source_path": str(path),
+            "sample_key": "Ni44Fe27Ga23Cu3Co3|1|2",
+            "graph_label": path.name,
+            "updated_at": "2026-08-01T12:00:00+00:00",
+        }
+    }
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    current_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+    assert set(section._transition_reviews) == {current_id}  # noqa: SLF001
+    assert section._transition_reviews[current_id]["status"] == (  # noqa: SLF001
+        builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+    )
+    assert section._transition_reviews[current_id]["updated_at"] == (  # noqa: SLF001
+        "2026-08-01T12:00:00+00:00"
+    )
+
+
+def test_annealing_review_prune_keeps_unmatched_history_as_stable_orphan(
+    tmp_path: Path,
+) -> None:
+    record = MeasurementRecord(
+        path=tmp_path / "current.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=100,
+            alt_variant=False,
+            measurement_id="current-id",
+            file_name="current.txt",
+            relpath="current.txt",
+            timestamp_mtime_utc="2026-08-27T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    section = builder_ui.AnnealingSection.__new__(builder_ui.AnnealingSection)
+    section._all_records = [record]  # noqa: SLF001
+    section._record_groups = {}  # noqa: SLF001
+    section._transition_reviews = {  # noqa: SLF001
+        "ca:legacy": {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            "source_path": str(tmp_path / "missing.txt"),
+            "manual_values_mA": {"As1": 25.0},
+        }
+    }
+
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+    first_snapshot = dict(section._transition_reviews)  # noqa: SLF001
+    section._prune_transition_reviews(store=False)  # noqa: SLF001
+
+    assert section._transition_reviews == first_snapshot  # noqa: SLF001
+    assert len(first_snapshot) == 1
+    orphan_id, payload = next(iter(first_snapshot.items()))
+    assert orphan_id.startswith("unmatched:current-annealing:")
+    assert payload["manual_values_mA"] == {"As1": 25.0}
+
+
 def test_current_density_ignores_excluded_transition_review_records() -> None:
     _ensure_qapp()
     annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
