@@ -56,6 +56,9 @@ stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
 source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+setup_baseline_simulator_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.setup_baseline_simulator"
+)
 
 
 def test_tic_acceleration_units_use_physical_stage_units() -> None:
@@ -5546,53 +5549,49 @@ def test_length_setup_uses_linear_unload_intercept_for_l0(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
-def test_setup_return_zero_stops_at_linear_unload_slack_onset(tmp_path: Path, qtbot) -> None:
+def _load_setup_baseline_trace_into_window(window, trace) -> None:
+    window._length_setup_points.clear()
+    for observation in trace.observations:
+        point = window._capture_measurement_point(
+            elapsed_s=observation.elapsed_s,
+            position_mm=observation.position_mm,
+            effective_position_mm=observation.position_mm,
+            raw_load_g=observation.raw_load_g,
+            load_g=window._effective_load_from_raw_g(observation.raw_load_g),
+        )
+        window._length_setup_points.append(point)
+    window._current_position_mm = trace.observations[-1].position_mm
+    window._effective_position_mm = trace.observations[-1].position_mm
+
+
+def test_setup_return_zero_confirms_spatial_plateau_before_accepting_baseline(
+    tmp_path: Path,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     targets: list[float] = []
     window._move_to_position_mm = lambda target_mm, **_kwargs: targets.append(target_mm) or True  # type: ignore[method-assign]
-    window.spin_diameter.setValue(0.0137)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_tension_load_positive.setChecked(True)
     window.spin_steps_per_mm.setValue(800.0)
     window._automation_step_note = "setup_return_zero"
     window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window._automation_phase = "seek"
     window._setup_return_zero_start_point_index = 0
-    window._current_position_mm = 7.18
-    window._effective_position_mm = 7.18
 
     try:
-        unload_points = [
-            (7.000, 20.0),
-            (7.012, 16.5),
-            (7.025, 12.5),
-            (7.038, 8.7),
-            (7.052, 5.2),
-            (7.066, 3.6),
-            (7.080, 2.5),
-            (7.110, 1.2),
-            (7.135, 1.0),
-            (7.155, 0.9),
-            (7.170, 0.9),
-            (7.180, 0.9),
-        ]
-        for index, (raw_position_mm, stress_mpa) in enumerate(unload_points):
-            load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
-            assert load_g is not None
-            point = window._capture_measurement_point(
-                elapsed_s=index * 0.25,
-                position_mm=raw_position_mm,
-                effective_position_mm=raw_position_mm,
-                raw_load_g=load_g,
-                load_g=load_g,
-            )
-            window._length_setup_points.append(point)
+        trace = setup_baseline_simulator_mod.run_setup_baseline_scenario(
+            setup_baseline_simulator_mod.scenario_by_name("clean_piecewise")
+        )
+        _load_setup_baseline_trace_into_window(window, trace)
 
         assert window._maybe_start_setup_unload_baseline_fallback() is True
 
-        assert targets == [pytest.approx(7.066, abs=0.01)]
-        assert window._setup_zero_position_mm == pytest.approx(7.066, abs=0.01)
-        assert window._setup_zero_fallback_return_position_mm == pytest.approx(7.066, abs=0.01)
-        assert window._setup_zero_fallback_reason == "linear_unload_slack"
-        assert "slack onset" in window.log_output.toPlainText()
+        assert targets == [pytest.approx(trace.estimate.zero_position_mm, abs=1e-9)]
+        assert window._setup_zero_position_mm == pytest.approx(trace.estimate.zero_position_mm)
+        assert window._setup_zero_fallback_raw_g == pytest.approx(trace.estimate.zero_raw_load_g)
+        assert window._setup_zero_fallback_reason == "spatial_unload_plateau"
+        assert "spatial-plateau intersection" in window.log_output.toPlainText()
 
         window._setup_zero_fallback_return_position_mm = None
         assert window._zero_return_requires_true_zero(
@@ -5603,7 +5602,7 @@ def test_setup_return_zero_stops_at_linear_unload_slack_onset(tmp_path: Path, qt
         _close_test_window(window)
 
 
-def test_setup_unload_slack_fit_uses_observed_plateau_despite_large_tare_drift(
+def test_setup_return_zero_candidate_switches_to_one_step_confirmation_probes(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -5612,59 +5611,134 @@ def test_setup_unload_slack_fit_uses_observed_plateau_despite_large_tare_drift(
     window._move_to_position_mm = (  # type: ignore[method-assign]
         lambda target_mm, **_kwargs: targets.append(target_mm) or True
     )
+    window.check_positive_motion_is_tension.setChecked(False)
     window.check_tension_load_positive.setChecked(True)
     window.spin_zero_load_scale_g.setValue(21.2)
-    window.spin_diameter.setValue(0.0137)
     window.spin_steps_per_mm.setValue(800.0)
     window._automation_step_note = "setup_return_zero"
     window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window._automation_phase = "seek"
     window._setup_return_zero_start_point_index = 0
-    window._current_position_mm = 7.18
-    window._effective_position_mm = 7.18
-    actual_zero_raw_g = 21.7
 
     try:
-        unload_points = [
-            (7.000, 20.0),
-            (7.012, 17.0),
-            (7.024, 14.0),
-            (7.036, 11.0),
-            (7.048, 8.0),
-            (7.060, 5.0),
-            (7.072, 2.0),
-            (7.090, 0.0),
-            (7.115, 0.0),
-            (7.140, 0.0),
-            (7.160, 0.0),
-            (7.180, 0.0),
-        ]
-        for index, (raw_position_mm, stress_mpa) in enumerate(unload_points):
-            tensile_load_g = mini_dma_mod.load_g_from_stress_mpa(
-                stress_mpa,
-                window.spin_diameter.value(),
-            )
-            assert tensile_load_g is not None
-            raw_load_g = actual_zero_raw_g - tensile_load_g
-            point = window._capture_measurement_point(
-                elapsed_s=index * 0.25,
-                position_mm=raw_position_mm,
-                effective_position_mm=raw_position_mm,
-                raw_load_g=raw_load_g,
-                load_g=window._effective_load_from_raw_g(raw_load_g),
-            )
-            window._length_setup_points.append(point)
+        full_trace = setup_baseline_simulator_mod.run_setup_baseline_scenario(
+            setup_baseline_simulator_mod.scenario_by_name("clean_piecewise")
+        )
+        candidate_prefix = None
+        for end in range(1, len(full_trace.observations) + 1):
+            observations = full_trace.observations[:end]
+            estimate = setup_baseline_simulator_mod.detect_setup_baseline(observations)
+            if estimate.status == "candidate_unconfirmed":
+                candidate_prefix = setup_baseline_simulator_mod.SetupBaselineSimulationTrace(
+                    full_trace.scenario,
+                    observations,
+                    estimate,
+                )
+                break
+        assert candidate_prefix is not None
+        _load_setup_baseline_trace_into_window(window, candidate_prefix)
+        current_position_mm = window._current_position_mm
 
         assert window._maybe_start_setup_unload_baseline_fallback() is True
 
-        assert targets == [pytest.approx(7.08, abs=0.01)]
-        assert window._setup_zero_position_mm == pytest.approx(7.08, abs=0.01)
-        assert "observed raw slack plateau (21.70000 g)" in window.log_output.toPlainText()
+        assert targets == [pytest.approx(current_position_mm + window._motor_step_mm())]
+        assert window._setup_zero_position_mm is None
+        assert window._setup_baseline_probe_origin_mm == pytest.approx(
+            candidate_prefix.estimate.candidate_position_mm
+        )
+        assert "bounded one-step spatial plateau confirmation" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
 
-        window._set_run_zero_load_scale_reference(actual_zero_raw_g, reason="test")
-        committed_fit = window._setup_unload_baseline_fit()
-        assert committed_fit is not None
-        assert committed_fit.zero_position_mm == pytest.approx(7.08, abs=0.01)
+
+def test_setup_return_zero_false_knee_keeps_probing_one_step_at_a_time(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: targets.append(target_mm) or True
+    )
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_return_zero_start_point_index = 0
+
+    try:
+        full_trace = setup_baseline_simulator_mod.run_setup_baseline_scenario(
+            setup_baseline_simulator_mod.scenario_by_name("false_knee_then_plateau")
+        )
+        ambiguous_prefix = None
+        for end in range(1, len(full_trace.observations) + 1):
+            observations = full_trace.observations[:end]
+            estimate = setup_baseline_simulator_mod.detect_setup_baseline(observations)
+            if estimate.status == "ambiguous":
+                ambiguous_prefix = setup_baseline_simulator_mod.SetupBaselineSimulationTrace(
+                    full_trace.scenario,
+                    observations,
+                    estimate,
+                )
+                break
+        assert ambiguous_prefix is not None
+        _load_setup_baseline_trace_into_window(window, ambiguous_prefix)
+        current_position_mm = window._current_position_mm
+
+        assert window._maybe_start_setup_unload_baseline_fallback() is True
+
+        assert targets == [pytest.approx(current_position_mm + window._motor_step_mm())]
+        assert window._setup_zero_position_mm is None
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_return_zero_stops_after_bounded_probe_travel(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    stopped: list[bool] = []
+    window._move_to_position_mm = pytest.fail  # type: ignore[method-assign]
+    window._stop_auto_ramp = (  # type: ignore[method-assign]
+        lambda **_kwargs: stopped.append(True)
+    )
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_return_zero_start_point_index = 0
+
+    try:
+        full_trace = setup_baseline_simulator_mod.run_setup_baseline_scenario(
+            setup_baseline_simulator_mod.scenario_by_name("clean_piecewise")
+        )
+        candidate_prefix = None
+        for end in range(1, len(full_trace.observations) + 1):
+            observations = full_trace.observations[:end]
+            estimate = setup_baseline_simulator_mod.detect_setup_baseline(observations)
+            if estimate.status == "candidate_unconfirmed":
+                candidate_prefix = setup_baseline_simulator_mod.SetupBaselineSimulationTrace(
+                    full_trace.scenario,
+                    observations,
+                    estimate,
+                )
+                break
+        assert candidate_prefix is not None
+        _load_setup_baseline_trace_into_window(window, candidate_prefix)
+        window._setup_baseline_probe_origin_mm = (
+            window._current_position_mm
+            - window._motor_step_mm() * mini_dma_mod.SETUP_BASELINE_MAX_PROBE_MOTOR_STEPS
+        )
+
+        assert window._maybe_start_setup_unload_baseline_fallback() is True
+
+        assert stopped == [True]
+        assert "did not produce a confirmed spatial plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -36851,7 +36925,8 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert first_logic["version"]
         assert (
             first_logic["profile"]
-            == "scale-routed-prague-legacy-kosice-adaptive-balanced-cycle-centered-resume-response-gated-volatile-observer"
+            == "scale-routed-prague-legacy-kosice-adaptive-balanced-cycle-centered-resume-"
+            "response-gated-volatile-observer-spatial-setup-baseline"
         )
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64

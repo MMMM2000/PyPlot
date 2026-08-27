@@ -27,6 +27,8 @@ POLICY_CYCLE_CENTER_RESUME = "cycle_center_resume"
 POLICY_CYCLE_CENTER_COMBINED = "cycle_center_combined"
 POLICY_PROCESSED_OBSERVATION = "processed_observation"
 POLICY_ADAPTIVE_RESPONSE_WINDOW = "adaptive_response_window"
+POLICY_PROCESSED_CROSSING = "processed_crossing"
+POLICY_ADAPTIVE_RESPONSE_CROSSING = "adaptive_response_crossing"
 POLICIES = (
     POLICY_BASELINE,
     POLICY_EVIDENCE,
@@ -37,6 +39,8 @@ POLICIES = (
     POLICY_CYCLE_CENTER_COMBINED,
     POLICY_PROCESSED_OBSERVATION,
     POLICY_ADAPTIVE_RESPONSE_WINDOW,
+    POLICY_PROCESSED_CROSSING,
+    POLICY_ADAPTIVE_RESPONSE_CROSSING,
 )
 CYCLE_MOTOR_POLICIES = {
     POLICY_CYCLE_CENTER_MOTOR,
@@ -193,6 +197,8 @@ class IsoStressPolicyConfig:
     observation_fast_veto_mpa: float = 35.0
     adaptive_response_trigger_reversals: int = 2
     adaptive_response_observation_s: float = 10.0
+    processed_crossing_confirm_s: float = 0.25
+    processed_crossing_fast_veto_mpa: float = 15.0
 
     def validated(self) -> "IsoStressPolicyConfig":
         if self.name not in POLICIES:
@@ -235,6 +241,10 @@ class IsoStressPolicyConfig:
             raise ValueError("adaptive response trigger reversals must be positive")
         if self.adaptive_response_observation_s <= 0.0:
             raise ValueError("adaptive response observation must be positive")
+        if self.processed_crossing_confirm_s <= 0.0:
+            raise ValueError("processed crossing confirmation must be positive")
+        if self.processed_crossing_fast_veto_mpa <= 0.0:
+            raise ValueError("processed crossing fast veto must be positive")
         return self
 
 
@@ -316,6 +326,7 @@ class IsoStressSimulationSummary:
     long_hold_time_fraction: float
     probation_s: float
     cycle_resumes: int
+    processed_crossing_resumes: int
     cycle_motor_suppressions: int
     hold_entries: int
     reholds_within_3s: int
@@ -606,9 +617,12 @@ def run_iso_stress_simulation(
     probation_s = 0.0
     hold_entries = 0
     cycle_resumes = 0
+    processed_crossing_resumes = 0
     cycle_motor_suppressions = 0
     last_resume_s: float | None = None
     reholds_within_3s = 0
+    hold_entry_error_sign = 0
+    crossing_confirm_s = 0.0
     stop_reason = "max_elapsed"
     sample_index = 0
 
@@ -686,6 +700,8 @@ def run_iso_stress_simulation(
                 hold_entries += 1
                 hold_elapsed_s = 0.0
                 hold_motor_reversals = 0
+                hold_entry_error_sign = 1 if fast_error > 0.0 else -1
+                crossing_confirm_s = 0.0
                 observation_elapsed_s = 0.0
                 observation_active = False
                 observation_samples.clear()
@@ -747,6 +763,29 @@ def run_iso_stress_simulation(
                 >= plant.hold_resume_post_move_settle_s
             )
             if policy.name in {
+                POLICY_PROCESSED_CROSSING,
+                POLICY_ADAPTIVE_RESPONSE_CROSSING,
+            }:
+                if abs(fast_error) <= resume_band and post_move_feedback_ready:
+                    resume_stable_s += step_dt
+                else:
+                    resume_stable_s = 0.0
+                crossed_processed_target = (
+                    hold_entry_error_sign * fast_error <= 0.0
+                    and abs(fast_error) <= policy.processed_crossing_fast_veto_mpa
+                    and post_move_feedback_ready
+                )
+                if crossed_processed_target:
+                    crossing_confirm_s += step_dt
+                    decision = "confirm_processed_target_crossing"
+                else:
+                    crossing_confirm_s = 0.0
+                    decision = "recover_to_processed_target_crossing"
+                should_resume = (
+                    crossing_confirm_s >= policy.processed_crossing_confirm_s
+                    or resume_stable_s >= policy.baseline_resume_stable_s
+                )
+            elif policy.name in {
                 POLICY_BASELINE,
                 POLICY_CYCLE_CENTER_MOTOR,
                 POLICY_ADAPTIVE_RESPONSE_WINDOW,
@@ -856,6 +895,11 @@ def run_iso_stress_simulation(
                 should_resume = evidence_s >= policy.evidence_required_s
             if should_resume:
                 last_resume_s = elapsed_s
+                if policy.name in {
+                    POLICY_PROCESSED_CROSSING,
+                    POLICY_ADAPTIVE_RESPONSE_CROSSING,
+                }:
+                    processed_crossing_resumes += 1
                 if cycle_resume_triggered:
                     cycle_resumes += 1
                 if (
@@ -877,10 +921,18 @@ def run_iso_stress_simulation(
                     phase = "ramp"
                 resume_stable_s = 0.0
                 evidence_s = 0.0
+                crossing_confirm_s = 0.0
                 decision = (
-                    "resume_cycle_center"
-                    if cycle_resume_triggered
-                    else "resume"
+                    "resume_processed_target_crossing"
+                    if policy.name in {
+                        POLICY_PROCESSED_CROSSING,
+                        POLICY_ADAPTIVE_RESPONSE_CROSSING,
+                    }
+                    else (
+                        "resume_cycle_center"
+                        if cycle_resume_triggered
+                        else "resume"
+                    )
                 )
 
         rate_multiplier = 0.0
@@ -894,6 +946,8 @@ def run_iso_stress_simulation(
                     POLICY_CYCLE_CENTER_COMBINED,
                     POLICY_PROCESSED_OBSERVATION,
                     POLICY_ADAPTIVE_RESPONSE_WINDOW,
+                    POLICY_PROCESSED_CROSSING,
+                    POLICY_ADAPTIVE_RESPONSE_CROSSING,
                 }
                 and last_resume_s is not None
                 and direction > 0
@@ -977,7 +1031,10 @@ def run_iso_stress_simulation(
             elapsed_s - last_motor_move_s >= plant.motor_correction_interval_s
         )
         if (
-            policy.name == POLICY_ADAPTIVE_RESPONSE_WINDOW
+            policy.name in {
+                POLICY_ADAPTIVE_RESPONSE_WINDOW,
+                POLICY_ADAPTIVE_RESPONSE_CROSSING,
+            }
             and phase == "hold"
             and hold_motor_reversals
             >= policy.adaptive_response_trigger_reversals
@@ -1087,6 +1144,8 @@ def run_iso_stress_simulation(
             phase = "ramp"
             probe_elapsed_s = 0.0
             probe_samples = 0
+            hold_entry_error_sign = 0
+            crossing_confirm_s = 0.0
         elif direction < 0 and current_ma <= plant.current_start_ma:
             current_ma = plant.current_start_ma
             stop_reason = "completed"
@@ -1132,6 +1191,7 @@ def run_iso_stress_simulation(
         long_hold_time_fraction=long_hold_time_s / max(1e-9, hold_s),
         probation_s=probation_s,
         cycle_resumes=cycle_resumes,
+        processed_crossing_resumes=processed_crossing_resumes,
         cycle_motor_suppressions=cycle_motor_suppressions,
         hold_entries=hold_entries,
         reholds_within_3s=reholds_within_3s,
@@ -1191,6 +1251,7 @@ def aggregate_summaries(results: Iterable[IsoStressSimulationResult]) -> list[di
         "long_hold_time_fraction",
         "probation_s",
         "cycle_resumes",
+        "processed_crossing_resumes",
         "cycle_motor_suppressions",
         "hold_entries",
         "reholds_within_3s",

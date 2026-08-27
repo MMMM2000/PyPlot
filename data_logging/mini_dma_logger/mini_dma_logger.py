@@ -116,6 +116,12 @@ from data_logging.mini_dma_logger.time_axis import (
 from data_logging.mini_dma_logger.metadata_checkpoints import (
     SessionMetadataCheckpointStore,
 )
+from data_logging.mini_dma_logger.setup_baseline_simulator import (
+    SetupBaselineDetectorConfig,
+    SetupBaselineEstimate,
+    SetupBaselineObservation,
+    detect_setup_baseline,
+)
 from data_logging.mini_dma_logger.thermal_frame_log import (
     SessionThermalFrameTarget,
     THERMAL_FRAME_LOG_FILENAME,
@@ -174,10 +180,11 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "tma_control"
-CONTROL_LOGIC_VERSION = "2026-08-11.1"
+CONTROL_LOGIC_VERSION = "2026-08-27.1"
 CONTROL_LOGIC_PROFILE = (
     "scale-routed-prague-legacy-kosice-adaptive-"
-    "balanced-cycle-centered-resume-response-gated-volatile-observer"
+    "balanced-cycle-centered-resume-response-gated-volatile-observer-"
+    "spatial-setup-baseline"
 )
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -185,7 +192,8 @@ RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
-    "setup_zero_plateau_accept_current_position",
+    "setup_zero_robust_taut_fit_spatial_plateau",
+    "setup_zero_bounded_confirmation_probes",
     "current_hold_filtered_scale_signal",
     "current_hold_cycle_center_motor_suppression",
     "current_hold_cycle_center_resume_confirmation",
@@ -621,6 +629,8 @@ SETUP_UNLOAD_SLACK_RECENT_POINTS = 5
 SETUP_UNLOAD_SLACK_MAX_STRESS_MPA = 4.0
 SETUP_UNLOAD_SLACK_MAX_STRESS_FRACTION = 0.30
 SETUP_UNLOAD_SLACK_SLOPE_FRACTION = 0.35
+SETUP_BASELINE_CONFIRMATION_PROBE_POSITIONS = 3
+SETUP_BASELINE_MAX_PROBE_MOTOR_STEPS = 24
 SETUP_PRELOAD_DEFAULT_DURATION_S = 10.0
 SETUP_RETURN_DEFAULT_DURATION_S = 5.0
 SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S = 1.0
@@ -8807,6 +8817,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm: float | None = None
         self._setup_zero_fallback_raw_g: float | None = None
         self._setup_zero_fallback_reason = ""
+        self._setup_baseline_probe_origin_mm: float | None = None
+        self._setup_baseline_probe_last_target_mm: float | None = None
+        self._setup_baseline_last_estimate: SetupBaselineEstimate | None = None
         self._setup_identification_retry_count = 0
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -20024,6 +20037,102 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return float(slope)
 
+    def _setup_baseline_detector_config(self) -> SetupBaselineDetectorConfig:
+        return SetupBaselineDetectorConfig(
+            motor_step_mm=self._motor_step_mm(),
+            relaxation_position_sign=int(-self._tension_motion_sign()),
+            relaxation_raw_sign=int(-self._load_sign()),
+            confirmation_probe_positions=SETUP_BASELINE_CONFIRMATION_PROBE_POSITIONS,
+        )
+
+    def _setup_baseline_observations(self) -> tuple[SetupBaselineObservation, ...]:
+        start_index = max(0, int(self._setup_return_zero_start_point_index))
+        points = self._length_setup_points[start_index:]
+        if not points:
+            return ()
+        step_mm = self._motor_step_mm()
+        observations: list[SetupBaselineObservation] = []
+        move_index = -1
+        visit_position_mm: float | None = None
+        visit_sample_index = 0
+        for point in points:
+            position_mm = float(point.raw_position_mm)
+            if visit_position_mm is None or abs(position_mm - visit_position_mm) > step_mm * 0.25:
+                move_index += 1
+                visit_position_mm = position_mm
+                visit_sample_index = 0
+            observations.append(
+                SetupBaselineObservation(
+                    elapsed_s=float(point.elapsed_s),
+                    position_mm=position_mm,
+                    raw_load_g=float(point.raw_load_g),
+                    fresh_after_move=True,
+                    move_index=move_index,
+                    sample_index=visit_sample_index,
+                    source="production_setup",
+                )
+            )
+            visit_sample_index += 1
+        return tuple(observations)
+
+    def _setup_baseline_estimate(self) -> SetupBaselineEstimate:
+        estimate = detect_setup_baseline(
+            self._setup_baseline_observations(),
+            self._setup_baseline_detector_config(),
+        )
+        self._setup_baseline_last_estimate = estimate
+        return estimate
+
+    def _reset_setup_baseline_probe_state(self) -> None:
+        self._setup_baseline_probe_origin_mm = None
+        self._setup_baseline_probe_last_target_mm = None
+        self._setup_baseline_last_estimate = None
+
+    def _move_setup_baseline_confirmation_probe(self, estimate: SetupBaselineEstimate) -> bool:
+        current_position_mm = float(self._current_position_mm)
+        if self._setup_baseline_probe_origin_mm is None:
+            candidate_position_mm = estimate.candidate_position_mm
+            self._setup_baseline_probe_origin_mm = (
+                current_position_mm
+                if candidate_position_mm is None
+                else float(candidate_position_mm)
+            )
+            self._log(
+                "Setup zero-load candidate detected; switching to bounded one-step spatial "
+                "plateau confirmation before accepting l0."
+            )
+        probe_origin_mm = float(self._setup_baseline_probe_origin_mm)
+        probe_travel_mm = abs(current_position_mm - probe_origin_mm)
+        maximum_probe_travel_mm = self._motor_step_mm() * SETUP_BASELINE_MAX_PROBE_MOTOR_STEPS
+        if probe_travel_mm >= maximum_probe_travel_mm - self._motor_step_mm() * 0.25:
+            self._log(
+                "Setup stopped because the zero-load candidate did not produce a confirmed spatial "
+                f"plateau within {_format_compact_unit(maximum_probe_travel_mm, 'mm')} of bounded probing."
+            )
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        relaxation_direction = float(self._setup_baseline_detector_config().relaxation_position_sign)
+        target_mm = current_position_mm + relaxation_direction * self._motor_step_mm()
+        if (
+            self._setup_baseline_probe_last_target_mm is not None
+            and abs(target_mm - float(self._setup_baseline_probe_last_target_mm)) <= self._motor_step_mm() * 0.25
+        ):
+            return True
+        if not self._move_to_position_mm(
+            target_mm,
+            speed_mm_s=self._setup_return_speed_for_distance_mm_s(self._motor_step_mm()),
+        ):
+            self._log("Setup stopped because a bounded baseline confirmation probe was rejected.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        self._setup_baseline_probe_last_target_mm = target_mm
+        self._log(
+            "Setup baseline confirmation probe: moving one motor step to "
+            f"{_format_compact_unit(target_mm, 'mm')} "
+            f"({estimate.additional_probe_positions_required} nominal probe position(s) still required)."
+        )
+        return True
+
     def _maybe_start_setup_unload_baseline_fallback(self) -> bool:
         if self._automation_step_note != "setup_return_zero":
             return False
@@ -20031,62 +20140,41 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if self._setup_zero_position_mm is not None:
             return False
-        return_points = self._length_setup_points[self._setup_return_zero_start_point_index :]
-        if len(return_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS + SETUP_UNLOAD_SLACK_RECENT_POINTS:
-            return False
-        recent_raw_values = [
-            float(point.raw_load_g)
-            for point in return_points[-SETUP_UNLOAD_SLACK_RECENT_POINTS:]
-        ]
-        provisional_zero_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
-        fit = self._setup_unload_baseline_fit(zero_raw_g=provisional_zero_raw_g)
-        if fit is None or fit.r_squared < 0.90:
-            return False
-        candidates = self._setup_unload_candidate_points(zero_raw_g=provisional_zero_raw_g)
-        if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS + SETUP_UNLOAD_SLACK_RECENT_POINTS:
-            return False
-        recent = candidates[-SETUP_UNLOAD_SLACK_RECENT_POINTS:]
-        recent_max_stress = max(stress for _position, stress in recent)
-        slack_stress_limit = max(
-            SETUP_UNLOAD_SLACK_MAX_STRESS_MPA,
-            fit.max_stress_mpa * SETUP_UNLOAD_SLACK_MAX_STRESS_FRACTION,
-        )
-        if recent_max_stress > slack_stress_limit:
-            return False
-        recent_slope = self._setup_unload_recent_slope_mpa_per_mm(candidates)
-        if recent_slope is None:
-            return False
-        if abs(recent_slope) > abs(fit.slope_mpa_per_mm) * SETUP_UNLOAD_SLACK_SLOPE_FRACTION:
-            return False
-
-        current_position_mm = float(self._current_position_mm)
-        zero_position_mm = fit.zero_position_mm
-        min_position = min(position for position, _stress in candidates)
-        max_position = max(position for position, _stress in candidates)
-        margin_mm = max(self._motor_step_mm() * 4.0, abs(max_position - min_position) * 0.25)
-        if zero_position_mm < min_position - margin_mm or zero_position_mm > max_position + margin_mm:
-            return False
-
-        self._setup_zero_position_mm = zero_position_mm
-        self._setup_zero_fallback_return_position_mm = zero_position_mm
-        self._setup_zero_fallback_reason = "linear_unload_slack"
-        self._log(
-            "Detected setup unload slack onset: recent load/stress slope collapsed "
-            f"to {abs(recent_slope):.4g} MPa/mm from the linear-fit "
-            f"{abs(fit.slope_mpa_per_mm):.4g} MPa/mm stiffness; using "
-            f"{_format_compact_unit(zero_position_mm, 'mm')} as the zero-stress l0 position "
-            "and returning there instead of driving farther into slack. The fit is referenced "
-            f"to the observed raw slack plateau ({provisional_zero_raw_g:.5f} g), not the stored tare."
-        )
-        if not self._move_to_position_mm(
-            zero_position_mm,
-            speed_mm_s=self._setup_return_speed_for_distance_mm_s(abs(current_position_mm - zero_position_mm)),
-        ):
-            if abs(current_position_mm - zero_position_mm) <= self._motor_step_mm():
-                self._setup_zero_fallback_return_position_mm = None
+        estimate = self._setup_baseline_estimate()
+        if estimate.confirmed:
+            assert estimate.zero_position_mm is not None
+            assert estimate.zero_raw_load_g is not None
+            zero_position_mm = float(estimate.zero_position_mm)
+            current_position_mm = float(self._current_position_mm)
+            self._setup_zero_position_mm = zero_position_mm
+            self._setup_zero_fallback_raw_g = float(estimate.zero_raw_load_g)
+            self._setup_zero_fallback_return_position_mm = zero_position_mm
+            self._setup_zero_fallback_reason = "spatial_unload_plateau"
+            if estimate.taut_slope_g_per_mm is not None:
+                self._remember_live_stiffness(abs(float(estimate.taut_slope_g_per_mm)))
+            self._log(
+                "Confirmed setup zero-load boundary from the robust taut-line/spatial-plateau "
+                f"intersection at {_format_compact_unit(zero_position_mm, 'mm')} "
+                f"(taut R^2={float(estimate.taut_r_squared or 0.0):.4f}, "
+                f"uncertainty {_format_compact_unit(float(estimate.zero_uncertainty_mm or 0.0), 'mm')}); "
+                f"using the observed plateau {float(estimate.zero_raw_load_g):.5f} g as this run's baseline."
+            )
+            if not self._move_to_position_mm(
+                zero_position_mm,
+                speed_mm_s=self._setup_return_speed_for_distance_mm_s(
+                    abs(current_position_mm - zero_position_mm)
+                ),
+            ):
+                if abs(current_position_mm - zero_position_mm) <= self._motor_step_mm():
+                    self._setup_zero_fallback_return_position_mm = None
+                    return True
+                self._log("Setup stopped because the confirmed zero-load return move was rejected.")
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
-            return False
-        return True
+            return True
+        if estimate.status in {"candidate_unconfirmed", "ambiguous"}:
+            return self._move_setup_baseline_confirmation_probe(estimate)
+        return False
 
     def _tension_motion_sign(self) -> float:
         config = self._control_config()
@@ -23974,7 +24062,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return SETUP_ZERO_FALLBACK_MIN_TIME_S
 
     def _accept_pending_linear_zero_plateau_if_stable(self) -> bool:
-        if self._setup_zero_fallback_reason != "linear_unload_slack":
+        if self._setup_zero_fallback_reason not in {
+            "linear_unload_slack",
+            "spatial_unload_plateau",
+        }:
             return False
         return self._accept_stable_setup_zero_plateau()
 
@@ -24001,7 +24092,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         plateau_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
         residual_load_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
-        baseline_is_slope_identified = self._setup_zero_fallback_reason == "linear_unload_slack"
+        baseline_is_slope_identified = self._setup_zero_fallback_reason in {
+            "linear_unload_slack",
+            "spatial_unload_plateau",
+        }
         if not baseline_is_slope_identified and residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
             return False
         zero_position_mm = float(self._current_position_mm)
@@ -24064,8 +24158,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     abs(float(self._current_position_mm) - float(target_mm))
                 ),
             )
-        if self._setup_zero_fallback_reason == "linear_unload_slack":
-            self._log_waiting_for_feedback("Returning to the linear-unload zero-stress position before computing l0.")
+        if self._setup_zero_fallback_reason in {"linear_unload_slack", "spatial_unload_plateau"}:
+            self._log_waiting_for_feedback(
+                "Returning to the confirmed unload zero-stress position before computing l0."
+            )
         else:
             self._log_waiting_for_feedback("Returning to zero-load plateau position before computing l0.")
         return False
@@ -28781,6 +28877,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_zero_fallback_raw_span_g": SETUP_ZERO_FALLBACK_RAW_SPAN_G,
                 "setup_zero_fallback_min_residual_g": SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G,
                 "setup_zero_fallback_max_residual_g": SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G,
+                "setup_baseline_confirmation_probe_positions": (
+                    SETUP_BASELINE_CONFIRMATION_PROBE_POSITIONS
+                ),
+                "setup_baseline_max_probe_motor_steps": SETUP_BASELINE_MAX_PROBE_MOTOR_STEPS,
                 "current_sweep_error_gain_per_s": SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S,
                 "current_sweep_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
                 "current_sweep_dynamic_min_fraction": SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION,
@@ -36406,6 +36506,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._reset_setup_baseline_probe_state()
         self._setup_identification_retry_count = 0
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -36922,6 +37023,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setup_zero_fallback_return_position_mm = None
             self._setup_zero_fallback_raw_g = None
             self._setup_zero_fallback_reason = ""
+            self._reset_setup_baseline_probe_state()
             self._length_setup_start_monotonic = time.monotonic()
             return
         dialog = self._length_setup_dialog
@@ -37007,6 +37109,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._reset_setup_baseline_probe_state()
         self._length_setup_start_monotonic = time.monotonic()
         self._update_length_setup_dialog("Enter the measured mounted wire length before setup.")
         self._update_length_setup_progress()
@@ -41463,6 +41566,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._reset_setup_baseline_probe_state()
         self._update_length_setup_dialog("Measured length saved. Returning load to 0 g to compute l0.")
         self._log(
             "Measured preload length accepted: "
@@ -41484,6 +41588,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._reset_setup_baseline_probe_state()
         self._update_length_setup_dialog("Returning load to 0 g to compute l0.")
         self._log("Length reference already captured; returning load to 0 g to compute l0.")
         return True
@@ -41532,6 +41637,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
+        self._reset_setup_baseline_probe_state()
         self._update_length_setup_dialog(
             "The first unload did not establish a confident linear stiffness; "
             "performing one bounded 0-load to preload identification cycle."
@@ -41578,14 +41684,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         try:
             self._refresh_tic_status()
-            setup_fit = self._setup_unload_baseline_fit()
-            if self._automation_active and (setup_fit is None or setup_fit.r_squared < 0.90):
-                if self._schedule_setup_identification_retry():
-                    return True
-                raise RuntimeError(
-                    "setup could not establish a confident linear unload stiffness after "
-                    "the bounded identification retry; inspect the wire engagement and scale signal"
-                )
+            if self._automation_active and self._setup_zero_position_mm is None:
+                estimate = self._setup_baseline_estimate()
+                if not estimate.confirmed:
+                    if self._schedule_setup_identification_retry():
+                        return True
+                    raise RuntimeError(
+                        "setup could not confirm the zero-load boundary from both a robust taut "
+                        "fit and a spatial plateau after the bounded identification retry; inspect "
+                        "the wire engagement and scale signal"
+                    )
             if self._setup_zero_position_mm is not None:
                 zero_position_mm = float(self._setup_zero_position_mm)
             else:
