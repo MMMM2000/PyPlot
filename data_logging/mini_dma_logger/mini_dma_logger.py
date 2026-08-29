@@ -16,12 +16,13 @@ import tempfile
 import time
 import weakref
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from itertools import zip_longest
 from pathlib import Path
 from threading import Condition, Event, Lock, RLock, Thread, current_thread, get_ident
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
@@ -42,9 +43,12 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
-from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
-from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
-from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.broker import (
+    ROLE_MINI_DMA_CURRENT,
+    ROLE_MINI_DMA_MOTOR,
+    ROLE_TMA_CURRENT,
+    ROLE_TMA_MOTOR,
+)
 from data_logging.shared_power_supply.discovery import (
     SerialPortIdentity,
     sort_hmp_port_identities,
@@ -52,7 +56,11 @@ from data_logging.shared_power_supply.discovery import (
 from data_logging.shared_power_supply.protocol import (
     BrokerJsonClient,
     broker_failure_diagnostic,
-    start_broker_server,
+)
+from data_logging.shared_power_supply.process import (
+    BrokerChannelConfig,
+    BrokerProcessConfig,
+    SharedPowerSupplyBrokerProcess,
 )
 from data_logging.source_provenance import (
     CAPTURE_PENDING,
@@ -82,6 +90,19 @@ from data_logging.mini_dma_logger.force_control import (
     ForceControlPolicy,
     ForceControlProfile,
 )
+from data_logging.mini_dma_logger.control_process import (
+    BackendFactorySpec,
+    ControlEventKind,
+    ControlPolicy,
+    ControlSessionIdentity,
+    ControlStartRequest,
+    ControlState,
+    TmaControlProcess,
+)
+from data_logging.mini_dma_logger.production_control_backend import (
+    capture_runtime_configuration,
+    capture_window_configuration,
+)
 from data_logging.mini_dma_logger.time_axis import (
     TimeAxisDisplay,
     time_axis_display as _time_axis_display,
@@ -107,6 +128,9 @@ DEFAULT_KOSICE_FOLDER = Path(
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
+TMA_START_ACK_TIMEOUT_S = 30.0
+TMA_COMMAND_ACK_TIMEOUT_S = 5.0
+TMA_EMERGENCY_ACK_TIMEOUT_S = 3.0
 DEFAULT_SHARED_BROKER_PORT = 8765
 SHARED_BROKER_SUPPLY_PROFILE_ID = "shared_hmp_broker"
 SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S = 0.5
@@ -138,8 +162,11 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "tma_control"
-CONTROL_LOGIC_VERSION = "2026-08-05.1"
-CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
+CONTROL_LOGIC_VERSION = "2026-08-11.1"
+CONTROL_LOGIC_PROFILE = (
+    "scale-routed-prague-legacy-kosice-adaptive-"
+    "balanced-cycle-centered-resume-response-gated-volatile-observer"
+)
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -150,6 +177,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_scale_signal",
     "current_hold_cycle_center_motor_suppression",
     "current_hold_cycle_center_resume_confirmation",
+    "current_hold_cycle_center_requires_balanced_crossings",
+    "current_hold_momentary_operator_bypass",
     "current_hold_cycle_center_resume_uses_active_hold_state",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
@@ -171,6 +200,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
     "current_hold_volatile_response_contains_adaptive_recovery",
+    "current_hold_outstanding_response_observation_gate",
     "current_hold_volatile_response_observer",
     "current_hold_volatile_response_observer_transformation_gate",
     "current_hold_large_error_uses_geometry_base_cap_before_response",
@@ -208,7 +238,7 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_supply_snapshot",
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
-    "current_sweep_reverse_current_recipe_flag",
+    "current_sweep_always_bidirectional",
     "fatigue_completed_cycle_tracking",
     "durable_stop_transition_tracking",
     "single_prompt_length_setup",
@@ -272,6 +302,12 @@ CONTROL_TRACE_FIELDNAMES = [
     "cycle_center_ready",
     "cycle_center_stationary",
     "cycle_center_fast_veto",
+    "cycle_center_crossing_count",
+    "cycle_center_above_fraction",
+    "cycle_center_below_fraction",
+    "cycle_center_balanced_crossings",
+    "current_hold_fluctuation_classification",
+    "current_hold_bypass_active",
     "cycle_center_suppression_allowed",
     "latest_scale_age_s",
     "scale_recent_rate_hz",
@@ -484,7 +520,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 GNG_SCALE_PREFERRED_BAUD = 9600
 GNG_SCALE_REQUEST = "\\x1bp"
 GNG_SCALE_TERMINATOR = ""
-GNG_SCALE_INTERVAL_MS = 250
+GNG_SCALE_INTERVAL_MS = 200
 GNG_SCALE_READABILITY_G = 0.005
 KERN_KCP_SUPPORTED_BAUDS = (256000, 128000, 115200, 57600, 38400, 19200, 9600)
 KERN_KCP_SCALE_PREFERRED_BAUD = 256000
@@ -499,6 +535,7 @@ SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_MOTOR_POWER_STALE_GRACE_S = 30.0
+TIC_MOTOR_POWER_RECIPE_PAUSE_S = 1.0
 MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 MANUAL_JOG_MAX_TIMER_ELAPSED_S = 0.075
 TIC_USB_VENDOR_ID = 0x1FFB
@@ -884,6 +921,8 @@ SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA = 35.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA = 20.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA = 12.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S = 2.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS = 3
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT = 3
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_WINDOW_S = 15.0
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_RESPONSE_S = 10.0
@@ -919,6 +958,7 @@ CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S = 15.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
+TMA_RECIPE_LOAD_LIMIT_RESERVE_G = 0.25
 CALIBRATION_MAX_AUTO_ACCEPTANCE_LOAD_G = 0.05
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
@@ -1656,7 +1696,12 @@ class CurrentHoldCycleCenterState:
     ready: bool
     stationary: bool
     fast_veto: bool
-    suppression_allowed: bool
+    crossing_count: int = 0
+    above_fraction: float = 0.0
+    below_fraction: float = 0.0
+    balanced_crossings: bool = False
+    classification: str = "inactive"
+    suppression_allowed: bool = False
 
 
 class ScaleSignalBuffer:
@@ -1924,6 +1969,38 @@ class AutomationStep:
     fatigue_cycle_index: int | None = None
     fatigue_leg: str | None = None
     fatigue_cycle_limit: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentSweepLoadLimitPlan:
+    basis: str
+    requested_targets: tuple[float, ...]
+    effective_targets: tuple[float, ...]
+    limit_g: float | None
+    planning_limit_g: float | None
+    reserve_g: float
+    requested_end: float
+    requested_end_load_g: float | None
+    effective_end: float | None
+    effective_end_load_g: float | None
+    theoretical_limit_target: float | None
+    clipped: bool
+    blocked_reason: str | None = None
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "basis": self.basis,
+            "requested_end": self.requested_end,
+            "requested_end_load_g": self.requested_end_load_g,
+            "effective_end": self.effective_end,
+            "effective_end_load_g": self.effective_end_load_g,
+            "active_limit_g": self.limit_g,
+            "planning_limit_g": self.planning_limit_g,
+            "reserve_g": self.reserve_g,
+            "theoretical_limit_target": self.theoretical_limit_target,
+            "clipped": self.clipped,
+            "blocked_reason": self.blocked_reason,
+        }
 
 
 @dataclass
@@ -3156,6 +3233,9 @@ class ScaleWorker(QtCore.QObject):
         self.request_command = request_command
         self.request_terminator = request_terminator
         self._stop_event = Event()
+        self.opened_event = Event()
+        self.finished_event = Event()
+        self.startup_error = ""
 
     def _read_timeout_s(self) -> float:
         timeout_s = max(0.05, self.poll_interval_ms / 1000.0)
@@ -3185,6 +3265,7 @@ class ScaleWorker(QtCore.QObject):
                 timeout=timeout_s,
                 write_timeout=0.2,
             )
+            self.opened_event.set()
             self.status_changed.emit(
                 f"Scale connected on {self.port_name} at {self.baudrate} baud."
             )
@@ -3214,8 +3295,10 @@ class ScaleWorker(QtCore.QObject):
                     if delay_s > 0.0:
                         self._stop_event.wait(delay_s)
         except SerialException as exc:
+            self.startup_error = f"Scale connection failed: {exc}"
             self.error_occurred.emit(f"Scale connection failed: {exc}")
         except Exception as exc:
+            self.startup_error = f"Scale worker failed: {exc}"
             self.error_occurred.emit(f"Scale worker failed: {exc}")
         finally:
             if port is not None:
@@ -3223,6 +3306,7 @@ class ScaleWorker(QtCore.QObject):
                     port.close()
                 except Exception:
                     pass
+            self.finished_event.set()
             self.finished.emit()
 
     @QtCore.pyqtSlot()
@@ -5198,6 +5282,8 @@ class AutomationControlLoop:
         self._running = False
         self._paused = False
         self._in_callback = False
+        self._wake_pending = False
+        self._callback_triggered_by_wake = False
         self._interval_s = DEFAULT_CONTROL_INTERVAL_MS / 1000.0
 
     def start(self, interval_ms: int) -> None:
@@ -5206,19 +5292,31 @@ class AutomationControlLoop:
             self._interval_s = interval_s
             if self._running:
                 self._paused = False
+                self._wake_pending = True
                 self._condition.notify_all()
                 return
             self._running = True
             self._paused = False
-            self._thread = Thread(target=self._run, name="MiniDMAAutomationControlLoop", daemon=True)
+            self._wake_pending = False
+            self._thread = Thread(target=self._run, name="TmaAutomationControlLoop", daemon=True)
             self._thread.start()
             self._condition.notify_all()
+
+    def wake(self) -> bool:
+        """Request one prompt control evaluation, coalescing repeated requests."""
+        with self._condition:
+            if not self._running or self._paused:
+                return False
+            self._wake_pending = True
+            self._condition.notify_all()
+            return True
 
     def pause(self, *, timeout_s: float = 2.0) -> bool:
         deadline_s = time.monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             if self._running:
                 self._paused = True
+                self._wake_pending = False
                 self._condition.notify_all()
             while self._in_callback:
                 remaining_s = deadline_s - time.monotonic()
@@ -5231,12 +5329,14 @@ class AutomationControlLoop:
         with self._condition:
             if self._running:
                 self._paused = False
+                self._wake_pending = True
                 self._condition.notify_all()
 
     def stop(self) -> bool:
         with self._condition:
             self._running = False
             self._paused = False
+            self._wake_pending = False
             thread = self._thread
             self._condition.notify_all()
         if thread is not None and thread is not current_thread():
@@ -5259,23 +5359,34 @@ class AutomationControlLoop:
         with self._condition:
             return self._paused
 
+    def callback_triggered_by_wake(self) -> bool:
+        with self._condition:
+            return self._in_callback and self._callback_triggered_by_wake
+
     def _run(self) -> None:
-        next_tick_s = time.monotonic()
+        next_fallback_s = time.monotonic()
         while True:
             with self._condition:
                 while self._running and self._paused:
                     self._condition.wait()
-                    next_tick_s = time.monotonic()
+                    next_fallback_s = time.monotonic()
                 if not self._running:
                     return
                 interval_s = self._interval_s
-                delay_s = max(0.0, next_tick_s - time.monotonic())
-                if delay_s > 0.0:
+                while self._running and not self._paused and not self._wake_pending:
+                    delay_s = max(0.0, next_fallback_s - time.monotonic())
+                    if delay_s <= 0.0:
+                        break
                     self._condition.wait(timeout=delay_s)
+                if not self._running:
+                    return
+                if self._paused:
                     continue
+                triggered_by_wake = self._wake_pending
+                self._wake_pending = False
+                self._callback_triggered_by_wake = triggered_by_wake
+                self._in_callback = True
             try:
-                with self._condition:
-                    self._in_callback = True
                 self._tick_callback()
             except BaseException as exc:
                 with self._condition:
@@ -5287,8 +5398,9 @@ class AutomationControlLoop:
             finally:
                 with self._condition:
                     self._in_callback = False
+                    self._callback_triggered_by_wake = False
                     self._condition.notify_all()
-            next_tick_s = max(next_tick_s + interval_s, time.monotonic())
+            next_fallback_s = time.monotonic() + interval_s
 
 
 class MiniDmaAutomationController:
@@ -5320,9 +5432,17 @@ class MiniDmaAutomationController:
 
     def execute_next_tick(self) -> None:
         host = self._host
+        if host._recipe_motor_power_interlock_active():
+            host._request_recipe_pause_for_motor_power_loss()
+            return
         if host._automation_index >= len(host._automation_steps):
             if not host._is_ui_thread():
-                host._call_on_ui_thread_sync(
+                # Completion stops the control loop.  Queue it asynchronously so
+                # the worker can return before the UI thread joins that worker.
+                # A synchronous callback deadlocks here: the worker waits for the
+                # UI while the UI waits for this worker to stop.
+                host._automation_paused = True
+                host._run_on_ui_thread(
                     WeakOwnerCallback(self, "execute_next_tick")
                 )
                 return
@@ -5335,6 +5455,12 @@ class MiniDmaAutomationController:
             return_to_origin = config.return_to_origin if config is not None else host.check_return_to_origin.isChecked()
             if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
+            if any(
+                step.note == "recipe_return_zero"
+                for step in host._automation_steps
+            ):
+                return_to_origin = False
+            host._capture_recipe_terminal_readback()
             host._update_recipe_progress(complete=True)
             completion_reason = "recovery_completed" if is_recovery else "recipe_completed"
             completion_detail = "Recovery completed." if is_recovery else "Recipe completed."
@@ -5466,7 +5592,12 @@ class MiniDmaAutomationController:
             finished = host._handle_timed_record_step(step, step_index)
             if not finished and host._automation_active:
                 host._automation_index -= 1
-        if host._automation_active and host._automation_phase != "current_hold":
+        completed_step = host._automation_index > step_index
+        if (
+            host._automation_active
+            and host._automation_phase != "current_hold"
+            and (not host._automation_tick_sample_driven or completed_step)
+        ):
             host._automation_completed_ticks = min(
                 max(1, host._automation_total_steps or len(host._automation_steps)),
                 host._automation_completed_ticks + 1,
@@ -6511,7 +6642,7 @@ class TicCommandDispatcher:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_requested = False
-            self._thread = Thread(target=self._run, name="MiniDMATicCommandDispatcher", daemon=True)
+            self._thread = Thread(target=self._run, name="TmaTicCommandDispatcher", daemon=True)
             self._thread.start()
             self._condition.notify_all()
 
@@ -7111,7 +7242,7 @@ class SharedBrokerSupplyController:
                 channel=channel,
                 requested_hz=self.requested_readback_hz,
                 owner=self.owner,
-                role=ROLE_MINI_DMA_CURRENT,
+                role=ROLE_TMA_CURRENT,
             )
         )
 
@@ -7162,7 +7293,12 @@ class SharedBrokerSupplyController:
         self._apply_cadence_status(status)
         return status
 
-    def disconnect(self) -> None:
+    def disconnect(
+        self,
+        *,
+        preserve_motor_output: bool = False,
+        preserve_current_output: bool = False,
+    ) -> None:
         with self._io_lock:
             client = self._client
             channels = list(self._leases)
@@ -7171,11 +7307,25 @@ class SharedBrokerSupplyController:
                 channels.insert(0, self.current_channel)
             for channel in channels:
                 lease_id = self._leases[channel]
-                try:
-                    client.set_output(channel=channel, lease_id=lease_id, output_on=False)
-                except Exception:
-                    pass
-                if self.current_channel is not None and int(channel) == int(self.current_channel):
+                preserve_channel = (
+                    preserve_motor_output
+                    and self.motor_channel is not None
+                    and int(channel) == int(self.motor_channel)
+                ) or (
+                    preserve_current_output
+                    and self.current_channel is not None
+                    and int(channel) == int(self.current_channel)
+                )
+                if not preserve_channel:
+                    try:
+                        client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                    except Exception:
+                        pass
+                if (
+                    not preserve_channel
+                    and self.current_channel is not None
+                    and int(channel) == int(self.current_channel)
+                ):
                     try:
                         client.configure_channel(
                             channel=channel,
@@ -7194,6 +7344,21 @@ class SharedBrokerSupplyController:
             self._client = None
             self._connected = False
 
+    def detach_for_handoff(self) -> dict[int, str]:
+        """Drop parent-side access without sending any broker or PSU command.
+
+        The hidden controller uses the same stable broker owner identity, so
+        its lease requests adopt these existing leases.  Returning the lease
+        ids lets the supervisor release them if child startup fails.
+        """
+
+        with self._io_lock:
+            leases = dict(self._leases)
+            self._leases.clear()
+            self._client = None
+            self._connected = False
+            return leases
+
     def is_connected(self) -> bool:
         return self._connected and self._client is not None
 
@@ -7210,8 +7375,8 @@ class SharedBrokerSupplyController:
 
     def _role_for_channel(self, channel: int) -> str:
         if self.motor_channel is not None and int(channel) == self.motor_channel:
-            return ROLE_MINI_DMA_MOTOR
-        return ROLE_MINI_DMA_CURRENT
+            return ROLE_TMA_MOTOR
+        return ROLE_TMA_CURRENT
 
     def _limits_for_channel(self, channel: int) -> tuple[float | None, float | None]:
         if self.motor_channel is not None and int(channel) == self.motor_channel:
@@ -7996,9 +8161,55 @@ class MainWindow(QtWidgets.QMainWindow):
         log_dir: str | None = None,
         *,
         persist_settings: bool = True,
+        control_process_enabled: bool | None = None,
+        controller_process_mode: bool = False,
         metadata_checkpoint_root: str | Path | None = None,
     ) -> None:
         super().__init__()
+        self._control_process_enabled = (
+            bool(persist_settings and not controller_process_mode)
+            if control_process_enabled is None
+            else bool(control_process_enabled)
+        )
+        self._controller_process_mode = bool(controller_process_mode)
+        self._supply_lease_owner = f"tma-session-{uuid4()}"
+        self._controller_process_error = ""
+        self._controller_process_cadence_downgrade_accepted = False
+        self._controller_process_prior_run_preflight_complete = False
+        self._controller_process_hardware_preflight_complete = False
+        self._controller_process_output_collision_action = OUTPUT_COLLISION_CANCEL
+        self._production_control_process: TmaControlProcess | None = None
+        self._production_control_identity: ControlSessionIdentity | None = None
+        self._production_control_generation = 0
+        self._production_control_snapshot: object | None = None
+        self._isolated_terminal_readback: dict[str, object] | None = None
+        self._isolated_terminal_state: ControlState | None = None
+        self._isolated_terminal_task = ""
+        self._recipe_terminal_readback: dict[str, object] | None = None
+        self._isolated_recipe_active = False
+        self._isolated_recipe_paused = False
+        self._isolated_command_pending: str | None = None
+        self._isolated_pending_sequence: int | None = None
+        self._isolated_command_deadline_s: float | None = None
+        self._isolated_runtime_update_values: dict[str, float | bool] | None = None
+        self._isolated_operator_prompt_open = False
+        self._isolated_last_plot_elapsed_s: float | None = None
+        self._isolated_setup_elapsed_offset_s: float | None = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
+        self._current_hold_bypass_dialog: QtWidgets.QDialog | None = None
+        self._current_hold_bypass_button: QtWidgets.QPushButton | None = None
+        self._current_hold_bypass_status: QtWidgets.QLabel | None = None
+        self._isolated_supply_handoff_leases: dict[int, str] = {}
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = False
+        self._recovery_action_pending = False
+        self._recovery_prompt_generation = 0
+        self._preserve_motor_supply_on_close = False
+        self._control_process_log_sink: Callable[[str], None] | None = None
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
         self._control_ui_event.connect(self._apply_control_ui_event, QtCore.Qt.ConnectionType.QueuedConnection)
@@ -8074,6 +8285,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_tic_status_monotonic_s: float | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
+        self._recipe_motor_power_loss_since_s: float | None = None
+        self._recipe_motor_power_pause_pending = False
         self._tic_keepalive_warning_active = False
         self._manual_jog_uses_last_target = False
         self._last_auto_sample_name = ""
@@ -8191,6 +8404,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_ui_telemetry_error: dict[str, str] | None = None
+        self._session_file_io_errors: list[dict[str, str]] = []
         self._ui_refresh_last_monotonic_s: float | None = None
         self._last_ui_refresh_interval_ms: float | None = None
         self._last_ui_handler_duration_ms: float | None = None
@@ -8232,6 +8447,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records: tuple[TmaHistoryRecord, ...] = ()
         self._tma_history_root: Path | None = None
         self._tma_history_scan_task: TmaHistoryScanTask | None = None
+        self._tma_history_check_pending = False
+        self._tma_history_start_deferred = False
+        self._last_tma_history_evidence: dict[str, Any] = {}
         self._tma_history_scan_pending_root: Path | None = None
         self._run_summary_pending: deque[tuple[Path, bool]] = deque()
         self._run_summary_task: RunSummaryTask | None = None
@@ -8249,6 +8467,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_scan_poll_timer.setInterval(50)
         self._tma_history_scan_poll_timer.timeout.connect(self._poll_tma_history_scan_task)
         self._first_overheating_preflight_decision: dict[str, Any] | None = None
+        self._allow_missing_prior_tma_history_once = False
         self._settings_save_timer = QtCore.QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.setInterval(750)
@@ -8304,6 +8523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_controller = MiniDmaAutomationController(self)
         self._automation_active = False
         self._automation_tick_running = False
+        self._automation_tick_sample_driven = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = DEFAULT_CONTROL_INTERVAL_MS
@@ -8311,7 +8531,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_completed_ticks = 0
         self._automation_progress_started_s = 0.0
         self._automation_progress_last_format_update_s = 0.0
+        self._isolated_progress_last_task = ""
         self._automation_name = ""
+        self._current_sweep_load_limit_plan_snapshot: CurrentSweepLoadLimitPlan | None = None
         self._automation_phase = "idle"
         self._automation_step_note: str | None = None
         self._automation_paused = False
@@ -8350,6 +8572,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
         self._current_sweep_ramp_hold_cycle_center_since_s: float | None = None
+        self._current_hold_bypass_active = False
+        self._current_hold_bypass_events: list[dict[str, object]] = []
+        self._current_hold_fluctuation_classification = "inactive"
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
         self._current_sweep_endpoint_seek_accepted_step_index: int | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
@@ -8402,6 +8627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_load_curve: Any | None = None
         self._length_setup_displacement_curve: Any | None = None
         self._length_setup_start_monotonic = 0.0
+        self._length_setup_position_origin_mm: float | None = None
         self._length_setup_last_record_scale_timestamp: float | None = None
         self._last_length_setup_plot_refresh_s: float | None = None
         self._length_setup_points: list[MeasurementPoint] = []
@@ -8428,7 +8654,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
-        self._owned_shared_broker_driver: HmpSerialDriver | None = None
+        self._owned_shared_broker_driver: None = None
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._sync_name_fields_in_progress = False
@@ -8536,6 +8762,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_timer.start()
         self._auto_ramp_timer = QtCore.QTimer(self)
         self._auto_ramp_timer.timeout.connect(self._handle_auto_ramp_tick)
+        self._control_process_poll_timer = QtCore.QTimer(self)
+        self._control_process_poll_timer.setInterval(50)
+        self._control_process_poll_timer.timeout.connect(
+            self._poll_production_control_process
+        )
         self._run_log_flush_timer = QtCore.QTimer(self)
         self._run_log_flush_timer.setSingleShot(True)
         self._run_log_flush_timer.timeout.connect(self._flush_pending_run_log_lines)
@@ -8544,8 +8775,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
         self._publish_manual_tic_settings_snapshot()
-        self._schedule_tma_history_scan()
-        self._start_serial_port_enumeration()
+        if not self._controller_process_mode:
+            self._schedule_tma_history_scan()
+            self._start_serial_port_enumeration()
         self._refresh_live_labels()
 
     def _menu_by_text(self, text: str) -> QtWidgets.QMenu | None:
@@ -8606,6 +8838,95 @@ class MainWindow(QtWidgets.QMainWindow):
         benchmark_action = developer_menu.addAction("Benchmark Tic Transports")
         if benchmark_action is not None:
             benchmark_action.triggered.connect(self._benchmark_tic_transports)
+        self.action_current_hold_bypass = developer_menu.addAction(
+            "Momentary Current-Hold Bypass..."
+        )
+        if self.action_current_hold_bypass is not None:
+            self.action_current_hold_bypass.triggered.connect(
+                self._show_current_hold_bypass_dialog
+            )
+
+    def _show_current_hold_bypass_dialog(self) -> None:
+        dialog = self._current_hold_bypass_dialog
+        if dialog is None:
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("TMA Developer Control")
+            dialog.setModal(False)
+            dialog.installEventFilter(self)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            explanation = QtWidgets.QLabel(
+                "Press and hold to bypass only the current-ramp stress hold. "
+                "Release restores normal hold logic immediately. All motor, "
+                "load, current, voltage, continuity, stale-data, and emergency "
+                "limits remain active."
+            )
+            explanation.setWordWrap(True)
+            layout.addWidget(explanation)
+            button = QtWidgets.QPushButton("Hold to bypass current hold")
+            button.setMinimumHeight(54)
+            button.pressed.connect(
+                lambda: self._request_current_hold_bypass(True)
+            )
+            button.released.connect(
+                lambda: self._request_current_hold_bypass(False)
+            )
+            layout.addWidget(button)
+            status = QtWidgets.QLabel("Normal current-hold logic active.")
+            status.setWordWrap(True)
+            layout.addWidget(status)
+            self._current_hold_bypass_dialog = dialog
+            self._current_hold_bypass_button = button
+            self._current_hold_bypass_status = status
+        self._update_current_hold_bypass_dialog()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _request_current_hold_bypass(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled and (
+            not self._isolated_recipe_active
+            or self._isolated_recipe_paused
+            or self._production_control_process is None
+            or self._production_control_identity is None
+        ):
+            self._current_hold_bypass_requested = False
+            self._update_current_hold_bypass_dialog(
+                detail="Bypass is available only during a running isolated recipe."
+            )
+            return
+        self._current_hold_bypass_requested = enabled
+        process = self._production_control_process
+        identity = self._production_control_identity
+        if process is not None and identity is not None:
+            try:
+                process.set_current_hold_bypass(identity, enabled)
+            except Exception as exc:
+                self._current_hold_bypass_requested = False
+                self._update_current_hold_bypass_dialog(detail=str(exc))
+                return
+        self._update_current_hold_bypass_dialog()
+
+    def _update_current_hold_bypass_dialog(self, *, detail: str = "") -> None:
+        button = self._current_hold_bypass_button
+        status = self._current_hold_bypass_status
+        if button is None or status is None:
+            return
+        available = bool(
+            self._isolated_recipe_active
+            and not self._isolated_recipe_paused
+            and self._production_control_process is not None
+        )
+        button.setEnabled(available)
+        if detail:
+            text = detail
+        elif self._current_hold_bypass_confirmed:
+            text = "Bypass active while the button remains held."
+        elif self._current_hold_bypass_requested:
+            text = "Bypass requested; waiting for controller confirmation."
+        else:
+            text = "Normal current-hold logic active."
+        status.setText(text)
 
     def _is_ui_thread(self) -> bool:
         return get_ident() == self._ui_thread_id
@@ -8729,6 +9050,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
     def _restore_main_window_focus_soon(self) -> None:
+        if self._controller_process_mode:
+            return
         if self._window_closing:
             return
         if not self._is_ui_thread():
@@ -9237,6 +9560,7 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(tabs)
 
         hardware_tab = QtWidgets.QWidget(tabs)
+        self.hardware_tab = hardware_tab
         hardware_layout = QtWidgets.QVBoxLayout(hardware_tab)
         hardware_layout.setContentsMargins(0, 0, 0, 0)
         hardware_layout.setSpacing(10)
@@ -10835,6 +11159,13 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_form.addRow("Step", current_step_row)
         self.row_current_sweep_target_step = current_step_row
         self.label_current_sweep_target_step = current_sweep_form.labelForField(current_step_row)
+        self.label_current_sweep_load_limit_warning = QtWidgets.QLabel("", automation_box)
+        self.label_current_sweep_load_limit_warning.setWordWrap(True)
+        self.label_current_sweep_load_limit_warning.setStyleSheet(
+            "color: #d97706; font-weight: 600;"
+        )
+        self.label_current_sweep_load_limit_warning.setVisible(False)
+        current_sweep_form.addRow("", self.label_current_sweep_load_limit_warning)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_ramp_rate.setDecimals(4)
         self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
@@ -11112,10 +11443,6 @@ class MainWindow(QtWidgets.QMainWindow):
             advanced_widget.setVisible(False)
 
         self.current_sweep_advanced_panel.setVisible(False)
-        self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
-        self.check_current_sweep_reverse_current.setChecked(True)
-        self.check_current_sweep_reverse_current.setVisible(False)
-        current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
         self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)
         self.spin_current_sweep_tolerance.setRange(0.0001, 100000.0)
@@ -11595,7 +11922,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_task.setFont(task_font)
         self.label_current_task.setStyleSheet("color: palette(text);")
         self.label_current_task.setVisible(False)
+        self.label_control_process_status = QtWidgets.QLabel(
+            (
+                "Controller: dedicated process (hardware and logs isolated)"
+                if self._control_process_enabled and not self._controller_process_mode
+                else "Controller: local process"
+            ),
+            self.recipe_action_footer,
+        )
+        self.label_control_process_status.setWordWrap(True)
+        self.label_control_process_status.setStyleSheet("color: #2563eb;")
+        self.label_control_process_status.setVisible(False)
 
+        self.recipe_action_footer_layout.addWidget(self.label_control_process_status)
         self.recipe_action_footer_layout.addWidget(self.recipe_progress)
         ramp_buttons = QtWidgets.QHBoxLayout()
         ramp_buttons.setSpacing(6)
@@ -11627,6 +11966,7 @@ class MainWindow(QtWidgets.QMainWindow):
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
+        self.manual_actions_box = manual_box
         manual_layout = QtWidgets.QVBoxLayout(manual_box)
         manual_hint = QtWidgets.QLabel(
             "Use manual controls for setup, preloading, or quick checks before launching a recipe."
@@ -11994,6 +12334,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
         self.spin_diameter.valueChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.check_max_load.toggled.connect(self._update_recipe_mode_ui)
+        self.spin_max_load_g.valueChanged.connect(self._update_recipe_mode_ui)
+        self.spin_zero_load_scale_g.valueChanged.connect(self._update_recipe_mode_ui)
         for widget in (
             self.spin_control_interval,
             self.spin_log_interval,
@@ -12096,7 +12439,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating_use_normal_end.toggled.connect(self._update_recipe_mode_ui)
-        self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_first_overheating_hold_on_error.toggled.connect(
             self._update_recipe_mode_ui
@@ -13040,6 +13382,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_log_message = str(message)
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
+        log_sink = self._control_process_log_sink
+        if callable(log_sink):
+            log_sink(line)
         self._queue_run_log_display_line(line)
         batch_live_run_log = (
             self._automation_control_loop is not None
@@ -13607,6 +13952,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         settings: TicConnectionSettings | None = None,
     ) -> TicController:
+        self._assert_local_hardware_access_allowed("Tic controller")
         selected = settings or self._tic_settings_for_current_command()
         self._acquire_tic_device_lock(selected)
         with self._tic_settings_lock:
@@ -13631,6 +13977,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         settings: TicConnectionSettings | None = None,
     ) -> TicCommandDispatcher:
+        self._assert_local_hardware_access_allowed("Tic command dispatcher")
         dispatcher_to_stop: TicCommandDispatcher | None = None
         with self._tic_settings_lock:
             selected = settings or self._tic_settings_for_current_command()
@@ -13658,9 +14005,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._tic_command_dispatcher
 
     def _acquire_tic_device_lock(self, settings: TicConnectionSettings) -> None:
-        if not self._persist_settings:
+        if not self._persist_settings and not self._controller_process_mode:
             # Test/embedded windows use fake controllers and isolated storage;
             # they must not contend for the workstation's real device lock.
+            # The hidden production controller is non-persistent but must still
+            # hold the same cross-process hardware lease as the visible app did.
             return
         identity = (settings.device_serial or "default").strip().lower()
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
@@ -13839,6 +14188,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _build_supply_controller(self) -> PowerSupplyController:
+        self._assert_local_hardware_access_allowed("power supply")
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
             return SharedBrokerSupplyController(  # type: ignore[return-value]
@@ -13850,6 +14200,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current_limit_a=None,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                 motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                owner=self._supply_lease_owner,
                 requested_readback_hz=self._requested_supply_readback_hz(),
             )
         return PowerSupplyController(
@@ -13938,6 +14289,12 @@ class MainWindow(QtWidgets.QMainWindow):
         show_errors: bool = True,
         allow_start_owned_broker: bool = True,
     ) -> bool:
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            self._log(
+                "Power-supply connection refused: the dedicated control process "
+                "owns recipe hardware."
+            )
+            return False
         self._disconnect_supply()
         if self._using_shared_broker_supply():
             self._apply_shared_broker_endpoint_defaults_for_preflight()
@@ -14033,46 +14390,49 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._motor_supply_enabled() and motor_channel is None:
             raise RuntimeError("Select a motor supply channel before starting the shared HMP broker.")
 
-        driver = HmpSerialDriver(
-            port_name=port_name,
-            baudrate=int(self.combo_supply_baud.currentText()),
-            timeout_s=0.7,
-        )
-        try:
-            driver.connect()
-            idn_text = identify_hmp_with_blank_retry(driver)
-            if driver.profile is None:
-                raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
-            broker = SharedPowerSupplyBroker(driver, driver.profile)
-            broker.assign_role(
+        channels = [
+            BrokerChannelConfig(
                 channel=current_channel,
-                role=ROLE_MINI_DMA_CURRENT,
-                confirmed=True,
+                role=ROLE_TMA_CURRENT,
                 voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
-                current_limit_a=None,
             )
-            if motor_channel is not None:
-                broker.assign_role(
+        ]
+        if motor_channel is not None:
+            channels.append(
+                BrokerChannelConfig(
                     channel=motor_channel,
-                    role=ROLE_MINI_DMA_MOTOR,
-                    confirmed=True,
+                    role=ROLE_TMA_MOTOR,
                     voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                     current_limit_a=float(self.spin_motor_supply_current_limit.value()),
                 )
-            broker.confirm_profile(name="TMA auto-started shared HMP broker")
-            server, thread = start_broker_server(
-                broker,
+            )
+        broker_process = SharedPowerSupplyBrokerProcess(
+            BrokerProcessConfig(
+                port_name=port_name,
+                baudrate=int(self.combo_supply_baud.currentText()),
                 host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
                 port=int(self.spin_shared_broker_port.value()),
+                channels=tuple(channels),
+                confirmation_name="TMA dedicated HMP broker",
+                parent_pid=os.getpid(),
             )
+        )
+        try:
+            broker_process.start()
+            ready = broker_process.wait_until_ready(timeout_s=10.0)
         except Exception:
-            driver.close()
+            broker_process.close(timeout_s=1.0, force=True)
             raise
 
-        self._owned_shared_broker_server = server
-        self._owned_shared_broker_thread = thread
-        self._owned_shared_broker_driver = driver
-        self._log(f"Started shared HMP broker on {self.edit_shared_broker_host.text().strip() or '127.0.0.1'}:{self.spin_shared_broker_port.value()} for {port_name}.")
+        # Keep the existing attribute as a compatibility boundary for older
+        # tests/plugins, but it now references a real OS-process supervisor.
+        self._owned_shared_broker_server = broker_process
+        self._owned_shared_broker_thread = None
+        self._owned_shared_broker_driver = None
+        self._log(
+            "Started process-owned TMA HMP broker "
+            f"PID {ready.owner_pid} on {ready.host}:{ready.port} for {port_name}."
+        )
 
     def _stop_owned_shared_broker(self) -> None:
         server = self._owned_shared_broker_server
@@ -14081,7 +14441,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_server = None
         self._owned_shared_broker_thread = None
         self._owned_shared_broker_driver = None
-        if server is not None:
+        if isinstance(server, SharedPowerSupplyBrokerProcess):
+            try:
+                server.close(timeout_s=2.0, force=True)
+            except Exception:
+                pass
+        elif server is not None:
+            # Compatibility with a broker created by an older in-memory
+            # window instance.
             try:
                 server.shutdown()
             except Exception:
@@ -14101,9 +14468,20 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    def _disconnect_supply(self) -> None:
+    def _disconnect_supply(
+        self,
+        *,
+        preserve_motor_output: bool = False,
+        preserve_current_output: bool = False,
+    ) -> None:
         if self._supply_controller is not None:
-            self._supply_controller.disconnect()
+            if isinstance(self._supply_controller, SharedBrokerSupplyController):
+                self._supply_controller.disconnect(
+                    preserve_motor_output=preserve_motor_output,
+                    preserve_current_output=preserve_current_output,
+                )
+            else:
+                self._supply_controller.disconnect()
         self._supply_controller = None
         self._current_sweep_channel_limit_checked = None
         self._supply_output_enabled = False
@@ -14112,6 +14490,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_cadence_generation = 0
         self._refresh_supply_cadence_status()
         self._refresh_supply_live_label()
+
+    def _emergency_shared_supply_outputs_off(self) -> None:
+        BrokerJsonClient(
+            host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+            port=int(self.spin_shared_broker_port.value()),
+        ).emergency_all_outputs_off()
+
+    def _detach_supply_for_handoff(self) -> dict[int, str]:
+        controller = self._supply_controller
+        handoff_leases: dict[int, str] = {}
+        if isinstance(controller, SharedBrokerSupplyController):
+            handoff_leases = controller.detach_for_handoff()
+        elif controller is not None:
+            # Direct serial disconnect only closes the port; it does not
+            # change channel or master output state.
+            controller.disconnect()
+        self._supply_controller = None
+        self._current_sweep_channel_limit_checked = None
+        self._supply_output_enabled = False
+        self.label_supply_status.setText("Supply ownership transferring.")
+        self._supply_effective_readback_hz = self._requested_supply_readback_hz()
+        self._supply_cadence_generation = 0
+        self._refresh_supply_cadence_status()
+        self._refresh_supply_live_label()
+        return handoff_leases
+
+    def _release_shared_supply_handoff_leases(
+        self,
+        leases: Mapping[int, str],
+    ) -> None:
+        if not leases:
+            return
+        client = BrokerJsonClient(
+            host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+            port=int(self.spin_shared_broker_port.value()),
+        )
+        for channel, lease_id in leases.items():
+            try:
+                client.release(channel=int(channel), lease_id=str(lease_id))
+            except Exception as exc:
+                self._log(
+                    f"WARNING: failed to release transferred CH{channel} lease "
+                    f"after child startup failure: {exc}"
+                )
 
     def _refresh_supply_live_label(self) -> None:
         if not self._is_ui_thread():
@@ -14508,6 +14930,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_supply_status.setText(message)
 
     def _emergency_stop(self) -> None:
+        if self._isolated_recipe_active:
+            process = self._production_control_process
+            if process is None:
+                detail = (
+                    "EMERGENCY STOP could not signal the dedicated control process "
+                    "because its supervisor is unavailable."
+                )
+                self._log(detail)
+                self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+                self.label_control_process_status.setText(detail)
+                self.label_control_process_status.setVisible(True)
+                return
+            try:
+                process.emergency_stop()
+            except Exception as exc:
+                detail = f"EMERGENCY STOP could not signal the control process: {exc}"
+                self._log(detail)
+                self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+                self.label_control_process_status.setText(detail)
+                self.label_control_process_status.setVisible(True)
+                return
+            try:
+                # The broker is a separate process, so this safety command
+                # remains available even if the recipe child is blocked.
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(
+                    "EMERGENCY STOP could not confirm broker outputs off: "
+                    f"{exc}"
+                )
+            self._isolated_command_pending = "emergency"
+            self._isolated_pending_sequence = None
+            self._isolated_command_deadline_s = (
+                time.monotonic() + TMA_EMERGENCY_ACK_TIMEOUT_S
+            )
+            self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+            self.label_control_process_status.setText(
+                "Controller: EMERGENCY STOP requested; awaiting child safe-state confirmation"
+            )
+            self.label_control_process_status.setVisible(True)
+            self._log(
+                "EMERGENCY STOP sent through the dedicated process out-of-band safety path."
+            )
+            self._update_recipe_buttons()
+            return
+
         messages: list[str] = []
         automation_was_active = self._automation_active
         # Fence the control worker first.  Physical output removal below must
@@ -14702,8 +15170,25 @@ class MainWindow(QtWidgets.QMainWindow):
         current_mA = self._continuity_current_mA()
         if current_mA <= 0.0:
             return True
-        if not self._set_recipe_current_mA(current_mA, measure_after=True):
+        # Continuity is a pre-motion safety condition, including the interval
+        # before the recipe/session flags become active.  Suppress the generic
+        # voltage-limit fallback while obtaining this readback: an open circuit
+        # at the continuity current must abort startup, not silently replace the
+        # continuity current with 0 mA and allow setup motion to continue.
+        self._continuity_preflight_active = True
+        try:
+            current_set = self._set_recipe_current_mA(current_mA, measure_after=True)
+        finally:
+            self._continuity_preflight_active = False
+        if not current_set:
             self._log("Recipe stopped because continuity-current setup failed.")
+            return False
+        if self._supply_readback_indicates_open_circuit(current_mA):
+            self._log(
+                "Recipe stopped before motion because the continuity check detected an open circuit: "
+                f"{self._wire_break_stop_message()}"
+            )
+            self._disable_supply_output()
             return False
         self._log(
             f"Continuity monitor enabled at {_format_compact_unit(current_mA, 'mA', decimals=3)}."
@@ -14727,6 +15212,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return
 
     def _handle_supply_limit_condition(self) -> None:
+        if getattr(self, "_continuity_preflight_active", False):
+            return
         if self._wire_break_detected():
             self._stop_for_wire_break()
             return
@@ -14794,6 +15281,9 @@ class MainWindow(QtWidgets.QMainWindow):
             setpoint_mA = self._supply_last_setpoint_mA
         if setpoint_mA is None:
             return False
+        return self._supply_readback_indicates_open_circuit(float(setpoint_mA))
+
+    def _supply_readback_indicates_open_circuit(self, setpoint_mA: float) -> bool:
         min_setpoint_mA = (
             min(WIRE_BREAK_MIN_SETPOINT_MA, max(self._supply_current_resolution_mA(), self._continuity_current_mA()))
             if self._continuity_monitor_enabled()
@@ -14865,8 +15355,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._session_active:
                 self._stop_session(reason="wire_break_or_contact_loss", detail=message)
             self.statusBar().showMessage(message, 15000)
-            self._ask_wire_break_recovery_after_stop(message)
-            self._maybe_offer_run_cleanup()
+            if not self._controller_process_mode:
+                self._ask_wire_break_recovery_after_stop(message)
+                self._maybe_offer_run_cleanup()
         finally:
             self._wire_break_stop_in_progress = False
 
@@ -15751,6 +16242,12 @@ class MainWindow(QtWidgets.QMainWindow):
             and event.type() == QtCore.QEvent.Type.ApplicationDeactivate
         ):
             self._hide_fabrication_completer_popups()
+            self._request_current_hold_bypass(False)
+        if (
+            watched is self._current_hold_bypass_dialog
+            and event.type() in {QtCore.QEvent.Type.Close, QtCore.QEvent.Type.Hide}
+        ):
+            self._request_current_hold_bypass(False)
         return super().eventFilter(watched, event)
 
     def _handle_fabrication_composition_activated(self, value: object) -> None:
@@ -16788,6 +17285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records = tuple(
             record for record in records if isinstance(record, TmaHistoryRecord)
         )
+        self._resume_start_after_tma_history_scan()
 
     def _handle_tma_history_scan_failure(self, root_obj: object, message: str) -> None:
         root = Path(root_obj)
@@ -16796,6 +17294,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_root = root
         self._tma_history_records = ()
         self._log(message)
+        self._resume_start_after_tma_history_scan()
+
+    def _resume_start_after_tma_history_scan(self) -> None:
+        if not self._tma_history_start_deferred or self._window_closing:
+            return
+        self._tma_history_start_deferred = False
+        QtCore.QTimer.singleShot(0, self._start_auto_ramp)
 
     def _stop_tma_history_scan_task(self) -> None:
         self._tma_history_scan_timer.stop()
@@ -16831,12 +17336,27 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._connect_scale()
 
+    def _assert_local_hardware_access_allowed(self, resource: str) -> None:
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            raise RuntimeError(
+                f"{resource} is owned by the dedicated TMA control process"
+            )
+
     def _connect_scale(self, checked: bool = False, *, show_errors: bool = True) -> bool:
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            self._log(
+                "Scale connection refused: the dedicated control process owns "
+                "recipe hardware."
+            )
+            return False
         port_name = str(self.combo_scale_port.currentData() or "").strip()
         if not port_name:
             if show_errors:
                 QtWidgets.QMessageBox.warning(self, APP_NAME, "Select a scale serial port first.")
             return False
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
         baudrate = int(self.combo_scale_baud.currentText())
         worker = ScaleWorker(
             port_name=port_name,
@@ -16886,16 +17406,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.start(SCALE_NO_DATA_HINT_DELAY_MS)
         return True
 
-    def _disconnect_scale(self, *, timeout_ms: int = 1500) -> None:
+    def _disconnect_scale(self, *, timeout_ms: int = 1500) -> bool:
         worker = self._scale_worker
         thread = self._scale_thread
         lifetime = self._scale_thread_lifetime
         ui_bridge = self._scale_ui_bridge
         self._scale_connection_token = None
-        self._scale_worker = None
-        self._scale_thread = None
-        self._scale_thread_lifetime = None
-        self._scale_ui_bridge = None
         self._scale_connected_at_s = None
         self._scale_no_data_hint_emitted = False
         self._scale_hint_timer.stop()
@@ -16904,18 +17420,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 worker.stop()
             except RuntimeError:
                 pass
+        released = True
         if thread is not None:
             try:
                 thread.quit()
                 if lifetime is not None:
-                    lifetime.wait(timeout_ms)
+                    released = lifetime.wait(timeout_ms)
                 elif thread.isRunning():
-                    thread.wait(max(0, int(timeout_ms)))
+                    released = bool(thread.wait(max(0, int(timeout_ms))))
             except RuntimeError:
-                pass
+                released = False
+        self._scale_worker = None
+        self._scale_thread = None
+        self._scale_thread_lifetime = None
+        self._scale_ui_bridge = None
         if ui_bridge is not None:
             ui_bridge.deleteLater()
         self.button_scale_connect.setText("Connect scale")
+        return released
 
     def _sensor_callback_is_current(self, sensor_kind: str, token: object) -> bool:
         if self._window_closing:
@@ -16985,6 +17507,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             write = self._reserve_raw_scale_sample_locked(sample)
             self._scale_no_data_hint_emitted = True
+        control_loop = self._automation_control_loop
+        if control_loop is not None:
+            control_loop.wake()
         return write
 
     def _record_scale_measurement_from_worker(
@@ -18076,6 +18601,25 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.label_current_tolerance_equiv, self.spin_current_sweep_tolerance),
         ):
             label.setText(self._target_equivalent_text(current_basis, float(spinbox.value())))
+        if hasattr(self, "label_current_sweep_load_limit_warning"):
+            self.label_current_target_end_equiv.setStyleSheet("")
+            self.label_current_target_end_equiv.setToolTip("")
+            self.label_current_sweep_load_limit_warning.setVisible(False)
+            self.label_current_sweep_load_limit_warning.setText("")
+            self.label_current_sweep_load_limit_warning.setToolTip("")
+            mode = str(self.combo_recipe_mode.currentData() or "")
+            if self._is_current_sweep_mode(mode):
+                plan = self._current_sweep_load_limit_plan()
+                if plan.clipped or plan.blocked_reason:
+                    message = self._current_sweep_load_limit_message(plan, compact=True)
+                    detail = self._current_sweep_load_limit_message(plan, compact=False)
+                    self.label_current_target_end_equiv.setStyleSheet(
+                        "color: #d97706; font-weight: 600;"
+                    )
+                    self.label_current_target_end_equiv.setToolTip(detail)
+                    self.label_current_sweep_load_limit_warning.setText(message)
+                    self.label_current_sweep_load_limit_warning.setToolTip(detail)
+                    self.label_current_sweep_load_limit_warning.setVisible(True)
         self.label_current_target_ramp_equiv.setText(
             self._target_equivalent_text(
                 current_basis,
@@ -21961,8 +22505,8 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         *,
         window_s: float | None = None,
-        since_s: float | None = None,
         trend_aware: bool = False,
+        since_s: float | None = None,
     ) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return None
@@ -22130,6 +22674,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ready=False,
             stationary=False,
             fast_veto=False,
+            crossing_count=0,
+            above_fraction=0.0,
+            below_fraction=0.0,
+            balanced_crossings=False,
+            classification="inactive",
             suppression_allowed=False,
         )
         hold_active = self._current_sweep_ramp_hold_step_index is not None
@@ -22141,6 +22690,7 @@ class MainWindow(QtWidgets.QMainWindow):
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or self._current_sweep_ramp_hold_scale_started_s is None
         ):
+            self._current_hold_fluctuation_classification = "inactive"
             return unavailable
         signal = self._scale_control_signal_for_basis(
             basis,
@@ -22148,6 +22698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             since_s=self._current_sweep_ramp_hold_scale_started_s,
         )
         if signal is None:
+            self._current_hold_fluctuation_classification = "insufficient_evidence"
             return unavailable
         center_band = self._current_sweep_hold_min_band_for_basis(
             basis,
@@ -22189,10 +22740,72 @@ class MainWindow(QtWidgets.QMainWindow):
             or abs(float(target_value) - float(fast_signal.latest_value)) > fast_veto_band
         )
         error_value = float(target_value) - float(signal.value)
+        latest = self._scale_signal_buffer.latest()
+        samples = (
+            []
+            if latest is None
+            else self._scale_signal_buffer.recent_samples(
+                now_s=latest.timestamp_s,
+                window_s=SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_WINDOW_S,
+            )
+        )
+        if self._current_sweep_ramp_hold_scale_started_s is not None:
+            samples = [
+                sample
+                for sample in samples
+                if sample.timestamp_s >= self._current_sweep_ramp_hold_scale_started_s
+            ]
+        values: list[float] = []
+        if basis == HSW_BASIS_LOAD_G:
+            values = [float(sample.applied_load_g) for sample in samples]
+        else:
+            config = self._control_config()
+            diameter_mm = (
+                config.diameter_mm
+                if config is not None
+                else float(self.spin_diameter.value())
+            )
+            for sample in samples:
+                stress = stress_mpa_from_load_g(
+                    float(sample.applied_load_g),
+                    diameter_mm,
+                )
+                if stress is not None and math.isfinite(float(stress)):
+                    values.append(float(stress))
+        side_signs = [
+            1 if value > target_value else -1 if value < target_value else 0
+            for value in values
+        ]
+        nonzero_signs = [sign for sign in side_signs if sign]
+        crossing_count = sum(
+            left != right
+            for left, right in zip(nonzero_signs, nonzero_signs[1:])
+        )
+        sample_total = max(1, len(values))
+        above_fraction = sum(value > target_value for value in values) / sample_total
+        below_fraction = sum(value < target_value for value in values) / sample_total
+        balanced_crossings = bool(
+            ready
+            and crossing_count >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS
+            and above_fraction >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+            and below_fraction >= SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+        )
+        if not ready:
+            classification = "insufficient_evidence"
+        elif fast_veto:
+            classification = "fast_excursion"
+        elif not stationary:
+            classification = "directional_drift"
+        elif balanced_crossings and abs(error_value) <= center_band:
+            classification = "centered_fluctuation"
+        else:
+            classification = "unbalanced_fluctuation"
+        self._current_hold_fluctuation_classification = classification
         suppression_allowed = (
             self._current_sweep_cycle_center_motor_suppression_enabled
             and stationary
             and not fast_veto
+            and balanced_crossings
             and abs(error_value) <= center_band
         )
         return CurrentHoldCycleCenterState(
@@ -22201,6 +22814,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ready=ready,
             stationary=stationary,
             fast_veto=fast_veto,
+            crossing_count=crossing_count,
+            above_fraction=above_fraction,
+            below_fraction=below_fraction,
+            balanced_crossings=balanced_crossings,
+            classification=classification,
             suppression_allowed=suppression_allowed,
         )
 
@@ -22672,6 +23290,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES,
             )
         return required_samples
+
+    def _current_hold_response_observation_pending(
+        self,
+        seek_key: tuple[str, int, float],
+        *,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> bool:
+        if (
+            self._automation_phase != "current_hold"
+            or seek_key not in self._seek_last_time_by_key
+        ):
+            return False
+        ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        if ready_after_s is None:
+            return False
+        response_age_s = max(0.0, time.monotonic() - float(ready_after_s))
+        return (
+            response_age_s < self._current_sweep_hold_filter_window_s()
+            or filtered_signal is None
+            or filtered_signal.sample_count
+            < SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+        )
 
     def _seek_wait_for_required_post_move_samples(
         self,
@@ -23668,6 +24308,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 seek_key,
                 required_samples,
             )
+            waiting_for_complete_response = self._current_hold_response_observation_pending(
+                seek_key,
+                filtered_signal=filtered_signal,
+            )
             if volatile_observer_active and not volatile_observation_complete:
                 self._log_waiting_for_feedback(
                     "Repeated volatile motor responses detected; holding position for a full "
@@ -23688,15 +24332,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     reason="volatile_observer_response_window",
                 )
                 return False
-            if waiting_for_required_samples or (
-                volatile_unsettled_response and not volatile_observer_active
+            if (
+                waiting_for_required_samples
+                or waiting_for_complete_response
+                or (volatile_unsettled_response and not volatile_observer_active)
             ):
                 self._log_waiting_for_feedback(
                     (
                         "Current-hold response is fluctuating after the last move; waiting for delayed "
                         "scale feedback to settle before compounding another correction."
                     )
-                    if volatile_post_move_response
+                    if volatile_post_move_response or waiting_for_complete_response
                     else f"Waiting for {required_samples} fresh scale samples before the next fine correction."
                 )
                 self._write_control_trace(
@@ -23713,6 +24359,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     reason=(
                         "volatile_response_unsettled"
                         if volatile_unsettled_response
+                        else "outstanding_response_observation"
+                        if waiting_for_complete_response
                         else "volatile_post_move_response"
                         if volatile_post_move_response
                         else f"{required_samples}_fresh_scale_samples"
@@ -24334,9 +24982,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ELASTOCALORIC_EFFECT: 6,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
-        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self.strain_setup_box.setVisible(True)
         self._refresh_equivalent_labels()
+        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self._update_setup_summary()
         fatigue_mode = mode == CURRENT_SWEEP_FATIGUE
         current_sweep_mode = self._is_current_sweep_mode(mode)
@@ -24718,6 +25366,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.recipe_progress.setRange(0, 100)
                 self.recipe_progress.setValue(0)
                 self.recipe_progress.setFormat(self._recipe_idle_progress_text)
+        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         self._update_recipe_file_status()
         if hasattr(self, "button_apply_current_sweep_edits"):
             self._refresh_current_sweep_pending_update_ui()
@@ -25125,6 +25774,32 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _append_return_to_origin(self, steps: list[AutomationStep]) -> list[AutomationStep]:
+        controlled_basis = next(
+            (
+                step.basis
+                for step in reversed(steps)
+                if step.action
+                in {
+                    "seek_target",
+                    "ramp_target",
+                    "mechanical_scan",
+                    "fatigue_loop",
+                    "calibration_move",
+                    "calibration_record",
+                }
+                and step.basis
+            ),
+            None,
+        )
+        if controlled_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            steps.append(
+                AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=HSW_BASIS_LOAD_G,
+                    note="recipe_return_zero",
+                )
+            )
         return steps
 
     def _tic_motor_power_warning(self, vin_v: float | None) -> str | None:
@@ -25544,7 +26219,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if velocity_units == 0:
             return
-        self._manual_jog_velocity_sequence = dispatcher.set_target_velocity(velocity_units)
+        self._manual_jog_velocity_sequence = dispatcher.set_target_velocity(
+            velocity_units
+        )
         self._manual_jog_timer_moves += 1
 
     def _handle_manual_jog_button_clicked(self, direction: float) -> None:
@@ -25554,6 +26231,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._jog_relative(direction, force_step=True)
 
     def _show_manual_auto_connect_progress(self) -> None:
+        if self._controller_process_mode:
+            return
         progress = QtWidgets.QProgressDialog("Connecting hardware...", "", 0, 0, self)
         progress.setWindowTitle("Auto-connect hardware")
         progress.setCancelButton(None)
@@ -25567,6 +26246,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
 
     def _set_manual_auto_connect_progress(self, label: str, value: int, maximum: int) -> None:
+        if self._controller_process_mode:
+            return
         progress = self._manual_auto_connect_progress
         if progress is None:
             return
@@ -25576,6 +26257,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
 
     def _close_manual_auto_connect_progress(self) -> None:
+        if self._controller_process_mode:
+            return
         progress = self._manual_auto_connect_progress
         self._manual_auto_connect_progress = None
         if progress is not None:
@@ -26068,6 +26751,198 @@ class MainWindow(QtWidgets.QMainWindow):
             return zero_load_limit_g
         return None
 
+    def _target_value_as_load_g(self, basis: str, value: float) -> float | None:
+        if basis == HSW_BASIS_LOAD_G:
+            return float(value)
+        if basis == HSW_BASIS_STRESS_MPA:
+            return load_g_from_stress_mpa(float(value), float(self.spin_diameter.value()))
+        return None
+
+    def _current_sweep_load_limit_plan(
+        self,
+        *,
+        basis: str | None = None,
+        target_start: float | None = None,
+        target_end: float | None = None,
+        target_step: float | None = None,
+        fatigue: bool | None = None,
+    ) -> CurrentSweepLoadLimitPlan:
+        resolved_basis = self._current_sweep_basis() if basis is None else str(basis)
+        resolved_start = (
+            float(self.spin_current_sweep_target_start.value())
+            if target_start is None
+            else float(target_start)
+        )
+        resolved_end = (
+            float(self.spin_current_sweep_target_end.value())
+            if target_end is None
+            else float(target_end)
+        )
+        resolved_step = abs(
+            float(self.spin_current_sweep_target_step.value())
+            if target_step is None
+            else float(target_step)
+        )
+        if fatigue is None:
+            fatigue = str(self.combo_recipe_mode.currentData() or "") == CURRENT_SWEEP_FATIGUE
+        requested_targets = (
+            [resolved_start]
+            if fatigue
+            else self._build_numeric_targets(resolved_start, resolved_end, resolved_step)
+        )
+        limit_g = self._effective_max_load_limit_g()
+        requested_end_load_g = self._target_value_as_load_g(resolved_basis, resolved_end)
+        theoretical_limit_target: float | None = None
+        if limit_g is not None:
+            if resolved_basis == HSW_BASIS_LOAD_G:
+                theoretical_limit_target = float(limit_g)
+            elif resolved_basis == HSW_BASIS_STRESS_MPA:
+                theoretical_limit_target = stress_mpa_from_load_g(
+                    float(limit_g),
+                    float(self.spin_diameter.value()),
+                )
+        if limit_g is None or resolved_basis == HSW_BASIS_STRAIN_PCT:
+            effective_targets = tuple(float(value) for value in requested_targets)
+            return CurrentSweepLoadLimitPlan(
+                basis=resolved_basis,
+                requested_targets=tuple(float(value) for value in requested_targets),
+                effective_targets=effective_targets,
+                limit_g=limit_g,
+                planning_limit_g=limit_g,
+                reserve_g=0.0,
+                requested_end=resolved_end,
+                requested_end_load_g=requested_end_load_g,
+                effective_end=(effective_targets[-1] if effective_targets else None),
+                effective_end_load_g=(
+                    None
+                    if not effective_targets
+                    else self._target_value_as_load_g(resolved_basis, effective_targets[-1])
+                ),
+                theoretical_limit_target=theoretical_limit_target,
+                clipped=False,
+            )
+
+        reserve_g = min(
+            TMA_RECIPE_LOAD_LIMIT_RESERVE_G,
+            max(0.0, float(limit_g) * 0.25),
+        )
+        planning_limit_g = max(0.0, float(limit_g) - reserve_g)
+        safe_targets: list[float] = []
+        first_unsafe: float | None = None
+        for target in requested_targets:
+            target_load_g = self._target_value_as_load_g(resolved_basis, float(target))
+            if target_load_g is not None and float(target_load_g) > planning_limit_g + 1e-12:
+                first_unsafe = float(target)
+                break
+            safe_targets.append(float(target))
+        blocked_reason: str | None = None
+        if not safe_targets and requested_targets:
+            first_target = float(requested_targets[0])
+            first_load_g = self._target_value_as_load_g(resolved_basis, first_target)
+            suffix, _ = self._distribution_units(resolved_basis)
+            load_text = (
+                "an unknown load"
+                if first_load_g is None
+                else _format_compact_unit(first_load_g, "g", decimals=3)
+            )
+            blocked_reason = (
+                f"The first target {first_target:.4f}{suffix} requires {load_text}, "
+                f"above the {_format_compact_unit(planning_limit_g, 'g', decimals=3)} "
+                "recipe planning ceiling. Lower the start target or raise the applied-load "
+                "limit only after checking the rig."
+            )
+        effective_targets = tuple(safe_targets)
+        clipped = first_unsafe is not None
+        effective_end = effective_targets[-1] if effective_targets else None
+        effective_end_load_g = (
+            None
+            if effective_end is None
+            else self._target_value_as_load_g(resolved_basis, effective_end)
+        )
+        return CurrentSweepLoadLimitPlan(
+            basis=resolved_basis,
+            requested_targets=tuple(float(value) for value in requested_targets),
+            effective_targets=effective_targets,
+            limit_g=float(limit_g),
+            planning_limit_g=planning_limit_g,
+            reserve_g=reserve_g,
+            requested_end=resolved_end,
+            requested_end_load_g=requested_end_load_g,
+            effective_end=effective_end,
+            effective_end_load_g=effective_end_load_g,
+            theoretical_limit_target=theoretical_limit_target,
+            clipped=clipped,
+            blocked_reason=blocked_reason,
+        )
+
+    def _current_sweep_load_limit_message(
+        self,
+        plan: CurrentSweepLoadLimitPlan,
+        *,
+        compact: bool,
+    ) -> str:
+        suffix, _ = self._distribution_units(plan.basis)
+        requested_load = (
+            "unknown load"
+            if plan.requested_end_load_g is None
+            else _format_compact_unit(plan.requested_end_load_g, "g", decimals=3)
+        )
+        limit_text = _format_compact_unit(plan.limit_g or 0.0, "g", decimals=3)
+        if plan.blocked_reason:
+            return plan.blocked_reason
+        effective_end = float(plan.effective_end or 0.0)
+        requested_target_text = (
+            f"{_format_compact_number(plan.requested_end, decimals=4)}{suffix}"
+        )
+        effective_target_text = (
+            f"{_format_compact_number(effective_end, decimals=4)}{suffix}"
+        )
+        effective_load = (
+            "unknown load"
+            if plan.effective_end_load_g is None
+            else _format_compact_unit(plan.effective_end_load_g, "g", decimals=3)
+        )
+        if compact:
+            return (
+                f"Load limit {limit_text}: run ends at {effective_target_text} "
+                f"({effective_load}), not {requested_target_text}."
+            )
+        theoretical = (
+            "unknown"
+            if plan.theoretical_limit_target is None
+            else f"{_format_compact_number(plan.theoretical_limit_target, decimals=4)}{suffix}"
+        )
+        return (
+            f"The requested endpoint {requested_target_text} requires {requested_load}.\n\n"
+            f"The active applied-load limit is {limit_text}, corresponding to a theoretical "
+            f"maximum of {theoretical}. A {plan.reserve_g:.3f} g control reserve is retained.\n\n"
+            f"With the configured target sequence, this run will end at "
+            f"{effective_target_text} ({effective_load}). The requested value remains saved, "
+            "and both requested and executed endpoints will be recorded."
+        )
+
+    def _confirm_current_sweep_load_limit_plan(self) -> bool:
+        if self._controller_process_mode:
+            return True
+        plan = self._current_sweep_load_limit_plan_snapshot
+        if plan is None or not plan.clipped:
+            return True
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText("Recipe endpoint will be capped by the applied-load limit.")
+        box.setInformativeText(self._current_sweep_load_limit_message(plan, compact=False))
+        suffix, _ = self._distribution_units(plan.basis)
+        continue_button = box.addButton(
+            "Continue to "
+            f"{_format_compact_number(float(plan.effective_end or 0.0), decimals=4)}{suffix}",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        back_button = box.addButton("Go back", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(back_button)
+        box.exec()
+        return box.clickedButton() == continue_button
+
     def _is_max_load_exceeded(self) -> bool:
         limit_g = self._effective_max_load_limit_g()
         if limit_g is None:
@@ -26532,6 +27407,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _ask_existing_output_action(self, paths: Sequence[Path]) -> str:
+        if self._controller_process_mode:
+            action = self._controller_process_output_collision_action
+            if action in {OUTPUT_COLLISION_NEXT, OUTPUT_COLLISION_REPLACE}:
+                return action
+            return OUTPUT_COLLISION_CANCEL
         existing_names = ", ".join(path.name for path in paths if path.exists())
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
@@ -26557,6 +27437,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if clicked is cancel_button:
             return OUTPUT_COLLISION_CANCEL
         return OUTPUT_COLLISION_CANCEL
+
+    def _preflight_isolated_session_output(self) -> bool:
+        """Resolve an existing run visibly before collecting recipe-only input."""
+
+        self._controller_process_output_collision_action = OUTPUT_COLLISION_NEXT
+        paths = self._session_base_paths()
+        if not _session_paths_exist(paths):
+            return True
+        action = self._ask_existing_output_action(paths)
+        if action == OUTPUT_COLLISION_CANCEL:
+            self._log("Recipe start cancelled while reviewing existing output.")
+            self._controller_process_output_collision_action = OUTPUT_COLLISION_CANCEL
+            return False
+        self._controller_process_output_collision_action = action
+        if action == OUTPUT_COLLISION_NEXT:
+            directory = paths[0].parent.parent
+            basename = _clean_session_basename(self.edit_log_name.text())
+            next_basename, _next_paths = _next_run_session_paths(directory, basename)
+            self.edit_log_name.setText(next_basename)
+            self._log(
+                "Existing output preserved; the dedicated controller will use "
+                f"{next_basename}."
+            )
+        else:
+            self._log(
+                "Existing output replacement confirmed; evacuation is deferred until "
+                "the dedicated controller starts authoritative logging."
+            )
+        return True
 
     def _resolve_session_base_paths(self) -> tuple[Path, Path, Path, Path]:
         paths = self._session_base_paths()
@@ -26816,16 +27725,70 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         return now - self._last_session_data_flush_s >= SESSION_DATA_FLUSH_INTERVAL_S
 
+    def _record_session_file_io_error(
+        self,
+        *,
+        sidecar: str,
+        operation: str,
+        error: BaseException,
+    ) -> dict[str, str]:
+        record = {
+            "sidecar": str(sidecar),
+            "operation": str(operation),
+            "error_type": error.__class__.__name__,
+            "error": str(error) or error.__class__.__name__,
+            "recorded_utc": _utc_timestamp(),
+        }
+        self._session_file_io_errors.append(record)
+        return record
+
     def _flush_session_data_handles(self) -> None:
-        for handle in (
-            self._session_txt_handle,
-            self._session_csv_handle,
-            self._session_setup_txt_handle,
-            self._session_setup_csv_handle,
+        for sidecar, handle in (
+            ("measurement_txt", self._session_txt_handle),
+            ("measurement_csv", self._session_csv_handle),
+            ("setup_txt", self._session_setup_txt_handle),
+            ("setup_csv", self._session_setup_csv_handle),
         ):
-            if handle is not None:
+            if handle is None:
+                continue
+            try:
                 handle.flush()
+            except (OSError, ValueError) as exc:
+                self._record_session_file_io_error(
+                    sidecar=sidecar,
+                    operation="flush",
+                    error=exc,
+                )
         self._last_session_data_flush_s = time.monotonic()
+
+    def _close_session_file_handle(
+        self,
+        attribute: str,
+        *,
+        sidecar: str,
+        flush: bool = False,
+    ) -> None:
+        handle = getattr(self, attribute, None)
+        setattr(self, attribute, None)
+        if handle is None:
+            return
+        if flush:
+            try:
+                handle.flush()
+            except (OSError, ValueError) as exc:
+                self._record_session_file_io_error(
+                    sidecar=sidecar,
+                    operation="flush",
+                    error=exc,
+                )
+        try:
+            handle.close()
+        except (OSError, ValueError) as exc:
+            self._record_session_file_io_error(
+                sidecar=sidecar,
+                operation="close",
+                error=exc,
+            )
 
     def _session_measurement_csv_has_data_rows(self) -> bool:
         handle = self._session_csv_handle
@@ -27138,6 +28101,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_cycle_center_resume_evidence_s": (
                     SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S
                 ),
+                "current_hold_cycle_center_min_crossings": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_CROSSINGS
+                ),
+                "current_hold_cycle_center_min_side_fraction": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_MIN_SIDE_FRACTION
+                ),
                 "current_hold_volatile_observer_burst_count": (
                     SERVO_CURRENT_SWEEP_HOLD_VOLATILE_OBSERVER_BURST_COUNT
                 ),
@@ -27170,6 +28139,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
                 "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
                 "current_ramp_hold_on_error": self.check_current_sweep_hold_on_error.isChecked(),
+                "current_hold_momentary_bypass_active": bool(
+                    self._current_hold_bypass_active
+                ),
+                "current_hold_momentary_bypass_events": list(
+                    self._current_hold_bypass_events
+                ),
+                "current_hold_fluctuation_classification": (
+                    self._current_hold_fluctuation_classification
+                ),
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
@@ -27427,6 +28405,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if skip_first_overheating_current_end and value_key == "first_overheating_current_end_mA":
                     continue
                 sweep[metadata_key] = values[value_key]
+            plan = self._current_sweep_load_limit_plan_snapshot
+            if plan is not None:
+                sweep["target_end_requested"] = plan.requested_end
+                sweep["target_end_effective"] = plan.effective_end
+                sweep["load_limit_plan"] = plan.metadata()
             self._run_metadata_snapshot = replace(
                 snapshot,
                 effective_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -27498,6 +28481,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+                "ui_telemetry_complete": self._session_ui_telemetry_error is None,
+                "ui_telemetry_error": self._session_ui_telemetry_error,
+                "file_io_errors": list(self._session_file_io_errors),
                 "sensor_sidecars": self._session_sensor_sidecar_metadata(),
             }
         )
@@ -27668,6 +28654,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+                "ui_telemetry_complete": self._session_ui_telemetry_error is None,
+                "ui_telemetry_error": self._session_ui_telemetry_error,
+                "file_io_errors": list(self._session_file_io_errors),
             },
             "control": {
                 "logic_name": CONTROL_LOGIC_NAME,
@@ -27751,6 +28740,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_ramp_skipped": self._setup_preload_ramp_skipped,
                 "target_start": float(self.spin_current_sweep_target_start.value()),
                 "target_end": float(self.spin_current_sweep_target_end.value()),
+                "target_end_requested": float(self.spin_current_sweep_target_end.value()),
+                "target_end_effective": (
+                    None
+                    if self._current_sweep_load_limit_plan_snapshot is None
+                    else self._current_sweep_load_limit_plan_snapshot.effective_end
+                ),
+                "load_limit_plan": (
+                    None
+                    if self._current_sweep_load_limit_plan_snapshot is None
+                    else self._current_sweep_load_limit_plan_snapshot.metadata()
+                ),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
                 "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
                 "fatigue_cycles": int(self.spin_current_sweep_fatigue_cycles.value()),
@@ -27803,11 +28803,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ),
                     "lifecycle": "iso_stress_up_and_return",
                 },
-                "reverse_current": (
-                    True
-                    if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE
-                    else bool(self.check_current_sweep_reverse_current.isChecked())
-                ),
+                "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -28104,6 +29100,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_ui_telemetry_error = None
+        self._session_file_io_errors = []
         self._ui_refresh_last_monotonic_s = None
         self._last_ui_refresh_interval_ms = None
         self._last_ui_handler_duration_ms = None
@@ -28402,32 +29400,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self._record_session_stop_stage("session_logging_fenced")
         timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
-        if self._session_txt_handle is not None:
-            self._session_txt_handle.close()
-            self._session_txt_handle = None
-        if self._session_csv_handle is not None:
-            self._session_csv_handle.close()
-            self._session_csv_handle = None
+        self._close_session_file_handle(
+            "_session_txt_handle",
+            sidecar="measurement_txt",
+        )
+        self._close_session_file_handle(
+            "_session_csv_handle",
+            sidecar="measurement_csv",
+        )
         self._session_csv_writer = None
         with self._session_control_trace_lock:
-            if self._session_control_trace_handle is not None:
-                self._session_control_trace_handle.flush()
-                self._session_control_trace_handle.close()
-                self._session_control_trace_handle = None
+            self._close_session_file_handle(
+                "_session_control_trace_handle",
+                sidecar="control_trace",
+                flush=True,
+            )
             self._session_control_trace_writer = None
             self._last_control_trace_flush_s = 0.0
-        if self._session_ui_telemetry_handle is not None:
-            self._session_ui_telemetry_handle.close()
-            self._session_ui_telemetry_handle = None
+        self._close_session_file_handle(
+            "_session_ui_telemetry_handle",
+            sidecar="ui_telemetry",
+            flush=True,
+        )
         self._session_ui_telemetry_writer = None
-        if self._session_setup_txt_handle is not None:
-            self._session_setup_txt_handle.close()
-            self._session_setup_txt_handle = None
-        if self._session_setup_csv_handle is not None:
-            self._session_setup_csv_handle.close()
-            self._session_setup_csv_handle = None
+        self._close_session_file_handle(
+            "_session_setup_txt_handle",
+            sidecar="setup_txt",
+        )
+        self._close_session_file_handle(
+            "_session_setup_csv_handle",
+            sidecar="setup_csv",
+        )
         self._session_setup_csv_writer = None
-        self._record_session_stop_stage("session_files_closed")
+        if self._session_file_io_errors:
+            self._record_session_stop_stage(
+                "session_files_closed_with_errors",
+                detail=(
+                    f"Recorded {len(self._session_file_io_errors)} "
+                    "bounded file finalization error(s); terminal metadata continues."
+                ),
+            )
+        else:
+            self._record_session_stop_stage("session_files_closed")
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = self._session_point_count()
@@ -28505,7 +29519,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_tic_settings_snapshot = None
             self._automatic_tic_settings_snapshot = None
         self._first_overheating_preflight_decision = None
-        if self._session_base_path is not None:
+        if self._session_base_path is not None and not self._controller_process_mode:
             self._start_run_summary_generation(
                 self._session_base_path.parent,
                 offer_cleanup=self._session_stop_reason == "recipe_completed",
@@ -28742,6 +29756,26 @@ class MainWindow(QtWidgets.QMainWindow):
                         ""
                         if cycle_center_state is None
                         else int(cycle_center_state.fast_veto)
+                    ),
+                    "cycle_center_crossing_count": (
+                        "" if cycle_center_state is None else cycle_center_state.crossing_count
+                    ),
+                    "cycle_center_above_fraction": _number(
+                        None if cycle_center_state is None else cycle_center_state.above_fraction
+                    ),
+                    "cycle_center_below_fraction": _number(
+                        None if cycle_center_state is None else cycle_center_state.below_fraction
+                    ),
+                    "cycle_center_balanced_crossings": (
+                        ""
+                        if cycle_center_state is None
+                        else int(cycle_center_state.balanced_crossings)
+                    ),
+                    "current_hold_fluctuation_classification": (
+                        self._current_hold_fluctuation_classification
+                    ),
+                    "current_hold_bypass_active": int(
+                        self._current_hold_bypass_active
                     ),
                     "cycle_center_suppression_allowed": (
                         ""
@@ -29201,6 +30235,28 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_sample_rate_hz=self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
         )
 
+    def _capture_recipe_terminal_readback(self) -> None:
+        """Freeze run-relative values before session teardown clears its zero."""
+
+        terminal: dict[str, object] = {}
+        try:
+            terminal["load_g"] = float(self._current_effective_load_g())
+        except Exception:
+            pass
+        try:
+            stress_mpa = self._current_distribution_value(HSW_BASIS_STRESS_MPA)
+        except Exception:
+            stress_mpa = None
+        if stress_mpa is not None:
+            terminal["stress_mpa"] = float(stress_mpa)
+        point = self._capture_live_plot_point()
+        if point is not None:
+            for field_info in fields(point):
+                value = getattr(point, field_info.name)
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    terminal[f"plot_{field_info.name}"] = value
+        self._recipe_terminal_readback = terminal or None
+
     def _scale_summary_for_record(self, *, now_s: float) -> ScaleIntervalSummary:
         since_s = self._last_session_log_timestamp_s
         if since_s is None and self._session_start_wall_s > 0.0:
@@ -29565,7 +30621,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self._log("Preflight: scale is not connected, trying auto-detect/connect.")
         self._fast_auto_detect_scale_port()
-        return self._connect_scale(show_errors=False)
+        if not self._connect_scale(show_errors=False):
+            return False
+        worker = self._scale_worker
+        if worker is None:
+            return False
+        deadline = time.monotonic() + max(
+            1.0,
+            (float(worker._read_timeout_s()) * 2.0) + 0.5,
+        )
+        while time.monotonic() < deadline:
+            if worker.opened_event.wait(0.02):
+                return True
+            if worker.finished_event.is_set():
+                break
+        detail = str(worker.startup_error or "scale serial port did not open in time")
+        self._controller_process_error = detail
+        self._log(f"Preflight: {detail}")
+        self._disconnect_scale()
+        return False
 
     def _ensure_supply_ready_for_recipe(self) -> bool:
         if self._supply_controller is not None and self._supply_controller.is_connected():
@@ -29595,6 +30669,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if not bool(preview.get("requires_confirmation")):
             return True
+        if self._controller_process_mode:
+            accepted = bool(self._controller_process_cadence_downgrade_accepted)
+            if not accepted:
+                self._controller_process_error = (
+                    "shared PSU cadence downgrade requires operator confirmation"
+                )
+            return accepted
         candidate = preview.get("candidate")
         effective_hz = (
             float(candidate.get("effective_hz", 1.0))
@@ -29721,6 +30802,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
             self._log(message.replace("\n", " "))
+            if self._controller_process_mode:
+                self._controller_process_error = message.replace("\n", " ")
+                return False
             QtWidgets.QMessageBox.warning(self, APP_NAME, message)
             return False
         finally:
@@ -30089,11 +31173,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
-                "reverse_current": (
-                    True
-                    if mode == CURRENT_SWEEP_FATIGUE
-                    else bool(self.check_current_sweep_reverse_current.isChecked())
-                ),
+                "reverse_current": True,
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
@@ -30293,15 +31373,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 )
             )
-            reverse_current = bool(
-                current_sweep.get(
-                    "reverse_current",
-                    self.check_current_sweep_reverse_current.isChecked(),
-                )
-            )
-            if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE:
-                reverse_current = True
-            self.check_current_sweep_reverse_current.setChecked(reverse_current)
+            # TMA current sweeps are always bidirectional.  Older recipe files may
+            # contain reverse_current=false from the removed one-way mode; ignore it.
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
@@ -30762,12 +31835,24 @@ class MainWindow(QtWidgets.QMainWindow):
         return str(self.combo_recipe_mode.currentText())
 
     def _update_current_task_display(self) -> None:
-        task_text = self._current_task_summary()
+        isolated_snapshot = self._production_control_snapshot
+        if self._isolated_recipe_active and isolated_snapshot is not None:
+            isolated_readback = dict(getattr(isolated_snapshot, "readback", {}))
+            task_text = str(
+                isolated_readback.get("task")
+                or isolated_readback.get("automation_phase")
+                or self._automation_phase
+            )
+        else:
+            task_text = self._current_task_summary()
         if hasattr(self, "label_current_task"):
             self.label_current_task.setText(f"Current task: {task_text}")
+            self.label_current_task.setVisible(False)
         if hasattr(self, "label_recipe_banner"):
             self.label_recipe_banner.setText(task_text)
-            self.label_recipe_banner.setVisible(self._automation_active)
+            self.label_recipe_banner.setVisible(
+                self._automation_active and not self._isolated_recipe_active
+            )
         self._set_dashboard_value("task", task_text)
 
     def _active_current_sweep_progress_text(self) -> str | None:
@@ -30905,6 +31990,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
+        if self._controller_process_mode:
+            return
         if not self._is_ui_thread():
             self._recipe_progress_pending_complete = self._recipe_progress_pending_complete or bool(complete)
             if self._recipe_progress_update_queued:
@@ -31286,11 +32373,16 @@ class MainWindow(QtWidgets.QMainWindow):
         values: Mapping[str, float | bool],
         active_target: float,
     ) -> list[float] | None:
-        targets = self._build_numeric_targets(
-            float(values["target_start"]),
-            float(values["target_end"]),
-            float(values["target_step"]),
+        plan = self._current_sweep_load_limit_plan(
+            basis=self._current_sweep_basis(),
+            target_start=float(values["target_start"]),
+            target_end=float(values["target_end"]),
+            target_step=float(values["target_step"]),
+            fatigue=False,
         )
+        if plan.blocked_reason:
+            return None
+        targets = list(plan.effective_targets)
         for index, target in enumerate(targets):
             if self._target_values_close(float(target), active_target):
                 return [float(value) for value in targets[index + 1 :]]
@@ -31687,6 +32779,60 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         show_message: bool = True,
     ) -> bool:
+        values = self._current_sweep_override_values_from_controls()
+        load_limit_plan = self._current_sweep_load_limit_plan(
+            basis=self._current_sweep_basis(),
+            target_start=float(values["target_start"]),
+            target_end=float(values["target_end"]),
+            target_step=float(values["target_step"]),
+            fatigue=False,
+        )
+        self._current_sweep_load_limit_plan_snapshot = load_limit_plan
+        if load_limit_plan.blocked_reason:
+            self._log(f"Runtime recipe update rejected: {load_limit_plan.blocked_reason}")
+            if show_message:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, load_limit_plan.blocked_reason)
+            return False
+        if load_limit_plan.clipped and show_message and not self._confirm_current_sweep_load_limit_plan():
+            self._log("Runtime recipe update cancelled at the applied-load cap confirmation.")
+            return False
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            process = self._production_control_process
+            identity = self._production_control_identity
+            if (
+                process is None
+                or identity is None
+                or self._isolated_command_pending is not None
+            ):
+                return False
+            try:
+                sequence = process.update_config(
+                    identity,
+                    capture_runtime_configuration(self),
+                )
+            except Exception as exc:
+                self._isolated_runtime_update_values = None
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
+                self._log(f"TMA runtime update could not be queued: {exc}")
+                self.label_control_process_status.setText(
+                    f"Controller: runtime update not sent ({exc})"
+                )
+                self.label_control_process_status.setVisible(True)
+                self._update_recipe_buttons()
+                return False
+            self._isolated_runtime_update_values = dict(values)
+            self._isolated_command_pending = "update_config"
+            self._isolated_pending_sequence = sequence
+            self._isolated_command_deadline_s = (
+                time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+            )
+            self.label_control_process_status.setText(
+                "Controller: runtime settings sent; awaiting child confirmation"
+            )
+            self._update_recipe_buttons()
+            return True
         if not self._automation_active or not self._is_current_sweep_mode(self._automation_name):
             if show_message:
                 QtWidgets.QMessageBox.information(
@@ -31698,7 +32844,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_steps:
             return False
 
-        values = self._current_sweep_override_values_from_controls()
         preview = self._current_sweep_pending_update_preview(values)
         active_index = int(preview["active_index"])
         active_step_message = str(preview["active_step_message"])
@@ -32046,13 +33191,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._length_setup_progress.setFormat("Setup progress: idle")
 
     def _update_recipe_buttons(self) -> None:
+        if self._controller_process_mode:
+            return
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._update_recipe_buttons)
             return
-        self.button_start_recipe.setEnabled(not self._automation_active or self._automation_paused)
-        self.button_pause_recipe.setEnabled(self._automation_active)
+        if self._isolated_recipe_active:
+            command_ready = self._isolated_command_pending is None
+            self.button_start_recipe.setEnabled(False)
+            self.button_pause_recipe.setEnabled(command_ready)
+            self.button_stop_recipe.setEnabled(command_ready)
+        else:
+            self.button_start_recipe.setEnabled(
+                not self._automation_active or self._automation_paused
+            )
+            self.button_pause_recipe.setEnabled(self._automation_active)
+            self.button_stop_recipe.setEnabled(self._automation_active)
+        child_owns_hardware = self._isolated_recipe_active
+        self.manual_actions_box.setEnabled(not child_owns_hardware)
+        self.hardware_tab.setEnabled(not child_owns_hardware)
+        self.button_emergency_stop.setEnabled(True)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
-        self.button_stop_recipe.setEnabled(self._automation_active)
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
 
@@ -32099,22 +33258,35 @@ class MainWindow(QtWidgets.QMainWindow):
         except (TypeError, ValueError):
             return left == right
 
+    def _current_sweep_runtime_active(self) -> bool:
+        return bool(
+            (self._automation_active or self._isolated_recipe_active)
+            and self._is_current_sweep_mode(self._automation_name)
+        )
+
     def _current_sweep_pending_value_keys(self) -> set[str]:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
-        if not runtime_active or not self._automation_steps:
+        if not self._current_sweep_runtime_active():
             return set()
         if self._current_sweep_runtime_applied_values is None:
             self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
             return set()
-        preview = self._current_sweep_pending_update_preview()
-        if not preview["changed_steps"]:
-            return set()
+        if not self._isolated_recipe_active:
+            if not self._automation_steps:
+                return set()
+            preview = self._current_sweep_pending_update_preview()
+            if not preview["changed_steps"]:
+                return set()
         visible_values = self._current_sweep_visible_runtime_values_from_controls()
-        pending_keys: set[str] = set()
-        for key, value in visible_values.items():
-            applied_value = self._current_sweep_runtime_applied_values.get(key)
-            if not self._runtime_values_equal(value, applied_value):
-                pending_keys.add(key)
+        pending_keys = {
+            key
+            for key, value in visible_values.items()
+            if not self._runtime_values_equal(
+                value,
+                self._current_sweep_runtime_applied_values.get(key),
+            )
+        }
+        if not pending_keys:
+            return set()
         return pending_keys
 
     def _set_current_sweep_runtime_pending(self, widget: QtWidgets.QWidget, pending: bool) -> None:
@@ -32130,7 +33302,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.style().polish(widget)
 
     def _refresh_current_sweep_pending_update_ui(self) -> None:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        runtime_active = self._current_sweep_runtime_active()
         has_update_current_sweep = False
         if not runtime_active:
             self._current_sweep_runtime_applied_values = None
@@ -32139,10 +33311,13 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             if self._current_sweep_runtime_applied_values is None:
                 self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
-            preview = self._current_sweep_pending_update_preview()
-            has_update_current_sweep = bool(preview["changed_steps"])
-            can_update_current_sweep = has_update_current_sweep and not self._automation_paused
             pending_keys = self._current_sweep_pending_value_keys()
+            if self._isolated_recipe_active:
+                has_update_current_sweep = bool(pending_keys)
+            else:
+                preview = self._current_sweep_pending_update_preview()
+                has_update_current_sweep = bool(preview["changed_steps"])
+            can_update_current_sweep = has_update_current_sweep and not self._automation_paused
 
         for widget, keys in self._current_sweep_runtime_widget_value_keys().items():
             self._set_current_sweep_runtime_pending(widget, any(key in pending_keys for key in keys))
@@ -32189,7 +33364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.style().polish(widget)
 
     def _update_current_sweep_runtime_edit_state(self) -> None:
-        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        runtime_active = self._current_sweep_runtime_active()
         editable_widgets = set(self._current_sweep_runtime_editable_widgets())
         for widget in editable_widgets:
             self._set_current_sweep_runtime_locked(widget, False)
@@ -32354,8 +33529,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_automation_control_tick(self) -> None:
         self._control_worker_thread_id = get_ident()
-        with self._automation_control_lock:
-            self._handle_auto_ramp_tick()
+        control_loop = self._automation_control_loop
+        self._automation_tick_sample_driven = bool(
+            control_loop is not None and control_loop.callback_triggered_by_wake()
+        )
+        try:
+            with self._automation_control_lock:
+                self._handle_auto_ramp_tick()
+        finally:
+            self._automation_tick_sample_driven = False
 
     def _handle_automation_control_loop_error(self, exc: BaseException) -> None:
         self._automation_control_error = str(exc) or exc.__class__.__name__
@@ -32437,20 +33619,95 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _has_previous_tma_measurement(self, identity: TmaSampleIdentity) -> bool:
+        self._tma_history_check_pending = False
+        checked_sources: list[str] = []
+        matching_sources: list[str] = []
+        project_match_found = False
         path_text = self.edit_project_path.text().strip()
         if path_text:
+            checked_sources.append(f"builder project {path_text}")
             cached_project = _peek_builder_project_cache_entry(Path(path_text))
             if cached_project is not None and _project_has_previous_tma_measurement(
                 cached_project.payload,
                 identity,
             ):
-                return True
-        if self._tma_history_root != self._current_tma_history_root():
-            return False
-        return _has_unambiguous_tma_identity_match(
-            identity,
-            (record.identity for record in self._tma_history_records),
+                matching_sources.append(f"builder project {path_text}")
+                project_match_found = True
+        root = self._current_tma_history_root()
+        checked_sources.append(f"completed-run metadata under {root}")
+        if (
+            self._tma_history_root != root
+            or self._tma_history_scan_task is not None
+            or self._tma_history_scan_pending_root is not None
+        ):
+            self._tma_history_check_pending = True
+            self._last_tma_history_evidence = {
+                "identity": identity,
+                "checked_sources": tuple(checked_sources),
+                "matching_sources": (),
+                "history_record_count": None,
+            }
+            if (
+                self._tma_history_scan_task is None
+                and self._tma_history_scan_pending_root != root
+            ):
+                self._schedule_tma_history_scan()
+            return project_match_found
+        matching_sources.extend(
+            record.source
+            for record in self._tma_history_records
+            if _tma_identities_match(identity, record.identity)
         )
+        self._last_tma_history_evidence = {
+            "identity": identity,
+            "checked_sources": tuple(checked_sources),
+            "matching_sources": tuple(matching_sources),
+            "history_record_count": len(self._tma_history_records),
+        }
+        return project_match_found or bool(matching_sources)
+
+    def _log_previous_tma_measurement_evidence(self, *, found: bool) -> None:
+        evidence = self._last_tma_history_evidence
+        identity_obj = evidence.get("identity")
+        identity = (
+            identity_obj
+            if isinstance(identity_obj, TmaSampleIdentity)
+            else self._current_tma_sample_identity()
+        )
+        specimen = f", specimen {identity.specimen}" if identity.specimen else ""
+        identity_text = (
+            f"{identity.composition} {identity.microwire}{specimen}"
+        )
+        matching_sources = tuple(evidence.get("matching_sources") or ())
+        checked_sources = tuple(evidence.get("checked_sources") or ())
+        record_count = evidence.get("history_record_count")
+        if found:
+            source_text = "; ".join(str(source) for source in matching_sources)
+            count_text = (
+                ""
+                if record_count is None
+                else (
+                    f" {len(matching_sources)} matching source(s) among "
+                    f"{int(record_count)} completed run record(s)."
+                )
+            )
+            self._log(
+                "Previous TMA measurement check: FOUND for "
+                f"{identity_text}.{count_text} "
+                f"Match: {source_text or 'loaded history index'}."
+            )
+        else:
+            checked_text = "; ".join(str(source) for source in checked_sources)
+            count_text = (
+                ""
+                if record_count is None
+                else f" ({int(record_count)} completed run record(s) indexed)"
+            )
+            self._log(
+                "Previous TMA measurement check: NO MATCH for "
+                f"{identity_text}. Checked: {checked_text or 'configured history sources'}"
+                f"{count_text}."
+            )
 
     def _build_first_overheating_preflight_dialog(self) -> QtWidgets.QMessageBox:
         box = QtWidgets.QMessageBox(self)
@@ -32512,21 +33769,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _first_overheating_preflight_allows_start(self) -> bool:
         self._first_overheating_preflight_decision = None
-        identity = self._current_tma_sample_identity()
         recipe_mode = str(self.combo_recipe_mode.currentData() or "")
-        history_found = self._has_previous_tma_measurement(identity)
         first_overheating_enabled = (
             self.check_constant_current_first_overheating.isChecked()
             if self._is_constant_current_strain_sweep_mode(recipe_mode)
             else self.check_current_sweep_first_overheating.isChecked()
         )
+        # Previous-run evidence is needed only when first overheating is disabled.
+        # Avoid making a configured recipe wait for an unrelated cloud-history scan.
+        if first_overheating_enabled:
+            return True
+        identity = self._current_tma_sample_identity()
+        history_found = self._has_previous_tma_measurement(identity)
+        if self._tma_history_check_pending:
+            self._tma_history_start_deferred = True
+            root = self._current_tma_history_root()
+            self._log(
+                "Previous TMA measurement check is still indexing completed runs under "
+                f"{root}; recipe start is deferred automatically until it finishes."
+            )
+            self.label_control_process_status.setText(
+                "Controller: waiting for previous-run history scan"
+            )
+            return False
+        self._log_previous_tma_measurement_evidence(found=history_found)
         if not _first_overheating_preflight_required(
             recipe_mode=recipe_mode,
             first_overheating_enabled=first_overheating_enabled,
             previous_tma_measurement_found=history_found,
         ):
+            self._allow_missing_prior_tma_history_once = False
             return True
-        action = self._ask_first_overheating_preflight_action()
+        if self._allow_missing_prior_tma_history_once:
+            self._allow_missing_prior_tma_history_once = False
+            action = FIRST_OVERHEATING_CONTINUE
+            self._log(
+                "First-overheating preflight: the armed bench plan explicitly authorized "
+                "one run to continue without prior TMA history."
+            )
+        else:
+            action = self._ask_first_overheating_preflight_action()
         if action == FIRST_OVERHEATING_CONFIGURE:
             if self._is_constant_current_strain_sweep_mode(recipe_mode):
                 self.check_constant_current_first_overheating.setChecked(True)
@@ -32558,6 +33840,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def authorize_missing_prior_tma_history_once(self) -> None:
+        """Authorize exactly one armed, non-interactive start past the history dialog."""
+        self._allow_missing_prior_tma_history_once = True
+
     def _record_first_overheating_preflight_skip_for_session(self) -> None:
         if self._first_overheating_preflight_decision is None or not self._session_active:
             return
@@ -32573,7 +33859,941 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._write_session_metadata()
 
+    def _create_production_control_process(self) -> TmaControlProcess:
+        return TmaControlProcess(
+            backend_factory_spec=BackendFactorySpec(
+                module=(
+                    "data_logging.tma_logger."
+                    "production_control_backend"
+                ),
+                factory="create_production_backend",
+            ),
+            heartbeat_interval_s=0.10,
+        )
+
+    def _rollback_isolated_controller_startup(
+        self,
+        process: object,
+        exc: BaseException,
+    ) -> None:
+        poll_fault_detail = getattr(process, "poll_fault_detail", None)
+        fault_detail, fault_traceback = (
+            poll_fault_detail()
+            if callable(poll_fault_detail)
+            else ("", "")
+        )
+        close_process = getattr(process, "close", None)
+        if callable(close_process):
+            close_process()
+        detail = str(fault_detail or exc)
+        self._log(
+            "Dedicated-process startup failed before hardware ownership "
+            f"transfer: {detail}"
+        )
+        if fault_traceback:
+            self._log(
+                "Dedicated-process bootstrap traceback:\n"
+                f"{fault_traceback.rstrip()}"
+            )
+        # Setup never became child-owned. Leaving its modal-looking graph
+        # open with disabled pause/stop buttons traps the operator in a dead
+        # idle state, so roll the pre-run view back completely.
+        self._close_length_setup_dialog()
+        QtWidgets.QMessageBox.critical(
+            self,
+            APP_NAME,
+            "The dedicated controller did not become ready. No hardware "
+            "ownership was transferred and PSU outputs were not changed.\n\n"
+            f"{detail}",
+        )
+        self._first_overheating_preflight_decision = None
+        self._update_recipe_buttons()
+
+    def _start_isolated_auto_ramp(self) -> None:
+        if self._isolated_recipe_active:
+            return
+        if self._session_active:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Stop the current manual session before starting an isolated "
+                "recipe. The dedicated process must be the sole authoritative "
+                "run logger.",
+            )
+            return
+        try:
+            steps, summary, interval_ms = self._build_automation_recipe()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self._isolated_terminal_readback = None
+        self._isolated_terminal_state = None
+        self._isolated_terminal_task = ""
+        if not self._confirm_current_sweep_load_limit_plan():
+            self._log("Recipe start cancelled at the applied-load cap confirmation.")
+            return
+        if not self._using_shared_broker_supply():
+            shared_index = self.combo_supply_profile.findData("shared_hmp_broker")
+            if shared_index < 0:
+                raise RuntimeError(
+                    "Process-isolated TMA requires the shared HMP broker profile."
+                )
+            self.combo_supply_profile.setCurrentIndex(shared_index)
+            self._log(
+                "Selected the process-owned shared HMP broker for isolated "
+                "TMA safety."
+            )
+        if self._resume_recipe_state is not None:
+            if self._resume_recipe_state.summary == summary:
+                resume_choice = self._ask_resume_stopped_recipe()
+                if resume_choice == "cancel":
+                    return
+                if resume_choice == "resume":
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        APP_NAME,
+                        "A stopped recipe cannot yet be resumed across the dedicated-process "
+                        "ownership boundary. Choose Start over in the resume dialog to run it "
+                        "with process isolation.",
+                    )
+                    return
+            else:
+                self._log(
+                    "Discarded stopped-recipe resume state because the visible recipe "
+                    "controls changed."
+                )
+            self._resume_recipe_state = None
+        if not self._first_overheating_preflight_allows_start():
+            return
+        self._sync_stale_log_name_from_sample()
+        if not self._preflight_isolated_session_output():
+            self._first_overheating_preflight_decision = None
+            return
+        if not self._preflight_recipe_hardware(steps, show_progress=True):
+            self._first_overheating_preflight_decision = None
+            return
+        if not self._prepare_continuity_current_for_recipe(steps):
+            self._first_overheating_preflight_decision = None
+            return
+        starting_length_mm: float | None = None
+        has_length_setup = any(
+            step.action == "starting_length_prompt" for step in steps
+        )
+        process = self._create_production_control_process()
+        try:
+            # This child is hardware-free until START. Warming its imports
+            # while the operator enters the mounted length hides most of the
+            # Windows spawn delay without transferring any hardware ownership.
+            process.start_process()
+        except Exception as exc:
+            self._rollback_isolated_controller_startup(process, exc)
+            return
+        if has_length_setup:
+            # Preserve the established pre-run experience: the setup graphs
+            # exist behind the modal length prompt. The visible process owns
+            # only these immutable views; the child still owns every setup
+            # hardware command and authoritative setup/run file.
+            self._show_length_setup_dialog()
+            self._update_length_setup_dialog(
+                "Preparing dedicated controller; hardware remains UI-owned."
+            )
+            if self._automated_setup_starting_length_mm is not None:
+                starting_length_mm = float(
+                    self._automated_setup_starting_length_mm
+                )
+                accepted = True
+                self._log(
+                    "Using the campaign-provided mounted length for the "
+                    "dedicated controller: "
+                    f"{_format_compact_unit(starting_length_mm, 'mm', decimals=4)}."
+                )
+            else:
+                starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    APP_NAME,
+                    "Measured mounted wire length now (mm):",
+                    max(0.001, float(self.spin_initial_length.value())),
+                    0.001,
+                    100000.0,
+                    4,
+                )
+            if not accepted:
+                self._log("Recipe start cancelled before transferring hardware ownership.")
+                process.close()
+                self._close_length_setup_dialog()
+                self._first_overheating_preflight_decision = None
+                return
+            starting_length_mm = float(starting_length_mm)
+            self.spin_initial_length.setValue(starting_length_mm)
+        config_json = capture_window_configuration(
+            self,
+            starting_length_mm=starting_length_mm,
+            cadence_downgrade_accepted=True,
+        )
+        self._update_length_setup_dialog(
+            "Waiting for dedicated controller readiness; hardware remains UI-owned."
+        )
+        try:
+            process.wait_until_ready(timeout_s=10.0)
+        except Exception as exc:
+            self._rollback_isolated_controller_startup(process, exc)
+            return
+        self._log(
+            "Dedicated controller process reported ready; beginning hardware "
+            "ownership transfer."
+        )
+        self._stop_manual_jog()
+        if (
+            self._scale_thread is not None
+            or self._ir_thread is not None
+            or self._supply_controller is not None
+            or self._tic_command_dispatcher is not None
+            or self._tic_controller is not None
+            or self._tic_device_lock is not None
+            or self._tic_device_lock_handle is not None
+        ):
+            self._log(
+                "Releasing UI-process hardware handles before starting the dedicated "
+                "control process."
+            )
+            if not self._disconnect_scale():
+                self._log(
+                    "Dedicated-process startup aborted because the UI scale "
+                    "worker did not release the serial port cleanly."
+                )
+                process.close()
+                self._first_overheating_preflight_decision = None
+                return
+            self._log("UI scale ownership released.")
+            if self._ir_thread is not None:
+                self._disconnect_ir_thermometer()
+                self._log("UI IR ownership released.")
+            if not self._stop_tic_dispatcher():
+                self._log(
+                    "Dedicated-process startup aborted because the UI Tic worker did "
+                    "not release hardware ownership cleanly."
+                )
+                process.close()
+                self._first_overheating_preflight_decision = None
+                return
+            self._release_tic_device_lock()
+            self._log("UI Tic ownership released.")
+            # Do not send broker release/configure/output commands here. The
+            # child uses the same stable broker owner identity and adopts the
+            # existing leases when it connects.
+            self._isolated_supply_handoff_leases = (
+                self._detach_supply_for_handoff()
+            )
+            self._log(
+                "Shared HMP ownership transferred without changing PSU outputs."
+            )
+        # The visible window no longer owns Tic status while the child owns
+        # recipe hardware.  A preflight refresh may have armed this timer.
+        self._status_timer.stop()
+        self._production_control_generation += 1
+        identity = ControlSessionIdentity(
+            session_id=f"tma-{uuid4()}",
+            generation=self._production_control_generation,
+        )
+        policy = (
+            ControlPolicy.KOSICE
+            if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
+            else ControlPolicy.PRAGUE
+        )
+        try:
+            start_sequence = process.start_session(
+                ControlStartRequest(
+                    identity=identity,
+                    policy=policy,
+                    control_interval_s=min(0.01, max(0.001, interval_ms / 1000.0)),
+                    snapshot_interval_s=0.10,
+                    parent_heartbeat_timeout_s=2.0,
+                    config_json=config_json,
+                )
+            )
+        except Exception as exc:
+            try:
+                process.emergency_stop()
+            except Exception as emergency_exc:
+                self._log(
+                    "WARNING: control-process emergency command failed during "
+                    f"ownership handoff: {emergency_exc}"
+                )
+            finally:
+                process.close()
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as shutdown_exc:
+                self._log(
+                    "WARNING: failed to confirm shared HMP outputs off after "
+                    f"control-process handoff failure: {shutdown_exc}"
+                )
+            self._release_shared_supply_handoff_leases(
+                self._isolated_supply_handoff_leases
+            )
+            self._isolated_supply_handoff_leases = {}
+            detail = (
+                "Dedicated controller could not accept the recipe after "
+                f"hardware ownership transfer: {exc}"
+            )
+            self._log(detail)
+            self._close_length_setup_dialog()
+            self._first_overheating_preflight_decision = None
+            self.label_control_process_status.setStyleSheet("color: #b91c1c;")
+            self.label_control_process_status.setText(
+                f"Controller: dedicated process start failed: {exc}"
+            )
+            self.label_control_process_status.setVisible(True)
+            QtWidgets.QMessageBox.critical(
+                self,
+                APP_NAME,
+                f"{detail}\n\nAll shared PSU outputs were commanded off.",
+            )
+            self._update_recipe_buttons()
+            return
+        self._production_control_process = process
+        self._production_control_identity = identity
+        self._isolated_recipe_active = True
+        self._isolated_recipe_paused = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
+        self._isolated_command_pending = "start"
+        self._isolated_pending_sequence = start_sequence
+        self._isolated_command_deadline_s = time.monotonic() + TMA_START_ACK_TIMEOUT_S
+        self._isolated_last_plot_elapsed_s = None
+        self._isolated_setup_elapsed_offset_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_last_log_sequence = 0
+        self._isolated_user_stop_requested = False
+        self._isolated_progress_last_task = ""
+        self._session_points = []
+        self._live_plot_points = []
+        self._automation_active = True
+        self._automation_paused = False
+        self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
+        self._automation_phase = "starting_process"
+        self.label_control_process_status.setStyleSheet("color: #2563eb;")
+        self.label_control_process_status.setText("Starting recipe controller…")
+        self.label_control_process_status.setVisible(True)
+        self._control_process_poll_timer.start()
+        self._update_recipe_buttons()
+
+    def _poll_production_control_process(self) -> None:
+        process = self._production_control_process
+        if process is None:
+            self._control_process_poll_timer.stop()
+            return
+        deadline_s = self._isolated_command_deadline_s
+        if (
+            self._isolated_command_pending is not None
+            and deadline_s is not None
+            and time.monotonic() >= deadline_s
+        ):
+            pending = self._isolated_command_pending
+            detail = (
+                f"TMA controller did not acknowledge {pending} before the "
+                "safety deadline."
+            )
+            self._log(detail)
+            try:
+                process.emergency_stop()
+            except Exception as exc:
+                self._log(f"TMA emergency signal after timeout failed: {exc}")
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(f"TMA broker emergency shutdown after timeout failed: {exc}")
+            try:
+                process.close(timeout_s=1.0, force=True)
+            except TypeError:
+                process.close(timeout_s=1.0)
+            self._finish_isolated_recipe(
+                state=ControlState.FAULTED,
+                detail=detail,
+            )
+            return
+        poll_fault_detail = getattr(process, "poll_fault_detail", None)
+        fault_detail, _fault_traceback = (
+            poll_fault_detail()
+            if callable(poll_fault_detail)
+            else ("", "")
+        )
+        snapshot = process.poll_latest_snapshot()
+        if snapshot is not None:
+            self._production_control_snapshot = snapshot
+            readback = dict(snapshot.readback)
+            self._current_hold_bypass_confirmed = bool(
+                readback.get("current_hold_bypass_active", False)
+            )
+            self._update_current_hold_bypass_dialog()
+            self._consume_isolated_log_snapshot(readback)
+            self._consume_isolated_plot_snapshot(readback)
+            if (
+                self._isolated_command_pending == "start"
+                and self._isolated_pending_sequence is not None
+                and snapshot.last_command_sequence >= self._isolated_pending_sequence
+                and getattr(snapshot, "last_command_result", "") == "accepted"
+            ):
+                # The child has adopted the stable-owner broker leases. It now
+                # owns their normal release/cleanup lifecycle.
+                self._isolated_supply_handoff_leases = {}
+            if (
+                self._length_setup_dialog is not None
+                and bool(readback.get("session_logging_enabled"))
+            ):
+                self._update_length_setup_progress(complete=True)
+                self._close_length_setup_dialog()
+            self._automation_paused = snapshot.state is ControlState.PAUSED
+            self._isolated_recipe_paused = self._automation_paused
+            pending_sequence = self._isolated_pending_sequence
+            if (
+                pending_sequence is not None
+                and snapshot.last_command_sequence >= pending_sequence
+                and getattr(snapshot, "last_command_result", "") == "rejected"
+            ):
+                detail = str(getattr(snapshot, "last_command_detail", "") or "")
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
+                self._isolated_runtime_update_values = None
+                self._log(f"Control-process command rejected: {detail}")
+                self._update_recipe_buttons()
+            elif (
+                self._isolated_command_pending in {"update_config", "starting_length"}
+                and pending_sequence is not None
+                and snapshot.last_command_sequence >= pending_sequence
+                and getattr(snapshot, "last_command_result", "") == "accepted"
+            ):
+                if (
+                    self._isolated_command_pending == "update_config"
+                    and self._isolated_runtime_update_values is not None
+                ):
+                    self._current_sweep_runtime_applied_values = dict(
+                        self._isolated_runtime_update_values
+                    )
+                self._isolated_runtime_update_values = None
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
+                if snapshot.state is ControlState.RUNNING:
+                    self.label_control_process_status.setVisible(False)
+                self._update_recipe_buttons()
+            if (
+                (
+                    self._isolated_command_pending == "start"
+                    and snapshot.state is ControlState.RUNNING
+                    and bool(readback.get("automation_active"))
+                )
+                or (
+                    self._isolated_command_pending == "pause"
+                    and snapshot.state is ControlState.PAUSED
+                )
+                or (
+                    self._isolated_command_pending == "resume"
+                    and snapshot.state is ControlState.RUNNING
+                )
+            ):
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_command_deadline_s = None
+                self._update_recipe_buttons()
+            self._automation_phase = str(
+                readback.get("automation_phase") or snapshot.state.value
+            )
+            self._automation_index = int(readback.get("automation_index") or 0)
+            completed = int(
+                readback.get("automation_completed") or self._automation_index
+            )
+            total = int(readback.get("automation_total") or 0)
+            self._automation_total_steps = max(0, total)
+            self._automation_completed_ticks = max(0, completed)
+            self._apply_isolated_recipe_status(snapshot, readback)
+            self.label_control_process_status.setText(
+                "Controller: dedicated process "
+                f"PID {snapshot.owner_pid} | {snapshot.state.value} | "
+                f"PSU {readback.get('supply_effective_hz') or '-'} Hz"
+            )
+            load_g = readback.get("load_g")
+            stress_mpa = readback.get("stress_mpa")
+            position_mm = readback.get("position_mm")
+            supply_current = readback.get("supply_current_mA")
+            supply_voltage = readback.get("supply_voltage_V")
+            self.label_live_summary.setText(
+                "Process-owned live state | "
+                f"load {'-' if load_g is None else f'{float(load_g):.4f} g'} | "
+                f"stress {'-' if stress_mpa is None else f'{float(stress_mpa):.3f} MPa'} | "
+                f"position {'-' if position_mm is None else f'{float(position_mm):.4f} mm'} | "
+                f"PSU {'-' if supply_current is None else f'{float(supply_current):.2f} mA'} "
+                f"{'-' if supply_voltage is None else f'{float(supply_voltage):.3f} V'}"
+            )
+            if snapshot.state in {
+                ControlState.STOPPED,
+                ControlState.EMERGENCY,
+                ControlState.FAULTED,
+            }:
+                self._finish_isolated_recipe(
+                    state=snapshot.state,
+                    detail=str(readback.get("error") or readback.get("emergency_reason") or ""),
+                    readback=readback,
+                )
+                return
+        for event in process.poll_events():
+            if event.kind is ControlEventKind.COMMAND_REJECTED:
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._isolated_runtime_update_values = None
+                self._update_recipe_buttons()
+                self._log(f"Control-process command rejected: {event.detail}")
+            elif event.kind is ControlEventKind.CONFIG_UPDATED:
+                if self._isolated_runtime_update_values is not None:
+                    self._current_sweep_runtime_applied_values = dict(
+                        self._isolated_runtime_update_values
+                    )
+                self._isolated_runtime_update_values = None
+                self._isolated_command_pending = None
+                self._isolated_pending_sequence = None
+                self._update_recipe_buttons()
+                self._log(f"Control-process configuration updated: {event.detail}")
+            elif event.kind is ControlEventKind.FAULT:
+                self._finish_isolated_recipe(
+                    state=ControlState.FAULTED,
+                    detail=event.detail or fault_detail,
+                )
+                return
+        if not process.is_alive() and process.exitcode is not None:
+            self._finish_isolated_recipe(
+                state=ControlState.FAULTED,
+                detail=(
+                    fault_detail
+                    or f"control process exited with code {process.exitcode}"
+                ),
+            )
+
+    def _apply_isolated_recipe_status(
+        self,
+        snapshot: object,
+        readback: Mapping[str, object],
+        *,
+        terminal_task: str = "",
+    ) -> None:
+        """Publish process-owned state through the current dashboard widgets."""
+        task_text = terminal_task or str(
+            readback.get("task") or self._automation_phase
+        )
+        if (
+            self._length_setup_dialog is not None
+            and not terminal_task
+            and not bool(readback.get("session_logging_enabled"))
+        ):
+            self._update_length_setup_dialog(f"Controller: {task_text}")
+        self.label_current_task.setText(f"Current task: {task_text}")
+        self.label_current_task.setVisible(False)
+        self.label_recipe_banner.setVisible(False)
+        self._set_dashboard_value("task", task_text)
+
+        load_g = readback.get("load_g")
+        stress_mpa = readback.get("stress_mpa")
+        strain_pct = readback.get("plot_strain_pct")
+        display_position_mm = readback.get("plot_position_mm")
+        if display_position_mm is None:
+            display_position_mm = readback.get("position_mm")
+        speed_mm_s = readback.get("speed_mm_s")
+        supply_current = readback.get("supply_current_mA")
+        supply_voltage = readback.get("supply_voltage_V")
+        self._set_dashboard_value(
+            "load_g",
+            "-" if load_g is None else f"{float(load_g):.3f} g",
+        )
+        self._set_dashboard_value(
+            "stress_mpa",
+            "-" if stress_mpa is None else f"{float(stress_mpa):.1f} MPa",
+        )
+        self._set_dashboard_value(
+            "strain_pct",
+            "-" if strain_pct is None else f"{float(strain_pct):.3f} %",
+        )
+        self._set_dashboard_value(
+            "speed_mm_s",
+            self._live_linear_speed_text(
+                None if speed_mm_s is None else float(speed_mm_s)
+            ),
+        )
+        self._set_dashboard_value(
+            "motor",
+            "-" if display_position_mm is None else f"{float(display_position_mm):.4f} mm",
+        )
+        current_text = "-" if supply_current is None else f"{float(supply_current):.2f}mA"
+        voltage_text = "-" if supply_voltage is None else f"{float(supply_voltage):.2f}V"
+        self._set_dashboard_value("supply", f"{current_text} {voltage_text}")
+
+        state = getattr(snapshot, "state", None)
+        if state in {ControlState.RUNNING, ControlState.PAUSED}:
+            self.label_control_process_status.setVisible(False)
+
+        if terminal_task:
+            self.recipe_progress.setRange(0, 100)
+            self.recipe_progress.setValue(100)
+            self.recipe_progress.setFormat(f"Overall 100% | {task_text}")
+            return
+
+        if str(readback.get("automation_name") or "") == CURRENT_SWEEP_FATIGUE:
+            completed_cycles = max(
+                0,
+                int(readback.get("fatigue_cycles_completed") or 0),
+            )
+            cycle_index = max(0, int(readback.get("fatigue_cycle_index") or 0))
+            raw_cycle_limit = readback.get("fatigue_cycle_limit")
+            cycle_limit = (
+                None
+                if raw_cycle_limit is None
+                else max(1, int(raw_cycle_limit))
+            )
+            active_leg = str(readback.get("fatigue_cycle_leg") or "").strip()
+            if cycle_limit is None:
+                self.recipe_progress.setRange(0, 0)
+                progress_text = (
+                    "Fatigue: preparing forever"
+                    if cycle_index <= 0
+                    else (
+                        f"Fatigue: {completed_cycles} complete | cycle {cycle_index}"
+                        " | until stopped"
+                    )
+                )
+            else:
+                self.recipe_progress.setRange(0, cycle_limit)
+                self.recipe_progress.setValue(min(completed_cycles, cycle_limit))
+                progress_text = (
+                    f"Fatigue: preparing {cycle_limit} cycle(s)"
+                    if cycle_index <= 0
+                    else f"Fatigue cycle {cycle_index}/{cycle_limit}"
+                )
+            if active_leg:
+                progress_text += f" | {active_leg}"
+            self.recipe_progress.setFormat(progress_text)
+            return
+
+        total = max(0, int(readback.get("automation_total") or 0))
+        completed = max(0, int(readback.get("automation_completed") or 0))
+        if total <= 0:
+            self.recipe_progress.setRange(0, 0)
+            self.recipe_progress.setFormat(task_text)
+            return
+        value = min(completed, max(0, total - 1))
+        percent = min(99, int(math.floor(100.0 * value / total)))
+        now_s = time.monotonic()
+        if self._automation_progress_started_s <= 0.0:
+            self._automation_progress_started_s = now_s
+        should_refresh_progress = (
+            self._automation_progress_last_format_update_s <= 0.0
+            or now_s - self._automation_progress_last_format_update_s >= 1.0
+            or task_text != self._isolated_progress_last_task
+        )
+        if not should_refresh_progress:
+            return
+        self._automation_progress_last_format_update_s = now_s
+        self._isolated_progress_last_task = task_text
+        self.recipe_progress.setRange(0, total)
+        self.recipe_progress.setValue(value)
+        progress_text = f"Overall {percent:3d}% | {task_text}"
+        remaining_s = self._estimated_recipe_remaining_s(
+            value=value,
+            total=total,
+            elapsed_s=max(0.0, now_s - self._automation_progress_started_s),
+        )
+        if remaining_s is not None and remaining_s > 0.0:
+            progress_text += f" | ETA {_format_duration(remaining_s)}"
+        self.recipe_progress.setFormat(progress_text)
+
+    def _finish_isolated_recipe(
+        self,
+        *,
+        state: ControlState,
+        detail: str = "",
+        readback: Mapping[str, object] | None = None,
+    ) -> None:
+        process = self._production_control_process
+        user_stop_requested = self._isolated_user_stop_requested
+        offer_recovery = (
+            state is ControlState.STOPPED
+            and user_stop_requested
+        )
+        final_readback = dict(readback or {})
+        if not final_readback and self._production_control_snapshot is not None:
+            final_readback = dict(
+                getattr(self._production_control_snapshot, "readback", {})
+            )
+        session_stop_reason = str(final_readback.get("session_stop_reason") or "")
+        session_stop_category = str(final_readback.get("session_stop_category") or "")
+        session_stop_label = str(final_readback.get("session_stop_label") or "")
+        session_stop_detail = str(final_readback.get("session_stop_detail") or "")
+        wire_break_terminal = session_stop_reason == "wire_break_or_contact_loss"
+        metadata_fault = session_stop_category == "fault"
+        terminal_fault = state in {ControlState.FAULTED, ControlState.EMERGENCY} or metadata_fault
+        if session_stop_detail and not detail:
+            detail = session_stop_detail
+        if wire_break_terminal:
+            terminal_task = "Wire break or contact loss (final values)"
+        elif state is ControlState.STOPPED:
+            terminal_task = (
+                "Recipe stopped (final values)"
+                if user_stop_requested
+                else "Recipe completed (final values)"
+            )
+        elif state is ControlState.EMERGENCY:
+            terminal_task = "Emergency stop (final values)"
+        else:
+            terminal_task = "Recipe faulted (final values)"
+        self._isolated_terminal_readback = final_readback or None
+        self._isolated_terminal_state = state
+        self._isolated_terminal_task = terminal_task
+        summary_run_dir: Path | None = None
+        if final_readback:
+            position_mm = final_readback.get("position_mm")
+            if position_mm is not None:
+                self._current_position_mm = float(position_mm)
+                self._effective_position_mm = float(position_mm)
+                self._last_move_target_mm = float(position_mm)
+                self._last_effective_move_target_mm = float(position_mm)
+            self._tic_motor_power_ok = None
+            session_path = final_readback.get("session_path")
+            if isinstance(session_path, str) and session_path.strip():
+                summary_run_dir = Path(session_path).parent
+        self._control_process_poll_timer.stop()
+        self._isolated_recipe_active = False
+        self._isolated_recipe_paused = False
+        self._isolated_command_pending = None
+        self._isolated_pending_sequence = None
+        self._isolated_command_deadline_s = None
+        self._isolated_runtime_update_values = None
+        self._isolated_operator_prompt_open = False
+        self._isolated_last_plot_elapsed_s = None
+        self._isolated_session_logging_enabled = False
+        self._isolated_user_stop_requested = False
+        self._current_hold_bypass_requested = False
+        self._current_hold_bypass_confirmed = False
+        self._update_current_hold_bypass_dialog()
+        self._close_length_setup_dialog()
+        self._automation_active = False
+        self._automation_paused = False
+        self._automation_steps = []
+        self._automation_index = 0
+        self._production_control_process = None
+        self._production_control_identity = None
+        if process is not None:
+            if offer_recovery:
+                self.label_control_process_status.setStyleSheet("color: #2563eb;")
+                self.label_control_process_status.setText(
+                    "Controller: recipe stopped safely; releasing hardware for recovery..."
+                )
+                self.label_control_process_status.setVisible(True)
+                self.label_control_process_status.repaint()
+            closed = process.close(timeout_s=2.0)
+            if not closed:
+                self._log(
+                    "TMA controller did not exit after its terminal state; "
+                    "forcing process cleanup."
+                )
+                try:
+                    process.close(timeout_s=1.0, force=True)
+                except TypeError:
+                    process.close(timeout_s=1.0)
+        if summary_run_dir is not None:
+            self._start_run_summary_generation(
+                summary_run_dir,
+                offer_cleanup=(
+                    state is ControlState.STOPPED
+                    and not offer_recovery
+                    and not terminal_fault
+                ),
+            )
+        if self._isolated_supply_handoff_leases:
+            if state in {ControlState.FAULTED, ControlState.EMERGENCY}:
+                try:
+                    self._emergency_shared_supply_outputs_off()
+                except Exception as exc:
+                    self._log(
+                        "WARNING: failed to confirm shared HMP outputs off "
+                        f"after pre-adoption controller fault: {exc}"
+                    )
+            self._release_shared_supply_handoff_leases(
+                self._isolated_supply_handoff_leases
+            )
+            self._isolated_supply_handoff_leases = {}
+        color = "#b91c1c" if terminal_fault else "#15803d"
+        self.label_control_process_status.setStyleSheet(f"color: {color};")
+        suffix = f": {detail}" if detail else ""
+        self.label_control_process_status.setText(
+            "Controller: "
+            + (
+                f"{session_stop_label or 'dedicated process fault'}{suffix}"
+                if metadata_fault
+                else f"dedicated process {state.value}{suffix}"
+            )
+        )
+        self.label_control_process_status.setVisible(terminal_fault)
+        self._update_recipe_buttons()
+        if self._isolated_terminal_readback is not None:
+            self._apply_isolated_recipe_status(
+                SimpleNamespace(state=state),
+                self._isolated_terminal_readback,
+                terminal_task=self._isolated_terminal_task,
+            )
+        if offer_recovery:
+            self._schedule_recovery_after_stop()
+        elif wire_break_terminal:
+            message = session_stop_detail or "Wire break or contact loss was detected."
+            QtCore.QTimer.singleShot(
+                0,
+                WeakOwnerCallback(self, "_ask_wire_break_recovery_after_stop", message),
+            )
+
+    def _consume_isolated_log_snapshot(
+        self,
+        readback: Mapping[str, object],
+    ) -> None:
+        raw_tail = readback.get("ui_log_tail_json")
+        if not isinstance(raw_tail, str) or not raw_tail:
+            return
+        try:
+            tail = json.loads(raw_tail)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(tail, list):
+            return
+        appended = False
+        for item in tail:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+            ):
+                continue
+            try:
+                sequence = int(item[0])
+            except (TypeError, ValueError):
+                continue
+            line = str(item[1])
+            if sequence <= self._isolated_last_log_sequence:
+                continue
+            if (
+                sequence > self._isolated_last_log_sequence + 1
+            ):
+                missed = sequence - self._isolated_last_log_sequence - 1
+                self._queue_run_log_display_line(
+                    f"[control process] {missed} UI log line(s) were omitted; "
+                    "the authoritative run_log.txt remains complete."
+                )
+            self._queue_run_log_display_line(line)
+            self._isolated_last_log_sequence = sequence
+            appended = True
+        if appended:
+            self._flush_pending_run_log_lines()
+
+    def _compact_live_plot_points(self) -> None:
+        if len(self._live_plot_points) <= LIVE_PLOT_MAX_POINTS:
+            return
+        self._display_plot_old_cache_key = None
+        self._display_plot_old_cache = []
+        self._live_plot_points = self._downsample_display_plot_points(
+            list(self._live_plot_points)
+        )
+
+    def _compact_length_setup_points(self) -> None:
+        """Bound setup rendering while retaining its complete time span."""
+
+        limit = 1000
+        if len(self._length_setup_points) <= limit:
+            return
+        recent_count = 200
+        older = self._length_setup_points[:-recent_count]
+        recent = self._length_setup_points[-recent_count:]
+        sampled = self._stable_downsample_older_plot_points(
+            older,
+            limit - recent_count,
+        )
+        self._length_setup_points = sampled + recent
+
+    def _consume_isolated_plot_snapshot(
+        self,
+        readback: Mapping[str, object],
+    ) -> None:
+        payload = {
+            field.name: readback.get(f"plot_{field.name}")
+            for field in fields(MeasurementPoint)
+        }
+        elapsed_value = payload.get("elapsed_s")
+        if elapsed_value is None:
+            return
+        elapsed_s = float(elapsed_value)
+        session_logging_enabled = bool(
+            readback.get("session_logging_enabled")
+        )
+        logging_started = (
+            session_logging_enabled
+            and not self._isolated_session_logging_enabled
+        )
+        if logging_started:
+            # Setup and recipe logging deliberately use separate elapsed
+            # clocks. Reset duplicate suppression at that boundary so the
+            # recipe's first points near t=0 are visible immediately.
+            self._isolated_last_plot_elapsed_s = None
+            self._isolated_setup_elapsed_offset_s = None
+            self._live_plot_points = []
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
+        last_elapsed_s = self._isolated_last_plot_elapsed_s
+        if last_elapsed_s is not None and elapsed_s <= last_elapsed_s:
+            return
+        try:
+            point = MeasurementPoint(**payload)
+        except (TypeError, ValueError):
+            return
+        self._isolated_last_plot_elapsed_s = elapsed_s
+        if (
+            self._length_setup_dialog is not None
+            and not session_logging_enabled
+        ):
+            if self._isolated_setup_elapsed_offset_s is None:
+                previous_elapsed_s = (
+                    float(self._length_setup_points[-1].elapsed_s)
+                    if self._length_setup_points
+                    else None
+                )
+                self._isolated_setup_elapsed_offset_s = (
+                    0.0
+                    if previous_elapsed_s is None
+                    else previous_elapsed_s
+                    + max(0.001, self._ui_refresh_interval_ms() / 1000.0)
+                    - elapsed_s
+                )
+            display_elapsed_s = elapsed_s + self._isolated_setup_elapsed_offset_s
+            point = replace(point, elapsed_s=display_elapsed_s)
+            self._length_setup_points.append(point)
+            self._compact_length_setup_points()
+            now_s = time.monotonic()
+            if self._dialog_plot_refresh_due(
+                self._last_length_setup_plot_refresh_s,
+                now_s=now_s,
+            ):
+                self._last_length_setup_plot_refresh_s = now_s
+                self._refresh_length_setup_plot()
+            self._isolated_session_logging_enabled = False
+            return
+        self._isolated_session_logging_enabled = session_logging_enabled
+        self._live_plot_points.append(point)
+        self._compact_live_plot_points()
+        now_s = time.monotonic()
+        if self._dashboard_graph_refresh_due(now_s=now_s):
+            self._refresh_plots()
+            self._last_dashboard_plot_refresh_s = now_s
+
     def _start_auto_ramp(self) -> None:
+        self._recipe_terminal_readback = None
+        if (
+            self._control_process_enabled
+            and not self._controller_process_mode
+        ):
+            self._start_isolated_auto_ramp()
+            return
         if self._automation_paused:
             self._resume_paused_recipe()
             return
@@ -32583,6 +34803,9 @@ class MainWindow(QtWidgets.QMainWindow):
             steps, summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if not self._confirm_current_sweep_load_limit_plan():
+            self._log("Recipe start cancelled at the applied-load cap confirmation.")
             return
         if self._resume_recipe_state is not None:
             if self._resume_recipe_state.summary == summary:
@@ -32597,10 +34820,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Discarded stopped-recipe resume state because the visible recipe controls changed."
                 )
             self._resume_recipe_state = None
-        if not self._first_overheating_preflight_allows_start():
+        parent_preflight_complete = (
+            self._controller_process_mode
+            and self._controller_process_prior_run_preflight_complete
+        )
+        if parent_preflight_complete:
+            self._controller_process_prior_run_preflight_complete = False
+        elif not self._first_overheating_preflight_allows_start():
             return
-        self._sync_stale_log_name_from_sample()
-        if not self._preflight_recipe_hardware(steps, show_progress=True):
+        if not parent_preflight_complete:
+            self._sync_stale_log_name_from_sample()
+        if (
+            self._controller_process_mode
+            and self._controller_process_hardware_preflight_complete
+        ):
+            self._controller_process_hardware_preflight_complete = False
+        elif not self._preflight_recipe_hardware(steps, show_progress=True):
             self._first_overheating_preflight_decision = None
             return
         if not self._prepare_continuity_current_for_recipe(steps):
@@ -32750,6 +34985,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
 
     def _pause_recipe(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._pause_recipe)
+            return
+        if self._isolated_recipe_active:
+            process = self._production_control_process
+            identity = self._production_control_identity
+            if (
+                process is not None
+                and identity is not None
+                and self._isolated_command_pending is None
+            ):
+                # Pause must restore normal policy even if the operator still
+                # physically holds the developer-only momentary button.
+                self._request_current_hold_bypass(False)
+                try:
+                    self._isolated_pending_sequence = process.pause(identity)
+                except Exception as exc:
+                    self._log(f"TMA pause could not be queued: {exc}")
+                    self.label_control_process_status.setText(
+                        f"Controller: pause not sent ({exc})"
+                    )
+                    self.label_control_process_status.setVisible(True)
+                    self._update_recipe_buttons()
+                    return
+                self._isolated_command_pending = "pause"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
+                self.label_control_process_status.setText(
+                    "Controller: pause requested; awaiting child confirmation"
+                )
+                self._update_recipe_buttons()
+            return
         if not self._automation_active or self._automation_paused:
             return
         self._automation_paused = True
@@ -32785,9 +35053,85 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_buttons()
         self._refresh_live_labels()
 
+    def _recipe_motor_power_interlock_active(self) -> bool:
+        if not self._recipe_requires_tic(self._automation_steps):
+            self._recipe_motor_power_loss_since_s = None
+            return False
+        if self._tic_motor_power_ok is not False:
+            self._recipe_motor_power_loss_since_s = None
+            return False
+        now_s = time.monotonic()
+        if self._recipe_motor_power_loss_since_s is None:
+            self._recipe_motor_power_loss_since_s = now_s
+        return now_s - self._recipe_motor_power_loss_since_s >= TIC_MOTOR_POWER_RECIPE_PAUSE_S
+
+    def _request_recipe_pause_for_motor_power_loss(self) -> None:
+        if self._recipe_motor_power_pause_pending or self._automation_paused:
+            return
+        self._recipe_motor_power_pause_pending = True
+
+        def _pause_on_ui_thread() -> None:
+            self._recipe_motor_power_pause_pending = False
+            if not self._automation_active or self._automation_paused:
+                return
+            vin_text = self._tic_vin_text()
+            self._log(
+                "Recipe paused by the motor-power interlock because Tic VIN remained "
+                f"below {TIC_MOTOR_POWER_MIN_V:.1f} V for at least "
+                f"{TIC_MOTOR_POWER_RECIPE_PAUSE_S:.1f} s (VIN {vin_text}). "
+                "The heating/current output is being turned off; motor power is not "
+                "automatically re-enabled."
+            )
+            self._pause_recipe()
+
+        if self._is_ui_thread():
+            _pause_on_ui_thread()
+        else:
+            self._run_on_ui_thread(_pause_on_ui_thread)
+
     def _resume_paused_recipe(self) -> None:
+        if self._isolated_recipe_active:
+            process = self._production_control_process
+            identity = self._production_control_identity
+            if (
+                process is not None
+                and identity is not None
+                and self._isolated_command_pending is None
+            ):
+                try:
+                    self._isolated_pending_sequence = process.resume(identity)
+                except Exception as exc:
+                    self._log(f"TMA resume could not be queued: {exc}")
+                    self.label_control_process_status.setText(
+                        f"Controller: resume not sent ({exc})"
+                    )
+                    self.label_control_process_status.setVisible(True)
+                    self._update_recipe_buttons()
+                    return
+                self._isolated_command_pending = "resume"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
+                self.label_control_process_status.setText(
+                    "Controller: resume requested; awaiting child confirmation"
+                )
+                self._update_recipe_buttons()
+            return
         if not self._automation_active or not self._automation_paused:
             return
+        if self._recipe_requires_tic(self._automation_steps):
+            try:
+                self._refresh_tic_status()
+            except Exception:
+                pass
+            if self._tic_motor_power_ok is not True:
+                self._log(
+                    "Recipe resume refused because motor power is not confirmed ready "
+                    f"(VIN {self._tic_vin_text()}; expected at least "
+                    f"{TIC_MOTOR_POWER_MIN_V:.1f} V)."
+                )
+                return
+        self._recipe_motor_power_loss_since_s = None
         if self._paused_current_setpoint_mA is not None and self._is_current_sweep_mode(self._automation_name):
             if not self._set_recipe_current_mA(float(self._paused_current_setpoint_mA)):
                 return
@@ -32834,6 +35178,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pause_recipe()
 
     def _stop_recipe_from_button(self) -> None:
+        if self._isolated_recipe_active:
+            process = self._production_control_process
+            identity = self._production_control_identity
+            if (
+                process is not None
+                and identity is not None
+                and self._isolated_command_pending is None
+            ):
+                try:
+                    self._isolated_pending_sequence = process.stop(identity)
+                except Exception as exc:
+                    self._log(f"TMA stop could not be queued: {exc}")
+                    # Stop is safety-relevant. Escalate immediately to the
+                    # independent emergency path rather than leaving a run
+                    # active with an ambiguous operator request.
+                    self._emergency_stop()
+                    return
+                self._isolated_command_pending = "stop"
+                self._isolated_command_deadline_s = (
+                    time.monotonic() + TMA_COMMAND_ACK_TIMEOUT_S
+                )
+                self._isolated_user_stop_requested = True
+                self.label_control_process_status.setText(
+                    "Controller: stop requested; awaiting safe child shutdown"
+                )
+                self._update_recipe_buttons()
+            return
         self._stop_auto_ramp(log_completion=True, user_initiated=True)
 
     def _sync_manual_motion_base_from_current_position(self) -> None:
@@ -32849,7 +35220,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
 
+    def _schedule_recovery_after_stop(self) -> None:
+        if (
+            self._window_closing
+            or self._recovery_prompt_pending
+            or self._recovery_prompt_visible
+            or self._recovery_action_pending
+        ):
+            return
+        self._recovery_prompt_generation += 1
+        generation = self._recovery_prompt_generation
+        self._recovery_prompt_pending = True
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: self._show_scheduled_recovery_prompt(generation),
+        )
+
+    def _show_scheduled_recovery_prompt(self, generation: int) -> None:
+        if generation != self._recovery_prompt_generation:
+            return
+        self._recovery_prompt_pending = False
+        self._ask_recovery_after_stop()
+
+    def _dispatch_recovery_choice(self, generation: int, action: str) -> None:
+        if generation != self._recovery_prompt_generation:
+            return
+        self._recovery_action_pending = False
+        if self._window_closing or self._automation_active:
+            return
+        if action == "position_zero":
+            self._start_recovery_displacement_zero()
+        elif action == "load_zero":
+            self._start_recovery_load_zero()
+
+    def _queue_recovery_choice(self, action: str) -> None:
+        if self._window_closing or self._recovery_action_pending:
+            return
+        self._recovery_action_pending = True
+        generation = self._recovery_prompt_generation
+        QtCore.QTimer.singleShot(
+            0,
+            lambda: self._dispatch_recovery_choice(generation, action),
+        )
+
     def _ask_recovery_after_stop(self) -> None:
+        if self._controller_process_mode:
+            return
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._ask_recovery_after_stop)
             return
@@ -32857,6 +35273,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._tic_motor_power_ok is False:
             return
+        if self._recovery_prompt_visible or self._recovery_action_pending:
+            return
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = True
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
@@ -32866,12 +35286,19 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_load_button = box.addButton("Return load to 0", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         leave_button = box.addButton("Leave as is", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(leave_button)
-        box.exec()
-        clicked = box.clickedButton()
+        clicked: QtWidgets.QAbstractButton | None = None
+        try:
+            box.exec()
+            clicked = box.clickedButton()
+        finally:
+            self._recovery_prompt_visible = False
+        action: str | None = None
         if clicked == return_position_button:
-            self._start_recovery_displacement_zero()
+            action = "position_zero"
         elif clicked == zero_load_button:
-            self._start_recovery_load_zero()
+            action = "load_zero"
+        if action is not None:
+            self._queue_recovery_choice(action)
 
     def _show_recovery_plot_dialog(self, title: str) -> None:
         if pg is None:
@@ -32923,6 +35350,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_length_setup_dialog(self) -> None:
         if self._window_closing:
+            return
+        if self._controller_process_mode:
+            self._length_setup_points.clear()
+            self._length_setup_position_origin_mm = float(self._current_position_mm)
+            self._length_setup_last_record_scale_timestamp = None
+            self._last_length_setup_plot_refresh_s = None
+            self._setup_return_zero_start_point_index = 0
+            self._setup_return_zero_speed_mm_s_value = None
+            self._setup_zero_position_mm = None
+            self._setup_zero_fallback_return_position_mm = None
+            self._setup_zero_fallback_raw_g = None
+            self._setup_zero_fallback_reason = ""
+            self._length_setup_start_monotonic = time.monotonic()
             return
         dialog = self._length_setup_dialog
         title_sample = self.edit_sample_name.text().strip() or self.edit_log_name.text().strip() or "unnamed sample"
@@ -32992,6 +35432,13 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             dialog.setWindowTitle(title)
         self._length_setup_points.clear()
+        # Setup points can span the visible UI and dedicated controller
+        # processes.  Each process has its own session displacement reference,
+        # so plotting MeasurementPoint.position_mm directly creates a false
+        # jump at ownership handoff.  Keep one raw Tic-coordinate origin for
+        # the complete visible setup instead.  This is a display reference
+        # only; it does not rewrite the Tic position or move the motor.
+        self._length_setup_position_origin_mm = float(self._current_position_mm)
         self._length_setup_last_record_scale_timestamp = None
         self._last_length_setup_plot_refresh_s = None
         self._setup_return_zero_start_point_index = 0
@@ -33008,8 +35455,12 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
 
     def _update_length_setup_dialog(self, message: str) -> None:
+        if self._controller_process_mode:
+            return
         if not self._is_ui_thread():
             self._run_on_ui_thread(
                 WeakOwnerCallback(self, "_update_length_setup_dialog", message)
@@ -33030,6 +35481,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automated_setup_preload_length_mm = None if preload_length_mm is None else float(preload_length_mm)
 
     def _close_length_setup_dialog(self) -> None:
+        if self._controller_process_mode:
+            self._forget_length_setup_dialog()
+            return
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._close_length_setup_dialog)
             return
@@ -33070,6 +35524,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._close_transient_child_windows)
             return
+        self._recovery_prompt_generation += 1
+        self._recovery_prompt_pending = False
+        self._recovery_prompt_visible = False
+        self._recovery_action_pending = False
         app = QtWidgets.QApplication.instance()
         active_modal = app.activeModalWidget() if app is not None else None
         if active_modal is not None and active_modal is not self:
@@ -33100,8 +35558,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._write_setup_point(point, flush=flush_now)
         if flush_now:
             self._last_session_data_flush_s = now_s
-        if len(self._length_setup_points) > 1000:
-            self._length_setup_points = self._length_setup_points[-1000:]
+        self._compact_length_setup_points()
         if self._dialog_plot_refresh_due(self._last_length_setup_plot_refresh_s, now_s=now_s):
             self._last_length_setup_plot_refresh_s = now_s
             self._refresh_length_setup_plot()
@@ -33110,7 +35567,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _dialog_plot_refresh_due(self, last_refresh_s: float | None, *, now_s: float) -> bool:
         if last_refresh_s is None:
             return True
-        interval_s = max(0.1, float(self._graph_refresh_interval_ms()) / 1000.0)
+        interval_s = max(
+            0.1,
+            min(
+                float(self._graph_refresh_interval_ms()),
+                float(self._ui_refresh_interval_ms()),
+            )
+            / 1000.0,
+        )
         return now_s - float(last_refresh_s) >= interval_s
 
     def _qcolor_from_rgb(self, rgb: Sequence[float]) -> QtGui.QColor:
@@ -33488,7 +35952,16 @@ class MainWindow(QtWidgets.QMainWindow):
             for point in points
         ]
         load_values = [float(point.load_g) for point in points]
-        displacement_values = [float(point.position_mm) for point in points]
+        position_origin_mm = self._length_setup_position_origin_mm
+        displacement_values = [
+            (
+                float(point.position_mm)
+                if position_origin_mm is None
+                else self._tension_motion_sign()
+                * (float(point.raw_position_mm) - float(position_origin_mm))
+            )
+            for point in points
+        ]
         self._set_pyqtgraph_curve_data(self._length_setup_stress_curve, x_values, stress_values)
         self._set_pyqtgraph_curve_data(self._length_setup_load_curve, x_values, load_values)
         self._set_pyqtgraph_curve_data(
@@ -33739,6 +36212,8 @@ class MainWindow(QtWidgets.QMainWindow):
             origin=resolved_origin,
             force_reason=resolved_reason != "app_closed",
         )
+        if self._current_hold_bypass_active:
+            self._set_current_hold_bypass_active(False)
         should_store_resume = user_initiated and self._automation_index < len(self._automation_steps)
         if should_store_resume:
             try:
@@ -34725,7 +37200,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            reverse_current = True if is_fatigue_recipe else self.check_current_sweep_reverse_current.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (
@@ -34743,14 +37217,55 @@ class MainWindow(QtWidgets.QMainWindow):
             current_hold_resume_stable_s = float(self.spin_current_sweep_hold_resume_stable_s.value())
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
+            load_limit_plan = self._current_sweep_load_limit_plan(
+                basis=basis,
+                target_start=target_start,
+                target_end=target_end,
+                target_step=target_step,
+                fatigue=is_fatigue_recipe,
+            )
+            self._current_sweep_load_limit_plan_snapshot = load_limit_plan
+            if load_limit_plan.blocked_reason:
+                raise ValueError(load_limit_plan.blocked_reason)
+            if first_overheating_enabled:
+                first_overheating_load_g = self._target_value_as_load_g(
+                    HSW_BASIS_STRESS_MPA,
+                    first_overheating_target_mpa,
+                )
+                active_limit_g = self._effective_max_load_limit_g()
+                first_overheating_reserve_g = (
+                    0.0
+                    if active_limit_g is None
+                    else min(
+                        TMA_RECIPE_LOAD_LIMIT_RESERVE_G,
+                        max(0.0, float(active_limit_g) * 0.25),
+                    )
+                )
+                planning_limit_g = (
+                    None
+                    if active_limit_g is None
+                    else max(0.0, float(active_limit_g) - first_overheating_reserve_g)
+                )
+                if (
+                    planning_limit_g is not None
+                    and first_overheating_load_g is not None
+                    and first_overheating_load_g > planning_limit_g + 1e-12
+                ):
+                    raise ValueError(
+                        "The first-overheating stress target requires "
+                        f"{_format_compact_unit(first_overheating_load_g, 'g', decimals=3)}, "
+                        "above the recipe planning ceiling of "
+                        f"{_format_compact_unit(planning_limit_g, 'g', decimals=3)}. "
+                        "Lower the first-overheating stress target before starting."
+                    )
             if is_fatigue_recipe:
                 basis = HSW_BASIS_STRESS_MPA
                 target_end = target_start
                 target_step = max(1e-9, target_step)
-                targets = [target_start]
+                targets = list(load_limit_plan.effective_targets)
                 fatigue_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
             else:
-                targets = self._build_numeric_targets(target_start, target_end, target_step)
+                targets = list(load_limit_plan.effective_targets)
                 fatigue_cycles = 0
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_target: float | None = 0.0
@@ -34764,7 +37279,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 fatigue_cycle_index: int | None = None,
             ) -> None:
                 sweep_ranges = [(current_start, plateau_current_end_mA)]
-                if reverse_current and abs(plateau_current_end_mA - current_start) > 1e-12:
+                if abs(plateau_current_end_mA - current_start) > 1e-12:
                     sweep_ranges.append((plateau_current_end_mA, current_start))
                 for sweep_start_mA, sweep_end_mA in sweep_ranges:
                     fatigue_leg = None
@@ -34839,6 +37354,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         fatigue_cycle_limit=None if fatigue_cycles == 0 else fatigue_cycles,
                     )
                 )
+                if fatigue_cycles > 0:
+                    steps = self._append_return_to_origin(steps)
                 cycle_text = "forever" if fatigue_cycles == 0 else f"{fatigue_cycles} cycle(s)"
                 summary = (
                     f"Started iso-stress fatigue: stress {target_start:.4f} MPa, "
@@ -34918,6 +37435,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         note=str(len(targets) + 1),
                     )
                 )
+            steps = self._append_return_to_origin(steps)
             suffix, _ = self._distribution_units(basis)
             if basis == HSW_BASIS_LOAD_G:
                 recipe_name = "iso-load current sweep"
@@ -34931,6 +37449,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"current {current_start:.2f} to {current_end:.2f} mA "
                 f"at {current_ramp_rate:.2f} mA/s; {clock_summary}."
             )
+            if load_limit_plan.clipped:
+                summary += (
+                    " Applied-load cap: requested endpoint "
+                    f"{target_end:.4f}{suffix}; executed endpoint "
+                    f"{float(load_limit_plan.effective_end or 0.0):.4f}{suffix} "
+                    f"under the {_format_compact_unit(load_limit_plan.limit_g or 0.0, 'g', decimals=3)} limit."
+                )
             if current_hold_enabled:
                 summary += (
                     f" Current ramp hold enabled: pause on absolute target error above "
@@ -34938,8 +37463,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
-            if not reverse_current:
-                summary += " Nominal current reverse sweeps are disabled."
             if first_overheating_enabled:
                 summary += (
                     " First overheating enabled: "
@@ -34992,6 +37515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
+        self._current_hold_fluctuation_classification = "inactive"
 
     def _mark_current_sweep_ramp_hold_scale_start(self) -> None:
         latest = self._scale_signal_buffer.latest()
@@ -35018,6 +37542,57 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
         self._clear_current_sweep_ramp_hold()
         self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
+
+    def _set_current_hold_bypass_active(self, enabled: bool) -> tuple[bool, str]:
+        """Set the process-owned momentary bypass without weakening safety rails."""
+
+        enabled = bool(enabled)
+        if enabled and (
+            not self._automation_active
+            or self._automation_paused
+            or not self._is_current_sweep_mode(self._automation_name)
+        ):
+            return False, "current-hold bypass requires a running current-sweep recipe"
+        if enabled == self._current_hold_bypass_active:
+            return True, (
+                "current-hold bypass active"
+                if enabled
+                else "current-hold bypass released"
+            )
+        self._current_hold_bypass_active = enabled
+        now_s = time.monotonic()
+        if enabled and self._current_sweep_ramp_hold_step_index is not None:
+            self._resume_current_sweep_ramp_from_hold(
+                now_s=now_s,
+                reason="operator is holding the momentary current-hold bypass",
+            )
+        event = {
+            "timestamp_utc": _utc_timestamp(),
+            "elapsed_s": max(0.0, now_s - self._session_start_monotonic),
+            "active": enabled,
+            "automation_phase": self._automation_phase,
+            "task": self._current_task_summary(),
+        }
+        self._current_hold_bypass_events.append(event)
+        if self._session_active:
+            self._session_metadata_dirty = True
+        self._write_control_trace(
+            decision="operator_override",
+            basis=self._automation_basis,
+            target_value=self._automation_target_value,
+            result="current_hold_bypass_enabled" if enabled else "current_hold_bypass_released",
+            reason="momentary_button_pressed" if enabled else "momentary_button_released",
+        )
+        if self._session_active:
+            self._write_session_metadata(throttle=True)
+        self._log(
+            "Momentary current-hold bypass enabled; normal hold logic resumes on release."
+            if enabled
+            else "Momentary current-hold bypass released; normal hold logic restored."
+        )
+        return True, (
+            "current-hold bypass active" if enabled else "current-hold bypass released"
+        )
 
     def _apply_current_sweep_post_hold_ramp_throttle(self, *, now_s: float) -> None:
         if self._current_sweep_post_hold_throttle_until_s <= 0.0:
@@ -35634,6 +38209,14 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         now_s: float,
     ) -> tuple[bool, bool]:
+        if self._current_hold_bypass_active:
+            if self._current_sweep_ramp_hold_step_index == step_index:
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=now_s,
+                    reason="operator is holding the momentary current-hold bypass",
+                )
+            self._reset_current_sweep_ramp_hold_candidate()
+            return False, False
         if self._current_sweep_endpoint_seek_accepted_step_index == int(step_index):
             return False, False
         if not step.current_hold_enabled:
@@ -35805,6 +38388,7 @@ class MainWindow(QtWidgets.QMainWindow):
         eligible = (
             state.ready
             and state.stationary
+            and state.balanced_crossings
             and not state.fast_veto
             and signal is not None
             and state.error_value is not None
@@ -35841,14 +38425,15 @@ class MainWindow(QtWidgets.QMainWindow):
             error_value=state.error_value,
             tolerance=center_band,
             result="cycle_center_resume",
-            reason="mature_stationary_distribution",
+            reason="mature_stationary_balanced_distribution",
         )
         self._resume_current_sweep_ramp_from_hold(
             now_s=now_s,
             reason=(
                 "mature fixed-current distribution is centered on target "
                 f"(center error {_format_compact_number(abs(float(state.error_value)))}, "
-                f"robust noise {_format_compact_number(float(signal.noise))})"
+                f"robust noise {_format_compact_number(float(signal.noise))}, "
+                f"crossings {state.crossing_count})"
             ),
         )
         return True
@@ -36325,6 +38910,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._fatigue_loop_anchor_index is None:
             self._fatigue_loop_anchor_index = int(step_index)
         anchor_index = int(self._fatigue_loop_anchor_index)
+        tail_steps = list(self._automation_steps[int(step_index) + 1 :])
         completed_cycle = int(self._fatigue_cycle_index)
         cycle_limit = loop_step.fatigue_cycle_limit
         if completed_cycle > int(self._fatigue_cycles_completed):
@@ -36340,7 +38926,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._write_session_metadata()
         next_cycle_index = int(self._fatigue_cycle_index) + 1
         if cycle_limit is not None and next_cycle_index > int(cycle_limit):
-            del self._automation_steps[anchor_index:]
+            self._automation_steps[anchor_index:] = tail_steps
             self._automation_index = anchor_index
             return
         try:
@@ -36351,7 +38937,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._fatigue_cycle_index = next_cycle_index
         self._fatigue_cycle_limit = cycle_limit
-        self._automation_steps[anchor_index:] = [*cycle_steps, loop_step]
+        self._automation_steps[anchor_index:] = [
+            *cycle_steps,
+            loop_step,
+            *tail_steps,
+        ]
         self._automation_index = anchor_index
         limit_text = "forever" if cycle_limit is None else str(cycle_limit)
         self._log(f"Starting fatigue cycle {next_cycle_index}/{limit_text}.")
@@ -36983,6 +39573,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_controller.execute_next_tick()
 
     def _handle_status_timer(self) -> None:
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            self._status_timer.stop()
+            return
         if (
             self._automation_active
             or self._session_active
@@ -36999,7 +39592,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._handle_applied_load_limit_status()
 
     def _handle_ui_refresh_timer(self) -> None:
-        if not self._automation_active and not self._session_active:
+        if (
+            not self._automation_active
+            and not self._session_active
+            and not self._setup_dialog_visible()
+            and not self._recovery_dialog_visible()
+        ):
             self._ui_refresh_timer.stop()
             return
         started_s = time.monotonic()
@@ -37071,7 +39669,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
             return f"{float(value):.{decimals}f}"
 
-        self._session_ui_telemetry_writer.writerow(
+        row = (
             {
                 "elapsed_s": f"{max(0.0, started_s - self._session_start_monotonic):.6f}",
                 "timestamp_utc": _utc_timestamp(),
@@ -37114,9 +39712,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 "live_plot_points": len(self._live_plot_points),
             }
         )
-        self._session_ui_telemetry_count += 1
-        if self._session_ui_telemetry_count % 10 == 0:
-            self._session_ui_telemetry_handle.flush()
+        try:
+            self._session_ui_telemetry_writer.writerow(row)
+            self._session_ui_telemetry_count += 1
+            if self._session_ui_telemetry_count % 10 == 0:
+                self._session_ui_telemetry_handle.flush()
+        except (OSError, ValueError) as exc:
+            self._session_ui_telemetry_error = self._record_session_file_io_error(
+                sidecar="ui_telemetry",
+                operation="write_or_flush",
+                error=exc,
+            )
+            handle = self._session_ui_telemetry_handle
+            self._session_ui_telemetry_writer = None
+            self._session_ui_telemetry_handle = None
+            try:
+                if handle is not None:
+                    handle.close()
+            except (OSError, ValueError) as close_exc:
+                self._record_session_file_io_error(
+                    sidecar="ui_telemetry",
+                    operation="close_after_failure",
+                    error=close_exc,
+                )
+            self._log(
+                "UI telemetry disabled after file I/O failure; authoritative control and "
+                f"measurement logging continue: {exc}"
+            )
         self._maybe_log_remote_debug_health(
             scale_age_s=scale_age_s,
             scale_recent_rate_hz=scale_recent_rate_hz,
@@ -37200,9 +39822,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if point is None:
             return False, False
         self._live_plot_points.append(point)
-        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
-            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        self._compact_live_plot_points()
         self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
+        if self._controller_process_mode:
+            return True, False
         now_s = time.monotonic()
         if self._dashboard_graph_refresh_due(now_s=now_s):
             self._refresh_plots()
@@ -37216,7 +39839,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if (
             self._setup_dialog_visible()
-            and self._automation_active
             and self._length_setup_last_record_scale_timestamp != self._latest_scale_timestamp
         ):
             self._record_length_setup_point()
@@ -37232,6 +39854,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return recorded
 
     def _refresh_live_labels(self) -> None:
+        if self._controller_process_mode:
+            self._sample_effective_linear_speed()
+            return
         if not self._is_ui_thread():
             if self._live_label_refresh_queued:
                 return
@@ -37244,6 +39869,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_on_ui_thread(_apply)
             return
         self._live_label_refresh_queued = False
+        isolated_snapshot = self._production_control_snapshot
+        if self._isolated_recipe_active and isolated_snapshot is not None:
+            self._apply_isolated_recipe_status(
+                isolated_snapshot,
+                dict(getattr(isolated_snapshot, "readback", {})),
+            )
+            return
+        if (
+            self._isolated_terminal_readback is not None
+            and self._isolated_terminal_state is not None
+            and self._scale_thread is None
+            and not self._session_active
+        ):
+            self._apply_isolated_recipe_status(
+                SimpleNamespace(state=self._isolated_terminal_state),
+                self._isolated_terminal_readback,
+                terminal_task=self._isolated_terminal_task,
+            )
+            return
         scale_age_s = self._scale_reading_age_s()
         scale_missing = self._latest_scale_timestamp is None
         scale_stale = scale_age_s is not None and scale_age_s > STALE_SCALE_AFTER_S
@@ -37867,7 +40511,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_first_overheating_current_end_mA",
             self.spin_current_sweep_first_overheating_end_mA.value(),
         )
-        self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
         self.settings.setValue("current_sweep_balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())
@@ -37966,8 +40609,8 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_request = KERN_KCP_SCALE_REQUEST
             scale_terminator = KERN_KCP_SCALE_TERMINATOR
             saved_scale_interval_ms = KERN_KCP_SCALE_INTERVAL_MS
-        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < DEFAULT_SCALE_REQUEST_INTERVAL_MS:
-            saved_scale_interval_ms = DEFAULT_SCALE_REQUEST_INTERVAL_MS
+        if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < GNG_SCALE_INTERVAL_MS:
+            saved_scale_interval_ms = GNG_SCALE_INTERVAL_MS
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)
@@ -38640,9 +41283,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
         )
-        self.check_current_sweep_reverse_current.setChecked(
-            bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
-        )
         self.spin_current_sweep_tolerance.setValue(float(self.settings.value("current_sweep_tolerance", 0.25)))
         self.spin_current_sweep_nudge_mm.setValue(float(self.settings.value("current_sweep_nudge_mm", 0.1)))
         self.spin_current_sweep_balance_speed_mm_s.setValue(
@@ -38809,6 +41449,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._status_timer,
             self._ui_refresh_timer,
             self._ui_heartbeat_timer,
+            self._control_process_poll_timer,
             self._auto_ramp_timer,
             self._run_log_flush_timer,
             self._scale_hint_timer,
@@ -38819,6 +41460,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
         self._stop_periodic_callbacks_for_close()
+        if self._isolated_recipe_active and self._production_control_process is not None:
+            self._production_control_process.emergency_stop()
+            try:
+                self._emergency_shared_supply_outputs_off()
+            except Exception as exc:
+                self._log(
+                    "Application close could not confirm TMA broker outputs "
+                    f"off: {exc}"
+                )
+            self._production_control_process.close(timeout_s=2.0, force=True)
+            self._production_control_process = None
+            self._production_control_identity = None
+            self._isolated_recipe_active = False
+            self._automation_active = False
         try:
             WINDOWS.remove(self)
         except ValueError:
@@ -38856,7 +41511,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_session_source_provenance()
         self._release_experiment_sleep_guard()
-        self._disconnect_supply()
+        self._disconnect_supply(
+            preserve_motor_output=self._preserve_motor_supply_on_close
+        )
+        self._preserve_motor_supply_on_close = False
         self._stop_owned_shared_broker()
         self._async_run_log_writer.stop(timeout_s=0.5)
         self._stop_periodic_callbacks_for_close()

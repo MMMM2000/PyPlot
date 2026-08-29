@@ -11,6 +11,7 @@ from plotting.shared.experiment_processes import (
     build_experiment_process_env,
     build_experiment_process_command,
     experiment_process_log_path,
+    control_python_executable,
     launch_experiment_process,
 )
 
@@ -29,6 +30,19 @@ def test_experiment_process_command_uses_module_entrypoint() -> None:
         "-m",
         "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
     ]
+
+
+def test_experiment_process_uses_console_interpreter_for_child_spawning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.touch()
+    pythonw.touch()
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    assert control_python_executable(pythonw) == python
 
 
 def test_experiment_process_command_uses_launcher_entrypoint_when_frozen(
@@ -81,8 +95,8 @@ def test_launch_experiment_process_starts_child_from_repo_root(
 ) -> None:
     spec = ExperimentProcessSpec(
         display_name="TMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
     )
     calls: list[dict[str, object]] = []
 
@@ -102,7 +116,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     assert calls[0]["args"] == [
         str(tmp_path / "python.exe"),
         "-m",
-        "data_logging.mini_dma_logger.mini_dma_logger",
+        "data_logging.tma_logger.tma_logger",
     ]
     assert calls[0]["cwd"] == str(Path(__file__).resolve().parents[1])
     assert calls[0]["stdin"] is subprocess.DEVNULL
@@ -121,11 +135,11 @@ def test_launch_experiment_process_starts_child_from_repo_root(
 def test_experiment_process_log_path_uses_ignored_logs_dir() -> None:
     spec = ExperimentProcessSpec(
         display_name="TMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        module="data_logging.tma_logger.tma_logger",
+        resource_tag="tma",
     )
 
     path = experiment_process_log_path(spec, pid=123)
 
     assert path.parent == Path(__file__).resolve().parents[1] / "logs" / "experiment_processes"
-    assert path.name.endswith("-123-mini_dma.log")
+    assert path.name.endswith("-123-tma.log")

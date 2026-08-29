@@ -232,6 +232,30 @@ def test_broker_reports_channel_output_state() -> None:
     assert broker.output_state(channel=3) is True
 
 
+def test_broker_audits_channel_output_commands_with_owner_and_utc_time() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=3, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    broker.confirm_profile()
+    lease = broker.lease(channel=3, owner="tma-session-123", role=ROLE_MINI_DMA_CURRENT)
+
+    broker.configure_channel(
+        channel=3,
+        lease_id=lease.lease_id,
+        voltage_v=12.0,
+        current_a=0.4,
+        output_on=True,
+    )
+    broker.set_output(channel=3, lease_id=lease.lease_id, output_on=False)
+
+    events = broker.snapshot()["output_events"]
+    assert [event["source"] for event in events] == ["configure_channel", "set_output"]
+    assert [event["output_on"] for event in events] == [True, False]
+    assert all(event["channel"] == 3 for event in events)
+    assert all(event["owner"] == "tma-session-123" for event in events)
+    assert all(event["role"] == ROLE_MINI_DMA_CURRENT for event in events)
+    assert all(str(event["timestamp_utc"]).endswith("+00:00") for event in events)
+
+
 def test_broker_blocks_raw_and_global_reset_style_commands() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
 
@@ -507,6 +531,23 @@ def test_broker_protocol_exposes_cadence_preview_and_status() -> None:
         assert preview["candidate"]["effective_hz"] == pytest.approx(2.0)
         assert status["polling"]["effective_hz"] == pytest.approx(2.0)
         assert client.polling_status(channel=1)["polling"]["requested_hz"] == pytest.approx(2.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_broker_protocol_emergency_all_outputs_off_requires_explicit_client_call() -> None:
+    broker, _annealing, _mini_dma = _leased_broker()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+
+        client.emergency_all_outputs_off()
+
+        assert broker.output_state(channel=1) is False
+        assert broker.output_state(channel=3) is False
     finally:
         server.shutdown()
         server.server_close()
