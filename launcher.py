@@ -83,6 +83,11 @@ def _experiment_process_launcher(
 
 
 EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
+    "current_program_logger": ExperimentProcessSpec(
+        display_name="Current Program Logger",
+        module="experiments.current_program_logger",
+        resource_tag="current_program_logger",
+    ),
     "current_annealing": ExperimentProcessSpec(
         display_name="Current Annealing Logger",
         module="data_logging.current_annealing_logger.current_annealing_logger",
