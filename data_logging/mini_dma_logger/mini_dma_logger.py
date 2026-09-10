@@ -31121,6 +31121,16 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _current_sweep_runtime_boundary_target(self, basis: str, active_index: int) -> float | None:
+        if 0 <= active_index < len(self._automation_steps):
+            active_step = self._automation_steps[active_index]
+            if active_step.action == "ramp_target" and active_step.basis == basis:
+                # The active ramp and its pending sweeps are retained. Replan
+                # after its destination, not the moving intermediate setpoint.
+                destination = active_step.target_end_value
+                if destination is None:
+                    destination = active_step.target_value
+                if destination is not None:
+                    return float(destination)
         if self._automation_basis == basis and self._automation_target_value is not None:
             return float(self._automation_target_value)
         for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):

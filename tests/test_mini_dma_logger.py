@@ -23495,7 +23495,7 @@ def test_current_sweep_runtime_update_before_plateau_sweeps_preserves_current_pl
             active_index if active_action == "ramp_target" else None
         )
         window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
-        window._automation_target_value = 50.0
+        window._automation_target_value = 25.0 if active_action == "ramp_target" else 50.0
         window._automation_interval_ms = 250
         window._recipe_estimated_points, window._automation_total_steps = (
             window._estimate_recipe_points_and_ticks(
@@ -34731,5 +34731,53 @@ def test_tma_parent_folder_queue_is_bounded_to_direct_runs(
         window._choose_tma_parent_for_transition_review()
 
         assert queued == [direct]
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "start,end,destination,intermediate,expected",
+    [(25., 475., 375., 354., [375., 425., 475.]),
+     (475., 275., 375., 396., [375., 325., 275.]),
+     (25., 475., 350., 329., [350., 375., 425., 475.])],
+)
+def test_runtime_mid_ramp_replan_starts_after_destination(
+    tmp_path, qtbot, start, end, destination, intermediate, expected,
+):
+    window = _build_window(tmp_path, qtbot)
+    basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    ramp = mini_dma_mod.AutomationStep(
+        "ramp_target", basis=basis, target_value=destination,
+        target_start_value=intermediate, target_end_value=destination,
+        target_ramp_rate_value_s=5., note="15",
+    )
+    sweeps = [mini_dma_mod.AutomationStep(
+        "sweep_current", basis=basis, target_value=destination,
+        current_start_mA=a, current_end_mA=b, current_ramp_rate_mA_s=1., note="15",
+    ) for a, b in [(1., 55.), (55., 1.)]]
+    previous = mini_dma_mod.AutomationStep("set_current", current_mA=1., note="14")
+    try:
+        window._automation_steps = [previous, ramp, *sweeps]
+        window._automation_index = 1
+        window._active_target_ramp_step_index = 1
+        window._automation_basis = basis
+        window._automation_target_value = intermediate
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        values = window._current_sweep_override_values_from_controls()
+        values.update(target_start=start, target_end=end, target_step=50.,
+                      current_start_mA=1., current_end_mA=55., return_target=False)
+        preview = window._current_sweep_pending_update_preview(values)
+        updated = preview["updated_steps"]
+        assert updated[0] is previous
+        assert updated[1] is ramp
+        assert window._automation_target_value == intermediate
+        up = [s.target_value for s in updated if s.action == "sweep_current"
+              and s.current_start_mA < s.current_end_mA]
+        down = [s.target_value for s in updated if s.action == "sweep_current"
+                and s.current_start_mA > s.current_end_mA]
+        assert up == expected
+        assert down == expected
+        future_ramps = [s for s in updated[2:] if s.action == "ramp_target"]
+        assert [(s.target_start_value, s.target_end_value) for s in future_ramps] == list(zip(expected, expected[1:]))
     finally:
         _close_test_window(window)
