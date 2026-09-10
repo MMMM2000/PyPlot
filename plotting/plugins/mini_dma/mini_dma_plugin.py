@@ -265,7 +265,9 @@ class TmaPlugin(PyPlotPlugin):
             for index, line in enumerate(axes.get_lines(), start=1):
                 label = line.get_label() or f"Series {index}"
                 state = window_module.GraphLineState(
-                    key=(plot_kind, label),
+                    # Repeated stress plateaus can share a display label.
+                    # Keep each measured sweep in the export descriptor.
+                    key=(plot_kind, f"{index}:{label}"),
                     label=label,
                     line=line,
                     base_x=line.get_xdata(),
