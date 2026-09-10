@@ -1,0 +1,1 @@
+TMA load- and stress-controlled recipes now remain in one controller session through a confirmed zero-load endpoint, avoiding the completion handoff deadlock and the legacy return-to-starting-displacement behavior. The visible dashboard also retains the dedicated controller's confirmed final values after a run finishes.

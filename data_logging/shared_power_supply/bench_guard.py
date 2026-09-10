@@ -104,6 +104,22 @@ def read_lock_info(lock_path: Path | None = None) -> BenchLockInfo | None:
     return BenchLockInfo.from_dict(payload)
 
 
+def _pid_is_running(pid: int) -> bool:
+    if int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 87:
+            return False
+        return True
+    return True
+
+
 def acquire_bench_lock(
     *,
     owner: str,
@@ -123,7 +139,19 @@ def acquire_bench_lock(
     try:
         fd = os.open(str(path), flags)
     except FileExistsError as exc:
-        raise BenchLockBusy(path, read_lock_info(path)) from exc
+        existing = read_lock_info(path)
+        if existing is None or _pid_is_running(existing.pid):
+            raise BenchLockBusy(path, existing) from exc
+        # A killed controller cannot release its lock in a finally block. Only
+        # remove the file when its parsed owner record is unchanged and that
+        # exact PID is no longer alive, then retry the atomic create once.
+        if read_lock_info(path) != existing:
+            raise BenchLockBusy(path, read_lock_info(path)) from exc
+        try:
+            path.unlink()
+            fd = os.open(str(path), flags)
+        except (FileNotFoundError, FileExistsError, PermissionError, OSError) as retry_exc:
+            raise BenchLockBusy(path, read_lock_info(path)) from retry_exc
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(info.to_dict(), handle, indent=2, sort_keys=True)

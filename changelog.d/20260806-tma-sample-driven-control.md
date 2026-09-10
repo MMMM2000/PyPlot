@@ -1,0 +1,1 @@
+Changed TMA closed-loop scheduling so each newly accepted scale sample promptly wakes the dedicated controller for a gated evaluation. Repeated sample events are coalesced, while the existing periodic control interval remains the recipe-timing and watchdog fallback.

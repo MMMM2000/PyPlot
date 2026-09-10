@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -309,6 +310,180 @@ def test_wait_for_tma_history_scan_blocks_until_current_root_is_ready(
     assert events == ["start", "process", "sleep", "process"]
 
 
+def test_recipe_with_first_overheating_skips_tma_history_scan() -> None:
+    class _Combo:
+        def currentData(self) -> str:
+            return "current_sweep_stress"
+
+    class _Checkbox:
+        def isChecked(self) -> bool:
+            return True
+
+    class _Window:
+        combo_recipe_mode = _Combo()
+        check_current_sweep_first_overheating = _Checkbox()
+
+        def _is_constant_current_strain_sweep_mode(self, _mode: str) -> bool:
+            return False
+
+    assert bench_automation._recipe_needs_tma_history_scan(_Window()) is False
+
+
+def test_execute_run_hands_completed_first_overheating_preflight_to_isolated_start(
+    monkeypatch,
+) -> None:
+    class _Checkbox:
+        def isChecked(self) -> bool:
+            return True
+
+    class _Combo:
+        def currentData(self) -> str:
+            return "current_sweep_stress"
+
+    class _Window:
+        combo_recipe_mode = _Combo()
+        check_current_sweep_first_overheating = _Checkbox()
+        _controller_process_prior_run_preflight_complete = False
+        _control_process_enabled = True
+        _controller_process_mode = False
+        _session_active = False
+        _automation_active = False
+
+        def _is_constant_current_strain_sweep_mode(self, _mode: str) -> bool:
+            return False
+
+        def _load_recipe_from_path(self, _path: Path) -> None:
+            return None
+
+        def _start_auto_ramp(self) -> None:
+            assert self._controller_process_prior_run_preflight_complete is True
+
+    window = _Window()
+    monkeypatch.setattr(bench_automation, "_apply_sample_identity", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_apply_length_setup_automation", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_prefer_next_output_run", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_ensure_measurement_logging_session", lambda *_args: None)
+
+    run = bench_automation.MiniDmaBenchRun(
+        name="bounded",
+        recipe_path=Path("bounded.recipe.json"),
+        repeat_index=0,
+        max_run_duration_s=1.0,
+    )
+    sample = bench_automation.MiniDmaSampleIdentity(
+        composition="Ni50Fe27Ga23",
+        microwire="12/5",
+        sample_name="Ni50Fe27Ga23 12/5",
+        diameter_mm=0.00935,
+    )
+    result = bench_automation._execute_run(
+        run,
+        app=SimpleNamespace(processEvents=lambda: None),
+        window=window,
+        sample_identity=sample,
+        guardrails=bench_automation.MiniDmaBenchGuardrails(),
+        sleep_fn=lambda _seconds: None,
+        total_deadline_s=None,
+    )
+
+    assert result["status"] == "not_started"
+
+
+def test_execute_run_applies_explicit_armed_missing_history_decision(monkeypatch) -> None:
+    events: list[str] = []
+
+    class _Window:
+        _session_active = False
+        _automation_active = False
+
+        def _load_recipe_from_path(self, _path: Path) -> None:
+            return None
+
+        def authorize_missing_prior_tma_history_once(self) -> None:
+            events.append("authorized")
+
+        def _start_auto_ramp(self) -> None:
+            events.append("started")
+
+    monkeypatch.setattr(bench_automation, "_recipe_needs_tma_history_scan", lambda _window: True)
+    monkeypatch.setattr(bench_automation, "_wait_for_tma_history_scan", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bench_automation, "_apply_sample_identity", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_apply_length_setup_automation", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_prefer_next_output_run", lambda *_args: None)
+    monkeypatch.setattr(bench_automation, "_ensure_measurement_logging_session", lambda *_args: None)
+
+    result = bench_automation._execute_run(
+        bench_automation.MiniDmaBenchRun(
+            name="bounded",
+            recipe_path=Path("bounded.recipe.json"),
+            max_run_duration_s=1.0,
+        ),
+        app=SimpleNamespace(processEvents=lambda: None),
+        window=_Window(),
+        sample_identity=bench_automation.MiniDmaSampleIdentity(),
+        guardrails=bench_automation.MiniDmaBenchGuardrails(),
+        sleep_fn=lambda _seconds: None,
+        total_deadline_s=None,
+        allow_missing_prior_tma_history=True,
+    )
+
+    assert result["status"] == "not_started"
+    assert events == ["authorized", "started"]
+
+
+def test_bench_plan_missing_history_authorization_defaults_off(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": False,
+                "runs": [{"recipe_path": recipe_path.name}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = bench_automation.load_mini_dma_bench_plan(plan_path)
+
+    assert plan.allow_missing_prior_tma_history is False
+
+
+def test_process_isolated_bench_does_not_open_ui_owned_logging_session() -> None:
+    events: list[str] = []
+
+    class _Window:
+        _control_process_enabled = True
+        _controller_process_mode = False
+        _session_active = False
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(f"start:{enable_logging}:{record_initial_point}")
+
+    bench_automation._ensure_measurement_logging_session(_Window())
+
+    assert events == []
+
+
+def test_in_process_bench_still_opens_logging_session() -> None:
+    events: list[str] = []
+
+    class _Window:
+        _control_process_enabled = False
+        _controller_process_mode = False
+        _session_active = False
+
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(f"start:{enable_logging}:{record_initial_point}")
+
+    bench_automation._ensure_measurement_logging_session(_Window())
+
+    assert events == ["start:True:False"]
+
+
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
@@ -478,7 +653,10 @@ def test_mini_dma_bench_plan_replaces_stale_execute_summary_while_running(tmp_pa
     def _sleep(_seconds: float) -> None:
         observed_running_summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
         assert windows
-        windows[-1]._automation_active = False  # type: ignore[attr-defined]
+        completed_window = windows[-1]
+        completed_window._automation_active = False  # type: ignore[attr-defined]
+        completed_window._session_active = False  # type: ignore[attr-defined]
+        completed_window._session_json_path = None  # type: ignore[attr-defined]
 
     summary = bench_automation.run_mini_dma_bench_plan(
         plan_path,
@@ -496,6 +674,9 @@ def test_mini_dma_bench_plan_replaces_stale_execute_summary_while_running(tmp_pa
     assert "old-run" not in json.dumps(running)
     assert summary["state"] == "completed"
     assert summary["run_count"] == 1
+    assert summary["runs"][0]["metadata_path"] == str(
+        tmp_path / "logs" / "run01" / "metadata.json"
+    )
 
 
 def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: Path) -> None:
@@ -862,6 +1043,87 @@ def test_mini_dma_bench_plan_stops_session_when_recipe_automation_stops(tmp_path
     assert run_summary["stop_metadata"]["reason"] == "recipe_control_stop"
     assert run_summary["stop_metadata"]["detail"] == "Recipe stopped before completion and recovery was offered."
     assert run_summary["control_trace_stop"]["reason"] == "correction_travel_limit"
+
+
+def test_mini_dma_bench_plan_exits_when_isolated_terminal_metadata_is_persisted(
+    tmp_path: Path,
+) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    run_dir = tmp_path / "logs" / "run01"
+    run_dir.mkdir(parents=True)
+    metadata_path = run_dir / "metadata.json"
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 10,
+                "bench_lock": {"enabled": False},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            return
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = metadata_path
+            self.closed = False
+
+        def set_length_setup_automation_values(self, **_values: object) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            self._automation_active = True
+
+        def close(self) -> None:
+            self.closed = True
+            self._automation_active = False
+
+    window = _FakeWindow()
+
+    def _sleep(_seconds: float) -> None:
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "session_state": "finished",
+                    "stop": {
+                        "reason": "wire_break_or_contact_loss",
+                        "category": "fault",
+                        "label": "Wire break or contact loss",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=lambda **_kwargs: window,
+        sleep_fn=_sleep,
+    )
+
+    assert summary["runs"][0]["status"] == "wire_break"
+    assert window.closed is True
 
 
 def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Path) -> None:

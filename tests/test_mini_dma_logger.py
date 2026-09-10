@@ -36,7 +36,7 @@ from microwire_data_builder import project_package, safe_codec
 
 TEST_QSETTINGS_ROOT = Path(
     os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
-)
+) / os.environ.get("PYTEST_XDIST_WORKER", "serial")
 TEST_QSETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 TEST_METADATA_CHECKPOINT_ROOT = Path("artifacts/test-metadata-checkpoints")
@@ -45,6 +45,9 @@ os.environ["MINI_DMA_METADATA_CHECKPOINT_DIR"] = str(TEST_METADATA_CHECKPOINT_RO
 
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
+)
+metadata_checkpoints_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.metadata_checkpoints"
 )
 kosice_mod = importlib.import_module(
     "data_logging.mini_dma_logger.kosice_import"
@@ -201,6 +204,67 @@ def test_automation_control_loop_ticks_without_qt_event_processing() -> None:
         assert len(ticks) >= 4
         assert loop.is_running() is True
     finally:
+        loop.stop()
+
+
+def test_automation_control_loop_wakes_promptly_before_periodic_fallback() -> None:
+    ticks: list[float] = []
+    wake_flags: list[bool] = []
+    loop: mini_dma_mod.AutomationControlLoop
+
+    def record_tick() -> None:
+        ticks.append(time.monotonic())
+        wake_flags.append(loop.callback_triggered_by_wake())
+
+    loop = mini_dma_mod.AutomationControlLoop(record_tick)
+
+    try:
+        loop.start(1000)
+        deadline = time.monotonic() + 0.3
+        while len(ticks) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(ticks) == 1
+
+        requested_s = time.monotonic()
+        assert loop.wake() is True
+        deadline = requested_s + 0.3
+        while len(ticks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        assert len(ticks) == 2
+        assert ticks[1] - requested_s < 0.2
+        assert wake_flags == [False, True]
+    finally:
+        loop.stop()
+
+
+def test_automation_control_loop_coalesces_repeated_wakes() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    ticks: list[float] = []
+
+    def blocked_first_tick() -> None:
+        ticks.append(time.monotonic())
+        if len(ticks) == 1:
+            entered.set()
+            release.wait(timeout=1.0)
+
+    loop = mini_dma_mod.AutomationControlLoop(blocked_first_tick)
+    try:
+        loop.start(1000)
+        assert entered.wait(timeout=0.3)
+        for _ in range(20):
+            assert loop.wake() is True
+        release.set()
+
+        deadline = time.monotonic() + 0.3
+        while len(ticks) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(ticks) == 2
+        time.sleep(0.08)
+        assert len(ticks) == 2
+    finally:
+        release.set()
         loop.stop()
 
 
@@ -546,6 +610,44 @@ def test_automation_controller_dispatches_steps_outside_main_window(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_sample_driven_retry_does_not_inflate_progress_until_step_completes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    finished = False
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_tick_sample_driven = True
+        window._automation_phase = "seek"
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("sweep_current", note="sample-driven"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = 10
+        window._automation_completed_ticks = 3
+        window._handle_current_sweep_step = lambda _step, _index: finished  # type: ignore[method-assign]
+        window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        window._automation_controller.tick()
+
+        assert window._automation_index == 0
+        assert window._automation_completed_ticks == 3
+
+        finished = True
+        window._automation_controller.tick()
+
+        assert window._automation_index == 1
+        assert window._automation_completed_ticks == 4
+    finally:
+        window._automation_active = False
+        window._automation_tick_sample_driven = False
+        _close_test_window(window)
+
+
 def test_automation_controller_executes_exact_finite_fatigue_cycles(
     tmp_path: Path,
     qtbot,
@@ -701,6 +803,74 @@ def test_automation_controller_does_not_advance_progress_during_current_hold(tmp
 
         assert window._automation_index == 0
         assert window._automation_completed_ticks == 42
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_automation_controller_interlocks_recipe_after_persistent_motor_power_loss(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    dispatched: list[str] = []
+    pause_requests: list[str] = []
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("move", target_value=1.0),
+        ]
+        window._automation_index = 0
+        window._tic_motor_power_ok = False
+        window._recipe_motor_power_loss_since_s = (
+            time.monotonic() - mini_dma_mod.TIC_MOTOR_POWER_RECIPE_PAUSE_S - 0.1
+        )
+        window._handle_move_step = (  # type: ignore[method-assign]
+            lambda _step, _index: dispatched.append("move") or True
+        )
+        window._request_recipe_pause_for_motor_power_loss = (  # type: ignore[method-assign]
+            lambda: pause_requests.append("pause")
+        )
+
+        window._automation_controller.tick()
+
+        assert dispatched == []
+        assert pause_requests == ["pause"]
+        assert window._automation_index == 0
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_resume_is_refused_until_motor_power_is_confirmed(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    current_commands: list[float] = []
+
+    try:
+        window._automation_active = True
+        window._automation_paused = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [mini_dma_mod.AutomationStep("move", target_value=1.0)]
+        window._paused_current_setpoint_mA = 12.0
+        window._tic_motor_power_ok = False
+        window._last_tic_vin_v = 0.1
+        window._refresh_tic_status = lambda: None  # type: ignore[method-assign]
+        window._set_recipe_current_mA = (  # type: ignore[method-assign]
+            lambda current_mA: current_commands.append(float(current_mA)) or True
+        )
+
+        window._resume_paused_recipe()
+
+        assert window._automation_paused is True
+        assert current_commands == []
+        assert "Recipe resume refused because motor power is not confirmed ready" in (
+            window.log_output.toPlainText()
+        )
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -1737,6 +1907,1331 @@ def test_first_overheating_history_uses_loaded_pydpj_cache_without_ui_thread_rea
         _close_test_window(window)
 
 
+class _FakeIsolatedControlProcess:
+    def __init__(self) -> None:
+        self.pid = 4242
+        self.exitcode = None
+        self.started = False
+        self.closed = False
+        self.requests: list[object] = []
+        self.commands: list[tuple[str, object | None]] = []
+        self.update_payloads: list[str] = []
+        self.hold_bypass_states: list[bool] = []
+        self.next_snapshot: object | None = None
+        self.next_events: tuple[object, ...] = ()
+        self.next_fault_detail: tuple[str, str] = ("", "")
+
+    def start_process(self) -> None:
+        self.started = True
+
+    def start_session(self, request: object) -> int:
+        self.requests.append(request)
+        return 1
+
+    def wait_until_ready(self, *, timeout_s: float = 10.0) -> object:
+        del timeout_s
+        if not self.started:
+            raise RuntimeError("process not started")
+        return SimpleNamespace(state=mini_dma_mod.ControlState.IDLE)
+
+    def pause(self, identity: object) -> int:
+        self.commands.append(("pause", identity))
+        return 2
+
+    def resume(self, identity: object) -> int:
+        self.commands.append(("resume", identity))
+        return 3
+
+    def stop(self, identity: object) -> int:
+        self.commands.append(("stop", identity))
+        return 4
+
+    def update_config(self, identity: object, config_json: str) -> int:
+        self.commands.append(("update_config", identity))
+        self.update_payloads.append(config_json)
+        return 5
+
+    def set_current_hold_bypass(self, identity: object, enabled: bool) -> int:
+        self.commands.append(("hold_bypass", identity))
+        self.hold_bypass_states.append(bool(enabled))
+        return 6
+
+    def emergency_stop(self) -> None:
+        self.commands.append(("emergency", None))
+
+    def poll_latest_snapshot(self) -> object | None:
+        snapshot = self.next_snapshot
+        self.next_snapshot = None
+        return snapshot
+
+    def poll_events(self) -> tuple[object, ...]:
+        events = self.next_events
+        self.next_events = ()
+        return events
+
+    def poll_fault_detail(self) -> tuple[str, str]:
+        detail = self.next_fault_detail
+        self.next_fault_detail = ("", "")
+        return detail
+
+    def is_alive(self) -> bool:
+        return self.started and not self.closed
+
+    def close(self, *, timeout_s: float = 2.0, force: bool = False) -> bool:
+        del timeout_s, force
+        self.closed = True
+        return True
+
+
+def test_momentary_current_hold_bypass_button_tracks_press_and_release(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+    identity = mini_dma_mod.ControlSessionIdentity("bypass-ui", 1)
+    try:
+        process.start_process()
+        window._production_control_process = process  # type: ignore[assignment]
+        window._production_control_identity = identity
+        window._isolated_recipe_active = True
+        window._isolated_recipe_paused = False
+        window._show_current_hold_bypass_dialog()
+        assert window._current_hold_bypass_button is not None
+
+        qtbot.mousePress(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        assert process.hold_bypass_states[-1] is True
+        qtbot.mouseRelease(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        assert process.hold_bypass_states[-1] is False
+
+        qtbot.mousePress(
+            window._current_hold_bypass_button,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        window.eventFilter(
+            QtWidgets.QApplication.instance(),
+            QtCore.QEvent(QtCore.QEvent.Type.ApplicationDeactivate),
+        )
+        assert process.hold_bypass_states[-1] is False
+    finally:
+        window._production_control_process = None
+        window._production_control_identity = None
+        _close_test_window(window)
+
+
+def test_process_owned_momentary_bypass_resumes_hold_and_restores_logic(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 3
+        window._current_sweep_ramp_hold_started_s = time.monotonic() - 2.0
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        accepted, _detail = window._set_current_hold_bypass_active(True)
+        assert accepted is True
+        assert window._current_hold_bypass_active is True
+        assert resumed and "momentary" in resumed[-1]
+
+        accepted, _detail = window._set_current_hold_bypass_active(False)
+        assert accepted is True
+        assert window._current_hold_bypass_active is False
+        assert [event["active"] for event in window._current_hold_bypass_events] == [True, False]
+    finally:
+        _close_test_window(window)
+
+
+def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    _ensure_app()
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._force_control_profile = (  # type: ignore[method-assign]
+        lambda: mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: show_progress
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: True
+    )
+    recovery_prompts: list[bool] = []
+    window._ask_recovery_after_stop = (  # type: ignore[method-assign]
+        lambda: recovery_prompts.append(True)
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert len(process.requests) == 1
+        request = process.requests[0]
+        assert request.identity == window._production_control_identity
+        assert request.policy is mini_dma_mod.ControlPolicy.KOSICE
+        assert '"schema_version":1' in request.config_json
+        assert window._isolated_recipe_active is True
+        assert window._automation_active is True
+        assert window._scale_thread is None
+        assert window._supply_controller is None
+        assert window._tic_command_dispatcher is None
+
+        def _confirm(
+            state: object,
+            *,
+            last_command_sequence: int = 1,
+            last_command_result: str = "accepted",
+        ) -> None:
+            plot_point = mini_dma_mod.MeasurementPoint(
+                elapsed_s=1.5,
+                timestamp_utc="2026-07-23T12:00:00Z",
+                raw_position_mm=1.25,
+                position_mm=1.25,
+                raw_load_g=0.5,
+                load_g=0.5,
+                preload_state="ready",
+                strain_pct=0.25,
+                stress_mpa=25.0,
+                current_set_mA=2.0,
+                current_measured_mA=2.0,
+                voltage_V=0.4,
+                resistance_ohm=200.0,
+                power_W=0.0008,
+                automation_phase=state.value,
+                automation_basis="stress_mpa",
+                automation_target_value=25.0,
+                plateau_index=0,
+                plateau_label="synthetic",
+            )
+            readback = {
+                "automation_active": state
+                in {
+                    mini_dma_mod.ControlState.RUNNING,
+                    mini_dma_mod.ControlState.PAUSED,
+                },
+                "automation_phase": state.value,
+                "automation_index": 0,
+                "automation_completed": 4,
+                "automation_total": 10,
+                "task": "synthetic",
+                "position_mm": 1.25,
+                "load_g": 0.5,
+                "stress_mpa": 25.0,
+                "speed_mm_s": 0.002,
+                "supply_current_mA": 2.0,
+                "supply_voltage_V": 0.4,
+            }
+            readback.update(
+                {
+                    f"plot_{field.name}": getattr(plot_point, field.name)
+                    for field in dataclasses.fields(plot_point)
+                }
+            )
+            process.next_snapshot = SimpleNamespace(
+                identity=request.identity,
+                state=state,
+                sequence=1,
+                monotonic_s=time.monotonic(),
+                tick_count=1,
+                last_command_sequence=last_command_sequence,
+                last_command_result=last_command_result,
+                last_command_detail="synthetic confirmation",
+                policy=request.policy,
+                owner_pid=process.pid,
+                dropped_event_count=0,
+                readback=readback,
+            )
+            window._poll_production_control_process()
+
+        _confirm(mini_dma_mod.ControlState.RUNNING)
+        assert len(window._live_plot_points) == 1
+        assert window._live_plot_points[0].stress_mpa == pytest.approx(25.0)
+        assert window._dashboard_value_labels["task"].text() == "synthetic"
+        assert window._dashboard_value_labels["load_g"].text() == "0.500 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "25.0 MPa"
+        assert window._dashboard_value_labels["strain_pct"].text() == "0.250 %"
+        assert window._dashboard_value_labels["speed_mm_s"].text() == "2 um/s"
+        assert window._dashboard_value_labels["motor"].text() == "1.2500 mm"
+        assert window._dashboard_value_labels["supply"].text() == "2.00mA 0.40V"
+        assert window.label_current_task.isVisible() is False
+        assert window.label_control_process_status.isVisible() is False
+        assert window.recipe_progress.maximum() == 10
+        assert window.recipe_progress.value() == 4
+        assert "Overall  40% | synthetic" in window.recipe_progress.format()
+        fatigue_readback = {
+            "automation_name": mini_dma_mod.CURRENT_SWEEP_FATIGUE,
+            "automation_phase": "current",
+            "task": "Fatigue cycle 4",
+            "fatigue_cycle_index": 4,
+            "fatigue_cycles_completed": 3,
+            "fatigue_cycle_limit": 10,
+            "fatigue_cycle_leg": "current_down",
+        }
+        window._apply_isolated_recipe_status(
+            SimpleNamespace(state=mini_dma_mod.ControlState.RUNNING),
+            fatigue_readback,
+        )
+        assert window.recipe_progress.maximum() == 10
+        assert window.recipe_progress.value() == 3
+        assert window.recipe_progress.format() == "Fatigue cycle 4/10 | current_down"
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window.spin_current_sweep_step_mA.setValue(
+            window.spin_current_sweep_step_mA.value() + 0.25
+        )
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        _confirm(
+            mini_dma_mod.ControlState.RUNNING,
+            last_command_sequence=5,
+        )
+        assert window._isolated_command_pending is None
+
+        window._pause_recipe()
+        _confirm(mini_dma_mod.ControlState.PAUSED)
+        window._resume_paused_recipe()
+        _confirm(mini_dma_mod.ControlState.RUNNING)
+        window._stop_recipe_from_button()
+        assert [kind for kind, _identity in process.commands] == [
+            "update_config",
+            "hold_bypass",
+            "pause",
+            "resume",
+            "stop",
+        ]
+
+        assert window._connect_scale(show_errors=False) is False
+        assert window._connect_supply(show_errors=False) is False
+        with pytest.raises(RuntimeError, match="dedicated TMA control process"):
+            window._build_tic_dispatcher()
+        _confirm(mini_dma_mod.ControlState.STOPPED)
+        qtbot.waitUntil(lambda: recovery_prompts == [True], timeout=1000)
+        assert process.closed is True
+        assert window._isolated_recipe_active is False
+        assert window._current_position_mm == pytest.approx(1.25)
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_setup_snapshot_updates_visible_setup_graph_until_logging_starts(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    point = mini_dma_mod.MeasurementPoint(
+        elapsed_s=1.5,
+        timestamp_utc="2026-07-28T07:00:00Z",
+        raw_position_mm=0.12,
+        position_mm=0.12,
+        raw_load_g=0.91,
+        load_g=0.91,
+        preload_state="setup",
+        strain_pct=0.0,
+        stress_mpa=49.8,
+        current_set_mA=1.0,
+        current_measured_mA=1.0,
+        voltage_V=0.15,
+        resistance_ohm=150.0,
+        power_W=0.00015,
+        automation_phase="starting_length_prompt",
+        automation_basis="stress_mpa",
+        automation_target_value=50.0,
+        plateau_index=0,
+        plateau_label="length setup",
+    )
+    readback = {
+        f"plot_{field.name}": getattr(point, field.name)
+        for field in dataclasses.fields(point)
+    }
+    readback["session_logging_enabled"] = False
+
+    try:
+        window._show_length_setup_dialog()
+        window._length_setup_points.append(
+            dataclasses.replace(point, elapsed_s=8.0, stress_mpa=48.0)
+        )
+        window._consume_isolated_plot_snapshot(readback)
+
+        assert window._length_setup_dialog is not None
+        assert window._length_setup_dialog.isVisible()
+        assert len(window._length_setup_points) == 2
+        assert window._length_setup_points[-1].stress_mpa == pytest.approx(49.8)
+        assert window._length_setup_points[-1].elapsed_s > 8.0
+        assert window._live_plot_points == []
+
+        readback["session_logging_enabled"] = True
+        # Recipe logging has its own elapsed clock. Its first point must not be
+        # rejected merely because setup elapsed time had already advanced.
+        readback["plot_elapsed_s"] = 0.1
+        window._consume_isolated_plot_snapshot(readback)
+
+        assert len(window._length_setup_points) == 2
+        assert len(window._live_plot_points) == 1
+        assert window._live_plot_points[0].elapsed_s == pytest.approx(0.1)
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_log_snapshot_appends_only_new_child_lines(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+
+    try:
+        window._consume_isolated_log_snapshot(
+            {
+                "ui_log_tail_json": json.dumps(
+                    [
+                        [1, "[00:00:01] child first"],
+                        [2, "[00:00:02] child second"],
+                    ]
+                )
+            }
+        )
+        window._consume_isolated_log_snapshot(
+            {
+                "ui_log_tail_json": json.dumps(
+                    [
+                        [2, "[00:00:02] child second"],
+                        [3, "[00:00:03] child third"],
+                    ]
+                )
+            }
+        )
+
+        text = window.log_output.toPlainText()
+        assert text.count("child first") == 1
+        assert text.count("child second") == 1
+        assert text.count("child third") == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_plot_compaction_preserves_full_time_range(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    base = mini_dma_mod.MeasurementPoint(
+        elapsed_s=0.0,
+        timestamp_utc="2026-07-28T07:00:00Z",
+        raw_position_mm=0.0,
+        position_mm=0.0,
+        raw_load_g=0.0,
+        load_g=0.0,
+        preload_state="recipe",
+        strain_pct=0.0,
+        stress_mpa=0.0,
+        current_set_mA=1.0,
+        current_measured_mA=1.0,
+        voltage_V=0.1,
+        resistance_ohm=100.0,
+        power_W=0.0001,
+        automation_phase="current",
+        automation_basis="stress_mpa",
+        automation_target_value=50.0,
+        plateau_index=1,
+        plateau_label="1",
+    )
+
+    try:
+        window._live_plot_points = [
+            dataclasses.replace(base, elapsed_s=float(index))
+            for index in range(mini_dma_mod.LIVE_PLOT_MAX_POINTS + 1)
+        ]
+        window._compact_live_plot_points()
+
+        assert len(window._live_plot_points) <= mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
+        assert window._live_plot_points[0].elapsed_s == pytest.approx(0.0)
+        assert window._live_plot_points[-1].elapsed_s == pytest.approx(
+            float(mini_dma_mod.LIVE_PLOT_MAX_POINTS)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_fast_child_exit_reports_durable_fault_detail(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = False
+    process.exitcode = 1
+    process.next_fault_detail = (
+        "hardware preflight failed: scale COM6 unavailable",
+        "Traceback (most recent call last): synthetic",
+    )
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+
+    try:
+        window._poll_production_control_process()
+
+        status = window.label_control_process_status.text()
+        assert "hardware preflight failed: scale COM6 unavailable" in status
+        assert "exited with code 1" not in status
+        assert window._production_control_process is None
+        assert window._isolated_recipe_active is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_emergency_uses_out_of_band_path_and_waits_for_confirmation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="emergency-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_command_pending = "pause"
+    local_safety_calls: list[str] = []
+    broker_safety_calls: list[str] = []
+    window._disable_motor_supply_output = (  # type: ignore[method-assign]
+        lambda: local_safety_calls.append("motor")
+    )
+    window._disable_supply_output = (  # type: ignore[method-assign]
+        lambda: local_safety_calls.append("supply")
+    )
+    window._stop_auto_ramp = (  # type: ignore[method-assign]
+        lambda **_kwargs: local_safety_calls.append("stop")
+    )
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
+
+    try:
+        window._emergency_stop()
+
+        assert process.commands == [("emergency", None)]
+        assert local_safety_calls == []
+        assert broker_safety_calls == ["all-off"]
+        assert window._isolated_command_pending == "emergency"
+        assert window._isolated_pending_sequence is None
+        assert "awaiting child safe-state confirmation" in (
+            window.label_control_process_status.text()
+        )
+        assert window.button_emergency_stop.isEnabled()
+
+        process.next_snapshot = SimpleNamespace(
+            state=mini_dma_mod.ControlState.EMERGENCY,
+            last_command_sequence=0,
+            last_command_result="accepted",
+            owner_pid=process.pid,
+            readback={
+                "automation_active": False,
+                "automation_phase": "emergency",
+                "emergency_reason": "operator emergency request",
+            },
+        )
+        window._poll_production_control_process()
+
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+        assert process.closed is True
+        assert "dedicated process emergency" in window.label_control_process_status.text()
+        assert "operator emergency request" in window.label_control_process_status.text()
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    [
+        mini_dma_mod.ControlState.STOPPED,
+        mini_dma_mod.ControlState.EMERGENCY,
+        mini_dma_mod.ControlState.FAULTED,
+    ],
+)
+def test_isolated_hardware_ownership_interlocks_manual_controls_until_finish(
+    tmp_path: Path,
+    qtbot,
+    terminal_state: object,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+
+    try:
+        window._update_recipe_buttons()
+
+        assert window.manual_actions_box.isEnabled() is False
+        assert window.hardware_tab.isEnabled() is False
+        assert window.button_emergency_stop.isEnabled() is True
+
+        window._finish_isolated_recipe(state=terminal_state)
+
+        assert window.manual_actions_box.isEnabled() is True
+        assert window.hardware_tab.isEnabled() is True
+        assert window.button_emergency_stop.isEnabled() is True
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_parent_status_timer_never_touches_tic_during_isolated_ownership(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    refreshes: list[str] = []
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._refresh_tic_status = lambda: refreshes.append("tic") or True  # type: ignore[method-assign]
+    window._status_timer.start()
+
+    try:
+        window._handle_status_timer()
+
+        assert refreshes == []
+        assert window._status_timer.isActive() is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_finishes_visible_preflight_and_length_before_process(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    ordering: list[str] = []
+    window._first_overheating_preflight_allows_start = (  # type: ignore[method-assign]
+        lambda: ordering.append("prior_run_check") or True
+    )
+    window._preflight_isolated_session_output = (  # type: ignore[method-assign]
+        lambda: ordering.append("existing_output_check") or True
+    )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: (
+            ordering.append("hardware_preflight") or show_progress
+        )
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: ordering.append("continuity_current") or True
+    )
+    show_length_setup_dialog = window._show_length_setup_dialog
+
+    def _show_setup_graph() -> None:
+        ordering.append("setup_graph")
+        show_length_setup_dialog()
+
+    window._show_length_setup_dialog = _show_setup_graph  # type: ignore[method-assign]
+
+    def _enter_length(*_args: object, **_kwargs: object) -> tuple[float, bool]:
+        assert window._length_setup_dialog is not None
+        assert window._length_setup_dialog.isVisible()
+        ordering.append("length_prompt")
+        return 57.602, True
+
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        _enter_length,
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == [
+            "prior_run_check",
+            "existing_output_check",
+            "hardware_preflight",
+            "continuity_current",
+            "setup_graph",
+            "length_prompt",
+        ]
+        assert len(process.requests) == 1
+        assert '"starting_length_mm":57.602' in process.requests[0].config_json
+        assert process.update_payloads == []
+        assert window.spin_initial_length.value() == pytest.approx(57.602)
+        assert window._status_timer.isActive() is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_reviews_real_existing_output_before_length(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_log_name.setText("existing_sample")
+    run_dir = tmp_path / "existing_sample"
+    run_dir.mkdir()
+    (run_dir / mini_dma_mod.SESSION_METADATA_JSON).write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 10,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni47Fe24Ga23Co6",
+                    "microwire": "2/1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    ordering: list[str] = []
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda paths: (
+            ordering.append(f"existing_output:{paths[0].parent.name}")
+            or mini_dma_mod.OUTPUT_COLLISION_NEXT
+        )
+    )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: (
+            ordering.append("hardware_preflight") or show_progress
+        )
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: ordering.append("continuity_current") or True
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (
+            ordering.append("length_prompt") or 57.522,
+            True,
+        ),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == [
+            "existing_output:existing_sample",
+            "hardware_preflight",
+            "continuity_current",
+            "length_prompt",
+        ]
+        assert process.started is True
+        payload = json.loads(process.requests[0].config_json)
+        assert payload["output_collision_action"] == mini_dma_mod.OUTPUT_COLLISION_NEXT
+        assert (
+            payload["widgets"]["edit_log_name"]["text"]
+            == "existing_sample_run02"
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_existing_output_cancel_prevents_hardware_and_length(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_log_name.setText("existing_sample")
+    (tmp_path / "existing_sample").mkdir()
+    side_effects: list[str] = []
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_CANCEL
+    )
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: side_effects.append("hardware") or True
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (
+            side_effects.append("length") or 57.522,
+            True,
+        ),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert side_effects == []
+        assert process.started is False
+        assert "cancelled while reviewing existing output" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_recipe_refuses_parallel_ui_owned_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._session_active = True
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(str(message)),
+    )
+
+    try:
+        window._start_auto_ramp()
+        assert process.started is False
+        assert warnings
+        assert "sole authoritative run logger" in warnings[0]
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_isolated_start_does_not_spawn_when_visible_hardware_preflight_fails(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_proves_child_ready_before_releasing_ui_hardware(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    ordering: list[str] = []
+    original_start_process = process.start_process
+    original_wait_until_ready = process.wait_until_ready
+
+    def _preflight(_steps: object, *, show_progress: bool) -> bool:
+        assert show_progress is True
+        ordering.append("ui_preflight")
+        window._scale_thread = object()
+        window._supply_controller = object()
+        window._tic_command_dispatcher = object()
+        return True
+
+    def _release(name: str, attribute: str) -> None:
+        ordering.append(name)
+        setattr(window, attribute, None)
+
+    def _start_process() -> None:
+        ordering.append("child_spawn")
+        assert window._scale_thread is not None
+        assert window._supply_controller is not None
+        assert window._tic_command_dispatcher is not None
+        original_start_process()
+
+    def _wait_until_ready(*, timeout_s: float = 10.0) -> object:
+        ordering.append("child_ready")
+        assert window._scale_thread is not None
+        assert window._supply_controller is not None
+        assert window._tic_command_dispatcher is not None
+        return original_wait_until_ready(timeout_s=timeout_s)
+
+    original_start_session = process.start_session
+
+    def _start_session(request: object) -> int:
+        ordering.append("child_session")
+        assert window._scale_thread is None
+        assert window._supply_controller is None
+        assert window._tic_command_dispatcher is None
+        return original_start_session(request)
+
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    process.start_process = _start_process  # type: ignore[method-assign]
+    process.wait_until_ready = _wait_until_ready  # type: ignore[method-assign]
+    process.start_session = _start_session  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._stop_manual_jog = lambda: ordering.append("stop_manual_jog")  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: (  # type: ignore[method-assign]
+        _release("release_scale", "_scale_thread") or True
+    )
+    window._detach_supply_for_handoff = lambda: (  # type: ignore[method-assign]
+        _release("transfer_supply", "_supply_controller") or {}
+    )
+    window._stop_tic_dispatcher = lambda *args, **kwargs: _release(  # type: ignore[method-assign]
+        "release_tic", "_tic_command_dispatcher"
+    ) or True
+    window._release_tic_device_lock = lambda: ordering.append("release_tic_lock")  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == [
+            "ui_preflight",
+            "child_spawn",
+            "child_ready",
+            "stop_manual_jog",
+            "release_scale",
+            "release_tic",
+            "release_tic_lock",
+            "transfer_supply",
+            "child_session",
+        ]
+        assert process.started is True
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_command_deadline_forces_child_and_broker_safe_state(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="deadline-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_command_pending = "start"
+    window._isolated_pending_sequence = 1
+    window._isolated_command_deadline_s = time.monotonic() - 0.01
+    broker_safety_calls: list[str] = []
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
+
+    try:
+        window._poll_production_control_process()
+
+        assert ("emergency", None) in process.commands
+        assert broker_safety_calls == ["all-off"]
+        assert process.closed is True
+        assert window._production_control_process is None
+        assert window._isolated_recipe_active is False
+        assert "did not acknowledge start" in (
+            window.label_control_process_status.text()
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_stop_backpressure_escalates_to_emergency(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._production_control_identity = mini_dma_mod.ControlSessionIdentity(
+        session_id="backpressure-test",
+        generation=1,
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    process.stop = lambda _identity: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("control command queue is full")
+    )
+    broker_safety_calls: list[str] = []
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: broker_safety_calls.append("all-off")
+    )
+
+    try:
+        window._stop_recipe_from_button()
+
+        assert process.commands == [("emergency", None)]
+        assert broker_safety_calls == ["all-off"]
+        assert window._isolated_command_pending == "emergency"
+        assert "queue is full" in window.log_output.toPlainText()
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_startup_failure_retains_ui_hardware_and_supply_state(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    scale = object()
+    supply = object()
+    tic_dispatcher = object()
+    critical_messages: list[str] = []
+    transfer_attempts: list[str] = []
+
+    def _preflight(_steps: object, *, show_progress: bool) -> bool:
+        assert show_progress is True
+        window._scale_thread = scale
+        window._supply_controller = supply
+        window._tic_command_dispatcher = tic_dispatcher
+        return True
+
+    process.wait_until_ready = (  # type: ignore[method-assign]
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated child startup failure")
+        )
+    )
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _preflight  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: transfer_attempts.append(  # type: ignore[method-assign]
+        "scale"
+    )
+    window._stop_tic_dispatcher = lambda *args, **kwargs: transfer_attempts.append(  # type: ignore[method-assign]
+        "tic"
+    ) or True
+    window._detach_supply_for_handoff = lambda: transfer_attempts.append(  # type: ignore[method-assign]
+        "supply"
+    ) or {}
+    window._emergency_shared_supply_outputs_off = lambda: transfer_attempts.append(  # type: ignore[method-assign]
+        "emergency_supply_off"
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: critical_messages.append(str(message)),
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (52.4, True),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
+        assert transfer_attempts == []
+        assert window._scale_thread is scale
+        assert window._supply_controller is supply
+        assert window._tic_command_dispatcher is tic_dispatcher
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+        assert window._length_setup_dialog is None
+        assert critical_messages
+        assert "No hardware ownership was transferred" in critical_messages[0]
+        assert "PSU outputs were not changed" in critical_messages[0]
+        assert "before hardware ownership transfer" in window.log_output.toPlainText()
+    finally:
+        window._scale_thread = None
+        window._supply_controller = None
+        window._tic_command_dispatcher = None
+        _close_test_window(window)
+
+
+def test_isolated_start_cancelled_length_closes_prewarmed_control_process(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (57.0, False),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
+        assert window._isolated_recipe_active is False
+        assert "before transferring hardware ownership" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_aborts_when_tic_dispatcher_cannot_quiesce(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    lock_releases: list[str] = []
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._tic_command_dispatcher = object()
+    window._stop_tic_dispatcher = lambda: False  # type: ignore[method-assign]
+    window._release_tic_device_lock = lambda: lock_releases.append("released")  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert process.closed is True
+        assert process.requests == []
+        assert lock_releases == []
+        assert "did not release hardware ownership cleanly" in window.log_output.toPlainText()
+    finally:
+        window._tic_command_dispatcher = None
+        _close_test_window(window)
+
+
+def test_isolated_start_failure_forces_shared_supply_off_even_if_child_emergency_fails(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    forced_shutdowns: list[bool] = []
+    critical_messages: list[str] = []
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    process.start_session = (  # type: ignore[method-assign]
+        lambda _request: (_ for _ in ()).throw(RuntimeError("start failed"))
+    )
+    process.emergency_stop = (  # type: ignore[method-assign]
+        lambda: (_ for _ in ()).throw(RuntimeError("child unavailable"))
+    )
+    window._emergency_shared_supply_outputs_off = (  # type: ignore[method-assign]
+        lambda: forced_shutdowns.append(True)
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: critical_messages.append(str(message)),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.closed is True
+        assert forced_shutdowns == [True]
+        assert "control-process emergency command failed" in window.log_output.toPlainText()
+        assert "could not accept the recipe" in window.log_output.toPlainText()
+        assert critical_messages
+        assert "All shared PSU outputs were commanded off" in critical_messages[0]
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+    finally:
+        _close_test_window(window)
+
+
 def _prepare_first_overheating_preflight_window(
     tmp_path: Path,
     qtbot,
@@ -1753,6 +3248,8 @@ def _prepare_first_overheating_preflight_window(
     window.edit_name_wire.setText("12/2")
     window.edit_name_specimen.setText("segment A")
     window.check_current_sweep_first_overheating.setChecked(False)
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
     window._tma_history_root = window._current_tma_history_root()
     window._tma_history_records = ()
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
@@ -1897,11 +3394,15 @@ def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists
         window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
             lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
         )
+        window._tma_history_scan_pending_root = window._current_tma_history_root()
         window.check_current_sweep_first_overheating.setChecked(True)
         assert window._first_overheating_preflight_allows_start() is True
         assert prompts == []
+        assert window._tma_history_check_pending is False
+        assert window._tma_history_start_deferred is False
 
         window.check_current_sweep_first_overheating.setChecked(False)
+        window._tma_history_scan_pending_root = None
         window._tma_history_records = (
             mini_dma_mod.TmaHistoryRecord(
                 identity=mini_dma_mod.TmaSampleIdentity(
@@ -1912,7 +3413,105 @@ def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists
         )
         assert window._first_overheating_preflight_allows_start() is True
         assert prompts == []
+        window._flush_pending_run_log_lines()
+        log_text = window.log_output.toPlainText()
+        assert "Previous TMA measurement check: FOUND" in log_text
+        assert "synthetic metadata" in log_text
     finally:
+        _close_test_window(window)
+
+
+def test_armed_bench_missing_history_authorization_is_one_shot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    prompts: list[str] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window.authorize_missing_prior_tma_history_once()
+
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+        assert window._allow_missing_prior_tma_history_once is False
+        assert window._first_overheating_preflight_decision is not None
+        assert (
+            window._first_overheating_preflight_decision["decision"]
+            == "operator_explicitly_skipped_first_overheating"
+        )
+
+        assert window._first_overheating_preflight_allows_start() is False
+        assert prompts == ["prompt"]
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_waits_for_completed_history_scan_and_logs_match_source(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_name_composition.setText("Ni47Fe24Ga23Co6")
+    window.edit_name_wire.setText("2/1")
+    window.edit_name_specimen.setText("")
+    root = window._current_tma_history_root()
+    window._tma_history_root = None
+    window._tma_history_scan_pending_root = root
+    window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+        lambda _steps, *, show_progress: show_progress
+    )
+    window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+        lambda _steps: True
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert window._tma_history_start_deferred is True
+        assert "recipe start is deferred automatically" in window.log_output.toPlainText()
+
+        window._tma_history_scan_timer.stop()
+        window._tma_history_scan_pending_root = None
+        match_source = str(root / "Ni47Fe24Ga23Co6 2_1 iso-stress_run09" / "metadata.json")
+        window._handle_tma_history_scan_success(
+            root,
+            (
+                mini_dma_mod.TmaHistoryRecord(
+                    identity=mini_dma_mod.TmaSampleIdentity(
+                        "Ni47Fe24Ga23Co6",
+                        "2/1",
+                    ),
+                    source=match_source,
+                ),
+            ),
+        )
+        qtbot.waitUntil(lambda: process.started, timeout=3000)
+
+        assert len(process.requests) == 1
+        window._flush_pending_run_log_lines()
+        log_text = window.log_output.toPlainText()
+        assert "Previous TMA measurement check: FOUND" in log_text
+        assert "1 matching source(s) among 1 completed run record(s)" in log_text
+        assert match_source in log_text
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
         _close_test_window(window)
 
 
@@ -3009,6 +4608,525 @@ def test_load_g_from_stress_mpa_inverts_stress_conversion() -> None:
 
     assert load_g == pytest.approx(0.7208, rel=5e-4)
     assert mini_dma_mod.stress_mpa_from_load_g(load_g, 0.03) == pytest.approx(10.0)
+
+
+def test_iso_stress_recipe_caps_target_grid_below_applied_load_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._update_recipe_mode_ui()
+
+        plan = window._current_sweep_load_limit_plan()
+        steps, summary, _interval_ms = window._build_automation_recipe()
+        sweep_targets = [
+            float(step.target_value)
+            for step in steps
+            if step.action == "sweep_current" and step.target_value is not None
+        ]
+        metadata = window._session_metadata_from_ui()["controlled_current_sweep"]
+
+        assert plan.clipped is True
+        assert plan.limit_g == pytest.approx(21.0)
+        assert plan.planning_limit_g == pytest.approx(20.75)
+        assert plan.theoretical_limit_target == pytest.approx(734.1, rel=2e-3)
+        assert plan.effective_end == pytest.approx(700.0)
+        assert max(sweep_targets) == pytest.approx(700.0)
+        assert 750.0 not in sweep_targets
+        assert "requested endpoint 1000.0000 MPa" in summary
+        assert "executed endpoint 700.0000 MPa" in summary
+        assert window.label_current_sweep_load_limit_warning.isHidden() is False
+        assert "run ends at 700 MPa" in window.label_current_sweep_load_limit_warning.text()
+        assert ".0000" not in window.label_current_sweep_load_limit_warning.text()
+        assert "color" in window.label_current_target_end_equiv.styleSheet()
+        assert metadata["target_end_requested"] == pytest.approx(1000.0)
+        assert metadata["target_end_effective"] == pytest.approx(700.0)
+        assert metadata["load_limit_plan"]["clipped"] is True
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_setup_status_replaces_pre_handoff_message(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+
+    try:
+        window._show_length_setup_dialog()
+        window._update_length_setup_dialog(
+            "Waiting for dedicated controller readiness; hardware remains UI-owned."
+        )
+        window._apply_isolated_recipe_status(
+            SimpleNamespace(state=mini_dma_mod.ControlState.RUNNING),
+            {
+                "task": "Setup: return load to zero",
+                "session_logging_enabled": False,
+                "automation_total": 100,
+                "automation_completed": 10,
+            },
+        )
+
+        assert window._length_setup_status_label is not None
+        assert window._length_setup_status_label.text() == (
+            "Controller: Setup: return load to zero"
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_progress_eta_refresh_is_throttled_until_task_changes(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    now_s = [100.0]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    snapshot = SimpleNamespace(state=mini_dma_mod.ControlState.RUNNING)
+    readback = {
+        "task": "Ramp to 50 MPa",
+        "automation_total": 100,
+        "automation_completed": 10,
+    }
+
+    try:
+        window._automation_progress_started_s = 90.0
+        window._automation_progress_last_format_update_s = 0.0
+        window._apply_isolated_recipe_status(snapshot, readback)
+        first_format = window.recipe_progress.format()
+        assert window.recipe_progress.value() == 10
+        assert "ETA" in first_format
+
+        now_s[0] = 100.1
+        readback["automation_completed"] = 20
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 10
+        assert window.recipe_progress.format() == first_format
+
+        now_s[0] = 100.2
+        readback["task"] = "Hold at 50 MPa"
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 20
+        assert "Hold at 50 MPa" in window.recipe_progress.format()
+
+        now_s[0] = 101.3
+        readback["automation_completed"] = 30
+        window._apply_isolated_recipe_status(snapshot, readback)
+        assert window.recipe_progress.value() == 30
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_user_stop_schedules_one_recovery_prompt_after_process_close(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    recovery_schedules: list[bool] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._isolated_user_stop_requested = True
+    window._schedule_recovery_after_stop = (  # type: ignore[method-assign]
+        lambda: recovery_schedules.append(True)
+    )
+
+    try:
+        window._finish_isolated_recipe(state=mini_dma_mod.ControlState.STOPPED)
+
+        assert process.closed is True
+        assert recovery_schedules == [True]
+        assert window._isolated_recipe_active is False
+        assert window._automation_active is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_finish_generates_summary_in_visible_parent_after_child_close(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-run"
+    requested: list[tuple[Path, bool, bool]] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={"session_path": str(run_dir / "measurement.csv")},
+        )
+
+        assert requested == [(run_dir, True, True)]
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_fault_generates_summary_from_cached_terminal_snapshot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-fault-run"
+    requested: list[tuple[Path, bool, bool]] = []
+    window._production_control_process = process
+    window._production_control_snapshot = SimpleNamespace(
+        readback={
+            "session_path": str(run_dir / "measurement.csv"),
+            "position_mm": 1.25,
+        }
+    )
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.FAULTED,
+            detail="wire break",
+        )
+
+        assert requested == [(run_dir, False, True)]
+        assert window._current_position_mm == pytest.approx(1.25)
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_wire_break_finishes_in_visible_parent_and_schedules_summary_and_prompt(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    run_dir = tmp_path / "isolated-wire-break"
+    requested: list[tuple[Path, bool, bool]] = []
+    prompts: list[str] = []
+    deferred: list[object] = []
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda path, *, offer_cleanup=False: requested.append(
+            (Path(path), bool(offer_cleanup), process.closed)
+        )
+    )
+    window._ask_wire_break_recovery_after_stop = prompts.append  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtCore.QTimer,
+        "singleShot",
+        lambda _delay, callback: deferred.append(callback),
+    )
+    detail = "Wire break detected: synthetic open circuit."
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback={
+                "session_path": str(run_dir / "measurement.csv"),
+                "session_stop_reason": "wire_break_or_contact_loss",
+                "session_stop_category": "fault",
+                "session_stop_label": "Wire break or contact loss",
+                "session_stop_detail": detail,
+            },
+        )
+
+        assert process.closed is True
+        assert requested == [(run_dir, False, True)]
+        assert window._dashboard_value_labels["task"].text() == (
+            "Wire break or contact loss (final values)"
+        )
+        assert not window.label_control_process_status.isHidden()
+        assert deferred
+        deferred[-1]()
+        assert prompts == [detail]
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_controller_process_wire_break_does_not_open_hidden_prompt(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    prompts: list[str] = []
+    cleanup_offers: list[bool] = []
+    window._ask_wire_break_recovery_after_stop = prompts.append  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: cleanup_offers.append(True)
+    )
+    window._automation_active = True
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 39.4
+    window._supply_snapshot = {
+        "current_mA": 0.2,
+        "voltage_V": 32.056,
+        "resistance_ohm": None,
+        "power_W": 0.0,
+    }
+    window._stop_auto_ramp = lambda **_kwargs: setattr(window, "_automation_active", False)  # type: ignore[method-assign]
+
+    try:
+        window._finish_wire_break_stop_on_ui_thread()
+
+        assert window._automation_active is False
+        assert prompts == []
+        assert cleanup_offers == []
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_isolated_normal_finish_retains_confirmed_final_dashboard_values(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    process.started = True
+    window._production_control_process = process
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    final_readback = {
+        "task": "Returning load to zero",
+        "load_g": 0.002,
+        "stress_mpa": 0.1,
+        "plot_strain_pct": 7.5,
+        "position_mm": 4.2,
+        "speed_mm_s": 0.0,
+        "supply_current_mA": 1.0,
+        "supply_voltage_V": 0.12,
+        "automation_completed": 20,
+        "automation_total": 20,
+    }
+
+    try:
+        window._finish_isolated_recipe(
+            state=mini_dma_mod.ControlState.STOPPED,
+            readback=final_readback,
+        )
+        window._latest_scale_timestamp = time.time() - 1000.0
+        window._refresh_live_labels()
+
+        assert window._dashboard_value_labels["task"].text() == (
+            "Recipe completed (final values)"
+        )
+        assert window._dashboard_value_labels["load_g"].text() == "0.002 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "0.1 MPa"
+        assert window.recipe_progress.value() == 100
+        assert window.recipe_progress.format() == (
+            "Overall 100% | Recipe completed (final values)"
+        )
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_iso_stress_recipe_blocks_when_first_target_exceeds_planning_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(800.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+
+        with pytest.raises(ValueError, match="first target 800.0000 MPa"):
+            window._build_automation_recipe()
+    finally:
+        _close_test_window(window)
+
+
+def test_capped_recipe_requires_confirmation_before_hardware_preflight(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+    confirmations: list[bool] = []
+    preflights: list[bool] = []
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_diameter.setValue(0.0189)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(21.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._confirm_current_sweep_load_limit_plan = (  # type: ignore[method-assign]
+            lambda: confirmations.append(True) or False
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda _steps, **_kwargs: preflights.append(True) or True
+        )
+
+        window._start_auto_ramp()
+
+        assert confirmations == [True]
+        assert preflights == []
+        assert window._automation_active is False
+        assert "applied-load cap confirmation" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_prompt_and_choice_are_one_shot(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    prompts: list[bool] = []
+    recoveries: list[str] = []
+    window._ask_recovery_after_stop = lambda: prompts.append(True)  # type: ignore[method-assign]
+    window._start_recovery_load_zero = lambda: recoveries.append("load")  # type: ignore[method-assign]
+
+    try:
+        window._schedule_recovery_after_stop()
+        window._schedule_recovery_after_stop()
+        _ensure_app().processEvents()
+
+        assert prompts == [True]
+
+        window._queue_recovery_choice("load_zero")
+        window._queue_recovery_choice("load_zero")
+        _ensure_app().processEvents()
+
+        assert recoveries == ["load"]
+        assert window._recovery_action_pending is False
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_choice_dispatches_after_modal_dialog_unwinds(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recoveries: list[str] = []
+    inside_exec = False
+
+    def fake_exec(box: QtWidgets.QMessageBox) -> int:
+        nonlocal inside_exec
+        inside_exec = True
+        load_button = next(
+            button for button in box.buttons() if button.text() == "Return load to 0"
+        )
+        load_button.click()
+        inside_exec = False
+        return 0
+
+    def start_load_recovery() -> None:
+        assert inside_exec is False
+        recoveries.append("load")
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", fake_exec)
+    window._start_recovery_load_zero = start_load_recovery  # type: ignore[method-assign]
+
+    try:
+        window._ask_recovery_after_stop()
+
+        assert recoveries == []
+        assert window._recovery_action_pending is True
+
+        _ensure_app().processEvents()
+
+        assert recoveries == ["load"]
+        assert window._recovery_action_pending is False
+    finally:
+        _close_test_window(window)
 
 
 def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) -> None:
@@ -4742,7 +6860,6 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_step_mA.setValue(1.0)
     window.spin_current_sweep_target_ramp_rate.setValue(0.1)
     window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
-    window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_control_interval.setValue(250)
     window.spin_log_interval.setValue(500)
 
@@ -4848,6 +6965,53 @@ def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot
         assert window._latest_scale_timestamp == pytest.approx(timestamp_s)
         assert window._scale_signal_buffer.latest() is not None
     finally:
+        _close_test_window(window)
+
+
+def test_accepted_scale_sample_wakes_control_loop_once(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    wake_count = 0
+
+    class _WakeProbe:
+        def wake(self) -> bool:
+            nonlocal wake_count
+            wake_count += 1
+            return True
+
+    try:
+        window._automation_control_loop = _WakeProbe()  # type: ignore[assignment]
+        window._record_scale_measurement_state(12.5, "12.5 g", time.time())
+
+        assert wake_count == 1
+    finally:
+        window._automation_control_loop = None
+        _close_test_window(window)
+
+
+def test_rejected_stale_scale_callback_does_not_wake_control_loop(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    wake_count = 0
+
+    class _WakeProbe:
+        def wake(self) -> bool:
+            nonlocal wake_count
+            wake_count += 1
+            return True
+
+    try:
+        window._automation_control_loop = _WakeProbe()  # type: ignore[assignment]
+        window._scale_connection_token = object()
+        write = window._record_scale_measurement_state(
+            12.5,
+            "stale 12.5 g",
+            time.time(),
+            token=object(),
+        )
+
+        assert write is None
+        assert wake_count == 0
+    finally:
+        window._automation_control_loop = None
         _close_test_window(window)
 
 
@@ -5015,6 +7179,67 @@ def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
     finally:
         if window._session_active:
             window._stop_session()
+        _close_test_window(window)
+
+
+def test_recipe_scale_preflight_waits_for_serial_open_failure(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker = SimpleNamespace(
+        opened_event=threading.Event(),
+        finished_event=threading.Event(),
+        startup_error="Scale connection failed: access denied",
+        _read_timeout_s=lambda: 0.05,
+    )
+    worker.finished_event.set()
+    disconnected: list[bool] = []
+    window._fast_auto_detect_scale_port = lambda: False  # type: ignore[method-assign]
+
+    def _connect(*, show_errors: bool) -> bool:
+        assert show_errors is False
+        window._scale_worker = worker
+        window._scale_thread = object()
+        return True
+
+    window._connect_scale = _connect  # type: ignore[method-assign]
+    window._disconnect_scale = lambda *args, **kwargs: (  # type: ignore[method-assign]
+        disconnected.append(True) or True
+    )
+
+    try:
+        assert window._ensure_scale_ready_for_recipe() is False
+        assert disconnected == [True]
+        assert "access denied" in window._controller_process_error
+    finally:
+        window._scale_thread = None
+        window._scale_worker = None
+        _close_test_window(window)
+
+
+def test_disconnect_scale_reports_unreleased_worker(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    stopped: list[str] = []
+    quit_calls: list[str] = []
+    bridge_deleted: list[str] = []
+    window._scale_worker = SimpleNamespace(stop=lambda: stopped.append("stop"))
+    window._scale_thread = SimpleNamespace(quit=lambda: quit_calls.append("quit"))
+    window._scale_thread_lifetime = SimpleNamespace(wait=lambda _timeout: False)
+    window._scale_ui_bridge = SimpleNamespace(
+        deleteLater=lambda: bridge_deleted.append("delete")
+    )
+
+    try:
+        assert window._disconnect_scale(timeout_ms=1) is False
+        assert stopped == ["stop"]
+        assert quit_calls == ["quit"]
+        assert bridge_deleted == ["delete"]
+        assert window._scale_thread is None
+    finally:
         _close_test_window(window)
 
 
@@ -6412,7 +8637,11 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         ]
         assert [step.relative_mm for step in forward_moves] == [pytest.approx(0.01)] * 4
         assert [step.relative_mm for step in reverse_moves] == [pytest.approx(-0.01)] * 4
-        assert steps[-1].action == "calibration_record"
+        assert steps[-2].action == "calibration_record"
+        assert steps[-1].action == "seek_target"
+        assert steps[-1].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert steps[-1].target_value == pytest.approx(0.0)
+        assert steps[-1].note == "recipe_return_zero"
     finally:
         _close_test_window(window)
 
@@ -8249,23 +10478,21 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         window.spin_current_sweep_fatigue_cycles.setValue(3)
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(False)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         steps, summary, interval_ms = window._build_automation_recipe()
         payload = window._current_recipe_payload()
 
         assert interval_ms == window._control_interval_ms()
-        assert len(steps) == 1
+        assert len(steps) == 2
         loop_step = steps[0]
         assert loop_step.action == "fatigue_loop"
         assert loop_step.fatigue_cycle_limit == 3
+        assert steps[1].note == "recipe_return_zero"
         observed_cycles: list[tuple[int | None, list[str | None]]] = []
+        window._automation_steps = list(steps)
         for expected_cycle in range(1, 4):
-            window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps))
-            if not window._automation_steps:
-                window._automation_steps = steps
-                window._fatigue_loop_anchor_index = None
-                window._expand_next_fatigue_cycle(loop_step, 0)
+            loop_index = window._automation_steps.index(loop_step)
+            window._expand_next_fatigue_cycle(loop_step, loop_index)
             sweep_steps = [
                 step for step in window._automation_steps if step.action == "sweep_current"
             ]
@@ -8275,7 +10502,8 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
                     [step.fatigue_leg for step in sweep_steps],
                 )
             )
-            assert len(window._automation_steps) == 5
+            assert len(window._automation_steps) == 6
+            assert window._automation_steps[-1].note == "recipe_return_zero"
             assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == [
                 (pytest.approx(1.0), pytest.approx(60.0)),
                 (pytest.approx(60.0), pytest.approx(1.0)),
@@ -8285,8 +10513,12 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
             (2, ["up", "down"]),
             (3, ["up", "down"]),
         ]
-        window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps) - 1)
-        assert window._automation_steps == []
+        window._expand_next_fatigue_cycle(
+            loop_step,
+            window._automation_steps.index(loop_step),
+        )
+        assert len(window._automation_steps) == 1
+        assert window._automation_steps[0].note == "recipe_return_zero"
         assert "iso-stress fatigue" in summary
         assert "3 cycle" in summary
         assert "Force control:" in summary
@@ -8343,9 +10575,10 @@ def test_large_finite_fatigue_recipe_stays_compact(tmp_path: Path, qtbot) -> Non
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
-        assert len(steps) == 1
+        assert len(steps) == 2
         assert steps[0].action == "fatigue_loop"
         assert steps[0].fatigue_cycle_limit == 100_000
+        assert steps[1].note == "recipe_return_zero"
         assert "100000 cycle(s)" in summary
         point_count, tick_count = window._estimate_recipe_points_and_ticks(
             steps,
@@ -8502,10 +10735,13 @@ def test_iso_stress_fatigue_recipe_can_start_with_first_overheating(tmp_path: Pa
         window.spin_current_sweep_first_overheating_end_mA.setValue(40.0)
 
         steps, summary, _interval_ms = window._build_automation_recipe()
-        loop_step = steps[-1]
+        loop_step = next(step for step in steps if step.action == "fatigue_loop")
         assert loop_step.action == "fatigue_loop"
         window._automation_steps = list(steps)
-        window._expand_next_fatigue_cycle(loop_step, len(steps) - 1)
+        window._expand_next_fatigue_cycle(
+            loop_step,
+            window._automation_steps.index(loop_step),
+        )
 
         set_current_steps = [
             step for step in window._automation_steps if step.action == "set_current"
@@ -9176,7 +11412,7 @@ def test_completed_recipe_cleanup_from_worker_is_queued_to_ui_thread(tmp_path: P
         window._automation_steps = []
         window._automation_index = 0
         window._is_ui_thread = lambda: False  # type: ignore[method-assign]
-        window._call_on_ui_thread_sync = lambda callback: queued.append(callback)  # type: ignore[method-assign]
+        window._run_on_ui_thread = lambda callback: queued.append(callback)  # type: ignore[method-assign]
 
         window._handle_auto_ramp_tick()
 
@@ -13979,7 +16215,7 @@ def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, q
     qtbot.addWidget(window)
 
     try:
-        assert window.spin_scale_interval.value() == mini_dma_mod.DEFAULT_SCALE_REQUEST_INTERVAL_MS
+        assert window.spin_scale_interval.value() == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     finally:
         _close_test_window(window)
 
@@ -14106,7 +16342,7 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
     assert window.edit_scale_request.text_value == "\\x1bp"
     assert window.edit_scale_terminator.text_value == ""
     assert spinners["control"].value_set == 250
-    assert spinners["scale"].value_set == 250
+    assert spinners["scale"].value_set == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     assert "Prague G&G" in messages[-1]
 
 
@@ -14625,9 +16861,27 @@ def test_length_setup_plot_sorts_points_by_elapsed_time(tmp_path: Path, qtbot) -
 
         base = window._length_setup_points[0]
         window._length_setup_points = [
-            dataclasses.replace(base, elapsed_s=2.0, position_mm=-0.2, load_g=0.3),
-            dataclasses.replace(base, elapsed_s=0.0, position_mm=0.0, load_g=0.1),
-            dataclasses.replace(base, elapsed_s=1.0, position_mm=-0.1, load_g=0.2),
+            dataclasses.replace(
+                base,
+                elapsed_s=2.0,
+                raw_position_mm=0.2,
+                position_mm=-0.2,
+                load_g=0.3,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=0.0,
+                raw_position_mm=0.0,
+                position_mm=0.0,
+                load_g=0.1,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=1.0,
+                raw_position_mm=0.1,
+                position_mm=-0.1,
+                load_g=0.2,
+            ),
         ]
 
         window._refresh_length_setup_plot()
@@ -14644,12 +16898,65 @@ def test_length_setup_plot_sorts_points_by_elapsed_time(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
+def test_length_setup_plot_keeps_one_raw_position_origin_across_process_handoff(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_positive_motion_is_tension.setChecked(True)
+        window._current_position_mm = 1.85
+        window._effective_position_mm = 1.85
+        window._show_length_setup_dialog()
+        assert window._length_setup_position_origin_mm == pytest.approx(1.85)
+
+        base = window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=1.85,
+            effective_position_mm=1.85,
+            raw_load_g=0.0,
+            load_g=0.0,
+        )
+        # The visible process still carries its older session reference, while
+        # the child has already rebased its own MeasurementPoint.position_mm to
+        # zero.  Raw Tic coordinates remain continuous across the handoff.
+        window._length_setup_points = [
+            dataclasses.replace(
+                base,
+                elapsed_s=0.0,
+                raw_position_mm=1.85,
+                position_mm=1.85,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=1.0,
+                raw_position_mm=1.85,
+                position_mm=0.0,
+            ),
+            dataclasses.replace(
+                base,
+                elapsed_s=2.0,
+                raw_position_mm=1.80,
+                position_mm=-0.05,
+            ),
+        ]
+
+        window._refresh_length_setup_plot()
+
+        assert window._length_setup_displacement_curve is not None
+        _, displacement_y = window._length_setup_displacement_curve.getData()
+        assert list(displacement_y) == pytest.approx([0.0, 0.0, -0.05])
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_timer_records_prompt_samples(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         window._show_length_setup_dialog()
-        window._automation_active = True
+        window._automation_active = False
         window._set_automation_context(phase="starting_length", note="starting_length")
         window._latest_scale_value_g = 21.5
         window._latest_scale_timestamp = time.time()
@@ -15482,7 +17789,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.label_current_sweep_targets_section.text() == "Load targets"
         assert window.label_current_sweep_current_section.text() == "Current sweep"
         assert window.check_current_sweep_return_target.isHidden() is True
-        assert window.check_current_sweep_reverse_current.isHidden() is True
+        assert not hasattr(window, "check_current_sweep_reverse_current")
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )
@@ -16054,6 +18361,10 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         assert current_steps[0].current_mA == pytest.approx(1.0)
         assert max(step.current_end_mA for step in current_sweep_steps if step.current_end_mA is not None) == pytest.approx(3.0)
         assert target_ramps[-1].target_end_value == pytest.approx(0.0)
+        assert steps[-1].action == "seek_target"
+        assert steps[-1].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert steps[-1].target_value == pytest.approx(0.0)
+        assert steps[-1].note == "recipe_return_zero"
         assert "iso-load current sweep" in summary.lower()
         assert "control every 250 ms" in summary
         assert "log every 500 ms" in summary
@@ -16162,7 +18473,7 @@ def test_current_sweep_returns_current_to_start_by_default(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
-def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_always_includes_reverse_current_steps(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -16170,21 +18481,21 @@ def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qt
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
-
         steps, summary, _interval_ms = window._build_automation_recipe()
 
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
 
-        assert len(current_sweep_steps) == 4
-        assert all(step.current_start_mA == pytest.approx(1.0) for step in current_sweep_steps)
-        assert all(step.current_end_mA == pytest.approx(3.0) for step in current_sweep_steps)
-        assert "Nominal current reverse sweeps are disabled." in summary
+        assert len(current_sweep_steps) == 8
+        assert [(step.current_start_mA, step.current_end_mA) for step in current_sweep_steps[:2]] == [
+            (pytest.approx(1.0), pytest.approx(3.0)),
+            (pytest.approx(3.0), pytest.approx(1.0)),
+        ]
+        assert "reverse sweeps are disabled" not in summary
     finally:
         _close_test_window(window)
 
 
-def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_recipe_payload_ignores_legacy_reverse_current_false(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -16192,16 +18503,16 @@ def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: 
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
-
         payload = window._current_recipe_payload()
+        assert payload["recipe"]["current_sweep"]["reverse_current"] is True
 
-        assert payload["recipe"]["current_sweep"]["reverse_current"] is False
-
-        window.check_current_sweep_reverse_current.setChecked(True)
+        payload["recipe"]["current_sweep"]["reverse_current"] = False
         window._apply_recipe_payload(payload)
-
-        assert window.check_current_sweep_reverse_current.isChecked() is False
+        assert window._current_recipe_payload()["recipe"]["current_sweep"]["reverse_current"] is True
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        assert current_sweep_steps
+        assert any(step.current_end_mA < step.current_start_mA for step in current_sweep_steps)
     finally:
         _close_test_window(window)
 
@@ -19243,6 +21554,165 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     ]
 
 
+def test_shared_broker_normal_stop_releases_motor_lease_without_disabling_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            del host, port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(
+                ("lease", {"channel": channel, "owner": owner, "role": role})
+            )
+            return {"lease_id": f"lease-{channel}"}
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            self.calls.append(
+                ("release", {"channel": channel, "lease_id": lease_id})
+            )
+
+        def set_output(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "set_output",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_channel(self, **payload: object) -> None:
+            self.calls.append(("configure_channel", dict(payload)))
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+        current_limit_a=0.08,
+        motor_voltage_limit_v=12.0,
+        motor_current_limit_a=0.5,
+    )
+    controller.connect()
+    controller._leases = {4: "lease-4", 3: "lease-3"}
+
+    controller.disconnect(preserve_motor_output=True)
+
+    calls = clients[0].calls
+    assert (
+        "set_output",
+        {"channel": 4, "lease_id": "lease-4", "output_on": False},
+    ) in calls
+    assert not any(
+        action == "set_output" and payload.get("channel") == 3
+        for action, payload in calls
+    )
+    assert (
+        "release",
+        {"channel": 4, "lease_id": "lease-4"},
+    ) in calls
+    assert (
+        "release",
+        {"channel": 3, "lease_id": "lease-3"},
+    ) in calls
+    assert controller._client is None
+    assert controller._leases == {}
+
+
+def test_shared_broker_handoff_detaches_both_leases_without_broker_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            del host, port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            self.calls.append(
+                ("release", {"channel": channel, "lease_id": lease_id})
+            )
+
+        def set_output(self, **payload: object) -> None:
+            self.calls.append(("set_output", dict(payload)))
+
+        def configure_channel(self, **payload: object) -> None:
+            self.calls.append(("configure_channel", dict(payload)))
+
+    client = _FakeBrokerClient(host="127.0.0.1", port=8765)
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "BrokerJsonClient",
+        lambda *, host, port: client,
+    )
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+        current_limit_a=0.08,
+        motor_voltage_limit_v=12.0,
+        motor_current_limit_a=0.5,
+    )
+    controller._client = client
+    controller._connected = True
+    controller._leases = {4: "lease-4", 3: "lease-3"}
+
+    leases = controller.detach_for_handoff()
+
+    assert client.calls == []
+    assert leases == {4: "lease-4", 3: "lease-3"}
+    assert controller._client is None
+    assert controller._leases == {}
+
+
+def test_dialog_plot_refresh_uses_faster_ui_cadence(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    window.spin_ui_interval.setValue(250)
+    window.spin_graph_interval.setValue(500)
+
+    try:
+        assert window._dialog_plot_refresh_due(10.0, now_s=10.24) is False
+        assert window._dialog_plot_refresh_due(10.0, now_s=10.25) is True
+    finally:
+        _close_test_window(window)
+
+
 def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -19840,18 +22310,33 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
 
     started: dict[str, object] = {}
 
-    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
-        nonlocal broker_started
-        broker_started = True
-        server = _FakeServer()
-        thread = _FakeThread()
-        started.update({"broker": broker, "host": host, "port": port, "server": server, "thread": thread})
-        return server, thread
+    class _FakeBrokerProcess:
+        def __init__(self, config: object) -> None:
+            started["config"] = config
+
+        def start(self) -> None:
+            return None
+
+        def wait_until_ready(self, *, timeout_s: float) -> object:
+            nonlocal broker_started
+            broker_started = True
+            config = started["config"]
+            return SimpleNamespace(
+                owner_pid=1234,
+                host=getattr(config, "host"),
+                port=getattr(config, "port"),
+            )
+
+        def close(self, *, timeout_s: float, force: bool) -> bool:
+            return True
 
     try:
         monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
-        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
-        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "SharedPowerSupplyBrokerProcess",
+            _FakeBrokerProcess,
+        )
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_supply_port.addItem("COM3", "COM3")
@@ -19869,16 +22354,16 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert window._connect_supply(show_errors=False) is True
 
         assert broker_started is True
-        assert started["host"] == "127.0.0.1"
-        assert started["port"] == 8765
-        assert getattr(started["broker"], "driver").identify_calls == 2
-        broker_profile = getattr(started["broker"], "bench_profile")
-        assert broker_profile.channels[4].voltage_limit_v == pytest.approx(1.0)
-        assert broker_profile.channels[4].current_limit_a is None
-        assert broker_profile.channels[3].voltage_limit_v == pytest.approx(12.0)
-        assert broker_profile.channels[3].current_limit_a == pytest.approx(0.4)
+        config = started["config"]
+        assert getattr(config, "host") == "127.0.0.1"
+        assert getattr(config, "port") == 8765
+        channels = {item.channel: item for item in getattr(config, "channels")}
+        assert channels[4].voltage_limit_v == pytest.approx(1.0)
+        assert channels[4].current_limit_a is None
+        assert channels[3].voltage_limit_v == pytest.approx(12.0)
+        assert channels[3].current_limit_a == pytest.approx(0.4)
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
-        assert "Started shared HMP broker" in window.log_output.toPlainText()
+        assert "Started process-owned TMA HMP broker" in window.log_output.toPlainText()
         assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -20191,9 +22676,23 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
         def join(self, timeout: float | None = None) -> None:
             return None
 
-    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
-        started.update({"broker": broker, "host": host, "port": port})
-        return _FakeServer(), _FakeThread()
+    class _FakeBrokerProcess:
+        def __init__(self, config: object) -> None:
+            started["config"] = config
+
+        def start(self) -> None:
+            return None
+
+        def wait_until_ready(self, *, timeout_s: float) -> object:
+            config = started["config"]
+            return SimpleNamespace(
+                owner_pid=1234,
+                host=getattr(config, "host"),
+                port=getattr(config, "port"),
+            )
+
+        def close(self, *, timeout_s: float, force: bool) -> bool:
+            return True
 
     try:
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
@@ -20216,8 +22715,11 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
                 "idn_text": "ROHDE&SCHWARZ,HMP4040",
             },
         )
-        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
-        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "SharedPowerSupplyBrokerProcess",
+            _FakeBrokerProcess,
+        )
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -20228,8 +22730,9 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
 
         assert window.combo_supply_port.currentData() == "COM7"
         assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
-        assert started["host"] == "127.0.0.1"
-        assert started["port"] == 8765
+        config = started["config"]
+        assert getattr(config, "host") == "127.0.0.1"
+        assert getattr(config, "port") == 8765
         assert "Auto-detected HMP supply on COM7" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -21404,6 +23907,38 @@ def test_tic_command_dispatcher_halt_cancels_queued_target_with_result() -> None
         dispatcher.stop()
 
 
+def test_tic_command_dispatcher_halt_cancels_queued_manual_velocity() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.actions.append(f"velocity:{velocity_steps_per_10k_s}")
+
+        def halt_and_hold(self) -> None:
+            self.actions.append("halt")
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(
+        lambda: controller,
+        autostart=False,
+    )
+    try:
+        velocity_sequence = dispatcher.set_target_velocity(800_000)
+        dispatcher.halt_and_hold()
+        velocity_result = dispatcher.command_result(velocity_sequence)
+
+        assert velocity_result is not None
+        assert velocity_result.succeeded is False
+        assert "cancelled by halt-and-hold" in str(velocity_result.error)
+
+        dispatcher.start()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert controller.actions == ["halt"]
+    finally:
+        dispatcher.stop()
+
+
 def test_tic_command_dispatcher_keepalive_runs_without_qt_event_processing() -> None:
     class _FakeController:
         def __init__(self) -> None:
@@ -22254,6 +24789,59 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
             "active_leg": "down",
             "state": "incomplete",
         }
+    finally:
+        _close_test_window(window)
+
+
+def test_ui_telemetry_flush_failure_does_not_stop_authoritative_session(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("ui_telemetry_flush_failure")
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    class _FailingFlushHandle:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def flush(self) -> None:
+            raise OSError(22, "synthetic invalid telemetry handle")
+
+        def close(self) -> None:
+            self.wrapped.close()
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        original_handle = window._session_ui_telemetry_handle
+        window._session_ui_telemetry_handle = _FailingFlushHandle(original_handle)
+        window._session_ui_telemetry_count = 9
+
+        window._write_ui_telemetry_sample(
+            started_s=window._session_start_monotonic + 0.2,
+            finished_s=window._session_start_monotonic + 0.21,
+            previous_ui_s=window._session_start_monotonic,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            live_plot_sample_recorded=True,
+            dashboard_plot_refreshed=False,
+        )
+
+        assert window._session_active is True
+        assert window._session_ui_telemetry_writer is None
+        assert window._session_ui_telemetry_handle is None
+        assert window._session_ui_telemetry_error is not None
+        assert "authoritative control and measurement logging continue" in window.log_output.toPlainText()
+
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_completed"
+        assert payload["logging"]["ui_telemetry_complete"] is False
+        assert payload["logging"]["ui_telemetry_error"]["error_type"] == "OSError"
+        assert payload["logging"]["file_io_errors"][0]["sidecar"] == "ui_telemetry"
     finally:
         _close_test_window(window)
 
@@ -23761,6 +26349,98 @@ def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
         assert window.spin_current_sweep_target_start.property("_mini_dma_runtime_pending") is False
         assert window.spin_current_sweep_step_mA.property("_mini_dma_runtime_pending") is False
     finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_length_setup_open_circuit_fails_before_automation_or_motion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    current_commands: list[tuple[float, bool]] = []
+    disabled: list[bool] = []
+    window.check_continuity_monitor.setChecked(True)
+    window.spin_continuity_current_mA.setValue(1.0)
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._automation_active = False
+    window._session_active = False
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+
+    def _set_current(current_mA: float, *, measure_after: bool = False) -> bool:
+        current_commands.append((current_mA, measure_after))
+        window._supply_output_enabled = True
+        window._supply_last_setpoint_mA = current_mA
+        if measure_after:
+            window._supply_snapshot = {
+                "current_mA": 0.1,
+                "voltage_V": 32.05,
+                "resistance_ohm": None,
+                "power_W": 0.003205,
+            }
+            window._handle_supply_limit_condition()
+        return True
+
+    window._set_recipe_current_mA = _set_current  # type: ignore[method-assign]
+    window._disable_supply_output = lambda: disabled.append(True)  # type: ignore[method-assign]
+    steps = [mini_dma_mod.AutomationStep("starting_length_prompt", note="setup_start_length")]
+
+    try:
+        assert window._prepare_continuity_current_for_recipe(steps) is False
+
+        assert current_commands == [(pytest.approx(1.0), True)]
+        assert disabled == [True]
+        assert window._automation_active is False
+        assert "stopped before motion" in window.log_output.toPlainText()
+        assert "open circuit" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_isolated_current_sweep_shows_runtime_update_for_hold_edit_without_ui_steps(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    process = _FakeIsolatedControlProcess()
+
+    try:
+        process.start_process()
+        window._production_control_process = process
+        window._production_control_identity = object()
+        window._automation_active = True
+        window._isolated_recipe_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = []
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window._current_sweep_runtime_applied_values = (
+            window._current_sweep_visible_runtime_values_from_controls()
+        )
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.check_current_sweep_hold_on_error.property(
+            "_mini_dma_runtime_pending"
+        ) is False
+
+        window.check_current_sweep_hold_on_error.setChecked(False)
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.button_apply_current_sweep_edits.isEnabled() is True
+        assert window.check_current_sweep_hold_on_error.property(
+            "_mini_dma_runtime_pending"
+        ) is True
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        assert [kind for kind, _identity in process.commands] == ["update_config"]
+        runtime_payload = json.loads(process.update_payloads[0])
+        assert runtime_payload["runtime_update"] is True
+        assert runtime_payload["widgets"][
+            "check_current_sweep_hold_on_error"
+        ]["checked"] is False
+    finally:
+        window._production_control_process = None
+        window._production_control_identity = None
+        window._isolated_recipe_active = False
         window._automation_active = False
         _close_test_window(window)
 
@@ -25605,9 +28285,11 @@ def test_current_sweep_hold_large_error_uses_bounded_disturbance_recovery_when_w
     window._current_position_mm = 0.0
     window._effective_position_mm = 0.0
     window._last_motion_command_time_s = (
-        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.5
+        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 1.0
     )
-    window._last_motion_expected_complete_time_s = window._last_motion_command_time_s
+    window._last_motion_expected_complete_time_s = (
+        time.time() - mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S - 0.8
+    )
     load_g = mini_dma_mod.load_g_from_stress_mpa(
         150.0,
         window.spin_diameter.value(),
@@ -25625,30 +28307,19 @@ def test_current_sweep_hold_large_error_uses_bounded_disturbance_recovery_when_w
         window._latest_scale_timestamp = timestamp_s
         window._latest_scale_value_g = load_g
     window._seek_last_filtered_value_by_key[seek_key] = 150.0
+    window._seek_post_move_sample_count_by_key[seek_key] = (
+        mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+    )
     window._seek_last_scale_timestamp_by_clock[(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1)] = (
         window._latest_scale_timestamp - 0.1
     )
 
     try:
-        reached = False
-        for attempt in range(6):
-            if attempt:
-                timestamp_s = now_s + attempt * 0.3
-                window._scale_signal_buffer.add_sample(
-                    timestamp_s=timestamp_s,
-                    raw_g=load_g,
-                    applied_load_g=load_g,
-                    raw_text=f"{load_g:.5f} g",
-                )
-                window._latest_scale_timestamp = timestamp_s
-                window._latest_scale_value_g = load_g
-            reached = window._seek_distribution_target(
-                mini_dma_mod.HSW_BASIS_STRESS_MPA,
-                target_value=50.0,
-                tolerance=0.4,
-            )
-            if moves:
-                break
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
 
         assert reached is False
         assert moves, window.log_output.toPlainText()
@@ -25747,6 +28418,429 @@ def test_current_sweep_hold_quiet_response_keeps_normal_post_move_sample_gate(
         )
 
         assert required_samples == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_outstanding_response_waits_for_time_and_samples(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        50.0,
+    )
+    window._seek_last_time_by_key[seek_key] = 99.0
+    window._last_motion_command_monotonic_s = 99.0
+    window._last_motion_expected_complete_monotonic_s = 99.2
+    complete_signal = mini_dma_mod.ScaleControlSignal(
+        value=50.0,
+        latest_value=50.0,
+        noise=0.1,
+        slope_per_s=0.0,
+        sample_count=mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES,
+        timestamp_s=100.0,
+    )
+
+    try:
+        assert window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=complete_signal,
+        )
+
+        clock["now"] = (
+            99.2 + window._current_sweep_hold_filter_window_s() + 0.01
+        )
+        assert not window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=complete_signal,
+        )
+
+        incomplete_signal = dataclasses.replace(
+            complete_signal,
+            sample_count=(
+                mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES - 1
+            ),
+        )
+        assert window._current_hold_response_observation_pending(
+            seek_key,
+            filtered_signal=incomplete_signal,
+        )
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("environment_value", "expected_enabled"),
+    [
+        (None, True),
+        ("0", False),
+        ("false", False),
+        ("1", True),
+    ],
+)
+def test_current_sweep_cycle_center_defaults_enabled_with_explicit_opt_out_response_gated(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+    environment_value: str | None,
+    expected_enabled: bool,
+) -> None:
+    if environment_value is None:
+        monkeypatch.delenv(mini_dma_mod.CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(
+            mini_dma_mod.CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV,
+            environment_value,
+        )
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert (
+            window._current_sweep_cycle_center_motor_suppression_enabled
+            is expected_enabled
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_cycle_center_requires_fixed_current_history_and_fast_veto_response_gated(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = time.time()
+    start_s = now_s - 20.0
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_ramp_hold_scale_started_s = start_s
+    window._current_sweep_cycle_center_motor_suppression_enabled = True
+    for index in range(81):
+        elapsed_s = index * 0.25
+        stress_mpa = 50.0 + 12.0 * math.cos(
+            2.0 * math.pi * elapsed_s / 10.0
+        )
+        load_g = mini_dma_mod.load_g_from_stress_mpa(
+            stress_mpa,
+            window.spin_diameter.value(),
+        )
+        assert load_g is not None
+        timestamp_s = start_s + elapsed_s
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+        )
+
+        assert state.signal is not None
+        assert state.signal.sample_count == 81
+        assert state.signal.span_s == pytest.approx(20.0)
+        assert state.ready is True
+        assert state.stationary is True
+        assert state.error_value == pytest.approx(0.0, abs=0.5)
+        assert state.fast_veto is False
+        assert state.suppression_allowed is True
+
+        veto_signal = mini_dma_mod.ScaleControlSignal(
+            value=90.0,
+            latest_value=90.0,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=7,
+            timestamp_s=now_s,
+        )
+        vetoed = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            veto_signal,
+        )
+        assert vetoed.fast_veto is True
+        assert vetoed.suppression_allowed is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence_response_gated(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumes: list[str] = []
+    trace_rows: list[dict[str, object]] = []
+    signal = mini_dma_mod.ScaleControlSignal(
+        value=51.5,
+        latest_value=58.0,
+        noise=6.0,
+        slope_per_s=0.0,
+        sample_count=81,
+        timestamp_s=time.time(),
+        span_s=20.0,
+        raw_min_value=38.0,
+        raw_max_value=62.0,
+        endpoint_slope_per_s=0.05,
+    )
+    state = mini_dma_mod.CurrentHoldCycleCenterState(
+        signal=signal,
+        error_value=-1.5,
+        ready=True,
+        stationary=True,
+        fast_veto=False,
+        crossing_count=8,
+        above_fraction=0.45,
+        below_fraction=0.55,
+        balanced_crossings=True,
+        classification="centered_fluctuation",
+        suppression_allowed=True,
+    )
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._scale_control_signal_for_basis = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: signal
+    )
+    window._current_sweep_hold_cycle_center_state = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: state
+    )
+    window._has_fresh_scale_reading = lambda **_kwargs: True  # type: ignore[method-assign]
+    window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+        lambda **kwargs: resumes.append(str(kwargs["reason"]))
+    )
+    window._write_control_trace = (  # type: ignore[method-assign]
+        lambda **kwargs: trace_rows.append(dict(kwargs))
+    )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_hold_enabled=True,
+    )
+
+    try:
+        window._latest_scale_arrival_monotonic_s = 10.0
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=100.0,
+            )
+            is False
+        )
+        window._latest_scale_arrival_monotonic_s = 11.9
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=101.9,
+            )
+            is False
+        )
+        window._latest_scale_arrival_monotonic_s = 12.1
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=102.1,
+            )
+            is True
+        )
+
+        assert len(resumes) == 1
+        assert "mature fixed-current distribution" in resumes[0]
+        assert trace_rows[-1]["result"] == "cycle_center_resume"
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("signal", "state"),
+    [
+        (
+            mini_dma_mod.ScaleControlSignal(
+                value=50.0,
+                latest_value=50.0,
+                noise=12.1,
+                slope_per_s=0.0,
+                sample_count=81,
+                timestamp_s=1.0,
+                span_s=20.0,
+                raw_min_value=30.0,
+                raw_max_value=70.0,
+                endpoint_slope_per_s=0.0,
+            ),
+            mini_dma_mod.CurrentHoldCycleCenterState(
+                signal=None,
+                error_value=0.0,
+                ready=True,
+                stationary=True,
+                fast_veto=False,
+                suppression_allowed=True,
+            ),
+        ),
+        (
+            mini_dma_mod.ScaleControlSignal(
+                value=50.0,
+                latest_value=71.0,
+                noise=5.0,
+                slope_per_s=0.0,
+                sample_count=81,
+                timestamp_s=1.0,
+                span_s=20.0,
+                raw_min_value=30.0,
+                raw_max_value=71.0,
+                endpoint_slope_per_s=0.0,
+            ),
+            mini_dma_mod.CurrentHoldCycleCenterState(
+                signal=None,
+                error_value=0.0,
+                ready=True,
+                stationary=True,
+                fast_veto=False,
+                suppression_allowed=True,
+            ),
+        ),
+    ],
+)
+def test_current_sweep_cycle_center_resume_vetoes_dispersion_and_fast_excursions_response_gated(
+    tmp_path: Path,
+    qtbot,
+    signal: mini_dma_mod.ScaleControlSignal,
+    state: mini_dma_mod.CurrentHoldCycleCenterState,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    state = dataclasses.replace(state, signal=signal)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._scale_control_signal_for_basis = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: signal
+    )
+    window._current_sweep_hold_cycle_center_state = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: state
+    )
+    window._has_fresh_scale_reading = lambda **_kwargs: True  # type: ignore[method-assign]
+    window._latest_scale_arrival_monotonic_s = 10.0
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_hold_enabled=True,
+    )
+
+    try:
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=100.0,
+            )
+            is False
+        )
+        assert window._current_sweep_ramp_hold_cycle_center_since_s is None
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_cycle_center_suppresses_phase_chasing_motor_command_response_gated(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+    start_s = now_s - 20.0
+
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True
+    )
+    window._write_control_trace = (  # type: ignore[method-assign]
+        lambda **kwargs: trace_rows.append(dict(kwargs))
+    )
+    window._seek_requires_fresh_after_last_move = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: False
+    )
+    window._seek_has_unused_scale_sample = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: True
+    )
+    window._current_hold_error_is_persistent = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: True
+    )
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_backlash_mm.setValue(0.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_ramp_hold_scale_started_s = start_s
+    window._current_sweep_cycle_center_motor_suppression_enabled = True
+    for index in range(81):
+        elapsed_s = index * 0.25
+        stress_mpa = 50.0 + 12.0 * math.cos(
+            2.0 * math.pi * elapsed_s / 10.0
+        )
+        load_g = mini_dma_mod.load_g_from_stress_mpa(
+            stress_mpa,
+            window.spin_diameter.value(),
+        )
+        assert load_g is not None
+        timestamp_s = start_s + elapsed_s
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert not moves
+        assert trace_rows[-1]["result"] == "suppressed"
+        assert trace_rows[-1]["reason"] == "cycle_center_motor_suppression"
     finally:
         _close_test_window(window)
 
@@ -25971,6 +29065,11 @@ def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence(
         ready=True,
         stationary=True,
         fast_veto=False,
+        crossing_count=8,
+        above_fraction=0.45,
+        below_fraction=0.55,
+        balanced_crossings=True,
+        classification="centered_fluctuation",
         suppression_allowed=True,
     )
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -30495,7 +33594,6 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -30505,7 +33603,7 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(60.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
-        assert window.check_current_sweep_reverse_current.isChecked() is True
+        assert window._current_recipe_payload()["recipe"]["current_sweep"]["reverse_current"] is True
     finally:
         _close_test_window(window)
 
@@ -31822,6 +34920,54 @@ def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
         _close_test_window(window)
 
 
+def test_stop_session_finalizes_metadata_when_measurement_handle_is_invalid(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("invalid_handle_finalization")
+    window._record_current_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    summary_requests: list[Path] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, **_kwargs: summary_requests.append(Path(run_dir))
+    )
+
+    class _InvalidHandle:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def flush(self) -> None:
+            raise OSError(22, "synthetic invalid measurement handle")
+
+        def close(self) -> None:
+            self.wrapped.close()
+            raise OSError(22, "synthetic invalid measurement handle")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        run_dir = metadata_path.parent
+        window._session_txt_handle = _InvalidHandle(window._session_txt_handle)
+
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["finished_utc"]
+        assert payload["stop"]["reason"] == "recipe_completed"
+        assert payload["stop"]["transition"]["stages"][-1]["stage"] == "completed"
+        errors = payload["logging"]["file_io_errors"]
+        assert [(item["sidecar"], item["operation"]) for item in errors] == [
+            ("measurement_txt", "flush"),
+            ("measurement_txt", "close"),
+        ]
+        assert summary_requests == [run_dir]
+        assert window._session_active is False
+    finally:
+        _close_test_window(window)
+
+
 def test_session_metadata_records_source_control_snapshot(
     tmp_path: Path,
     qtbot,
@@ -32083,7 +35229,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert first_logic["version"]
         assert (
             first_logic["profile"]
-            == "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
+            == "scale-routed-prague-legacy-kosice-adaptive-balanced-cycle-centered-resume-response-gated-volatile-observer"
         )
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
@@ -32099,7 +35245,8 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_hold_response_stiffness_requires_error_improvement" in first_logic["features"]
         assert "current_hold_adaptive_cap_growth_is_response_earned" in first_logic["features"]
         assert "current_hold_adaptive_large_error_floor_scales_with_band" in first_logic["features"]
-        assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
+        assert "current_sweep_reverse_current_recipe_flag" not in first_logic["features"]
+        assert "current_sweep_always_bidirectional" in first_logic["features"]
         assert "control_constants" in first_logic["fingerprint_fields"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
         assert (
@@ -32187,6 +35334,225 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
 
         assert window._session_base_path is not None
         assert requested == [(window._session_base_path.parent, True)]
+    finally:
+        _close_test_window(window)
+
+
+def test_cycle_center_classifier_requires_repeated_balanced_target_crossings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 100.0
+        for index in range(81):
+            value = 0.99 if index % 2 == 0 else 1.01
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=100.0 + index * 0.25,
+                raw_g=value,
+                applied_load_g=value,
+                raw_text=str(value),
+            )
+        fast = mini_dma_mod.ScaleControlSignal(
+            value=1.0,
+            latest_value=1.01,
+            noise=0.01,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=120.0,
+        )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            1.0,
+            fast,
+        )
+
+        assert state.classification == "centered_fluctuation"
+        assert state.balanced_crossings is True
+        assert state.suppression_allowed is True
+        assert state.crossing_count >= 3
+        assert state.above_fraction >= 0.15
+        assert state.below_fraction >= 0.15
+    finally:
+        _close_test_window(window)
+
+
+def test_cycle_center_classifier_rejects_one_sided_stationary_noise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 100.0
+        for index in range(81):
+            value = 1.01 + 0.002 * (index % 3)
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=100.0 + index * 0.25,
+                raw_g=value,
+                applied_load_g=value,
+                raw_text=str(value),
+            )
+        fast = mini_dma_mod.ScaleControlSignal(
+            value=1.012,
+            latest_value=1.012,
+            noise=0.002,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=120.0,
+        )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            1.0,
+            fast,
+        )
+
+        assert state.balanced_crossings is False
+        assert state.classification != "centered_fluctuation"
+        assert state.suppression_allowed is False
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_centered"),
+    [("target_spanning_cloud", True), ("transformation_bias", False)],
+)
+def test_cycle_center_classifier_distinguishes_simulated_noise_from_transformation(
+    tmp_path: Path,
+    qtbot,
+    scenario_name: str,
+    expected_centered: bool,
+) -> None:
+    from dataclasses import replace
+    from data_logging.mini_dma_logger.wire_simulator import (
+        run_virtual_wire_scenario,
+        scenario_by_name,
+    )
+
+    scenario = scenario_by_name(scenario_name)
+    scenario = replace(
+        scenario,
+        sweep=replace(scenario.sweep, hold_s=24.0),
+    )
+    trace = run_virtual_wire_scenario(scenario)
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_diameter.setValue(scenario.wire.diameter_mm)
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current_hold"
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_scale_started_s = 0.0
+        for sample in trace.samples:
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=sample.elapsed_s,
+                raw_g=sample.raw_load_g,
+                applied_load_g=sample.raw_load_g,
+                raw_text=str(sample.raw_load_g),
+            )
+
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            scenario.controller.target_stress_mpa,
+        )
+
+        assert (state.classification == "centered_fluctuation") is expected_centered
+        assert state.balanced_crossings is expected_centered
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_completion_from_worker_queues_without_waiting_for_ui(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    queued: list[object] = []
+    synchronous_calls: list[bool] = []
+    window._automation_active = True
+    window._automation_steps = []
+    window._automation_index = 0
+    window._run_on_ui_thread = lambda callback: queued.append(callback)  # type: ignore[method-assign]
+    window._call_on_ui_thread_sync = lambda _callback: synchronous_calls.append(True)  # type: ignore[method-assign]
+
+    try:
+        worker = threading.Thread(
+            target=window._automation_controller.execute_next_tick
+        )
+        worker.start()
+        worker.join(timeout=1.0)
+
+        assert worker.is_alive() is False
+        assert len(queued) == 1
+        assert synchronous_calls == []
+        assert window._automation_paused is True
+    finally:
+        _close_test_window(window)
+
+
+def test_inline_zero_load_completion_does_not_start_second_recovery(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    origin_recoveries: list[bool] = []
+    window._automation_active = True
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "seek_target",
+            target_value=0.0,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            note="recipe_return_zero",
+        )
+    ]
+    window._automation_index = 1
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    terminal_captures: list[bool] = []
+    window._capture_recipe_terminal_readback = (  # type: ignore[method-assign]
+        lambda: terminal_captures.append(window._automation_active)
+    )
+    window._start_recovery_position_origin = (  # type: ignore[method-assign]
+        lambda: origin_recoveries.append(True)
+    )
+
+    try:
+        window._automation_controller.execute_next_tick()
+
+        assert window._automation_active is False
+        assert terminal_captures == [True]
+        assert origin_recoveries == []
+        assert "Recipe completed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_controller_process_defers_run_summary_to_visible_parent(tmp_path: Path, qtbot) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    window.edit_log_name.setText("controller_summary_deferred")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
+
+    try:
+        window._start_session()
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert requested == []
     finally:
         _close_test_window(window)
 
@@ -33131,6 +36497,42 @@ def test_existing_output_message_names_sample_and_output_folder(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_controller_process_resolves_transferred_output_choice_without_dialog(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(window)
+    paths = mini_dma_mod._session_paths_for_basename(tmp_path, "existing_sample")
+    window._controller_process_output_collision_action = mini_dma_mod.OUTPUT_COLLISION_NEXT
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "exec",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller process must not open an output-collision dialog"
+        ),
+    )
+
+    try:
+        assert (
+            window._ask_existing_output_action(paths)
+            == mini_dma_mod.OUTPUT_COLLISION_NEXT
+        )
+        window._controller_process_output_collision_action = "unexpected"
+        assert (
+            window._ask_existing_output_action(paths)
+            == mini_dma_mod.OUTPUT_COLLISION_CANCEL
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_stale_output_base_filename_syncs_to_current_sample(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_name_composition.setText("Ni50Fe27Ga23")
@@ -33534,7 +36936,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
         assert window.combo_scale_baud.currentText() == "9600"
         assert window.edit_scale_request.text() == "\\x1bp"
         assert window.edit_scale_terminator.text() == ""
-        assert window.spin_scale_interval.value() == 250
+        assert window.spin_scale_interval.value() == mini_dma_mod.GNG_SCALE_INTERVAL_MS
     finally:
         _close_test_window(window)
 
