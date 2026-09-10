@@ -1,0 +1,1 @@
+Fix TMA current-sweep plots and transition summaries omitting the recorded cooling return leg when the logger reverses current at the voltage limit. Include current_limit_unwind rows alongside normal sweep rows.

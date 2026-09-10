@@ -36,8 +36,10 @@ MINI_DMA_EXCLUDED_DISCOVERY_DIR_NAMES = frozenset(
         "tmp",
     }
 )
-PLOT_PHASES = {"current"}
-SUMMARY_PHASES = {"current", "current_hold"}
+# A voltage-limited sweep records its return leg as an unwind instead of
+# running the nominal reverse sweep. Keep that measured cooling trace.
+PLOT_PHASES = {"current", "current_limit_unwind"}
+SUMMARY_PHASES = PLOT_PHASES | {"current_hold"}
 ISO_CURRENT_RECIPE_MODES = {"constant_current_strain_sweep", "iso-current", "iso_current"}
 ISO_CURRENT_PHASES = {"current_zero", "target_ramp", "current", "current_hold"}
 TRANSITION_REVIEW_RECIPE_MODES = {"current_sweep_stress", "iso-stress", "iso_stress"}
