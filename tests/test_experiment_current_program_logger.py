@@ -38,6 +38,44 @@ def _app() -> QtWidgets.QApplication:
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def test_bundle_estimate_uses_ceiling_and_milliamp_units():
+    wires, single, total = module.bundle_estimate(6.575, 10.0, 175.0)
+    assert wires == 305
+    assert single == pytest.approx(0.0175)
+    assert total == pytest.approx(5.3375)
+    assert module.bundle_estimate(2000, 0, 100) == (1, 0, 0)
+    for load, current, resistance in [(0, 10, 100), (1, -1, 100), (1, 1, float('nan'))]:
+        with pytest.raises(ValueError):
+            module.bundle_estimate(load, current, resistance)
+
+
+def test_bundle_panel_updates_and_persists_load(tmp_path):
+    app = _app()
+    window = module.CurrentProgramWindow()
+    window.bundle_load_spin.setValue(6.575)
+    window.initial_current_spin.setValue(1)
+    window.set_blocks([module.CurrentBlock('Pulse', 10, 0.5)])
+    window._refresh_bundle_estimate()
+    assert '305 wires' in window.bundle_label.text()
+    assert 'awaiting' in window.bundle_label.text()
+    window._measured = [1, 10, 10, float('nan')]
+    window._resistance = [100, 174, 175, 999]
+    window._refresh_bundle_estimate()
+    assert '5.34 W total' in window.bundle_label.text()
+    window.set_blocks([module.CurrentBlock('Pulse', 20, 0.5)])
+    window._refresh_bundle_estimate()
+    assert '21.35 W total' in window.bundle_label.text()
+    assert 'at 10 mA' in window.bundle_label.text()
+    window._save_settings()
+    window.show()
+    app.processEvents()
+    window.grab().save(str(tmp_path / 'bundle-panel.png'))
+    window.close()
+    restored = module.CurrentProgramWindow()
+    assert restored.bundle_load_spin.value() == 6.575
+    restored.close()
+
+
 def test_recipe_engine_ramps_pulses_then_holds_indefinitely() -> None:
     blocks = [
         module.CurrentBlock("Ramp", 20.0, 4.0, "warm up"),

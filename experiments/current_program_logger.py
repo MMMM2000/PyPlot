@@ -1032,6 +1032,17 @@ class ProgramWorker(QtCore.QThread):
                     pass
 
 
+def bundle_estimate(load_g: float, current_mA: float, resistance_ohm: float) -> tuple[int, float, float]:
+    """Ideal equal-load-sharing 2 kg bundle; electrical estimate, not stroke validation."""
+    if not all(math.isfinite(v) for v in (load_g, current_mA, resistance_ohm)):
+        raise ValueError("Bundle inputs must be finite.")
+    if load_g <= 0 or current_mA < 0 or resistance_ohm <= 0:
+        raise ValueError("Positive load/resistance and nonnegative current required.")
+    wires = math.ceil(2000.0 / load_g)
+    per_wire_w = (current_mA / 1000.0) ** 2 * resistance_ohm
+    return wires, per_wire_w, wires * per_wire_w
+
+
 class CurrentProgramWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1049,6 +1060,11 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self._viewing_history = False
         self._build_ui()
         self._load_settings()
+        self.bundle_timer = QtCore.QTimer(self)
+        self.bundle_timer.setInterval(500)
+        self.bundle_timer.timeout.connect(self._refresh_bundle_estimate)
+        self.bundle_timer.start()
+        self._refresh_bundle_estimate()
         install_standard_menu(self, help_topic="logger_current_annealing")
 
     def _build_ui(self) -> None:
@@ -1286,6 +1302,19 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         status_layout.addRow("Block", self.block_label)
         status_layout.addRow("Elapsed", self.elapsed_label)
         layout.addWidget(status_group)
+        bundle_group = QtWidgets.QGroupBox("2 kg bundle estimate")
+        bundle_layout = QtWidgets.QFormLayout(bundle_group)
+        self.bundle_load_spin = QtWidgets.QDoubleSpinBox()
+        self.bundle_load_spin.setDecimals(3)
+        self.bundle_load_spin.setRange(0.0, 2000000.0)
+        self.bundle_load_spin.setSuffix(" g / wire")
+        self.bundle_load_spin.setSpecialValueText("Set supported load")
+        self.bundle_load_spin.setToolTip("Total tension supported by one wire, including its test holder. Bundle estimate excludes extra device/fixture mass and safety margin.")
+        self.bundle_label = QtWidgets.QLabel()
+        self.bundle_label.setWordWrap(True)
+        bundle_layout.addRow("Supported load", self.bundle_load_spin)
+        bundle_layout.addRow(self.bundle_label)
+        layout.addWidget(bundle_group)
         if pg is not None:
             plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
             self.plot = pg.PlotWidget()
@@ -1351,6 +1380,32 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
         return panel
+
+    def _refresh_bundle_estimate(self) -> None:
+        load = self.bundle_load_spin.value()
+        if load <= 0:
+            self.bundle_label.setText("Enter per-wire supported load to calculate wire count.")
+            return
+        try:
+            peak = max([self.initial_current_spin.value()] + [b.target_mA for b in self.blocks()])
+        except (RuntimeError, AttributeError):
+            return
+        count = math.ceil(2000.0 / load)
+        pairs = [(abs(i - peak), i, r) for i, r in zip(self._measured, self._resistance)
+                 if math.isfinite(i) and i > 0 and math.isfinite(r) and r > 0]
+        if not pairs:
+            self.bundle_label.setText(f"{count:,} wires • sequence maximum {peak:g} mA\nPower: awaiting resistance measurements.")
+            return
+        # Closest current; use the largest R on ties rather than averaging hysteresis branches.
+        _, sampled_current, resistance = min(pairs, key=lambda p: (p[0], -p[2]))
+        count, per_wire, total = bundle_estimate(load, peak, resistance)
+        basis = "displayed history" if self._viewing_history else "live run"
+        self.bundle_label.setText(
+            f"{count:,} wires • sequence maximum {peak:g} mA\n"
+            f"{per_wire * 1000:.2f} mW / wire → {total:.2f} W total\n"
+            f"Assumed R = {resistance:.1f} Ω from {basis} at {sampled_current:g} mA.\n"
+            "I²R estimate; not measured peak power or verified lifting stroke."
+        )
 
     def _sync_resistance_view(self) -> None:
         if self.plot is None or self.resistance_view is None:
@@ -2029,6 +2084,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         )
 
     def _load_settings(self) -> None:
+        self.bundle_load_spin.setValue(float(self.settings.value("bundle_load_g", 0.0)))
         default_dir = Path.home() / "Downloads"
         self.output_edit.setText(str(self.settings.value("output_dir", str(default_dir))))
         self.output_edit.setCursorPosition(0)
@@ -2087,6 +2143,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self._sync_repeat_fields()
 
     def _save_settings(self) -> None:
+        self.settings.setValue("bundle_load_g", self.bundle_load_spin.value())
         self.settings.setValue("output_dir", self.output_edit.text())
         self.settings.setValue("connection_mode", self.mode_combo.currentText())
         self.settings.setValue("broker_host", self.host_edit.text())
