@@ -1081,3 +1081,34 @@ def test_voltage_limit_unwind_survives_loading_grouping_and_rendering(tmp_path, 
         assert cooling.current_mA.tolist() == currents[3:7]
     figure = figure_factory(run)
     assert figure.axes[0].lines[0].get_xdata().tolist() == currents[:7]
+
+
+@pytest.mark.parametrize("plot_kind", ["strain_current", "resistance_current"])
+def test_repeated_target_sweeps_survive_shared_origin_workbook(tmp_path, monkeypatch, plot_kind):
+    monkeypatch.setenv("PYTEST_QSETTINGS_ROOT", str(tmp_path / "settings"))
+    app = _ensure_qapp()
+    host = PyPlotWindow(title="Repeated sweep export test")
+    plugin = TmaPlugin(host, "TMA")
+    plugin.settings_widget()
+    plugin._show_power_top_axis_checkbox.setChecked(False)
+    run = core.MiniDmaRun(
+        path=tmp_path, measurement_path=tmp_path / "measurement.csv",
+        frame=pd.DataFrame(), sample_name="Repeated target",
+    )
+    figure = plt.Figure()
+    axes = figure.add_subplot(111)
+    axes.plot([1., 20., 1.], [0., 1., .2], label="375 MPa / 3 g")
+    axes.plot([1., 30., 1.], [.3, 2., .5], label="375 MPa / 3 g")
+    try:
+        plugin._create_plot_tab(run, figure, plot_kind=plot_kind)
+        workbooks = host._shared_plot_workbooks_for_plugin("TMA")
+        assert len(workbooks) == 1
+        sheet = host._worksheets[workbooks[0].worksheets[0]]
+        pairs = host._origin_plot_pairs(sheet.dataframe, sheet.axis_roles)
+        assert len(pairs) == 2
+        for (x_index, y_index), line in zip(pairs, axes.lines):
+            np.testing.assert_array_equal(sheet.dataframe.iloc[:, x_index].dropna(), line.get_xdata())
+            np.testing.assert_array_equal(sheet.dataframe.iloc[:, y_index].dropna(), line.get_ydata())
+    finally:
+        host.close()
+        app.processEvents()
