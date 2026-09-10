@@ -1055,3 +1055,29 @@ def test_tma_transition_signal_gate_rejects_trace_noise() -> None:
         strong_fit,
         pd.Series([0.0, 0.6]),
     )
+
+
+@pytest.mark.parametrize("figure_factory", [core.make_strain_current_figure, core.make_resistance_current_figure])
+def test_voltage_limit_unwind_survives_loading_grouping_and_rendering(tmp_path, figure_factory):
+    run_path = tmp_path / "sample iso-stress"
+    run_path.mkdir()
+    currents = [1., 10., 20., 30., 20., 10., 1., 1.]
+    pd.DataFrame({
+        "elapsed_s": range(8),
+        "automation_phase": ["current"] * 4 + ["current_limit_unwind"] * 3 + ["target_ramp"],
+        "automation_target_value": [50.] * 8,
+        "plateau_index": [1] * 8,
+        "strain_pct": [0., .2, .4, .6, .5, .3, .1, 9.],
+        "resistance_ohm": [100.] * 8,
+        "current_measured_mA": currents,
+    }).to_csv(run_path / "measurement.csv", index=False)
+    run = core.load_run(run_path)
+    for phases in (None, core.SUMMARY_PHASES):
+        groups = core.current_sweep_groups(run.frame, phases=phases)
+        assert len(groups) == 1
+        assert groups[0][1].current_mA.tolist() == currents[:7]
+        heating, cooling = core._split_current_sweep_legs(groups[0][1])
+        assert heating.current_mA.tolist() == currents[:4]
+        assert cooling.current_mA.tolist() == currents[3:7]
+    figure = figure_factory(run)
+    assert figure.axes[0].lines[0].get_xdata().tolist() == currents[:7]
