@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import subprocess
@@ -1336,6 +1337,25 @@ def test_hardware_experiment_loggers_launch_in_child_process(
     assert getattr(spec, "display_name") == name
     assert getattr(spec, "module") == module
     assert getattr(spec, "resource_tag") == resource_tag
+
+
+def test_current_program_experiment_is_registered_for_isolated_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_module = importlib.import_module("experiments.current_program_logger")
+    experiments_package = importlib.import_module("experiments")
+    launched: list[object] = []
+    monkeypatch.setattr(experiment_module, "launch_experiment_process", launched.append)
+    experiments_package._resolve.cache_clear()
+    launcher_module._load_experiments_registry.cache_clear()
+    try:
+        experiments = launcher_module._load_experiments_registry()
+        assert "Current Program Logger" in experiments
+        assert experiments["Current Program Logger"]() is None
+        assert launched[0].resource_tag == "current_program_logger"
+    finally:
+        experiments_package._resolve.cache_clear()
+        launcher_module._load_experiments_registry.cache_clear()
 
 
 def test_launcher_plotting_list_refreshes_using_last_opened_order(
