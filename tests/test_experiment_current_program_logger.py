@@ -49,6 +49,29 @@ def test_bundle_estimate_uses_ceiling_and_milliamp_units():
             module.bundle_estimate(load, current, resistance)
 
 
+def test_siglent_ui_mode_and_resistance_step_guard(monkeypatch):
+    app = _app()
+    w = module.CurrentProgramWindow()
+    w.mode_combo.setCurrentText('Siglent SPD1305X (VISA)')
+    assert w.voltage_spin.maximum() == 30
+    assert w.visa_resource_combo.isEnabled()
+    assert not w.keithley_channel_combo.isEnabled()
+    assert not w.remote_sense_check.isEnabled()
+    assert not w.supply_warning_label.isHidden()
+    assert isinstance(w._make_adapter(), module.SiglentSPD1305XAdapter)
+    w.set_blocks([module.CurrentBlock('Hold',10,1,resistance_ohm=150)])
+    warnings=[]
+    monkeypatch.setattr(module.QtWidgets.QMessageBox,'warning',lambda *args: warnings.append(args[2]))
+    w.start_run()
+    assert w.worker is None
+    assert 'time-based steps only' in warnings[0]
+    w._save_settings()
+    w.close()
+    w=module.CurrentProgramWindow()
+    assert w.mode_combo.currentText() == 'Siglent SPD1305X (VISA)'
+    w.close()
+
+
 def test_bundle_panel_updates_and_persists_load(tmp_path):
     app = _app()
     window = module.CurrentProgramWindow()

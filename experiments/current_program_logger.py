@@ -21,6 +21,7 @@ from queue import SimpleQueue, Empty
 from typing import Any, Callable, Protocol, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from experiments.siglent_spd1305x import SiglentSPD1305XAdapter
 
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
@@ -1095,7 +1096,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         connection = QtWidgets.QGroupBox("Connection")
         form = QtWidgets.QFormLayout(connection)
         self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItems(["Simulation", "Keithley 2636B (VISA)", "Shared HMP broker"])
+        self.mode_combo.addItems(["Simulation", "Keithley 2636B (VISA)", "Shared HMP broker", "Siglent SPD1305X (VISA)"])
         self.host_edit = QtWidgets.QLineEdit("127.0.0.1")
         self.port_spin = QtWidgets.QSpinBox()
         self.port_spin.setRange(1, 65535)
@@ -1302,6 +1303,14 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         status_layout.addRow("Block", self.block_label)
         status_layout.addRow("Elapsed", self.elapsed_label)
         layout.addWidget(status_group)
+        self.supply_warning_label = QtWidgets.QLabel(
+            "SPD1305X: 1 mA current steps (rounded down); local 2-wire sensing. "
+            "Low-current resistance is approximate. Separate I/V queries; requested rates are not guaranteed. "
+            "Not qualified for XRD fault protection."
+        )
+        self.supply_warning_label.setWordWrap(True)
+        self.supply_warning_label.hide()
+        layout.addWidget(self.supply_warning_label)
         bundle_group = QtWidgets.QGroupBox("2 kg bundle estimate")
         bundle_layout = QtWidgets.QFormLayout(bundle_group)
         self.bundle_load_spin = QtWidgets.QDoubleSpinBox()
@@ -1827,8 +1836,9 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         if current:
             self.visa_resource_combo.setCurrentText(current)
         elif resources:
+            vendor = "0XF4EC" if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)" else "0X05E6"
             preferred = next(
-                (resource for resource in resources if "0X05E6" in resource.upper() and "0X2636" in resource.upper()),
+                (resource for resource in resources if vendor in resource.upper()),
                 resources[0],
             )
             self.visa_resource_combo.setCurrentText(preferred)
@@ -1840,6 +1850,12 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
 
     def _make_adapter(self) -> SupplyAdapter:
         mode = self.mode_combo.currentText()
+        if mode == "Siglent SPD1305X (VISA)":
+            return SiglentSPD1305XAdapter(
+                resource_name=self.visa_resource_combo.currentText(),
+                current_limit_mA=self.max_current_spin.value(),
+                resource_manager_factory=_default_visa_resource_manager,
+            )
         if mode == "Simulation":
             return SimulatedSupplyAdapter()
         if mode == "Keithley 2636B (VISA)":
@@ -1856,6 +1872,20 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         )
 
     def start_run(self) -> None:
+        if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)":
+            try:
+                blocks = self.blocks()
+                values = [self.initial_current_spin.value()] + [b.target_mA for b in blocks]
+                if any(0 < value < 1 for value in values):
+                    raise ValueError("SPD1305X cannot represent sub-1 mA nonzero setpoints. Use 0 or at least 1 mA.")
+                if any(b.resistance_ohm is not None for b in blocks):
+                    raise ValueError(
+                        "SPD1305X supports time-based steps only for now: resistance-step "
+                        "confirmation requires <=5 ms read gaps, but measured I/V query pairs take about 10 ms."
+                    )
+            except (ValueError, RuntimeError) as exc:
+                QtWidgets.QMessageBox.warning(self, "Cannot start Siglent sequence", str(exc))
+                return
         if self.worker is not None:
             if self._readout_active and not self._stopping:
                 try:
@@ -1878,6 +1908,9 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 max_current_mA=max_current,
                 repeat_count=repeat_count,
             )
+            if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)":
+                if not self.visa_resource_combo.currentText().strip():
+                    raise ValueError("Select or enter the Siglent VISA resource.")
             if self.mode_combo.currentText() == "Keithley 2636B (VISA)":
                 if not self.visa_resource_combo.currentText().strip():
                     raise ValueError("Select or enter the Keithley VISA resource.")
@@ -2059,23 +2092,27 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         mode = self.mode_combo.currentText()
         broker = mode == "Shared HMP broker"
         keithley = mode == "Keithley 2636B (VISA)"
+        siglent = mode == "Siglent SPD1305X (VISA)"
         editable = self.worker is None
         self.host_edit.setEnabled(broker and self.worker is None)
         self.port_spin.setEnabled(broker and self.worker is None)
         self.channel_spin.setEnabled(broker and self.worker is None)
-        self.visa_resource_combo.setEnabled(keithley and editable)
+        self.visa_resource_combo.setEnabled((keithley or siglent) and editable)
         visa_editor = self.visa_resource_combo.lineEdit()
         if visa_editor is not None:
             visa_editor.setToolTip(visa_editor.text())
             visa_editor.setCursorPosition(0)
-        self.visa_refresh_button.setEnabled(keithley and editable)
+        self.visa_refresh_button.setEnabled((keithley or siglent) and editable)
         self.keithley_channel_combo.setEnabled(keithley and editable)
         self.remote_sense_check.setEnabled(keithley and editable)
+        self.remote_sense_check.setVisible(not siglent)
+        if hasattr(self, "supply_warning_label"):
+            self.supply_warning_label.setVisible(siglent)
         if keithley:
             self.voltage_spin.setMaximum(20.0)
             self.max_current_spin.setMaximum(1500.0)
         else:
-            self.voltage_spin.setMaximum(32.05)
+            self.voltage_spin.setMaximum(30.0 if siglent else 32.05)
             self.max_current_spin.setMaximum(5000.0)
 
     def _sync_repeat_fields(self) -> None:
