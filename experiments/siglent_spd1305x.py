@@ -1,5 +1,6 @@
 """SPD1305X SCPI adapter: exclusive VISA ownership, local sense, 1 mA steps."""
 import math
+import time
 
 
 class SiglentSPD1305XAdapter:
@@ -8,7 +9,11 @@ class SiglentSPD1305XAdapter:
     startup_timeout_s = 1.0
     startup_poll_s = 0.1
 
-    def __init__(self, *, resource_name, current_limit_mA, resource_manager_factory):
+    def __init__(self, *, resource_name, current_limit_mA, resource_manager_factory, settling_s=1.0):
+        if not math.isfinite(settling_s) or settling_s < 0:
+            raise ValueError("Settling interval must be finite and nonnegative.")
+        self.settling_s = settling_s
+        self._changed_at = float('-inf')
         if not math.isfinite(current_limit_mA) or not 0 <= current_limit_mA <= 5000:
             raise ValueError("SPD1305X current limit must be between 0 and 5000 mA.")
         self.resource_name = resource_name.strip()
@@ -85,6 +90,7 @@ class SiglentSPD1305XAdapter:
         if not math.isclose(actual_v, voltage_v, abs_tol=0.0001) or not math.isclose(actual_i, self._last_current, abs_tol=0.01):
             raise RuntimeError("Siglent setpoint verification failed; output not enabled.")
         d.write("OUTP CH1,ON")
+        self._changed_at = time.monotonic()
         if not self._status() & 0x10:
             raise RuntimeError("Siglent output did not enable.")
 
@@ -96,6 +102,11 @@ class SiglentSPD1305XAdapter:
         if quantized != self._last_current:
             self._instrument.write(f"CH1:CURR {quantized / 1000:.3f}")
             self._last_current = quantized
+            self._changed_at = time.monotonic()
+
+    def resistance_quality(self):
+        # Elapsed-time qualification only; not proof of synchronous ADC readings.
+        return "settling" if time.monotonic() - self._changed_at < self.settling_s else "settled_interval"
 
     def measure(self):
         # Separate queries, not simultaneous acquisition; zero current has no valid R.

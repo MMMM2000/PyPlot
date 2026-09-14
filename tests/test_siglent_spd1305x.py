@@ -43,6 +43,31 @@ def make():
                                 resource_manager_factory=lambda: rm), d, rm
 
 
+def test_settling_only_restarts_for_real_steps(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr('experiments.siglent_spd1305x.time.monotonic', lambda: clock[0])
+    a, d, rm = make()
+    a.open()
+    a.configure(voltage_v=4, current_mA=10)
+    assert a.resistance_quality() == 'settling'
+    clock[0] = 1.1
+    a.set_current(10.9)
+    assert a.resistance_quality() == 'settled_interval'
+    a.set_current(11)
+    assert a.resistance_quality() == 'settling'
+    assert a.measure()['current_mA'] == 10  # Raw readback is never suppressed.
+    clock[0] = 2.2
+    assert a.resistance_quality() == 'settled_interval'
+    a.close()
+
+
+@pytest.mark.parametrize('delay', [-1, math.nan, math.inf])
+def test_invalid_settling_interval(delay):
+    with pytest.raises(ValueError):
+        SiglentSPD1305XAdapter(resource_name='FAKE', current_limit_mA=20,
+                              resource_manager_factory=lambda: None, settling_s=delay)
+
+
 def test_siglent_control_measure_and_verified_shutdown():
     a,d,rm=make(); a.open(); a.configure(voltage_v=2,current_mA=10.9)
     assert d.current == .010

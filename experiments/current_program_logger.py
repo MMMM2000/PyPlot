@@ -53,6 +53,8 @@ CSV_FIELDS = (
     "measured_current_mA",
     "voltage_V",
     "resistance_ohm",
+    "qualified_resistance_ohm",
+    "resistance_quality",
     "power_mW",
     "resistance_limit_reached",
     "resistance_current_ceiling_mA",
@@ -843,6 +845,7 @@ class ProgramWorker(QtCore.QThread):
             run_dir.mkdir(parents=True, exist_ok=False)
             metadata = {
                 "schema": "current_program_logger_v1",
+                "resistance_settling_s": getattr(self.adapter, "settling_s", 0.0),
                 "started_utc": started_utc,
                 "finished_utc": None,
                 "status": "running",
@@ -1014,6 +1017,7 @@ class ProgramWorker(QtCore.QThread):
                 if now >= next_control:
                     next_control = max(next_control + control_interval_s, now + control_interval_s)
                 if now >= next_measurement:
+                    resistance_quality = getattr(self.adapter, "resistance_quality", lambda: "unfiltered")()
                     readback = self.adapter.measure()
                     acquired_at = time.monotonic()
                     if monitor.limits.enabled or self.config.max_resistance_ohm is not None:
@@ -1098,6 +1102,8 @@ class ProgramWorker(QtCore.QThread):
                         "measured_current_mA": measured,
                         "voltage_V": voltage,
                         "resistance_ohm": resistance,
+                        "qualified_resistance_ohm": resistance if resistance_quality != "settling" else None,
+                        "resistance_quality": resistance_quality,
                         "power_mW": power,
                         "resistance_limit_reached": resistance_current_ceiling_mA is not None,
                         "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
@@ -1370,6 +1376,12 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.ui_rate_spin.setDecimals(1)
         self.ui_rate_spin.setValue(10.0)
         self.ui_rate_spin.setSuffix(" Hz")
+        self.settling_spin = QtWidgets.QDoubleSpinBox()
+        self.settling_spin.setRange(0, 10)
+        self.settling_spin.setValue(1.0)
+        self.settling_spin.setSuffix(" s")
+        self.settling_spin.setToolTip("Provisional Siglent resistance qualification delay after each real current step. 0 disables it. Raw CSV and protection remain active; elapsed time does not guarantee ADC synchronization.")
+        self.quality_label = QtWidgets.QLabel("Resistance: awaiting measurements")
         for label, widget in (
             ("Mode", self.mode_combo),
             ("Broker host", self.host_edit),
@@ -1387,10 +1399,12 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             ("Control rate", self.control_rate_spin),
             ("Readback poll rate", self.measurement_rate_spin),
             ("UI refresh rate", self.ui_rate_spin),
+            ("Resistance settling", self.settling_spin),
         ):
             form.addRow(label, widget)
         form.addRow(self.visa_status_label)
         form.addRow(self.profile_label)
+        form.addRow(self.quality_label)
         layout.addWidget(connection)
 
         safety = QtWidgets.QGroupBox("Electrical faults: OFF + manual reset")
@@ -2013,7 +2027,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 times.append(elapsed)
                 targets.append(target)
                 measured_values.append(optional_float("measured_current_mA"))
-                resistances.append(optional_float("resistance_ohm"))
+                resistances.append(optional_float("qualified_resistance_ohm" if row.get("resistance_quality") else "resistance_ohm"))
         if not times:
             raise ValueError(f"No measurement rows were found in {csv_path}")
         self._times = times
@@ -2173,6 +2187,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 resource_name=self.visa_resource_combo.currentText(),
                 current_limit_mA=self.max_current_spin.value(),
                 resource_manager_factory=_default_visa_resource_manager,
+                settling_s=self.settling_spin.value(),
             )
         if mode == "Simulation":
             return SimulatedSupplyAdapter()
@@ -2286,6 +2301,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             ),
         )
         self._times.clear()
+        self._last_qualified_resistance = None
         self._targets.clear()
         self._measured.clear()
         self._resistance.clear()
@@ -2323,7 +2339,17 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self._targets.append(float(row["target_current_mA"]))
         measured = row.get("measured_current_mA")
         self._measured.append(float("nan") if measured is None else float(measured))
-        resistance = row.get("resistance_ohm")
+        resistance = row.get("qualified_resistance_ohm", row.get("resistance_ohm"))
+        quality = row.get("resistance_quality", "unfiltered")
+        if resistance is not None and math.isfinite(float(resistance)):
+            self._last_qualified_resistance = float(resistance)
+            self.quality_label.setText(f"Resistance: {float(resistance):.2f} ohm ({quality})")
+        elif quality == "settling":
+            last = getattr(self, "_last_qualified_resistance", None)
+            held = f"Last qualified: {last:.2f} ohm; " if last is not None else ""
+            self.quality_label.setText(held + "settling (plot gap; raw data retained)")
+        else:
+            self.quality_label.setText("Resistance: unavailable")
         self._resistance.append(float("nan") if resistance is None else float(resistance))
         limit = self.live_points_spin.value()
         for values in (self._times, self._targets, self._measured, self._resistance):
@@ -2341,10 +2367,10 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self.target_curve.setData(self._times[data_slice], self._targets[data_slice])
             self.measured_curve.setData(self._times[data_slice], self._measured[data_slice])
             self.resistance_curve.setData(
-                self._times[data_slice], self._resistance[data_slice]
+                self._times[data_slice], self._resistance[data_slice], connect="finite"
             )
             self.resistance_current_curve.setData(
-                self._measured[data_slice], self._resistance[data_slice]
+                self._measured[data_slice], self._resistance[data_slice], connect="finite"
             )
             self._refresh_power_axis()
 
@@ -2474,6 +2500,8 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.keithley_channel_combo.setEnabled(keithley and editable)
         self.remote_sense_check.setEnabled(keithley and editable)
         self.remote_sense_check.setVisible(not siglent)
+        self.connection_form.setRowVisible(self.settling_spin, siglent)
+        self.settling_spin.setEnabled(siglent and editable)
         for widget in (self.host_edit, self.port_spin, self.channel_spin):
             self.connection_form.setRowVisible(widget, broker)
         self.connection_form.setRowVisible(self.visa_row, keithley or siglent)
@@ -2512,6 +2540,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             ("measurement_rate_hz", self.measurement_rate_spin, 10.0),
             ("resistance_check_rate_hz", self.resistance_check_rate_spin, 100.0),
             ("ui_rate_hz", self.ui_rate_spin, 10.0),
+            ("resistance_settling_s", self.settling_spin, 1.0),
         ) + self._new_settings()
 
     def _profile_key(self, mode):

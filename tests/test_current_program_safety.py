@@ -70,6 +70,7 @@ class Adapter:
 @pytest.mark.parametrize("record", [True, False])
 def test_fault_shutdown_independent_of_csv_ui_and_legacy_hold(tmp_path, kind, record):
     a = Adapter(kind)
+    a.resistance_quality = lambda: "settling"  # Qualification never mutes faults.
     # Retain legacy high-R protection too: zero-I detection must not divide by zero.
     w = m.ProgramWorker(config(tmp_path, record_csv=record, max_resistance_ohm=190), a)
     w.coalesce_ui = True  # GUI never acknowledges: acquisition must continue anyway.
@@ -102,6 +103,33 @@ def test_zero_steps_and_transient_contact_loss_reset_confirmation():
     assert monitor.check(2.1, 80, 0, 10) is None
     assert "contact loss" in monitor.check(2.21, 80, 0, 10)
     assert monitor.check(3, 80, 80, 8)  # remains latched even after recovery
+
+
+def test_settling_keeps_raw_csv_but_qualifies_separately(tmp_path):
+    a = Adapter()
+    a.resistance_quality = lambda: "settling" if a.calls < 4 else "settled_interval"
+    w = m.ProgramWorker(config(tmp_path, initial_current_mA=10,
+        electrical_limits=ElectricalLimits(), measurement_rate_hz=100, log_rate_hz=100), a)
+    original = a.measure
+    def measure():
+        row = original()
+        if a.calls >= 8:
+            w.stop()
+        return row
+    a.measure = measure
+    w.start()
+    assert w.wait(3000)
+    assert a.closed
+    with next(tmp_path.glob('*/measurement.csv')).open(newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert any(r['resistance_quality'] == 'settling' for r in rows)
+    assert any(r['resistance_quality'] == 'settled_interval' for r in rows)
+    for r in rows:
+        assert float(r['resistance_ohm']) == pytest.approx(100)
+        if r['resistance_quality'] == 'settling':
+            assert r['qualified_resistance_ohm'] == ''
+        else:
+            assert float(r['qualified_resistance_ohm']) == pytest.approx(100)
 
 
 def test_short_threshold_and_detection_floor():
