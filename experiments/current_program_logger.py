@@ -13,6 +13,7 @@ import math
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,9 @@ from typing import Any, Callable, Protocol, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from experiments.siglent_spd1305x import SiglentSPD1305XAdapter
+from experiments.current_program_support import BufferedCsv, ElectricalLimits, ElectricalMonitor
+from experiments.current_program_profiles import PROFILES
+from plotting.shared.power_guard import create_experiment_sleep_guard
 
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
@@ -55,6 +59,7 @@ CSV_FIELDS = (
     "operating_mode",
     "sequence_id",
     "sequence_elapsed_s",
+    "electrical_fault",
 )
 
 
@@ -300,6 +305,7 @@ class SimulatedSupplyAdapter:
 
 
 class BrokerSupplyAdapter:
+    profile_mode = "Shared HMP broker"
     description = "Shared HMP broker"
 
     def __init__(self, *, host: str, port: int, channel: int) -> None:
@@ -389,6 +395,7 @@ def list_visa_resources(
 
 
 class Keithley2636Adapter:
+    profile_mode = "Keithley 2636B (VISA)"
     """PyVISA/TSP adapter for either channel of a Keithley 2636/2636B SMU."""
 
     def __init__(
@@ -522,8 +529,13 @@ class RunConfig:
     repeat_count: int | None = 1
     resistance_action: str = "hold_current"
     resistance_check_rate_hz: float = 100.0
+    record_csv: bool = True
+    log_rate_hz: float | None = None
+    electrical_limits: ElectricalLimits = ElectricalLimits()
 
     def __post_init__(self) -> None:
+        if self.log_rate_hz is not None and (not math.isfinite(self.log_rate_hz) or self.log_rate_hz <= 0):
+            raise ValueError("CSV rate must be positive and finite.")
         for label, value in (
             ("Control rate", self.control_rate_hz),
             ("Measurement/log rate", self.measurement_rate_hz),
@@ -629,6 +641,24 @@ class _PreviewSignals(QtCore.QObject):
     ready = QtCore.pyqtSignal(int, object, str)
 
 
+class _VisaSignals(QtCore.QObject):
+    ready = QtCore.pyqtSignal(int, str, object, str)
+
+
+class _VisaDiscoveryJob(QtCore.QRunnable):
+    def __init__(self, token, mode):
+        super().__init__()
+        self.token, self.mode = token, mode
+        self.discover = list_visa_resources
+        self.signals = _VisaSignals()
+
+    def run(self):
+        try:
+            self.signals.ready.emit(self.token, self.mode, self.discover(), "")
+        except Exception as exc:
+            self.signals.ready.emit(self.token, self.mode, [], str(exc))
+
+
 class _PreviewJob(QtCore.QRunnable):
     def __init__(self, token, path):
         super().__init__()
@@ -714,12 +744,17 @@ class ProgramWorker(QtCore.QThread):
         self.adapter = adapter
         self._stop_event = Event()
         self._commands: SimpleQueue = SimpleQueue()
+        self.ui_pending = Event()
+        self.coalesce_ui = False
 
     def request_readout(self) -> None:
         self._commands.put(("readout", None))
 
     def request_sequence(self, blocks: Sequence[CurrentBlock], repeat_count: int | None) -> None:
         validate_recipe(blocks, max_current_mA=self.config.max_current_mA, repeat_count=repeat_count)
+        profile = PROFILES.get(getattr(self.adapter, "profile_mode", ""))
+        if profile is not None and not profile.conditional_steps and any(b.resistance_ohm is not None for b in blocks):
+            raise ValueError("Resistance-conditioned steps are not qualified for this supply.")
         self._commands.put(("sequence", (tuple(blocks), repeat_count)))
 
     def stop(self) -> None:
@@ -735,6 +770,45 @@ class ProgramWorker(QtCore.QThread):
                 self._stop_event.wait(remaining - 0.015)
             else:
                 time.sleep(remaining)
+
+    def _startup_baseline(self, monitor, metadata):
+        """Qualify slow PSU startup at the initial current, before recipe timing.
+
+        Existing fault detectors run on every sample; no protection is muted.
+        Only finite zero readbacks can be retried, under a bounded deadline.
+        """
+        timeout = getattr(self.adapter, "startup_timeout_s", 0.0)
+        started = time.monotonic()
+        samples = metadata["startup_samples"] = []
+        valid_count = 0
+        while not self._stop_event.is_set():
+            baseline = self.adapter.measure()
+            now = time.monotonic()
+            current, voltage = baseline.get("current_mA"), baseline.get("voltage_V")
+            samples.append(dict(elapsed_s=now-started, **baseline))
+            finite = current is not None and voltage is not None and all(
+                math.isfinite(float(v)) and float(v) >= 0 for v in (current, voltage))
+            fault = monitor.check(now, self.config.initial_current_mA, current, voltage)
+            if not finite or fault or timeout <= 0:
+                return baseline
+            valid = self.config.initial_current_mA == 0 or (current > 0 and voltage > 0)
+            # Never defer the legacy upper-R limit while waiting for settling.
+            if current > 0 and self.config.max_resistance_ohm is not None:
+                if voltage / (current / 1000) >= self.config.max_resistance_ohm:
+                    return baseline
+            valid_count = valid_count + 1 if valid else 0
+            if valid_count >= 2:
+                return baseline
+            if now - started >= timeout:
+                raise RuntimeError(
+                    f"Startup baseline unavailable after {now-started:.2f} s at initial "
+                    f"{self.config.initial_current_mA:g} mA: measured I={current!r} mA, "
+                    f"V={voltage!r} V. Output will be shut down; the ramp was not started. "
+                    "Check connections and the instrument display; zero readback can mean "
+                    "unsettled/low-resolution telemetry, an open circuit or a short."
+                )
+            self._wait_until(now + getattr(self.adapter, "startup_poll_s", .1))
+        return None
 
     def run(self) -> None:  # noqa: C901 - cleanup is deliberately kept in one ownership scope
         started_utc = _utc_now()
@@ -760,7 +834,11 @@ class ProgramWorker(QtCore.QThread):
         max_check_gap_s = 0.0
         readout_mode = False
         sequence_id = 1
-        sequence_events: list[dict[str, Any]] = []
+        sequence_events: deque[dict[str, Any]] = deque(maxlen=1024)
+        monitor = ElectricalMonitor(self.config.electrical_limits)
+        fault_sample = None
+        writer = None
+        sleep_guard = None
         try:
             run_dir.mkdir(parents=True, exist_ok=False)
             metadata = {
@@ -780,11 +858,31 @@ class ProgramWorker(QtCore.QThread):
                 "resistance_action": self.config.resistance_action,
                 "resistance_check_rate_hz": self.config.resistance_check_rate_hz,
                 "blocks": [asdict(block) for block in self.config.blocks],
+                "record_csv": self.config.record_csv,
+                "log_rate_hz": self.config.log_rate_hz or self.config.measurement_rate_hz,
+                "electrical_limits": asdict(self.config.electrical_limits),
             }
             metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-            self.paths_ready.emit(str(csv_path), str(metadata_path))
+            self.paths_ready.emit(str(csv_path) if self.config.record_csv else "", str(metadata_path))
+            profile = PROFILES.get(getattr(self.adapter, "profile_mode", ""))
+            if profile is not None:
+                rates = (self.config.measurement_rate_hz, self.config.resistance_check_rate_hz,
+                         self.config.ui_rate_hz, self.config.log_rate_hz or self.config.measurement_rate_hz)
+                if self.config.control_rate_hz > profile.max_control_hz or max(rates) > profile.max_acquisition_hz:
+                    raise ValueError("Requested rates exceed this supply's application ceilings; review its profile before starting.")
+                if not profile.conditional_steps and isinstance(engine, ConditionalRecipeEngine):
+                    raise ValueError("Resistance-conditioned steps are not qualified for this supply.")
+            if self.config.record_csv:
+                writer = BufferedCsv(csv_path, CSV_FIELDS)
+                writer.start()
+            sleep_guard = create_experiment_sleep_guard(APP_TITLE, keep_display_awake=False)
+            sleep_guard.acquire()
+            if self._stop_event.is_set():
+                return
             self.adapter.open()
             opened = True
+            if self._stop_event.is_set():
+                return
             self.adapter.configure(
                 voltage_v=self.config.voltage_limit_v,
                 current_mA=self.config.initial_current_mA,
@@ -794,11 +892,25 @@ class ProgramWorker(QtCore.QThread):
                 warm_up_started = time.monotonic()
                 warm_up()
                 metadata["warm_up_measurement_s"] = time.monotonic() - warm_up_started
-                metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-            if self.config.max_resistance_ohm is not None:
-                baseline = self.adapter.measure()
+            if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
+                    or getattr(self.adapter, "startup_timeout_s", 0)):
+                baseline = self._startup_baseline(monitor, metadata)
+                if baseline is None:
+                    return
                 baseline_current = baseline.get("current_mA")
                 baseline_voltage = baseline.get("voltage_V")
+                fault = monitor.check(time.monotonic(), self.config.initial_current_mA,
+                                      baseline_current, baseline_voltage)
+                if fault:
+                    fault_sample = dict(timestamp_utc=_utc_now(), elapsed_s=0,
+                                        target_current_mA=self.config.initial_current_mA,
+                                        measured_current_mA=baseline_current,
+                                        voltage_V=baseline_voltage, electrical_fault=fault)
+                    self.adapter.close()
+                    opened = False
+                    if writer is not None:
+                        writer.submit(fault_sample, flush=True)
+                    raise RuntimeError(f"Electrical fault latched at baseline: {fault}")
                 baseline_resistance: float | None = None
                 if baseline_current is not None and baseline_voltage is not None:
                     current_mA = float(baseline_current)
@@ -808,12 +920,18 @@ class ProgramWorker(QtCore.QThread):
                 if (baseline_current is None or baseline_voltage is None
                         or not math.isfinite(float(baseline_current))
                         or not math.isfinite(float(baseline_voltage))
-                        or (self.config.initial_current_mA > 0 and (
+                        or (self.config.max_resistance_ohm is not None and self.config.initial_current_mA > 0 and not (
+                            monitor.limits.open_current_fraction is not None
+                            and self.config.initial_current_mA >= monitor.limits.active_above_mA
+                            and baseline_current == 0
+                        ) and (
                             baseline_resistance is None or not math.isfinite(baseline_resistance)
                             or baseline_resistance <= 0))):
-                    raise RuntimeError("Invalid baseline protection measurement; stopping output.")
+                    raise RuntimeError(f"Invalid baseline protection measurement: I={baseline_current!r} mA, "
+                                       f"V={baseline_voltage!r} V, R={baseline_resistance!r} ohm; stopping output.")
                 if (
-                    baseline_resistance is not None
+                    self.config.max_resistance_ohm is not None
+                    and baseline_resistance is not None
                     and math.isfinite(baseline_resistance)
                     and baseline_resistance >= self.config.max_resistance_ohm
                 ):
@@ -823,14 +941,15 @@ class ProgramWorker(QtCore.QThread):
                         self.adapter.close()
                         opened = False
                         self._stop_event.set()
-                metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             start = time.monotonic()
             sequence_start = start
             control_interval_s = 1.0 / self.config.control_rate_hz
-            measurement_interval_s = 1.0 / self.config.measurement_rate_hz
+            measurement_interval_s = 1.0 / (self.config.log_rate_hz or self.config.measurement_rate_hz)
             acquisition_interval_s = 1.0 / max(
                 self.config.measurement_rate_hz,
-                self.config.resistance_check_rate_hz if (self.config.max_resistance_ohm is not None
+                self.config.ui_rate_hz,
+                self.config.log_rate_hz or 0.0,
+                self.config.resistance_check_rate_hz if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
                     or isinstance(engine, ConditionalRecipeEngine)) else 0.0,
             )
             ui_interval_s = 1.0 / self.config.ui_rate_hz
@@ -840,181 +959,203 @@ class ProgramWorker(QtCore.QThread):
             next_ui = start
             state = engine.state_at(0.0)
             target = min(self.config.max_current_mA, max(0.0, state.target_mA))
-            with csv_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-                writer.writeheader()
-                while not self._stop_event.is_set():
-                    now = time.monotonic()
-                    try:
-                        command, payload = self._commands.get_nowait()
-                    except Empty:
-                        command, payload = None, None
-                    if command == "readout":
+            while not self._stop_event.is_set():
+                if writer is not None:
+                    writer.check()
+                now = time.monotonic()
+                try:
+                    command, payload = self._commands.get_nowait()
+                except Empty:
+                    command, payload = None, None
+                if command == "readout":
+                    readout_mode = True
+                    target = self.config.initial_current_mA
+                    if resistance_current_ceiling_mA is not None:
+                        target = min(target, resistance_current_ceiling_mA)
+                    self.adapter.set_current(target)
+                    last_target = target
+                    sequence_events.append(dict(event="readout", elapsed_s=now-start, sequence_id=sequence_id))
+                    next_control = now
+                    next_ui = now
+                elif command == "sequence" and readout_mode and resistance_current_ceiling_mA is None:
+                    blocks, repeat_count = payload
+                    engine = make_recipe_engine(blocks, initial_current_mA=float(last_target), repeat_count=repeat_count)
+                    acquisition_interval_s = 1.0 / max(self.config.measurement_rate_hz,
+                        self.config.ui_rate_hz, self.config.log_rate_hz or 0.0,
+                        self.config.resistance_check_rate_hz if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
+                            or isinstance(engine, ConditionalRecipeEngine)) else 0.0)
+                    next_measurement = now
+                    sequence_start = now
+                    sequence_id += 1
+                    readout_mode = False
+                    sequence_events.append(dict(event="sequence", elapsed_s=now-start, sequence_id=sequence_id,
+                                                blocks=[asdict(b) for b in blocks], repeat_count=repeat_count))
+                    next_control = now
+                    next_ui = now
+                if now >= next_control:
+                    state = engine.state_at(now - sequence_start)
+                    if not readout_mode and getattr(engine, "timed_out", False):
                         readout_mode = True
-                        target = self.config.initial_current_mA
-                        if resistance_current_ceiling_mA is not None:
+                        sequence_events.append(dict(event="resistance_timeout",elapsed_s=now-start,
+                                                    sequence_id=sequence_id,block_index=state.block_index))
+                        next_ui = now
+                    if readout_mode:
+                        state = ProgramState(0, 0, CurrentBlock("Hold", self.config.initial_current_mA, None, "Readout"),
+                                             self.config.initial_current_mA, 0, True)
+                    target = min(self.config.max_current_mA, max(0.0, state.target_mA))
+                    if resistance_current_ceiling_mA is not None:
+                        if self.config.resistance_action == "readout_current":
+                            target = resistance_current_ceiling_mA
+                        else:
                             target = min(target, resistance_current_ceiling_mA)
-                        self.adapter.set_current(target)
-                        last_target = target
-                        sequence_events.append(dict(event="readout", elapsed_s=now-start, sequence_id=sequence_id))
-                        next_control = now
-                        next_ui = now
-                    elif command == "sequence" and readout_mode and resistance_current_ceiling_mA is None:
-                        blocks, repeat_count = payload
-                        engine = make_recipe_engine(blocks, initial_current_mA=float(last_target), repeat_count=repeat_count)
-                        acquisition_interval_s = 1.0 / max(self.config.measurement_rate_hz,
-                            self.config.resistance_check_rate_hz if (self.config.max_resistance_ohm is not None
-                                or isinstance(engine, ConditionalRecipeEngine)) else 0.0)
-                        next_measurement = now
-                        sequence_start = now
-                        sequence_id += 1
-                        readout_mode = False
-                        sequence_events.append(dict(event="sequence", elapsed_s=now-start, sequence_id=sequence_id,
-                                                    blocks=[asdict(b) for b in blocks], repeat_count=repeat_count))
-                        next_control = now
-                        next_ui = now
-                    if now >= next_control:
-                        state = engine.state_at(now - sequence_start)
-                        if not readout_mode and getattr(engine, "timed_out", False):
-                            readout_mode = True
-                            sequence_events.append(dict(event="resistance_timeout",elapsed_s=now-start,
-                                                        sequence_id=sequence_id,block_index=state.block_index))
-                            next_ui = now
-                        if readout_mode:
-                            state = ProgramState(0, 0, CurrentBlock("Hold", self.config.initial_current_mA, None, "Readout"),
-                                                 self.config.initial_current_mA, 0, True)
-                        target = min(self.config.max_current_mA, max(0.0, state.target_mA))
-                        if resistance_current_ceiling_mA is not None:
-                            if self.config.resistance_action == "readout_current":
-                                target = resistance_current_ceiling_mA
-                            else:
-                                target = min(target, resistance_current_ceiling_mA)
-                    if now >= next_control and (last_target is None or abs(target - last_target) >= 1e-9):
-                        self.adapter.set_current(target)
-                        last_target = target
-                    if now >= next_control:
-                        next_control = max(next_control + control_interval_s, now + control_interval_s)
-                    if now >= next_measurement:
-                        readback = self.adapter.measure()
-                        acquired_at = time.monotonic()
-                        if self.config.max_resistance_ohm is not None:
-                            protection_checks += 1
-                            if last_check_time is not None:
-                                max_check_gap_s = max(max_check_gap_s, acquired_at - last_check_time)
-                            last_check_time = acquired_at
-                        measured = readback.get("current_mA")
-                        voltage = readback.get("voltage_V")
-                        resistance = None
-                        power = None
-                        if measured is not None and voltage is not None:
-                            if abs(float(measured)) > 1e-9:
-                                resistance = float(voltage) / (float(measured) / 1000.0)
-                                power = (float(measured) ** 2) * resistance / 1000.0
-                            else:
-                                power = 0.0
-                        if self.config.max_resistance_ohm is not None and (
-                            measured is None or voltage is None
-                            or not math.isfinite(float(measured))
-                            or not math.isfinite(float(voltage))
-                            or (target > 0 and (resistance is None or not math.isfinite(resistance) or resistance <= 0))
-                        ):
-                            raise RuntimeError("Invalid resistance protection measurement; stopping output.")
-                        tripped_now = False
-                        if (
-                            resistance_current_ceiling_mA is None
-                            and self.config.max_resistance_ohm is not None
-                            and resistance is not None
-                            and math.isfinite(resistance)
-                            and resistance >= self.config.max_resistance_ohm
-                        ):
-                            resistance_current_ceiling_mA = max(
-                                0.0,
-                                float(last_target if last_target is not None else target),
-                            )
-                            resistance_limit_reached_elapsed_s = acquired_at - start
-                            tripped_now = True
-                            if self.config.resistance_action == "readout_current":
-                                resistance_current_ceiling_mA = min(
-                                    resistance_current_ceiling_mA,
-                                    self.config.initial_current_mA,
-                                )
-                                self.adapter.set_current(resistance_current_ceiling_mA)
-                                last_target = resistance_current_ceiling_mA
-                            if self.config.resistance_action == "output_off":
-                                # Shut down before logging, UI signals, or another recipe command.
-                                self.adapter.close()
-                                opened = False
-                                self._stop_event.set()
-                        if (not readout_mode and resistance_current_ceiling_mA is None
-                                and isinstance(engine, ConditionalRecipeEngine)):
-                            if engine.observe(acquired_at-sequence_start, resistance,
-                                              (state.cycle_index, state.block_index)):
-                                sequence_events.append(dict(event="resistance_target",elapsed_s=acquired_at-start,
-                                                            sequence_id=sequence_id,block_index=state.block_index))
-                                next_control = acquired_at
-                                next_ui = now
-                        row = {
-                            "timestamp_utc": _utc_now(),
-                            "elapsed_s": now - start,
-                            "cycle_index": state.cycle_index + 1,
-                            "block_index": state.block_index + 1,
-                            "block_type": state.block.kind,
-                            "block_label": state.block.label,
-                            "sequence_complete": state.sequence_complete,
-                            "target_current_mA": target,
-                            "measured_current_mA": measured,
-                            "voltage_V": voltage,
-                            "resistance_ohm": resistance,
-                            "power_mW": power,
-                            "resistance_limit_reached": resistance_current_ceiling_mA is not None,
-                            "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
-                            "operating_mode": "readout" if readout_mode else "sequence",
-                            "sequence_id": sequence_id,
-                            "sequence_elapsed_s": now - sequence_start,
-                        }
-                        if acquired_at >= next_log or tripped_now:
-                            writer.writerow(row)
-                            handle.flush()
-                            rows += 1
-                            next_log = acquired_at + measurement_interval_s
-                        if now >= next_ui or tripped_now:
-                            self.sample_ready.emit(row)
-                            self.state_changed.emit(
-                                {
-                                    "cycle_index": state.cycle_index,
-                                    "block_index": state.block_index,
-                                    "block_type": state.block.kind,
-                                    "block_label": state.block.label,
-                                    "sequence_complete": state.sequence_complete,
-                                    "resistance_limit_reached": resistance_current_ceiling_mA
-                                    is not None,
-                                    "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
-                                    "resistance_action": self.config.resistance_action,
-                                    "readout_mode": readout_mode,
-                                    "resistance_timeout": getattr(engine, "timed_out", False),
-                                }
-                            )
-                            next_ui = max(next_ui + ui_interval_s, now + ui_interval_s)
-                        next_measurement = max(
-                            next_measurement + acquisition_interval_s,
-                            now + acquisition_interval_s,
+                if now >= next_control and (last_target is None or abs(target - last_target) >= 1e-9):
+                    self.adapter.set_current(target)
+                    last_target = target
+                if now >= next_control:
+                    next_control = max(next_control + control_interval_s, now + control_interval_s)
+                if now >= next_measurement:
+                    readback = self.adapter.measure()
+                    acquired_at = time.monotonic()
+                    if monitor.limits.enabled or self.config.max_resistance_ohm is not None:
+                        protection_checks += 1
+                        if last_check_time is not None:
+                            max_check_gap_s = max(max_check_gap_s, acquired_at - last_check_time)
+                        last_check_time = acquired_at
+                    measured = readback.get("current_mA")
+                    voltage = readback.get("voltage_V")
+                    fault = monitor.check(acquired_at, target, measured, voltage)
+                    if fault:
+                        fault_sample = dict(timestamp_utc=_utc_now(), elapsed_s=acquired_at-start,
+                                            target_current_mA=target, measured_current_mA=measured,
+                                            voltage_V=voltage, electrical_fault=fault)
+                        # Never enqueue disk/UI work before the shutdown attempt.
+                        self.adapter.close()
+                        opened = False
+                        if writer is not None:
+                            writer.submit(fault_sample, flush=True)
+                        raise RuntimeError(f"Electrical fault latched: {fault}")
+                    resistance = None
+                    power = None
+                    if measured is not None and voltage is not None:
+                        if abs(float(measured)) > 1e-9:
+                            resistance = float(voltage) / (float(measured) / 1000.0)
+                            power = (float(measured) ** 2) * resistance / 1000.0
+                        else:
+                            power = 0.0
+                    if self.config.max_resistance_ohm is not None and (
+                        measured is None or voltage is None
+                        or not math.isfinite(float(measured))
+                        or not math.isfinite(float(voltage))
+                        or (target > 0 and not (
+                            monitor.limits.open_current_fraction is not None
+                            and target >= monitor.limits.active_above_mA and measured == 0
+                        ) and (resistance is None or not math.isfinite(resistance) or resistance <= 0))
+                    ):
+                        raise RuntimeError("Invalid resistance protection measurement; stopping output.")
+                    tripped_now = False
+                    if (
+                        resistance_current_ceiling_mA is None
+                        and self.config.max_resistance_ohm is not None
+                        and resistance is not None
+                        and math.isfinite(resistance)
+                        and resistance >= self.config.max_resistance_ohm
+                    ):
+                        resistance_current_ceiling_mA = max(
+                            0.0,
+                            float(last_target if last_target is not None else target),
                         )
-                    next_deadline = min(next_control, next_measurement)
-                    self._wait_until(next_deadline)
+                        resistance_limit_reached_elapsed_s = acquired_at - start
+                        tripped_now = True
+                        if self.config.resistance_action == "readout_current":
+                            resistance_current_ceiling_mA = min(
+                                resistance_current_ceiling_mA,
+                                self.config.initial_current_mA,
+                            )
+                            self.adapter.set_current(resistance_current_ceiling_mA)
+                            last_target = resistance_current_ceiling_mA
+                        if self.config.resistance_action == "output_off":
+                            # Shut down before logging, UI signals, or another recipe command.
+                            self.adapter.close()
+                            opened = False
+                            self._stop_event.set()
+                    if (not readout_mode and resistance_current_ceiling_mA is None
+                            and isinstance(engine, ConditionalRecipeEngine)):
+                        if engine.observe(acquired_at-sequence_start, resistance,
+                                          (state.cycle_index, state.block_index)):
+                            sequence_events.append(dict(event="resistance_target",elapsed_s=acquired_at-start,
+                                                        sequence_id=sequence_id,block_index=state.block_index))
+                            next_control = acquired_at
+                            next_ui = now
+                    row = {
+                        "timestamp_utc": _utc_now(),
+                        "elapsed_s": now - start,
+                        "cycle_index": state.cycle_index + 1,
+                        "block_index": state.block_index + 1,
+                        "block_type": state.block.kind,
+                        "block_label": state.block.label,
+                        "sequence_complete": state.sequence_complete,
+                        "target_current_mA": target,
+                        "measured_current_mA": measured,
+                        "voltage_V": voltage,
+                        "resistance_ohm": resistance,
+                        "power_mW": power,
+                        "resistance_limit_reached": resistance_current_ceiling_mA is not None,
+                        "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
+                        "operating_mode": "readout" if readout_mode else "sequence",
+                        "sequence_id": sequence_id,
+                        "sequence_elapsed_s": now - sequence_start,
+                    }
+                    if acquired_at >= next_log or tripped_now:
+                        if writer is not None:
+                            writer.submit(row, flush=tripped_now)
+                        next_log = acquired_at + measurement_interval_s
+                    if (now >= next_ui or tripped_now) and (not self.coalesce_ui or not self.ui_pending.is_set()):
+                        self.ui_pending.set()
+                        self.sample_ready.emit(row)
+                        self.state_changed.emit(
+                            {
+                                "cycle_index": state.cycle_index,
+                                "block_index": state.block_index,
+                                "block_type": state.block.kind,
+                                "block_label": state.block.label,
+                                "sequence_complete": state.sequence_complete,
+                                "resistance_limit_reached": resistance_current_ceiling_mA
+                                is not None,
+                                "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
+                                "resistance_action": self.config.resistance_action,
+                                "readout_mode": readout_mode,
+                                "resistance_timeout": getattr(engine, "timed_out", False),
+                            }
+                        )
+                        next_ui = max(next_ui + ui_interval_s, now + ui_interval_s)
+                    next_measurement = max(
+                        next_measurement + acquisition_interval_s,
+                        now + acquisition_interval_s,
+                    )
+                next_deadline = min(next_control, next_measurement)
+                self._wait_until(next_deadline)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            self.failed.emit(error)
         finally:
             if opened:
                 try:
                     self.adapter.close()
                 except Exception as exc:
-                    if error is None:
-                        error = f"Safe shutdown failed: {exc}"
-                        self.failed.emit(error)
+                    error = f"{error or ''} Safe shutdown failed: {exc}".strip()
+            if sleep_guard is not None:
+                try:
+                    sleep_guard.release()
+                except Exception as exc:
+                    error = f"{error or ''} Sleep guard release failed: {exc}".strip()
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception as exc:
+                    error = f"{error or ''} {exc}".strip()
+                rows = writer.rows
             if metadata_path.exists():
                 try:
-                    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    payload = metadata
                     payload.update(
                         finished_utc=_utc_now(),
                         status="failed" if error else "stopped",
@@ -1026,11 +1167,16 @@ class ProgramWorker(QtCore.QThread):
                         resistance_action=self.config.resistance_action,
                         protection_checks=protection_checks,
                         max_protection_check_gap_s=max_check_gap_s,
-                        sequence_events=sequence_events,
+                        sequence_events=list(sequence_events),
+                        sequence_events_retained_limit=1024,
+                        electrical_fault=monitor.fault,
+                        fault_sample=fault_sample,
                     )
                     metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 except Exception:
                     pass
+            if error:
+                self.failed.emit(error)
 
 
 def bundle_estimate(load_g: float, current_mA: float, resistance_ohm: float) -> tuple[int, float, float]:
@@ -1054,19 +1200,58 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.worker: ProgramWorker | None = None
         self._readout_active = False
         self._stopping = False
+        self._fault_latched = False
         self._times: list[float] = []
         self._targets: list[float] = []
         self._measured: list[float] = []
         self._resistance: list[float] = []
         self._viewing_history = False
+        self._loading_profile = True
+        self._active_supply_mode = None
+        self._discovery_token = 0
+        self._discovery_busy = False
+        self._discovery_jobs = {}
+        self._discovery_timer = QtCore.QTimer(self)
+        self._discovery_timer.setSingleShot(True)
+        self._discovery_timer.setInterval(5000)
+        self._discovery_timer.timeout.connect(self._visa_discovery_timeout)
         self._build_ui()
+        # Scope the application filter to this window, including dynamically added recipe editors.
+        QtWidgets.QApplication.instance().installEventFilter(self)
         self._load_settings()
+        self._loading_profile = False
         self.bundle_timer = QtCore.QTimer(self)
         self.bundle_timer.setInterval(500)
         self.bundle_timer.timeout.connect(self._refresh_bundle_estimate)
         self.bundle_timer.start()
         self._refresh_bundle_estimate()
         install_standard_menu(self, help_topic="logger_current_annealing")
+        if PROFILES[self.mode_combo.currentText()].vendor:
+            self._refresh_visa_resources()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.Wheel and isinstance(watched, QtWidgets.QWidget):
+            control = watched
+            if isinstance(control, QtWidgets.QLineEdit):
+                control = control.parentWidget()
+            if (isinstance(control, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox))
+                    and self.isAncestorOf(control)):
+                # Even a focused field must not change while scrolling the setup panel.
+                # Explicit typing, keyboard arrows, spin buttons and popup selection still work.
+                parent = control.parentWidget()
+                while parent is not None and not isinstance(parent, QtWidgets.QAbstractScrollArea):
+                    parent = parent.parentWidget()
+                if parent is not None:
+                    viewport = parent.viewport()
+                    forwarded = QtGui.QWheelEvent(
+                        QtCore.QPointF(viewport.mapFromGlobal(event.globalPosition().toPoint())),
+                        event.globalPosition(), event.pixelDelta(), event.angleDelta(),
+                        event.buttons(), event.modifiers(), event.phase(), event.inverted(),
+                    )
+                    QtWidgets.QApplication.sendEvent(viewport, forwarded)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -1088,13 +1273,15 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self._build_setup_panel())
         splitter.addWidget(self._build_recipe_panel())
         splitter.addWidget(self._build_live_panel())
-        splitter.setSizes([300, 590, 470])
+        splitter.setSizes([400, 530, 430])
 
     def _build_setup_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         connection = QtWidgets.QGroupBox("Connection")
         form = QtWidgets.QFormLayout(connection)
+        self.connection_form = form
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Simulation", "Keithley 2636B (VISA)", "Shared HMP broker", "Siglent SPD1305X (VISA)"])
         self.host_edit = QtWidgets.QLineEdit("127.0.0.1")
@@ -1111,8 +1298,13 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.visa_refresh_button = QtWidgets.QPushButton("Refresh")
         self.visa_refresh_button.clicked.connect(self._refresh_visa_resources)
         visa_row = QtWidgets.QHBoxLayout()
+        self.visa_row = visa_row
         visa_row.addWidget(self.visa_resource_combo, 1)
         visa_row.addWidget(self.visa_refresh_button)
+        self.visa_status_label = QtWidgets.QLabel()
+        self.visa_status_label.setWordWrap(True)
+        self.profile_label = QtWidgets.QLabel()
+        self.profile_label.setWordWrap(True)
         self.keithley_channel_combo = QtWidgets.QComboBox()
         self.keithley_channel_combo.addItems(["A", "B"])
         self.remote_sense_check = QtWidgets.QCheckBox("Use 4-wire remote sense")
@@ -1191,13 +1383,57 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             ("Initial current", self.initial_current_spin),
             ("Max resistance", resistance_limit_row),
             ("At resistance limit", self.resistance_action_combo),
-            ("Resistance check rate", self.resistance_check_rate_spin),
+            ("Protection poll rate", self.resistance_check_rate_spin),
             ("Control rate", self.control_rate_spin),
-            ("Measurement / log rate", self.measurement_rate_spin),
+            ("Readback poll rate", self.measurement_rate_spin),
             ("UI refresh rate", self.ui_rate_spin),
         ):
             form.addRow(label, widget)
+        form.addRow(self.visa_status_label)
+        form.addRow(self.profile_label)
         layout.addWidget(connection)
+
+        safety = QtWidgets.QGroupBox("Electrical faults: OFF + manual reset")
+        safety_form = QtWidgets.QFormLayout(safety)
+        safety_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.short_check = QtWidgets.QCheckBox("Short-circuit detection")
+        self.short_resistance_spin = QtWidgets.QDoubleSpinBox()
+        self.short_resistance_spin.setRange(0.01, 1_000_000)
+        self.short_resistance_spin.setValue(10)
+        self.short_resistance_spin.setSuffix(" ohm")
+        self.open_check = QtWidgets.QCheckBox("Broken wire / contact loss")
+        self.open_fraction_spin = QtWidgets.QDoubleSpinBox()
+        self.open_fraction_spin.setRange(1, 99)
+        self.open_fraction_spin.setValue(25)
+        self.open_fraction_spin.setSuffix(" % of target")
+        self.protection_floor_spin = QtWidgets.QDoubleSpinBox()
+        self.protection_floor_spin.setRange(0.01, 5000)
+        self.protection_floor_spin.setValue(10)
+        self.protection_floor_spin.setSuffix(" mA")
+        self.open_confirm_spin = QtWidgets.QDoubleSpinBox()
+        self.open_confirm_spin.setRange(0.01, 10)
+        self.open_confirm_spin.setValue(0.2)
+        self.open_confirm_spin.setSuffix(" s")
+        for label, widget in (
+            ("", self.short_check), ("Short if R <=", self.short_resistance_spin),
+            ("", self.open_check), ("Lost if I <", self.open_fraction_spin),
+            ("Active at target >=", self.protection_floor_spin),
+            ("Low-current confirmation", self.open_confirm_spin),
+        ):
+            safety_form.addRow(label, widget)
+        safety_help = QtWidgets.QLabel(
+            "Set specimen-specific thresholds before enabling. No short/open detection below "
+            "the target-current floor; short detection also requires measured current >= floor. "
+            "Shorts trip on one sample; contact loss must persist. Neither is a hardware interlock. "
+            "Windows idle sleep is prevented during runs; the screen may turn off."
+        )
+        safety_help.setWordWrap(True)
+        safety_form.addRow(safety_help)
+        self.reset_fault_button = QtWidgets.QPushButton("Acknowledge fault / allow new run")
+        self.reset_fault_button.clicked.connect(self._reset_fault)
+        self.reset_fault_button.setEnabled(False)
+        safety_form.addRow(self.reset_fault_button)
+        layout.addWidget(safety)
 
         execution = QtWidgets.QGroupBox("Execution")
         execution_form = QtWidgets.QFormLayout(execution)
@@ -1212,6 +1448,21 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
 
         output = QtWidgets.QGroupBox("Continuous log")
         output_form = QtWidgets.QFormLayout(output)
+        output_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.record_csv_check = QtWidgets.QCheckBox("Record measurements to CSV")
+        self.record_csv_check.setChecked(True)
+        self.record_csv_check.setToolTip("When disabled, only run settings and fault/summary metadata are saved. Protection stays active.")
+        self.log_rate_spin = QtWidgets.QDoubleSpinBox()
+        self.log_rate_spin.setRange(0.01, 1000)
+        self.log_rate_spin.setDecimals(2)
+        self.log_rate_spin.setValue(1)
+        self.log_rate_spin.setSuffix(" Hz")
+        self.live_points_spin = QtWidgets.QSpinBox()
+        self.live_points_spin.setRange(100, 20_000)
+        self.live_points_spin.setValue(10_000)
+        output_form.addRow(self.record_csv_check)
+        output_form.addRow("CSV rate", self.log_rate_spin)
+        output_form.addRow("Live history points", self.live_points_spin)
         self.output_edit = QtWidgets.QLineEdit()
         self.output_edit.textChanged.connect(self.output_edit.setToolTip)
         browse = QtWidgets.QPushButton("Browse…")
@@ -1227,10 +1478,13 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         output_form.addRow(self.history_button)
         layout.addWidget(output)
         layout.addStretch(1)
-        self.mode_combo.currentIndexChanged.connect(self._sync_connection_fields)
+        self.mode_combo.currentIndexChanged.connect(self._on_supply_changed)
         self.repeat_mode_combo.currentIndexChanged.connect(self._sync_repeat_fields)
         self.resistance_limit_check.toggled.connect(self.max_resistance_spin.setEnabled)
-        return panel
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        return scroll
 
     def _build_recipe_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -1408,7 +1662,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         # Closest current; use the largest R on ties rather than averaging hysteresis branches.
         _, sampled_current, resistance = min(pairs, key=lambda p: (p[0], -p[2]))
         count, per_wire, total = bundle_estimate(load, peak, resistance)
-        basis = "displayed history" if self._viewing_history else "live run"
+        basis = "displayed history" if self._viewing_history else "retained live history"
         self.bundle_label.setText(
             f"{count:,} wires • sequence maximum {peak:g} mA\n"
             f"{per_wire * 1000:.2f} mW / wire → {total:.2f} W total\n"
@@ -1423,14 +1677,18 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.resistance_view.setGeometry(main_view.sceneBoundingRect())
         self.resistance_view.linkedViewChanged(main_view, pg.ViewBox.XAxis)
 
-    def _resistance_at_current(self, current_mA: float) -> float | None:
-        pairs = sorted(
+    def _sorted_resistance_pairs(self) -> list[tuple[float, float]]:
+        return sorted(
             (float(current), float(resistance))
             for current, resistance in zip(self._measured, self._resistance)
             if math.isfinite(float(current))
             and math.isfinite(float(resistance))
             and float(resistance) > 0.0
         )
+
+    def _resistance_at_current(self, current_mA: float, *, pairs=None) -> float | None:
+        if pairs is None:
+            pairs = self._sorted_resistance_pairs()
         if not pairs:
             return None
         if len(pairs) == 1:
@@ -1443,8 +1701,8 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 return y0 + fraction * (y1 - y0)
         return min(pairs, key=lambda pair: abs(pair[0] - current_mA))[1]
 
-    def _power_mw_at_current(self, current_mA: float) -> float | None:
-        resistance = self._resistance_at_current(current_mA)
+    def _power_mw_at_current(self, current_mA: float, *, pairs=None) -> float | None:
+        resistance = self._resistance_at_current(current_mA, pairs=pairs)
         if resistance is None:
             return None
         return (float(current_mA) ** 2) * resistance / 1000.0
@@ -1471,8 +1729,9 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         if not positions:
             positions = [x_low + (x_high - x_low) * index / 4.0 for index in range(5)]
         ticks = []
+        pairs = self._sorted_resistance_pairs()
         for position in positions:
-            power = self._power_mw_at_current(position)
+            power = self._power_mw_at_current(position, pairs=pairs)
             if power is None:
                 label = ""
             else:
@@ -1562,6 +1821,16 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         hold = kind.currentText() == "Hold"
         condition = self.table.cellWidget(row, 6)
         resistance = self.table.cellWidget(row, 7)
+        if isinstance(condition, QtWidgets.QComboBox):
+            supported = PROFILES[self.mode_combo.currentText()].conditional_steps
+            for index in (1, 2):
+                item = condition.model().item(index)
+                if item is not None:
+                    item.setEnabled(supported)
+            condition.setToolTip("" if supported else "This supply supports time-based steps only; resistance-step timing is not qualified.")
+        target = self.table.cellWidget(row, 2)
+        if isinstance(target, QtWidgets.QDoubleSpinBox):
+            target.setSingleStep(PROFILES[self.mode_combo.currentText()].current_step)
         conditional = isinstance(condition, QtWidgets.QComboBox) and condition.currentData() != "time"
         if resistance is not None:
             resistance.setEnabled(conditional)
@@ -1823,27 +2092,76 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self.repeat_count_spin.setValue(repeat_count)
 
     def _refresh_visa_resources(self) -> None:
-        try:
-            resources = list_visa_resources()
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "VISA discovery failed", str(exc))
+        mode = self.mode_combo.currentText()
+        if self.worker is not None or not PROFILES[mode].vendor:
+            return
+        if len(self._discovery_jobs) >= 2:
+            self.visa_status_label.setText("Previous VISA discovery is still blocked. Enter the resource manually or restart the app after checking the VISA driver.")
+            return
+        self._discovery_token += 1
+        token = self._discovery_token
+        self._discovery_busy = True
+        self._discovery_requested_text = self.visa_resource_combo.currentText()
+        self.visa_status_label.setText("Discovering VISA resources (no output changes)...")
+        self.visa_refresh_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        job = _VisaDiscoveryJob(token, mode)
+        self._discovery_jobs[token] = job
+        job.signals.ready.connect(self._on_visa_discovered)
+        self._discovery_timer.start()
+        QtCore.QThreadPool.globalInstance().start(job)
+
+    def _visa_discovery_timeout(self):
+        self._discovery_token += 1
+        self._discovery_busy = False
+        self.visa_status_label.setText("VISA discovery timed out; no device was opened. Enter the resource manually or retry Refresh.")
+        if self.worker is None:
+            self.start_button.setEnabled(not self._fault_latched)
+            self.visa_refresh_button.setEnabled(bool(PROFILES[self.mode_combo.currentText()].vendor))
+
+    @QtCore.pyqtSlot(int, str, object, str)
+    def _on_visa_discovered(self, token, mode, resources, error):
+        self._discovery_jobs.pop(token, None)
+        if token != self._discovery_token or mode != self.mode_combo.currentText():
+            return
+        self._discovery_timer.stop()
+        self._discovery_busy = False
+        if self.worker is not None:
+            return
+        self.visa_refresh_button.setEnabled(True)
+        self.start_button.setEnabled(not self._fault_latched)
+        if error:
+            self.visa_status_label.setText(f"VISA discovery failed: {error}. Enter a resource or retry Refresh.")
             return
         current = self.visa_resource_combo.currentText().strip()
+        # Do not overwrite an address the operator edited during discovery.
+        if current != self._discovery_requested_text.strip():
+            self.visa_status_label.setText("Discovery complete; preserved your edited resource.")
+            return
+        vendor = PROFILES[mode].vendor
+        matches = [r for r in resources if f"::{vendor}::" in r.upper()]
+        if current and current in resources and not current.upper().startswith("USB"):
+            matches.insert(0, current)
         self.visa_resource_combo.clear()
-        self.visa_resource_combo.addItems(resources)
-        if current and current not in resources:
-            self.visa_resource_combo.addItem(current)
-        if current:
+        self.visa_resource_combo.addItems(matches)
+        if current in matches:
             self.visa_resource_combo.setCurrentText(current)
-        elif resources:
-            vendor = "0XF4EC" if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)" else "0X05E6"
-            preferred = next(
-                (resource for resource in resources if vendor in resource.upper()),
-                resources[0],
-            )
-            self.visa_resource_combo.setCurrentText(preferred)
-        if not resources:
-            self._show_status_message("No VISA resources were found.")
+        elif len(matches) == 1:
+            self.visa_resource_combo.setCurrentText(matches[0])
+        else:
+            self.visa_resource_combo.setCurrentIndex(-1)
+            if current and not current.upper().startswith("USB"):
+                self.visa_resource_combo.setCurrentText(current)
+        if not matches:
+            self.visa_status_label.setText("No matching supply found. Check USB, or enter its LAN/VISA resource.")
+        elif len(matches) > 1 and current not in matches:
+            self.visa_status_label.setText("Multiple matching supplies found; select the intended device.")
+        else:
+            self.visa_status_label.setText("Matching resource selected. Identity and ownership are verified at Start.")
+        editor = self.visa_resource_combo.lineEdit()
+        if editor is not None:
+            editor.setToolTip(editor.text())
+            editor.setCursorPosition(0)
 
     def _show_status_message(self, message: str) -> None:
         self.status_label.setText(message)
@@ -1872,8 +2190,17 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         )
 
     def start_run(self) -> None:
+        if self._fault_latched:
+            self.status_label.setText("Fault latched: inspect connections and acknowledge before a new run")
+            return
+        if self._discovery_busy:
+            self.visa_status_label.setText("Wait for resource discovery before starting.")
+            return
         if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)":
             try:
+                resource = self.visa_resource_combo.currentText().strip()
+                if resource.upper().startswith("USB") and "::0XF4EC::" not in resource.upper():
+                    raise ValueError("The selected USB VISA address is not Siglent (0xF4EC). Click Refresh and select the SPD1305X; the old Keithley address cannot be used.")
                 blocks = self.blocks()
                 values = [self.initial_current_spin.value()] + [b.target_mA for b in blocks]
                 if any(0 < value < 1 for value in values):
@@ -1908,6 +2235,9 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 max_current_mA=max_current,
                 repeat_count=repeat_count,
             )
+            profile = PROFILES[self.mode_combo.currentText()]
+            if not profile.conditional_steps and any(b.resistance_ohm is not None for b in blocks):
+                raise ValueError("This supply supports time-based steps only; its application rate ceiling cannot satisfy the resistance-step confirmation timing.")
             if self.mode_combo.currentText() == "Siglent SPD1305X (VISA)":
                 if not self.visa_resource_combo.currentText().strip():
                     raise ValueError("Select or enter the Siglent VISA resource.")
@@ -1946,6 +2276,14 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             repeat_count=repeat_count,
             resistance_action=str(self.resistance_action_combo.currentData()),
             resistance_check_rate_hz=self.resistance_check_rate_spin.value(),
+            record_csv=self.record_csv_check.isChecked(),
+            log_rate_hz=self.log_rate_spin.value(),
+            electrical_limits=ElectricalLimits(
+                short_resistance_ohm=self.short_resistance_spin.value() if self.short_check.isChecked() else None,
+                open_current_fraction=self.open_fraction_spin.value()/100 if self.open_check.isChecked() else None,
+                active_above_mA=self.protection_floor_spin.value(),
+                open_confirm_s=self.open_confirm_spin.value(),
+            ),
         )
         self._times.clear()
         self._targets.clear()
@@ -1953,6 +2291,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self._resistance.clear()
         self._viewing_history = False
         self.worker = ProgramWorker(config, self._make_adapter(), self)
+        self.worker.coalesce_ui = True
         self.worker.sample_ready.connect(self._on_sample)
         self.worker.state_changed.connect(self._on_state)
         self.worker.failed.connect(self._on_failure)
@@ -1986,6 +2325,10 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self._measured.append(float("nan") if measured is None else float(measured))
         resistance = row.get("resistance_ohm")
         self._resistance.append(float("nan") if resistance is None else float(resistance))
+        limit = self.live_points_spin.value()
+        for values in (self._times, self._targets, self._measured, self._resistance):
+            if len(values) > limit:
+                del values[:-limit]
         self._refresh_plot_data()
 
     def _refresh_plot_data(self) -> None:
@@ -1994,7 +2337,7 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
                 step = max(1, math.ceil(len(self._times) / 20_000))
                 data_slice = slice(None, None, step)
             else:
-                data_slice = slice(max(0, len(self._times) - 5000), None)
+                data_slice = slice(None)
             self.target_curve.setData(self._times[data_slice], self._targets[data_slice])
             self.measured_curve.setData(self._times[data_slice], self._measured[data_slice])
             self.resistance_curve.setData(
@@ -2006,6 +2349,10 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self._refresh_power_axis()
 
     def _on_state(self, state: dict[str, Any]) -> None:
+        if self.worker is not None:
+            self.worker.ui_pending.clear()
+        if self._fault_latched:
+            return
         self._readout_active = bool(state.get("readout_mode"))
         can_restart = self._readout_active and not state.get("resistance_limit_reached") and not self._stopping
         self.start_button.setText("Start next sequence" if self._readout_active else "Start continuous run")
@@ -2032,11 +2379,28 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.block_label.setText(f"Cycle {cycle} · {index}. {state['block_type']}{suffix}")
 
     def _on_failure(self, message: str) -> None:
+        self._fault_latched = True
+        self.start_button.setEnabled(False)
+        self.readout_button.setEnabled(False)
         self.status_label.setText("Failed")
         QtWidgets.QMessageBox.critical(self, "Current program failed", message)
 
+    def _reset_fault(self) -> None:
+        if self.worker is not None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, "Acknowledge fault",
+            "Verify the supply output is OFF, inspect wiring and thresholds, and correct the fault. "
+            "Allow a new run? This does not turn the output on.",
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._fault_latched = False
+            self.reset_fault_button.setEnabled(False)
+            self.start_button.setEnabled(True)
+            self.status_label.setText("Fault acknowledged; ready for a new run")
+
     def _on_paths(self, csv_path: str, metadata_path: str) -> None:
-        self.path_label.setText(f"CSV: {csv_path}\nMetadata: {metadata_path}")
+        self.path_label.setText(f"CSV: {csv_path or 'disabled (display only)'}\nMetadata: {metadata_path}")
 
     def _on_finished(self) -> None:
         failed = self.status_label.text() == "Failed"
@@ -2049,7 +2413,8 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self.status_label.setText("Stopped · output off")
 
     def _set_editing_enabled(self, enabled: bool) -> None:
-        self.start_button.setEnabled(enabled)
+        self.start_button.setEnabled(enabled and not self._fault_latched and not self._discovery_busy)
+        self.reset_fault_button.setEnabled(enabled and self._fault_latched)
         self.stop_button.setEnabled(not enabled)
         self.readout_button.setEnabled(not enabled)
         self.table.setEnabled(enabled)
@@ -2057,6 +2422,9 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         for button in self.recipe_edit_buttons:
             button.setEnabled(enabled)
         for widget in (
+            self.short_check, self.short_resistance_spin, self.open_check,
+            self.open_fraction_spin, self.protection_floor_spin, self.open_confirm_spin,
+            self.record_csv_check, self.log_rate_spin, self.live_points_spin,
             self.mode_combo,
             self.host_edit,
             self.port_spin,
@@ -2106,6 +2474,13 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.keithley_channel_combo.setEnabled(keithley and editable)
         self.remote_sense_check.setEnabled(keithley and editable)
         self.remote_sense_check.setVisible(not siglent)
+        for widget in (self.host_edit, self.port_spin, self.channel_spin):
+            self.connection_form.setRowVisible(widget, broker)
+        self.connection_form.setRowVisible(self.visa_row, keithley or siglent)
+        self.connection_form.setRowVisible(self.keithley_channel_combo, keithley)
+        self.connection_form.setRowVisible(self.remote_sense_check, keithley)
+        self.visa_status_label.setVisible(keithley or siglent)
+        self.visa_refresh_button.setEnabled((keithley or siglent) and editable and not self._discovery_busy)
         if hasattr(self, "supply_warning_label"):
             self.supply_warning_label.setVisible(siglent)
         if keithley:
@@ -2120,93 +2495,162 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self.worker is None and self.repeat_mode_combo.currentText() == "Fixed cycles"
         )
 
-    def _load_settings(self) -> None:
-        self.bundle_load_spin.setValue(float(self.settings.value("bundle_load_g", 0.0)))
-        default_dir = Path.home() / "Downloads"
-        self.output_edit.setText(str(self.settings.value("output_dir", str(default_dir))))
-        self.output_edit.setCursorPosition(0)
-        self.output_edit.setToolTip(self.output_edit.text())
-        self.mode_combo.setCurrentText(str(self.settings.value("connection_mode", "Simulation")))
-        self.host_edit.setText(str(self.settings.value("broker_host", "127.0.0.1")))
-        self.port_spin.setValue(int(self.settings.value("broker_port", 8765)))
-        self.channel_spin.setValue(int(self.settings.value("channel", 1)))
-        self.visa_resource_combo.setCurrentText(str(self.settings.value("visa_resource", "")))
-        visa_editor = self.visa_resource_combo.lineEdit()
-        if visa_editor is not None:
-            visa_editor.setToolTip(visa_editor.text())
-            visa_editor.setCursorPosition(0)
-        self.keithley_channel_combo.setCurrentText(str(self.settings.value("keithley_channel", "A")))
-        self.remote_sense_check.setChecked(
-            str(self.settings.value("keithley_remote_sense", "true")).lower() not in {"0", "false", "no"}
-        )
-        self.voltage_spin.setValue(float(self.settings.value("voltage_limit_v", self.voltage_spin.value())))
-        self.max_current_spin.setValue(
-            float(self.settings.value("max_current_mA", self.max_current_spin.value()))
-        )
-        self.initial_current_spin.setValue(
-            float(self.settings.value("initial_current_mA", self.initial_current_spin.value()))
-        )
-        self.resistance_limit_check.setChecked(
-            str(self.settings.value("resistance_limit_enabled", "true")).lower()
-            not in {"0", "false", "no"}
-        )
-        self.max_resistance_spin.setValue(
-            float(self.settings.value("max_resistance_ohm", 190.0))
-        )
-        self.control_rate_spin.setValue(float(self.settings.value("control_rate_hz", 100.0)))
-        action_index = self.resistance_action_combo.findData(
-            str(self.settings.value("resistance_action", "hold_current"))
-        )
-        self.resistance_action_combo.setCurrentIndex(max(0, action_index))
-        self.resistance_check_rate_spin.setValue(float(self.settings.value("resistance_check_rate_hz", 100.0)))
-        self.measurement_rate_spin.setValue(float(self.settings.value("measurement_rate_hz", 10.0)))
-        self.ui_rate_spin.setValue(float(self.settings.value("ui_rate_hz", 10.0)))
-        self.name_edit.setText(str(self.settings.value("run_name", self.name_edit.text())))
-        stored_repeat = self.settings.value("repeat_count", 1)
-        self._set_repeat_count(None if str(stored_repeat) == "forever" else int(stored_repeat))
-        stored_blocks = self.settings.value("program_blocks_json", "")
-        if stored_blocks:
-            try:
-                blocks = [CurrentBlock(**item) for item in json.loads(str(stored_blocks))]
-                validate_recipe(
-                    blocks,
-                    max_current_mA=5000.0,
-                    repeat_count=self._repeat_count(),
-                )
-                self.set_blocks(blocks)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                pass
+    # Supply profiles and global settings are deliberately separate.
+
+    def _profile_fields(self):
+        return (
+            ("broker_host", self.host_edit, "127.0.0.1"), ("broker_port", self.port_spin, 8765),
+            ("channel", self.channel_spin, 1), ("visa_resource", self.visa_resource_combo, ""),
+            ("keithley_channel", self.keithley_channel_combo, "A"),
+            ("keithley_remote_sense", self.remote_sense_check, True),
+            ("voltage_limit_v", self.voltage_spin, 1.0), ("max_current_mA", self.max_current_spin, 5.0),
+            ("initial_current_mA", self.initial_current_spin, 1.0),
+            ("resistance_limit_enabled", self.resistance_limit_check, True),
+            ("max_resistance_ohm", self.max_resistance_spin, 190.0),
+            ("resistance_action", self.resistance_action_combo, "hold_current"),
+            ("control_rate_hz", self.control_rate_spin, 100.0),
+            ("measurement_rate_hz", self.measurement_rate_spin, 10.0),
+            ("resistance_check_rate_hz", self.resistance_check_rate_spin, 100.0),
+            ("ui_rate_hz", self.ui_rate_spin, 10.0),
+        ) + self._new_settings()
+
+    def _profile_key(self, mode):
+        return f"supply_profiles_v1/{PROFILES[mode].key}"
+
+    def _capture_profile(self):
+        values = {}
+        for key, widget, default in self._profile_fields():
+            if isinstance(widget, QtWidgets.QCheckBox): value = widget.isChecked()
+            elif isinstance(widget, QtWidgets.QComboBox):
+                value = widget.currentData() if widget is self.resistance_action_combo else widget.currentText()
+            elif isinstance(widget, QtWidgets.QLineEdit): value = widget.text()
+            else: value = widget.value()
+            values[key] = value
+        values["repeat_count"] = self._repeat_count()
+        values["blocks"] = [asdict(b) for b in self.blocks()]
+        return values
+
+    def _store_profile(self, mode):
+        self.settings.setValue(self._profile_key(mode), json.dumps(self._capture_profile()))
+
+    def _apply_profile(self, mode, values):
+        profile = PROFILES[mode]
+        defaults = dict(control_rate_hz=profile.control_hz, measurement_rate_hz=profile.acquisition_hz,
+                        resistance_check_rate_hz=profile.protection_hz, ui_rate_hz=profile.ui_hz)
+        adjusted = []
+        self._loading_profile = True
+        self._sync_connection_fields()
+        self.voltage_spin.setMaximum(profile.max_voltage)
+        self.max_current_spin.setMaximum(profile.max_current)
+        self.initial_current_spin.setMaximum(profile.max_current)
+        self.initial_current_spin.setSingleStep(profile.current_step)
+        self.max_current_spin.setSingleStep(profile.current_step)
+        self.control_rate_spin.setMaximum(profile.max_control_hz)
+        for spin in (self.measurement_rate_spin, self.resistance_check_rate_spin, self.log_rate_spin):
+            spin.setMaximum(profile.max_acquisition_hz)
+        self.ui_rate_spin.setMaximum(min(60, profile.max_acquisition_hz))
+        for key, widget, fallback in self._profile_fields():
+            value = values.get(key, defaults.get(key, fallback))
+            if isinstance(widget, QtWidgets.QCheckBox):
+                widget.setChecked(str(value).lower() not in {"0", "false", "no"})
+            elif isinstance(widget, QtWidgets.QComboBox):
+                if widget is self.resistance_action_combo:
+                    widget.setCurrentIndex(max(0, widget.findData(str(value))))
+                else:
+                    if widget is self.visa_resource_combo: widget.clear()
+                    widget.setCurrentText(str(value))
+            elif isinstance(widget, QtWidgets.QLineEdit): widget.setText(str(value))
+            else:
+                try:
+                    number = float(value)
+                    if not math.isfinite(number): raise ValueError()
+                except (ValueError, TypeError): number = float(defaults.get(key, fallback))
+                widget.setValue(int(number) if isinstance(widget, QtWidgets.QSpinBox) else number)
+                if widget.value() != number: adjusted.append(key)
+        blocks = values.get("blocks", [asdict(CurrentBlock("Hold", 1, 3, "Initial readout")),
+                    asdict(CurrentBlock("Ramp", 4, 2, "Low-current test ramp")),
+                    asdict(CurrentBlock("Hold", 1, None, "Measure at low current"))])
+        try:
+            parsed = [CurrentBlock(**item) for item in blocks]
+            self.set_blocks(parsed)
+            self._set_repeat_count(values.get("repeat_count", 1))
+        except (ValueError, TypeError, KeyError):
+            self.set_blocks([CurrentBlock("Hold", 1, None)])
+            self._set_repeat_count(1)
+        self._active_supply_mode = mode
+        self._loading_profile = False
         self._sync_connection_fields()
         self._sync_repeat_fields()
+        self.profile_label.setText(
+            f"{mode}: independent settings. App ceilings: control {profile.max_control_hz:g} Hz, "
+            f"read/protection polling {profile.max_acquisition_hz:g} Hz. {profile.rate_basis}"
+            + (" Saved values above these ceilings were reduced; review before starting." if adjusted else "")
+        )
+        self.resistance_check_rate_spin.setToolTip(
+            f"Requested polling only; not a guaranteed fresh-measurement rate or fault-response time. {profile.rate_basis}"
+        )
+        self.measurement_rate_spin.setToolTip(self.resistance_check_rate_spin.toolTip())
+
+    def _read_profile(self, mode):
+        try:
+            value = json.loads(str(self.settings.value(self._profile_key(mode), "{}")))
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError): return {}
+
+    def _on_supply_changed(self):
+        if self._loading_profile or self.worker is not None:
+            return
+        if self._active_supply_mode is not None:
+            self._store_profile(self._active_supply_mode)
+        mode = self.mode_combo.currentText()
+        self._discovery_token += 1
+        self._discovery_timer.stop()
+        self._discovery_busy = False
+        self._apply_profile(mode, self._read_profile(mode))
+        self.visa_status_label.clear()
+        self._set_editing_enabled(True)
+        if PROFILES[mode].vendor:
+            self._refresh_visa_resources()
+
+    def _load_settings(self) -> None:
+        self.bundle_load_spin.setValue(float(self.settings.value("bundle_load_g", 0.0)))
+        self.output_edit.setText(str(self.settings.value("output_dir", str(Path.home()/"Downloads"))))
+        self.name_edit.setText(str(self.settings.value("run_name", "current-program")))
+        mode = str(self.settings.value("connection_mode", "Simulation"))
+        if mode not in PROFILES: mode = "Simulation"
+        self.mode_combo.setCurrentText(mode)
+        values = self._read_profile(mode)
+        # Migrate old flat settings ONLY into the mode they were last saved for.
+        # Other supplies always start with their own defaults. Keep legacy keys untouched.
+        if not values:
+            for key, widget, default in self._profile_fields():
+                value = self.settings.value(key, None)
+                if value is not None: values[key] = value
+            repeat = self.settings.value("repeat_count", 1)
+            values["repeat_count"] = None if str(repeat) == "forever" else int(repeat)
+            try: values["blocks"] = json.loads(str(self.settings.value("program_blocks_json", "null")))
+            except ValueError: pass
+            if values.get("blocks") is None: values.pop("blocks", None)
+        self._apply_profile(mode, values)
 
     def _save_settings(self) -> None:
-        self.settings.setValue("bundle_load_g", self.bundle_load_spin.value())
-        self.settings.setValue("output_dir", self.output_edit.text())
+        self._store_profile(self._active_supply_mode or self.mode_combo.currentText())
         self.settings.setValue("connection_mode", self.mode_combo.currentText())
-        self.settings.setValue("broker_host", self.host_edit.text())
-        self.settings.setValue("broker_port", self.port_spin.value())
-        self.settings.setValue("channel", self.channel_spin.value())
-        self.settings.setValue("visa_resource", self.visa_resource_combo.currentText())
-        self.settings.setValue("keithley_channel", self.keithley_channel_combo.currentText())
-        self.settings.setValue("keithley_remote_sense", self.remote_sense_check.isChecked())
-        self.settings.setValue("voltage_limit_v", self.voltage_spin.value())
-        self.settings.setValue("max_current_mA", self.max_current_spin.value())
-        self.settings.setValue("initial_current_mA", self.initial_current_spin.value())
-        self.settings.setValue(
-            "resistance_limit_enabled", self.resistance_limit_check.isChecked()
-        )
-        self.settings.setValue("max_resistance_ohm", self.max_resistance_spin.value())
-        self.settings.setValue("resistance_action", self.resistance_action_combo.currentData())
-        self.settings.setValue("resistance_check_rate_hz", self.resistance_check_rate_spin.value())
-        self.settings.setValue("control_rate_hz", self.control_rate_spin.value())
-        self.settings.setValue("measurement_rate_hz", self.measurement_rate_spin.value())
-        self.settings.setValue("ui_rate_hz", self.ui_rate_spin.value())
+        self.settings.setValue("output_dir", self.output_edit.text())
         self.settings.setValue("run_name", self.name_edit.text())
-        repeat_count = self._repeat_count()
-        self.settings.setValue("repeat_count", "forever" if repeat_count is None else repeat_count)
-        self.settings.setValue(
-            "program_blocks_json",
-            json.dumps([asdict(block) for block in self.blocks()]),
+        self.settings.setValue("bundle_load_g", self.bundle_load_spin.value())
+
+    def _new_settings(self):
+        return (
+            ("short_enabled", self.short_check, False),
+            ("short_resistance_ohm", self.short_resistance_spin, 10.0),
+            ("contact_loss_enabled", self.open_check, False),
+            ("contact_loss_percent", self.open_fraction_spin, 25.0),
+            ("protection_floor_mA", self.protection_floor_spin, 10.0),
+            ("contact_loss_confirm_s", self.open_confirm_spin, 0.2),
+            ("record_csv", self.record_csv_check, True),
+            ("csv_rate_hz", self.log_rate_spin, 1.0),
+            ("live_points", self.live_points_spin, 10_000),
         )
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:

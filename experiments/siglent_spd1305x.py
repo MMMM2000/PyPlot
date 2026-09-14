@@ -3,6 +3,11 @@ import math
 
 
 class SiglentSPD1305XAdapter:
+    profile_mode = "Siglent SPD1305X (VISA)"
+    # Conservative application policy, not a claimed ADC update rate.
+    startup_timeout_s = 1.0
+    startup_poll_s = 0.1
+
     def __init__(self, *, resource_name, current_limit_mA, resource_manager_factory):
         if not math.isfinite(current_limit_mA) or not 0 <= current_limit_mA <= 5000:
             raise ValueError("SPD1305X current limit must be between 0 and 5000 mA.")

@@ -32,6 +32,8 @@ class _MemorySettings:
 def _isolate_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     _MemorySettings.shared_values.clear()
     monkeypatch.setattr(module.QtCore, "QSettings", _MemorySettings)
+    real_discovery = module.list_visa_resources
+    monkeypatch.setattr(module, "list_visa_resources", lambda factory=None: real_discovery(factory) if factory else [])
 
 
 def _app() -> QtWidgets.QApplication:
@@ -49,10 +51,11 @@ def test_bundle_estimate_uses_ceiling_and_milliamp_units():
             module.bundle_estimate(load, current, resistance)
 
 
-def test_siglent_ui_mode_and_resistance_step_guard(monkeypatch):
+def test_siglent_ui_mode_and_resistance_step_guard(monkeypatch, qtbot):
     app = _app()
     w = module.CurrentProgramWindow()
     w.mode_combo.setCurrentText('Siglent SPD1305X (VISA)')
+    qtbot.waitUntil(lambda: not w._discovery_busy)
     assert w.voltage_spin.maximum() == 30
     assert w.visa_resource_combo.isEnabled()
     assert not w.keithley_channel_combo.isEnabled()
