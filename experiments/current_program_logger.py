@@ -202,7 +202,7 @@ class RecipeEngine:
 
 class ConditionalRecipeEngine:
     """Sequential resistance-aware scheduler; timeout never advances into heating."""
-    def __init__(self, blocks, *, initial_current_mA, repeat_count=1):
+    def __init__(self, blocks, *, initial_current_mA, repeat_count=1, advance_on_timeout=False):
         self.blocks = tuple(blocks)
         self.repeat_count = repeat_count
         self.previous = initial_current_mA
@@ -211,6 +211,8 @@ class ConditionalRecipeEngine:
         self.complete = self.timed_out = False
         self.hits = 0
         self.last_reading = None
+        self.advance_on_timeout = advance_on_timeout
+        self.timeout_events = []
 
     def _advance(self, at, current):
         self.previous = current
@@ -232,8 +234,10 @@ class ConditionalRecipeEngine:
             if block.duration_s is None or elapsed < self.started + block.duration_s:
                 break
             if block.resistance_ohm is not None:
-                self.timed_out = True
-                break
+                if not self.advance_on_timeout:
+                    self.timed_out = True
+                    break
+                self.timeout_events.append((self.cycle, self.index, self.started + block.duration_s))
             self._advance(self.started + block.duration_s, block.target_mA)
         block = self.blocks[self.index]
         age = max(0.0, elapsed-self.started)
@@ -266,6 +270,8 @@ class ConditionalRecipeEngine:
 
 def make_recipe_engine(blocks, **kwargs):
     engine_type = ConditionalRecipeEngine if any(b.resistance_ohm is not None for b in blocks) else RecipeEngine
+    if engine_type is RecipeEngine:
+        kwargs.pop("advance_on_timeout", None)
     return engine_type(blocks, **kwargs)
 
 
@@ -534,6 +540,8 @@ class RunConfig:
     record_csv: bool = True
     log_rate_hz: float | None = None
     electrical_limits: ElectricalLimits = ElectricalLimits()
+    advance_on_resistance_timeout: bool = False
+    stop_when_sequence_complete: bool = False
 
     def __post_init__(self) -> None:
         if self.log_rate_hz is not None and (not math.isfinite(self.log_rate_hz) or self.log_rate_hz <= 0):
@@ -548,6 +556,8 @@ class RunConfig:
                 raise ValueError(f"{label} must be greater than zero.")
         if self.resistance_action not in {"hold_current", "readout_current", "output_off"}:
             raise ValueError("Unknown resistance limit action.")
+        if not isinstance(self.advance_on_resistance_timeout, bool) or not isinstance(self.stop_when_sequence_complete, bool):
+            raise ValueError("Finite trial options must be Boolean.")
         if (not math.isfinite(self.initial_current_mA) or self.initial_current_mA < 0
                 or not math.isfinite(self.max_current_mA)
                 or self.initial_current_mA > self.max_current_mA):
@@ -824,6 +834,7 @@ class ProgramWorker(QtCore.QThread):
             self.config.blocks,
             initial_current_mA=self.config.initial_current_mA,
             repeat_count=self.config.repeat_count,
+            advance_on_timeout=self.config.advance_on_resistance_timeout,
         )
         error: str | None = None
         rows = 0
@@ -837,6 +848,7 @@ class ProgramWorker(QtCore.QThread):
         readout_mode = False
         sequence_id = 1
         sequence_events: deque[dict[str, Any]] = deque(maxlen=1024)
+        seen_timeout_events = 0
         monitor = ElectricalMonitor(self.config.electrical_limits)
         fault_sample = None
         writer = None
@@ -859,6 +871,8 @@ class ProgramWorker(QtCore.QThread):
                 "max_resistance_ohm": self.config.max_resistance_ohm,
                 "repeat_count": self.config.repeat_count,
                 "resistance_action": self.config.resistance_action,
+                "advance_on_resistance_timeout": self.config.advance_on_resistance_timeout,
+                "stop_when_sequence_complete": self.config.stop_when_sequence_complete,
                 "resistance_check_rate_hz": self.config.resistance_check_rate_hz,
                 "blocks": [asdict(block) for block in self.config.blocks],
                 "record_csv": self.config.record_csv,
@@ -983,6 +997,7 @@ class ProgramWorker(QtCore.QThread):
                 elif command == "sequence" and readout_mode and resistance_current_ceiling_mA is None:
                     blocks, repeat_count = payload
                     engine = make_recipe_engine(blocks, initial_current_mA=float(last_target), repeat_count=repeat_count)
+                    seen_timeout_events = 0
                     acquisition_interval_s = 1.0 / max(self.config.measurement_rate_hz,
                         self.config.ui_rate_hz, self.config.log_rate_hz or 0.0,
                         self.config.resistance_check_rate_hz if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
@@ -997,6 +1012,13 @@ class ProgramWorker(QtCore.QThread):
                     next_ui = now
                 if now >= next_control:
                     state = engine.state_at(now - sequence_start)
+                    timeout_events = getattr(engine, "timeout_events", ())
+                    for cycle, block_index, at in timeout_events[seen_timeout_events:]:
+                        sequence_events.append(dict(event="resistance_timeout_continue",
+                                                    elapsed_s=sequence_start + at - start,
+                                                    sequence_id=sequence_id, cycle_index=cycle,
+                                                    block_index=block_index))
+                    seen_timeout_events = len(timeout_events)
                     if not readout_mode and getattr(engine, "timed_out", False):
                         readout_mode = True
                         sequence_events.append(dict(event="resistance_timeout",elapsed_s=now-start,
@@ -1134,6 +1156,10 @@ class ProgramWorker(QtCore.QThread):
                             }
                         )
                         next_ui = max(next_ui + ui_interval_s, now + ui_interval_s)
+                    if self.config.stop_when_sequence_complete and state.sequence_complete:
+                        sequence_events.append(dict(event="sequence_complete_stop",
+                                                    elapsed_s=acquired_at-start, sequence_id=sequence_id))
+                        self._stop_event.set()
                     next_measurement = max(
                         next_measurement + acquisition_interval_s,
                         now + acquisition_interval_s,
