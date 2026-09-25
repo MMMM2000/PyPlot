@@ -534,11 +534,13 @@ class RunConfig:
     max_current_mA: float
     voltage_limit_v: float
     max_resistance_ohm: float | None = None
+    max_resistance_active_above_mA: float = 0.0
     repeat_count: int | None = 1
     resistance_action: str = "hold_current"
     resistance_check_rate_hz: float = 100.0
     record_csv: bool = True
     log_rate_hz: float | None = None
+    log_rate_schedule: tuple[tuple[int, float, float], ...] = ()
     electrical_limits: ElectricalLimits = ElectricalLimits()
     advance_on_resistance_timeout: bool = False
     stop_when_sequence_complete: bool = False
@@ -546,6 +548,12 @@ class RunConfig:
     def __post_init__(self) -> None:
         if self.log_rate_hz is not None and (not math.isfinite(self.log_rate_hz) or self.log_rate_hz <= 0):
             raise ValueError("CSV rate must be positive and finite.")
+        for block_index, from_s, rate_hz in self.log_rate_schedule:
+            if (type(block_index) is not int or not 0 <= block_index < len(self.blocks)
+                    or not math.isfinite(from_s) or from_s < 0
+                    or not math.isfinite(rate_hz) or rate_hz <= 0):
+                raise ValueError("CSV rate schedule requires a valid block, nonnegative age and positive rate.")
+
         for label, value in (
             ("Control rate", self.control_rate_hz),
             ("Measurement/log rate", self.measurement_rate_hz),
@@ -566,6 +574,16 @@ class RunConfig:
             not math.isfinite(self.max_resistance_ohm) or self.max_resistance_ohm <= 0
         ):
             raise ValueError("Maximum resistance must be greater than zero.")
+        if not math.isfinite(self.max_resistance_active_above_mA) or self.max_resistance_active_above_mA < 0:
+            raise ValueError("Resistance protection current floor must be finite and nonnegative.")
+
+    def log_rate_for(self, state: ProgramState) -> float:
+        rate = self.log_rate_hz or self.measurement_rate_hz
+        latest = -1.0
+        for block_index, from_s, phase_rate in self.log_rate_schedule:
+            if block_index == state.block_index and latest < from_s <= state.block_elapsed_s:
+                rate, latest = phase_rate, from_s
+        return rate
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,7 +823,8 @@ class ProgramWorker(QtCore.QThread):
                 return baseline
             valid = self.config.initial_current_mA == 0 or (current > 0 and voltage > 0)
             # Never defer the legacy upper-R limit while waiting for settling.
-            if current > 0 and self.config.max_resistance_ohm is not None:
+            if (current > 0 and self.config.max_resistance_ohm is not None
+                    and self.config.initial_current_mA >= self.config.max_resistance_active_above_mA):
                 if voltage / (current / 1000) >= self.config.max_resistance_ohm:
                     return baseline
             valid_count = valid_count + 1 if valid else 0
@@ -848,6 +867,7 @@ class ProgramWorker(QtCore.QThread):
         readout_mode = False
         sequence_id = 1
         sequence_events: deque[dict[str, Any]] = deque(maxlen=1024)
+        current_commands: deque[dict[str, Any]] = deque(maxlen=1024)
         seen_timeout_events = 0
         monitor = ElectricalMonitor(self.config.electrical_limits)
         fault_sample = None
@@ -869,6 +889,7 @@ class ProgramWorker(QtCore.QThread):
                 "max_current_mA": self.config.max_current_mA,
                 "voltage_limit_v": self.config.voltage_limit_v,
                 "max_resistance_ohm": self.config.max_resistance_ohm,
+                "max_resistance_active_above_mA": self.config.max_resistance_active_above_mA,
                 "repeat_count": self.config.repeat_count,
                 "resistance_action": self.config.resistance_action,
                 "advance_on_resistance_timeout": self.config.advance_on_resistance_timeout,
@@ -877,14 +898,17 @@ class ProgramWorker(QtCore.QThread):
                 "blocks": [asdict(block) for block in self.config.blocks],
                 "record_csv": self.config.record_csv,
                 "log_rate_hz": self.config.log_rate_hz or self.config.measurement_rate_hz,
+                "log_rate_schedule": [list(item) for item in self.config.log_rate_schedule],
                 "electrical_limits": asdict(self.config.electrical_limits),
             }
             metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             self.paths_ready.emit(str(csv_path) if self.config.record_csv else "", str(metadata_path))
             profile = PROFILES.get(getattr(self.adapter, "profile_mode", ""))
+            peak_log_rate_hz = max((self.config.log_rate_hz or self.config.measurement_rate_hz,
+                                    *(rate for _, _, rate in self.config.log_rate_schedule)))
             if profile is not None:
                 rates = (self.config.measurement_rate_hz, self.config.resistance_check_rate_hz,
-                         self.config.ui_rate_hz, self.config.log_rate_hz or self.config.measurement_rate_hz)
+                         self.config.ui_rate_hz, peak_log_rate_hz)
                 if self.config.control_rate_hz > profile.max_control_hz or max(rates) > profile.max_acquisition_hz:
                     raise ValueError("Requested rates exceed this supply's application ceilings; review its profile before starting.")
                 if not profile.conditional_steps and isinstance(engine, ConditionalRecipeEngine):
@@ -937,7 +961,9 @@ class ProgramWorker(QtCore.QThread):
                 if (baseline_current is None or baseline_voltage is None
                         or not math.isfinite(float(baseline_current))
                         or not math.isfinite(float(baseline_voltage))
-                        or (self.config.max_resistance_ohm is not None and self.config.initial_current_mA > 0 and not (
+                        or (self.config.max_resistance_ohm is not None
+                            and self.config.initial_current_mA >= self.config.max_resistance_active_above_mA
+                            and self.config.initial_current_mA > 0 and not (
                             monitor.limits.open_current_fraction is not None
                             and self.config.initial_current_mA >= monitor.limits.active_above_mA
                             and baseline_current == 0
@@ -948,6 +974,7 @@ class ProgramWorker(QtCore.QThread):
                                        f"V={baseline_voltage!r} V, R={baseline_resistance!r} ohm; stopping output.")
                 if (
                     self.config.max_resistance_ohm is not None
+                    and self.config.initial_current_mA >= self.config.max_resistance_active_above_mA
                     and baseline_resistance is not None
                     and math.isfinite(baseline_resistance)
                     and baseline_resistance >= self.config.max_resistance_ohm
@@ -961,11 +988,10 @@ class ProgramWorker(QtCore.QThread):
             start = time.monotonic()
             sequence_start = start
             control_interval_s = 1.0 / self.config.control_rate_hz
-            measurement_interval_s = 1.0 / (self.config.log_rate_hz or self.config.measurement_rate_hz)
             acquisition_interval_s = 1.0 / max(
                 self.config.measurement_rate_hz,
                 self.config.ui_rate_hz,
-                self.config.log_rate_hz or 0.0,
+                peak_log_rate_hz,
                 self.config.resistance_check_rate_hz if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
                     or isinstance(engine, ConditionalRecipeEngine)) else 0.0,
             )
@@ -973,6 +999,7 @@ class ProgramWorker(QtCore.QThread):
             next_control = start
             next_measurement = start
             next_log = start
+            last_log_phase = None
             next_ui = start
             state = engine.state_at(0.0)
             target = min(self.config.max_current_mA, max(0.0, state.target_mA))
@@ -999,7 +1026,7 @@ class ProgramWorker(QtCore.QThread):
                     engine = make_recipe_engine(blocks, initial_current_mA=float(last_target), repeat_count=repeat_count)
                     seen_timeout_events = 0
                     acquisition_interval_s = 1.0 / max(self.config.measurement_rate_hz,
-                        self.config.ui_rate_hz, self.config.log_rate_hz or 0.0,
+                        self.config.ui_rate_hz, peak_log_rate_hz,
                         self.config.resistance_check_rate_hz if (monitor.limits.enabled or self.config.max_resistance_ohm is not None
                             or isinstance(engine, ConditionalRecipeEngine)) else 0.0)
                     next_measurement = now
@@ -1036,6 +1063,11 @@ class ProgramWorker(QtCore.QThread):
                 if now >= next_control and (last_target is None or abs(target - last_target) >= 1e-9):
                     self.adapter.set_current(target)
                     last_target = target
+                    if self.config.stop_when_sequence_complete:
+                        current_commands.append(dict(elapsed_s=time.monotonic()-start,
+                                                     sequence_id=sequence_id,
+                                                     block_index=state.block_index,
+                                                     target_current_mA=target))
                 if now >= next_control:
                     next_control = max(next_control + control_interval_s, now + control_interval_s)
                 if now >= next_measurement:
@@ -1068,7 +1100,8 @@ class ProgramWorker(QtCore.QThread):
                             power = (float(measured) ** 2) * resistance / 1000.0
                         else:
                             power = 0.0
-                    if self.config.max_resistance_ohm is not None and (
+                    if (self.config.max_resistance_ohm is not None
+                            and target >= self.config.max_resistance_active_above_mA) and (
                         measured is None or voltage is None
                         or not math.isfinite(float(measured))
                         or not math.isfinite(float(voltage))
@@ -1082,6 +1115,7 @@ class ProgramWorker(QtCore.QThread):
                     if (
                         resistance_current_ceiling_mA is None
                         and self.config.max_resistance_ohm is not None
+                        and target >= self.config.max_resistance_active_above_mA
                         and resistance is not None
                         and math.isfinite(resistance)
                         and resistance >= self.config.max_resistance_ohm
@@ -1114,7 +1148,7 @@ class ProgramWorker(QtCore.QThread):
                             next_ui = now
                     row = {
                         "timestamp_utc": _utc_now(),
-                        "elapsed_s": now - start,
+                        "elapsed_s": acquired_at - start,
                         "cycle_index": state.cycle_index + 1,
                         "block_index": state.block_index + 1,
                         "block_type": state.block.kind,
@@ -1131,12 +1165,15 @@ class ProgramWorker(QtCore.QThread):
                         "resistance_current_ceiling_mA": resistance_current_ceiling_mA,
                         "operating_mode": "readout" if readout_mode else "sequence",
                         "sequence_id": sequence_id,
-                        "sequence_elapsed_s": now - sequence_start,
+                        "sequence_elapsed_s": acquired_at - sequence_start,
                     }
-                    if acquired_at >= next_log or tripped_now:
+                    log_rate = self.config.log_rate_for(state)
+                    log_phase = (state.cycle_index, state.block_index, log_rate)
+                    if log_phase != last_log_phase or acquired_at >= next_log or tripped_now:
                         if writer is not None:
                             writer.submit(row, flush=tripped_now)
-                        next_log = acquired_at + measurement_interval_s
+                        next_log = acquired_at + 1.0 / log_rate
+                        last_log_phase = log_phase
                     if (now >= next_ui or tripped_now) and (not self.coalesce_ui or not self.ui_pending.is_set()):
                         self.ui_pending.set()
                         self.sample_ready.emit(row)
@@ -1200,6 +1237,7 @@ class ProgramWorker(QtCore.QThread):
                         protection_checks=protection_checks,
                         max_protection_check_gap_s=max_check_gap_s,
                         sequence_events=list(sequence_events),
+                        current_commands=list(current_commands),
                         sequence_events_retained_limit=1024,
                         electrical_fault=monitor.fault,
                         fault_sample=fault_sample,

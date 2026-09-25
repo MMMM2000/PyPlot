@@ -74,12 +74,61 @@ def test_batch_threshold_advances_early():
     blocks = trial_config(None, "trial", 2).blocks
     engine = logger.ConditionalRecipeEngine(blocks, initial_current_mA=.1,
                                              advance_on_timeout=True)
-    assert not engine.observe(.001, 181)
-    assert not engine.observe(.002, 181)
-    assert engine.observe(.003, 181)
+    assert not engine.observe(.001, 191)
+    assert not engine.observe(.002, 191)
+    assert engine.observe(.003, 191)
     assert engine.state_at(.004).target_mA == .1
     assert engine.state_at(30.003).sequence_complete
     assert not engine.timeout_events
+
+
+def test_pilot_limits_and_phase_log_schedule(tmp_path):
+    config = trial_config(tmp_path, "pilot", 5)
+    assert config.blocks[0].resistance_ohm == 190
+    assert config.max_resistance_ohm == 195
+    assert config.max_resistance_active_above_mA == 1
+    assert config.resistance_action == "output_off"
+    def state(block, age):
+        return logger.ProgramState(0, block, config.blocks[block],
+                                   config.blocks[block].target_mA, age)
+    assert config.log_rate_for(state(0, 0)) == 1000
+    assert config.log_rate_for(state(0, 30)) == 100
+    assert config.log_rate_for(state(1, 0)) == 1000
+    assert config.log_rate_for(state(1, 2)) == 20
+
+
+@pytest.mark.parametrize("heat_resistance, expected_target, cutoff", [
+    (191, True, False), (196, False, True),
+])
+def test_pilot_cooling_transition_and_emergency_cutoff(
+        tmp_path, heat_resistance, expected_target, cutoff):
+    class Adapter:
+        description = "fake Keithley"
+        def open(self): self.closed = False
+        def configure(self, **kwargs): self.current = kwargs["current_mA"]
+        def set_current(self, value): self.current = value
+        def measure(self):
+            resistance = heat_resistance if self.current >= 1 else 210
+            return {"current_mA": self.current,
+                    "voltage_V": self.current * resistance / 1000}
+        def close(self): self.closed = True
+
+    config = replace(trial_config(tmp_path, "pilot", 5), blocks=(
+        logger.CurrentBlock("Hold", 5, .2, resistance_ohm=190),
+        logger.CurrentBlock("Hold", .1, .02)))
+    adapter = Adapter()
+    worker = logger.ProgramWorker(config, adapter)
+    worker.start()
+    assert worker.wait(3000)
+    assert adapter.closed
+    metadata = json.loads(next(tmp_path.glob("*/metadata.json")).read_text())
+    events = [event["event"] for event in metadata["sequence_events"]]
+    assert ("resistance_target" in events) is expected_target
+    assert metadata["resistance_limit_reached"] is cutoff
+    assert metadata["status"] == "stopped"
+    assert metadata["current_commands"][0]["target_current_mA"] == 5
+    assert any(command["target_current_mA"] == .1
+               for command in metadata["current_commands"]) is expected_target
 
 
 def test_worker_automatically_stops_after_timed_out_trial(tmp_path):

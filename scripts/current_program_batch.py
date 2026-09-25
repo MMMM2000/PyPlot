@@ -110,7 +110,7 @@ def trial_config(output_dir: Path, run_name: str, current_mA: int) -> RunConfig:
     return RunConfig(
         blocks=(
             CurrentBlock("Hold", float(current_mA), 600.0,
-                         "Heat until 180 ohm or 600 s", 180.0, "above"),
+                         "Heat until 190 ohm or 600 s", 190.0, "above"),
             CurrentBlock("Hold", 0.1, 30.0, "Cooling"),
         ),
         output_dir=output_dir,
@@ -121,10 +121,15 @@ def trial_config(output_dir: Path, run_name: str, current_mA: int) -> RunConfig:
         initial_current_mA=0.1,
         max_current_mA=10.0,
         voltage_limit_v=3.0,
+        max_resistance_ohm=195.0,
+        max_resistance_active_above_mA=1.0,
+        resistance_action="output_off",
         repeat_count=1,
         resistance_check_rate_hz=1000.0,
         record_csv=True,
-        log_rate_hz=10.0,
+        log_rate_hz=20.0,
+        log_rate_schedule=((0, 0.0, 1000.0), (0, 30.0, 100.0),
+                           (1, 0.0, 1000.0), (1, 2.0, 20.0)),
         electrical_limits=ElectricalLimits(
             short_resistance_ohm=10.0,
             open_current_fraction=0.25,
@@ -154,7 +159,8 @@ def run_batch(*, resource: str, output_dir: Path, run_name: str,
     configs = [trial_config(output_dir, run_name, level) for level in range(first, last + 1)]
     preview = dict(resource=resource, levels_mA=list(range(first, last + 1)),
                    output_dir=str(output_dir), hold_limit_s=600, cooling_s=30,
-                   resistance_target_ohm=180, current_ceiling_mA=10,
+                   resistance_target_ohm=190, emergency_cutoff_ohm=195,
+                   current_ceiling_mA=10,
                    voltage_ceiling_v=3, max_total_s=len(configs) * 630)
     if not live:
         return dict(preview=preview, status="dry_run")
