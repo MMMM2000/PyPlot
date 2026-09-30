@@ -607,8 +607,10 @@ def test_vsm_temperature_section_combines_preview_pixmaps_side_by_side(
 
 def test_vsm_temperature_visible_preview_defers_pixmap_render(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _ensure_qapp()
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path / "empty-store")
     section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
     try:
         pixmap = QtGui.QPixmap(16, 16)

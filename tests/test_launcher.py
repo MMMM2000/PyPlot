@@ -3766,10 +3766,10 @@ def test_builder_database_promotion_keeps_latest_when_project_copy_fails(
     launcher_module._write_json(output_project, new_payload)  # noqa: SLF001
     real_copy_file_atomic = launcher_module._copy_file_atomic  # noqa: SLF001
 
-    def fail_latest_project_copy(source: Path, target: Path) -> None:
+    def fail_latest_project_copy(source: Path, target: Path, **kwargs) -> None:
         if target == latest_project:
             raise OSError("simulated latest project copy failure")
-        real_copy_file_atomic(source, target)
+        real_copy_file_atomic(source, target, **kwargs)
 
     monkeypatch.setattr(launcher_module, "_copy_file_atomic", fail_latest_project_copy)
 

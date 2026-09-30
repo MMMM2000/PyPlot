@@ -1251,6 +1251,7 @@ class VsmHysteresisRecord:
     angle: Optional[float] = None
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
+    variant: Optional[str] = None
 
 
 @dataclass
@@ -1273,6 +1274,7 @@ class DmaIsoStressRecord:
     datasets: Dict[int, Tuple[List[float], List[float]]]
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
+    variant: Optional[str] = None
 
 
 @dataclass
@@ -1353,6 +1355,7 @@ class ShapeMemoryStressStrainRecord:
     data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
+    variant: Optional[str] = None
 
 
 @dataclass
@@ -1364,6 +1367,7 @@ class FmrRecord:
     data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
+    variant: Optional[str] = None
 
 
 class FabricationIndex:

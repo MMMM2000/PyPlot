@@ -31,13 +31,17 @@ import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
-from microwire_data_builder.safe_codec import SafeCodecError, decode_envelope, read_json_file
+from microwire_data_builder.safe_codec import (
+    SafeCodecError, decode_envelope, decode_record_list_envelope, read_json_file,
+)
 from microwire_data_builder.project_package import (
     PACKAGE_VERSION as BUILDER_PACKAGE_VERSION,
     inspect_project_package,
     is_project_package,
     load_project as load_builder_project,
     write_project_package,
+    ProjectPayloadResolver,
+    MAX_AGGREGATE_BYTES,
 )
 
 from plotting.shared.experiment_processes import (
@@ -432,6 +436,7 @@ def _load_builder_project_object(
     label: str,
     section_keys: Collection[str] | None = None,
     load_payloads: bool = True,
+    decode_record_lists: bool = False,
 ) -> dict[str, Any]:
     if not path.exists():
         raise _AutomationRecipeError(f"{label} file not found: {path}")
@@ -444,11 +449,22 @@ def _load_builder_project_object(
                 else {str(key) for key in section_keys} & set(index.sections)
             )
             payload = index.project_header()
-            with index.open_reader() as reader:
-                payload["sections"] = {
-                    key: reader.read_section(key, load_payloads=load_payloads)
-                    for key in selected
-                }
+            resolver = ProjectPayloadResolver(index)
+            with index.open_reader(budget=resolver.budget) as reader:
+                loaded = {}
+                for key in selected:
+                    section = reader.read_section(
+                        key, load_payloads=load_payloads and not decode_record_lists,
+                    )
+                    if load_payloads and decode_record_lists:
+                        section["payloads"] = {
+                            name: (resolver.load_record_list(key, name)
+                                   if name.endswith("_records")
+                                   else reader.read_payload(key, name))
+                            for name in index.sections[key]["payloads"]
+                        }
+                    loaded[key] = section
+                payload["sections"] = loaded
         else:
             payload = load_builder_project(path)
     except Exception as exc:
@@ -529,11 +545,33 @@ def _write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         raise
 
 
-def _copy_file_atomic(source: Path, target: Path) -> None:
+_NO_FILE_GUARD = object()
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _assert_file_unchanged(path: Path, expected: str | None) -> None:
+    if _file_sha256(path) != expected:
+        raise _AutomationRecipeError(
+            f"File changed during the Builder update: '{path}'. The newer file was preserved."
+        )
+
+
+def _copy_file_atomic(
+    source: Path, target: Path, *, expected_target_sha256: object = _NO_FILE_GUARD,
+) -> None:
     temp_path = _temporary_sibling_path(target)
     try:
         shutil.copyfile(source, temp_path)
         _fsync_file(temp_path)
+        if expected_target_sha256 is not _NO_FILE_GUARD:
+            _assert_file_unchanged(target, cast(str | None, expected_target_sha256))
         os.replace(temp_path, target)
     except Exception:
         _unlink_quietly(temp_path)
@@ -651,6 +689,8 @@ def _collect_builder_paths(
 
 def _record_path_key(record: object) -> str:
     raw_path = getattr(record, "path", "")
+    if raw_path is None or not str(raw_path).strip():
+        return ""
     try:
         return str(Path(raw_path).resolve())
     except Exception:
@@ -769,12 +809,116 @@ def _merge_builder_records(existing_records: Sequence[object], new_records: Sequ
     merged: dict[str, object] = {}
     fallback_index = 0
     for record in [*existing_records, *new_records]:
-        key = _record_path_key(record)
+        key = os.path.normcase(_record_path_key(record))
         if not key:
             fallback_index += 1
             key = f"record-{fallback_index}"
         merged[key] = record
     return list(merged.values())
+
+
+def _merge_builder_vsm_table_rows(
+    existing: pd.DataFrame, incoming: pd.DataFrame, graph_column: str,
+) -> pd.DataFrame:
+    """Retain saved grouping and external-only references during VSM imports."""
+    rows = existing.to_dict(orient="records")
+    def values(row: Mapping[str, Any], field: str) -> list[Any]:
+        raw = row.get(field)
+        if isinstance(raw, (list, tuple, set)):
+            return list(raw)
+        return [raw] if isinstance(raw, str) and raw.strip() else []
+    for update in incoming.to_dict(orient="records"):
+        sources = {os.path.normcase(str(p)) for p in values(update, "_sources")}
+        sample = update.get("_sample")
+        target = next((row for row in rows if
+                       (isinstance(sample, str) and sample.strip()
+                        and isinstance(row.get("_sample"), str) and row["_sample"] == sample)
+                       or sources.intersection(os.path.normcase(str(p)) for p in values(row, "_sources"))), None)
+        if target is None:
+            rows.append(update)
+            continue
+        for field in ("_sources", graph_column):
+            target[field] = list(dict.fromkeys([*values(target, field), *values(update, field)]))
+    columns = list(dict.fromkeys([*existing.columns, *incoming.columns]))
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _merge_builder_data_rows(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Merge fabrication/video rows while retaining fields absent in new data."""
+    rows = existing.to_dict(orient="records")
+    def identity(row):
+        composition = row.get("Composition")
+        try:
+            return str(composition), int(row["Draw"]), int(row["Piece"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+    by_key = {key: row for row in rows if (key := identity(row)) is not None}
+    for update in incoming.to_dict(orient="records"):
+        key = identity(update)
+        target = by_key.get(key) if key is not None else None
+        if target is None:
+            rows.append(update)
+            if key is not None:
+                by_key[key] = update
+        else:
+            for column, value in update.items():
+                if value is not None and not (pd.api.types.is_scalar(value) and pd.isna(value)):
+                    if not isinstance(value, str) or value.strip():
+                        target[column] = value
+    return pd.DataFrame(rows, columns=list(dict.fromkeys([*existing.columns, *incoming.columns])))
+
+
+def _merge_builder_fabrication_indexes(builder_ui: Any, previous: Any, incoming: Any) -> Any:
+    merged = builder_ui.FabricationIndex()
+    for index in (previous, incoming):
+        if not isinstance(index, builder_ui.FabricationIndex):
+            continue
+        for (composition, draw), record in index.draw_level.items():
+            merged.set_draw(composition, draw, dict(record))
+        for (composition, draw, piece), record in index.piece_level.items():
+            merged.set_piece(composition, draw, piece, dict(record))
+    return merged
+
+
+def _prepare_builder_section_for_import(
+    builder_ui: Any, sections: Mapping[str, Any], section_name: str,
+) -> dict[str, Any]:
+    prepared = dict(sections.get(section_name, {}))
+    decoded_payloads = {}
+    for name, value in prepared.get("payloads", {}).items():
+        decoded = _decode_builder_section_payload(builder_ui, sections, section_name, name)
+        if decoded is None and value is not None:
+            raise _AutomationRecipeError(
+                f"Cannot restore {section_name}.{name}; refresh stopped to preserve existing data."
+            )
+        decoded_payloads[name] = decoded
+    if decoded_payloads:
+        prepared[builder_ui.PROJECT_DECODED_PAYLOADS_KEY] = decoded_payloads
+    return prepared
+
+
+def _begin_isolated_builder_store(storage: Any, root: Path) -> dict[str, Any]:
+    cls = storage.MiniDatabaseStore
+    names = (
+        "_memory_data", "_memory_payloads", "_pending_sections", "_pending_payloads",
+        "_pending_section_values", "_pending_payload_values", "_memory_transactions",
+        "_disk_writes_suspended", "_discard_writes_depth", "_blocked_sections",
+        "_blocked_payloads", "_payload_loaders", "_payload_tombstones",
+    )
+    snapshot = {name: getattr(cls, name) for name in names}
+    snapshot["_storage_root"] = storage._storage_root
+    for name in names:
+        setattr(cls, name, type(snapshot[name])())
+    storage._storage_root = lambda: root
+    return snapshot
+
+
+def _restore_builder_store(storage: Any, snapshot: Mapping[str, Any]) -> None:
+    for name, value in snapshot.items():
+        if name == "_storage_root":
+            storage._storage_root = value
+        else:
+            setattr(storage.MiniDatabaseStore, name, value)
 
 
 def _builder_payload_record_count(payload: object) -> int:
@@ -855,6 +999,19 @@ def _run_builder_update_section_command(
         )
     else:
         max_depth = raw_max_depth
+    prune_missing = command.get("prune_missing", False)
+    if not isinstance(prune_missing, bool):
+        raise _AutomationRecipeError(f"{section_name} prune_missing must be a boolean.")
+    if prune_missing and spec.get("payload_kind", "sequence") != "sequence":
+        raise _AutomationRecipeError("prune_missing is supported only for graph record sections.")
+    if section_name == "videos" and isinstance(sections.get("fabrication"), Mapping):
+        dependency = builder_ui.FabricationSection(LOGGER, lambda *_args: None)
+        try:
+            dependency.import_project_payload(
+                _prepare_builder_section_for_import(builder_ui, sections, "fabrication")
+            )
+        finally:
+            dependency.close()
     section = section_class(LOGGER, lambda *_args: None)
     exclude_names = [str(name) for name in raw_exclude_dir_names]
     exclude_prefixes = [str(prefix) for prefix in raw_exclude_dir_prefixes]
@@ -925,22 +1082,31 @@ def _run_builder_update_section_command(
             f"[builder-automation] {section_name}: loading saved section state",
             flush=True,
         )
-        section.import_project_payload(sections.get(section_name, {}))
+        section.import_project_payload(
+            _prepare_builder_section_for_import(builder_ui, sections, section_name)
+        )
         existing_table = (
             section.data.table.copy()
             if isinstance(section.data.table, pd.DataFrame)
             else pd.DataFrame()
         )
         existing_payload = section.store.load_payload(payload_name)
+        existing_raw_index = (
+            section.store.load_payload("fabrication_index_raw")
+            if section_name == "fabrication" else None
+        )
         print(
             f"[builder-automation] {section_name}: saved section state loaded",
             flush=True,
         )
         existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
-        existing_records = _filter_builder_records_outside_refresh_roots(
-            existing_records,
-            input_paths,
-        )
+        # TMA keeps its explicit newest-active-run gating. Other graph families
+        # merge by successful source path; an unreadable file must not erase an
+        # already embedded curve. Deletion requires an explicit prune request.
+        if prune_missing or section_name == "mini_dma":
+            existing_records = _filter_builder_records_outside_refresh_roots(
+                existing_records, input_paths,
+            )
         source_strings = [str(path) for path in input_paths]
         section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
         if section_name == "mini_dma":
@@ -981,14 +1147,22 @@ def _run_builder_update_section_command(
             new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
             merged_records = {**existing_mapping, **new_mapping}
         elif payload_kind == "object":
-            merged_records = result.payloads.get(payload_name)
+            merged_records = _merge_builder_fabrication_indexes(
+                builder_ui, existing_payload, result.payloads.get(payload_name),
+            )
+            result.payloads["fabrication_index_raw"] = _merge_builder_fabrication_indexes(
+                builder_ui, existing_raw_index or existing_payload,
+                result.payloads.get("fabrication_index_raw"),
+            )
         else:
             new_payload = result.payloads.get(payload_name, [])
             new_records = list(new_payload) if isinstance(new_payload, list) else []
             merged_records = _merge_builder_records(existing_records, new_records)
 
         if payload_kind == "object":
-            section.data.table = result.table
+            section.data.table = _merge_builder_data_rows(
+                existing_table, builder_ui._fabrication_index_to_frame(merged_records),
+            )
         if callable(table_builder):
             try:
                 section.data.table = table_builder(merged_records, result.extra)
@@ -999,6 +1173,19 @@ def _run_builder_update_section_command(
                 merged_records,
                 str(graph_column),
                 sample_column="_sample",
+            )
+        if section_name in {"vsm_temperature_scan", "vsm_hysteresis"} and not prune_missing and not existing_table.empty:
+            incoming = builder_ui._graph_records_to_frame(
+                new_records, str(graph_column), sample_column="_sample",
+            )
+            section.data.table = _merge_builder_vsm_table_rows(
+                existing_table, incoming, str(graph_column),
+            )
+        if section_name == "videos":
+            section.data.table = section._apply_overrides_to_table(
+                _merge_builder_data_rows(existing_table, builder_ui._video_index_to_frame(
+                    merged_records, section._fabrication_table(),
+                )),
             )
         if section_name == "microscope" and not existing_table.empty:
             merge_rows = getattr(section, "_merge_rows_into_frame", None)
@@ -1039,6 +1226,12 @@ def _run_builder_update_section_command(
             "updated_count": len(processed_keys),
             "skipped_count": len(skipped_sources),
             "skipped_sources": skipped_sources,
+            "retained_skipped_count": sum(
+                1 for record in existing_records
+                if os.path.normcase(_record_path_key(record)) in
+                {os.path.normcase(str(Path(p).resolve())) for p in skipped_sources}
+            ),
+            "prune_missing": prune_missing,
             "record_count": _builder_payload_record_count(merged_records),
             "row_count": int(len(section.data.table.index)),
             "sources": source_strings,
@@ -1111,10 +1304,14 @@ def _decode_builder_section_payload(
         # have consumed them. They are staged with the v3 streaming codec
         # immediately before the final package write.
         return encoded
-    decoder = getattr(builder_ui, "_decode_project_payload", None)
-    if not callable(decoder):
-        return None
-    return decoder(encoded)
+    try:
+        if payload_name.endswith("_records"):
+            return decode_record_list_envelope(encoded, max_total_bytes=MAX_AGGREGATE_BYTES)
+        return decode_envelope(encoded)
+    except SafeCodecError as exc:
+        raise _AutomationRecipeError(
+            f"Cannot restore {section_name}.{payload_name}: {exc}"
+        ) from exc
 
 
 def _builder_section_rows_as_frame(
@@ -3254,6 +3451,7 @@ def _prepare_assemble_export_project_payload(
         label="Microwire Data Builder project",
         section_keys=selected_sections,
         load_payloads=include_payloads,
+        decode_record_lists=True,
     )
     _validate_builder_project_payload(source_payload, path=project_path)
 
@@ -3269,6 +3467,7 @@ def _prepare_assemble_export_project_payload(
             label="Microwire Data Builder project copy",
             section_keys=selected_sections,
             load_payloads=include_payloads,
+            decode_record_lists=True,
         )
         _validate_builder_project_payload(payload, path=copied_project)
 
@@ -3284,7 +3483,8 @@ def _prepare_assemble_export_project_payload(
         )
         previous_qt_platform = os.environ.get("QT_QPA_PLATFORM")
         builder_storage: Any = None
-        original_storage_root: Any = None
+        storage_snapshot: dict[str, Any] | None = None
+        store_root: Path | None = None
         try:
             os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -3294,19 +3494,13 @@ def _prepare_assemble_export_project_payload(
             from microwire_data_builder import storage as builder_storage
             from microwire_data_builder import ui as builder_ui
 
-            store_root = (
+            store_parent = (
                 working_copy_dir
                 or (output_path.parent / "_assemble_export_project_copy")
-            ) / "_builder_store"
-            if store_root.exists():
-                shutil.rmtree(store_root)
-            original_storage_root = builder_storage._storage_root
-            builder_storage._storage_root = lambda: store_root  # type: ignore[assignment]
-            builder_storage.MiniDatabaseStore._memory_data = {}
-            builder_storage.MiniDatabaseStore._memory_payloads = {}
-            builder_storage.MiniDatabaseStore._pending_sections = set()
-            builder_storage.MiniDatabaseStore._pending_payloads = set()
-            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            )
+            store_parent.mkdir(parents=True, exist_ok=True)
+            store_root = Path(tempfile.mkdtemp(prefix="_builder_store-", dir=store_parent))
+            storage_snapshot = _begin_isolated_builder_store(builder_storage, store_root)
             command: dict[str, Any] = {"action": "rebuild_assemble"}
             if rebuild_sections:
                 command["sections"] = list(rebuild_sections)
@@ -3318,13 +3512,8 @@ def _prepare_assemble_export_project_payload(
                 output_project=copied_project or output_path.with_suffix(".pydpj"),
             )
         finally:
-            if builder_storage is not None and original_storage_root is not None:
-                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
-                builder_storage.MiniDatabaseStore._memory_data = {}
-                builder_storage.MiniDatabaseStore._memory_payloads = {}
-                builder_storage.MiniDatabaseStore._pending_sections = set()
-                builder_storage.MiniDatabaseStore._pending_payloads = set()
-                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if builder_storage is not None and storage_snapshot is not None:
+                _restore_builder_store(builder_storage, storage_snapshot)
             if previous_dialog_setting is None:
                 os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
             else:
@@ -3335,6 +3524,8 @@ def _prepare_assemble_export_project_payload(
                 os.environ.pop("QT_QPA_PLATFORM", None)
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_qt_platform
+            if store_root is not None and store_root.resolve().parent == store_parent.resolve():
+                shutil.rmtree(store_root, ignore_errors=True)
 
     return payload, copied_project, rebuild_result
 
@@ -3525,14 +3716,14 @@ def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
         text = str(raw).strip()
         if text:
             return re.sub(r"[^0-9A-Za-z_-]+", "_", text)
-    return datetime.now().strftime("%Y-%m-%d_%H%M")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S_%fZ")
 
 
 def _builder_database_paths(
     recipe: Mapping[str, Any],
     *,
     base_dir: Path,
-) -> dict[str, Path | str] | None:
+) -> dict[str, Path | str | None] | None:
     raw_database_dir = recipe.get("database_dir")
     if raw_database_dir in (None, ""):
         return None
@@ -3563,7 +3754,7 @@ def _builder_database_paths(
 
 def _promote_builder_database_latest(
     *,
-    database_paths: Mapping[str, Path | str],
+    database_paths: Mapping[str, Path | str | None],
     output_project: Path,
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -3577,37 +3768,78 @@ def _promote_builder_database_latest(
 
     database_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
-    project_archive = _prepare_file_archive(latest_project, archive_project)
-    manifest_archive = _prepare_file_archive(latest_manifest, archive_manifest)
+    if manifest_path.resolve() in {latest_project.resolve(), latest_manifest.resolve(), output_project.resolve()}:
+        raise _AutomationRecipeError("The working manifest must be distinct from database project and latest manifest paths.")
+    old_project_sha = cast(str | None, database_paths.get(
+        "expected_latest_project_sha256", _file_sha256(latest_project)
+    ))
+    old_manifest_sha = cast(str | None, database_paths.get(
+        "expected_latest_manifest_sha256", _file_sha256(latest_manifest)
+    ))
+    new_project_sha = _file_sha256(output_project)
+    project_archive = manifest_archive = None
     project_promoted = False
-    manifest_promoted = False
     try:
-        _copy_file_atomic(output_project, latest_project)
-        project_promoted = True
-        archived_project = _finish_prepared_file_archive(project_archive)
+        _assert_file_unchanged(latest_project, old_project_sha)
+        _assert_file_unchanged(latest_manifest, old_manifest_sha)
+        project_archive = _prepare_file_archive(latest_project, archive_project)
+        manifest_archive = _prepare_file_archive(latest_manifest, archive_manifest)
+        # An archive must represent the version checked at the start, even if
+        # another application saved while its copy was being prepared.
+        if project_archive is not None:
+            _assert_file_unchanged(project_archive.temp_path, old_project_sha)
+        if manifest_archive is not None:
+            _assert_file_unchanged(manifest_archive.temp_path, old_manifest_sha)
         manifest["database"] = {
             "database_dir": str(database_dir.resolve()),
             "database_name": str(database_paths["database_name"]),
             "timestamp": str(database_paths["timestamp"]),
             "latest_project": str(latest_project.resolve()),
             "latest_manifest": str(latest_manifest.resolve()),
-            "archived_project": archived_project,
+            "archived_project": _prepared_archive_path(project_archive),
             "archived_manifest": _prepared_archive_path(manifest_archive),
         }
         _write_json(manifest_path, manifest)
-        _write_json(latest_manifest, manifest)
-        manifest_promoted = True
+        _assert_file_unchanged(latest_manifest, old_manifest_sha)
+        _copy_file_atomic(
+            output_project, latest_project, expected_target_sha256=old_project_sha,
+        )
+        project_promoted = True
+        _finish_prepared_file_archive(project_archive)
         _finish_prepared_file_archive(manifest_archive)
-    except Exception:
-        if not project_promoted:
-            _discard_prepared_file_archive(project_archive)
-        if not manifest_promoted:
-            _discard_prepared_file_archive(manifest_archive)
+        _assert_file_unchanged(latest_manifest, old_manifest_sha)
+        _write_json(latest_manifest, manifest)
+    except Exception as exc:
+        if project_promoted:
+            try:
+                if project_archive is not None:
+                    previous = (project_archive.temp_path if project_archive.temp_path.exists()
+                                else project_archive.archive_path)
+                    _copy_file_atomic(
+                        previous, latest_project, expected_target_sha256=new_project_sha,
+                    )
+                else:
+                    _assert_file_unchanged(latest_project, new_project_sha)
+                    latest_project.unlink()
+            except Exception as rollback_exc:
+                # Preserve the recovery files when a newer manual save prevents
+                # rollback. Never replace that newer save with our snapshot.
+                _finish_prepared_file_archive(
+                    project_archive if project_archive and project_archive.temp_path.exists() else None
+                )
+                raise _AutomationRecipeError(
+                    f"Database promotion failed ({exc}); rollback also failed ({rollback_exc}). "
+                    f"Recovery archive: {_prepared_archive_path(project_archive)}"
+                ) from exc
         raise
+    finally:
+        _discard_prepared_file_archive(project_archive)
+        _discard_prepared_file_archive(manifest_archive)
 
 
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
     payload_staging_root: Path | None = None
+    automation_store: Path | None = None
     try:
         recipe = _load_json_object(recipe_path, label="Automation recipe")
         base_dir = recipe_path.parent
@@ -3631,6 +3863,11 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         if project_path is None or not project_path.exists():
             raise _AutomationRecipeError("Builder automation field 'project' must point to an existing .pydpj file.")
 
+        source_project_sha = _file_sha256(project_path)
+        if database_paths is not None:
+            database_paths["expected_latest_project_sha256"] = _file_sha256(cast(Path, database_paths["latest_project"]))
+            database_paths["expected_latest_manifest_sha256"] = _file_sha256(cast(Path, database_paths["latest_manifest"]))
+
         source_payload = _load_builder_project_object(
             project_path,
             label="Microwire Data Builder project",
@@ -3650,10 +3887,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             else:
                 working_copy_dir = (base_dir / "builder_automation").resolve()
         working_copy_dir.mkdir(parents=True, exist_ok=True)
-        payload_staging_root = working_copy_dir / "_payload_staging"
-        if payload_staging_root.exists():
-            shutil.rmtree(payload_staging_root)
-        payload_staging_root.mkdir(parents=True, exist_ok=True)
+        payload_staging_root = Path(tempfile.mkdtemp(prefix="_payload_staging-", dir=working_copy_dir))
 
         output_project = _resolve_recipe_path_value(
             recipe.get("output_project"),
@@ -3677,9 +3911,13 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             raise _AutomationRecipeError(
                 "Builder automation refuses to overwrite the source .pydpj without overwrite_source=true."
             )
+        if database_paths is not None and output_project.resolve() == cast(Path, database_paths["latest_project"]).resolve():
+            raise _AutomationRecipeError("Database updates require an output copy distinct from the latest project.")
         output_project.parent.mkdir(parents=True, exist_ok=True)
         if not same_project:
-            shutil.copy2(project_path, output_project)
+            _copy_file_atomic(project_path, output_project)
+        _assert_file_unchanged(project_path, source_project_sha)
+        _assert_file_unchanged(output_project, source_project_sha)
 
         commands = recipe.get("commands")
         if not isinstance(commands, list) or not commands:
@@ -3692,6 +3930,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             action = str(command.get("action") or "").strip()
             if action == "update_section":
                 required_sections.add(str(command.get("section") or "").strip())
+                if command.get("section") == "videos":
+                    required_sections.add("fabrication")
             elif action == "rebuild_assemble":
                 load_all_sections = True
             elif action == "export_assemble":
@@ -3703,6 +3943,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             label="Microwire Data Builder project copy",
             section_keys=None if load_all_sections else required_sections,
             load_payloads=True,
+            decode_record_lists=True,
         )
         _validate_builder_project_payload(project_payload, path=output_project)
         sections = project_payload.get("sections")
@@ -3723,13 +3964,19 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 )
             else:
                 manifest_path = output_project.with_suffix(".manifest.json")
+        protected_paths = {project_path.resolve(), output_project.resolve()}
+        if database_paths is not None:
+            protected_paths.update(cast(Path, database_paths[name]).resolve()
+                                   for name in ("latest_project", "latest_manifest", "archive_project", "archive_manifest"))
+        if manifest_path.resolve() in protected_paths:
+            raise _AutomationRecipeError("The working manifest must be distinct from project and database paths.")
 
         previous_dialog_setting = os.environ.get(
             "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
         )
         builder_storage: Any = None
         builder_ui_module: Any = None
-        original_storage_root: Any = None
+        storage_snapshot: dict[str, Any] | None = None
         builder_transaction: Any = None
         previous_payload_stager: Any = None
         payload_stager_installed = False
@@ -3745,17 +3992,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             from microwire_data_builder import ui as builder_ui
 
             builder_ui_module = builder_ui
-            original_storage_root = builder_storage._storage_root
-            automation_store = working_copy_dir / "_builder_store"
-            if automation_store.exists():
-                shutil.rmtree(automation_store)
-            builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
-            builder_storage.MiniDatabaseStore._memory_data = {}
-            builder_storage.MiniDatabaseStore._memory_payloads = {}
-            builder_storage.MiniDatabaseStore._pending_sections = set()
-            builder_storage.MiniDatabaseStore._pending_payloads = set()
-            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
-            builder_storage.MiniDatabaseStore._memory_transactions = []
+            automation_store = Path(tempfile.mkdtemp(prefix="_builder_store-", dir=working_copy_dir))
+            storage_snapshot = _begin_isolated_builder_store(builder_storage, automation_store)
             builder_transaction = (
                 builder_storage.MiniDatabaseStore.begin_memory_transaction()
             )
@@ -3856,14 +4094,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 )
             if builder_transaction is not None and not builder_transaction.finished:
                 builder_transaction.rollback()
-            if builder_storage is not None and original_storage_root is not None:
-                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
-                builder_storage.MiniDatabaseStore._memory_data = {}
-                builder_storage.MiniDatabaseStore._memory_payloads = {}
-                builder_storage.MiniDatabaseStore._pending_sections = set()
-                builder_storage.MiniDatabaseStore._pending_payloads = set()
-                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
-                builder_storage.MiniDatabaseStore._memory_transactions = []
+            if builder_storage is not None and storage_snapshot is not None:
+                _restore_builder_store(builder_storage, storage_snapshot)
             if previous_dialog_setting is None:
                 os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
             else:
@@ -3872,6 +4104,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 )
 
         project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        _assert_file_unchanged(project_path, source_project_sha)
+        _assert_file_unchanged(output_project, source_project_sha)
         _write_builder_project_object(output_project, project_payload)
         manifest = {
             "kind": "builder",
@@ -3902,8 +4136,9 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         print(f"[automation-recipe] {type(exc).__name__}: {exc}")
         return 1
     finally:
-        if payload_staging_root is not None:
-            shutil.rmtree(payload_staging_root, ignore_errors=True)
+        for owned_temp in (payload_staging_root, automation_store):
+            if owned_temp is not None and owned_temp.resolve().parent == working_copy_dir.resolve():
+                shutil.rmtree(owned_temp, ignore_errors=True)
 
 
 def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:

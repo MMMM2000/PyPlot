@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .video_lengths import cumulative_piece_lengths
 
 import json
 import logging
@@ -763,20 +764,7 @@ class UniversalVideoSection(VideoSection):
                 continue
             lengths[(composition, draw, piece)] = self._coerce_float(row.get("Length (m)"))
 
-        cumulative_map: Dict[Tuple[str, int, int], Optional[float]] = {}
-        grouped: Dict[Tuple[str, int], List[Tuple[int, Optional[float]]]] = {}
-        for (composition, draw, piece), length_val in lengths.items():
-            grouped.setdefault((composition, draw), []).append((piece, length_val))
-        for (composition, draw), entries in grouped.items():
-            running: Optional[float] = 0.0
-            for piece, length_val in sorted(entries, key=lambda item: item[0]):
-                if running is None or length_val is None:
-                    running = None
-                    cumulative_map[(composition, draw, piece)] = None
-                else:
-                    running += length_val
-                    cumulative_map[(composition, draw, piece)] = running
-        return cumulative_map
+        return cumulative_piece_lengths(lengths)
 
     def process(
         self,

@@ -888,6 +888,53 @@ def decode_envelope(
     return decode_value(node["value"], _blob_resolver=blob_resolver)
 
 
+def decode_record_list_envelope(
+    payload: Any,
+    *,
+    blob_resolver: Callable[[str, int], bytes] | None = None,
+    max_total_bytes: int = MAX_DECODE_BYTES,
+) -> list[Any]:
+    """Decode measurement records independently with a bounded total allocation.
+
+    A packaged project can hold more curves than the generic single-payload
+    budget. Each record still obeys every ordinary codec limit; total decoded
+    bytes count repeated references too, even if the package caches their blobs.
+    """
+    node = _require_mapping(payload, "codec envelope")
+    empty = dict(node)
+    value = _require_mapping(node.get("value"), "record list")
+    if value.get("$type") != "list":
+        raise SafeCodecError("Builder record payload is not an encoded list")
+    empty["value"] = {**value, "items": []}
+    decode_envelope(empty)
+    items = _require_list(value.get("items"), "record list items")
+    if isinstance(max_total_bytes, bool) or not isinstance(max_total_bytes, int) or not 0 < max_total_bytes <= 4 * 1024**3:
+        raise SafeCodecError("Invalid aggregate record decode byte limit")
+    records: list[Any] = []
+    total_bytes = total_nodes = 0
+    for item in items:
+        record = _require_mapping(item, "measurement record")
+        type_id = record.get("class")
+        if (
+            record.get("$type") != "dataclass"
+            or not isinstance(type_id, str)
+            or type_id not in _ALLOWED_TYPES
+            or not type_id.startswith("microwire_data_builder.core:")
+            or not type_id.endswith("Record")
+        ):
+            raise SafeCodecError("Builder record list contains an unsupported record")
+        budget = _DecodeBudget()
+        decoded = decode_value(record, _budget=budget, _blob_resolver=blob_resolver)
+        total_bytes += budget.bytes
+        total_nodes += budget.nodes
+        if total_bytes > max_total_bytes:
+            raise SafeCodecError("Aggregate record decode byte budget exceeded")
+        if total_nodes > MAX_DECODE_NODES:
+            raise SafeCodecError("Aggregate record decode node budget exceeded")
+        records.append(decoded)
+    return records
+
+
 def atomic_write_json(path: Path, payload: Any) -> None:
     """Write JSON next to its destination and atomically replace on success."""
 
@@ -943,6 +990,7 @@ __all__ = [
     "SafeCodecError",
     "atomic_write_json",
     "decode_envelope",
+    "decode_record_list_envelope",
     "decode_value",
     "encode_envelope",
     "encode_value",
