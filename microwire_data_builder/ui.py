@@ -6888,11 +6888,31 @@ def _portable_annealing_review(record: MeasurementRecord) -> Dict[str, Any]:
 
 def _review_semantics(payload: Mapping[str, Any]) -> Tuple[str, Tuple[Tuple[str, float], ...], Tuple[str, ...]]:
     status = str(payload.get("status") or "").strip()
+    if status in {TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED}:
+        status = "accepted"
     values = _clean_transition_values(
         payload.get("final_values_mA") if isinstance(payload.get("final_values_mA"), Mapping) else {}
     )
     cleared = tuple(sorted(str(label) for label in payload.get("cleared_labels", ()) if str(label)))
     return status, tuple(sorted(values.items())), cleared
+
+
+def _refresh_unchanged_portable_conflict(
+    existing: Mapping[str, Any], portable: Mapping[str, Any],
+    semantics: Callable[[Mapping[str, Any]], Any], identity_field: str,
+) -> Dict[str, Any] | None:
+    previous = existing.get("portable_review")
+    if (existing.get("portable_conflict") != "project_and_sidecar_differ"
+            or not isinstance(previous, Mapping)
+            or semantics(previous) != semantics(portable)
+            or previous.get(identity_field) != portable.get(identity_field)):
+        return None
+    merged = dict(existing)
+    merged["portable_review"] = {**previous, **portable}
+    for key in (identity_field, "portable_sidecar_path", "portable_review_revision"):
+        if portable.get(key) not in (None, ""):
+            merged[key] = portable[key]
+    return merged
 
 
 def _merge_portable_annealing_review(
@@ -6901,6 +6921,9 @@ def _merge_portable_annealing_review(
 ) -> Dict[str, Any]:
     if not existing or str(existing.get("status") or "") in {"", TRANSITION_REVIEW_STATUS_UNREVIEWED}:
         return dict(portable)
+    refreshed = _refresh_unchanged_portable_conflict(existing, portable, _review_semantics, "content_identity")
+    if refreshed is not None:
+        return refreshed
     if _review_semantics(existing) == _review_semantics(portable):
         merged = dict(existing)
         for key in ("content_identity", "portable_sidecar_path", "portable_review_revision"):
@@ -8455,6 +8478,11 @@ def _mini_dma_cleared_transition_labels(review: Mapping[str, Any] | None) -> Set
     return {str(label).strip() for label in candidates if str(label).strip() in valid}
 
 
+def _mini_dma_portable_review_semantics(review: Mapping[str, Any]) -> tuple:
+    return (str(review.get("status") or ""), _clean_mini_dma_transition_values(review.get("values")),
+            _mini_dma_cleared_transition_labels(review))
+
+
 def _mini_dma_review_status_label(status: str) -> str:
     if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
         return "Accepted"
@@ -8882,17 +8910,12 @@ def _import_portable_tma_reviews(
                 reviews[record_id] = portable_review
                 changed = True
                 continue
-            existing_semantics = (
-                str(existing.get("status") or ""),
-                _clean_mini_dma_transition_values(existing.get("values")),
-                _mini_dma_cleared_transition_labels(existing),
+            refreshed = _refresh_unchanged_portable_conflict(
+                existing, portable_review, _mini_dma_portable_review_semantics, "measurement_fingerprint",
             )
-            portable_semantics = (
-                str(portable_review.get("status") or ""),
-                _clean_mini_dma_transition_values(portable_review.get("values")),
-                _mini_dma_cleared_transition_labels(portable_review),
-            )
-            if existing_semantics == portable_semantics:
+            if refreshed is not None:
+                merged = refreshed
+            elif _mini_dma_portable_review_semantics(existing) == _mini_dma_portable_review_semantics(portable_review):
                 merged = dict(existing)
                 merged.update(
                     {
@@ -14825,18 +14848,6 @@ class FabricationSection(MiniDatabaseSection):
         }
         if not composition_tokens:
             return candidates, 0, False
-        draw_tokens: Dict[str, Set[str]] = {}
-        for comp, draw_map in relevant_map.items():
-            comp_key = self._normalise_token(comp)
-            if not comp_key:
-                continue
-            bucket = draw_tokens.setdefault(comp_key, set())
-            for draw, pieces in draw_map.items():
-                if draw is not None:
-                    bucket.add(self._normalise_token(draw))
-                for piece in pieces:
-                    if piece is not None:
-                        bucket.add(self._normalise_token(f"{draw}{piece}"))
         filtered: List[Path] = []
         skipped = 0
         for path in candidates:
@@ -14847,10 +14858,6 @@ class FabricationSection(MiniDatabaseSection):
             matched = False
             for _, token in composition_tokens.items():
                 if token and token in text:
-                    matched = True
-                    break
-                draw_set = draw_tokens.get(token)
-                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
                     matched = True
                     break
             if matched:
@@ -23602,6 +23609,11 @@ class VideoSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered = self._filter_candidates_for_relevance(
+            unique_paths, relevant_map, relevant_compositions,
+        )
+        unique_paths = filtered or unique_paths
         index = _collect_video_metrics(
             unique_paths,
             self.logger,

@@ -49,3 +49,44 @@ Disposable logs, package copies and machine-readable comparisons are under the w
 - The database already had three hysteresis table groups without embedded curves before the USB import: Ni46Fe27Ga23Cu2Co2 2/1, 2/5 and 2/7. Their source references are preserved; recovering those historical curves requires reconciling the referenced raw files.
 - The two newly assembled rows are `Ni48Fe27Ga23Co1Cu1 1/1` and `1/5`, already present in the saved TMA section's run sources. Other families use the equivalent nominal formula spelling `Ni48Fe27Ga23Cu1Co1`. Both spellings and all source records are preserved; physical sample identity should be reconciled before combining these families or counting independent specimens in a report.
 - Fabrication parameters read from video should be saved with frame/time/length evidence and the visible units. The manual/assisted frame-review workflow is a separate data update; this pass does not reintroduce the retired OCR engine.
+
+## October 1 follow-up
+
+A full source inventory and staged update exposed additional failures. Fabrication
+matching accepted unrelated compositions sharing a draw number; automated refresh
+did not restore both annealing and microscopy context; reference-only video refresh
+could replace saved readings with empty lists. These paths now preserve context,
+measurements and source history. Current-program resistance/current sessions require
+an explicit full composition and draw/piece in their folder name. Supply current
+limits are not inferred as annealing treatment setpoints.
+
+Skipped-source accounting previously resolved the same cloud paths for every
+retained record. It now resolves each candidate once. Additive annealing refreshes
+retain manual phase points outside the imported subset. Successful updates print
+ASCII-safe JSON while preserving Unicode in UTF-8 manifests, preventing a console
+encoding error after a successful save.
+
+Sidecar reconciliation now treats accepted-auto and manual-adjusted decisions with
+identical final points as equivalent. Reopening an unchanged conflict preserves
+the original project decision without recursively wrapping its history. The staged
+database comparison identified and corrected 64 false annealing conflicts and 205
+repeated TMA history wrappers. Original scientific decisions remain preserved;
+genuine existing conflicts still require review.
+
+The final follow-up run passed **722 tests in 202.83 seconds**, including **51
+integrity regression cases**, with the frozen lock, offscreen Qt and isolated
+settings/stores. No real project or instrument was used as test data. The staged
+copy retained all 1,392 historical measurement curves and added 19 explicitly
+identified electrical records and 56 TMA records, reaching 1,467. Three existing TMA
+text summaries were recomputed; their numerical arrays and other fields remained
+identical. Fabrication indexes retained every historical nonblank value and key,
+adding 3 filtered pieces and 18 raw pieces. Saved manual overrides were retained.
+
+The inventory also records 97 current-program sessions awaiting reliable sample
+identity, including 32 with the shorthand Cu1Co1 1-5. TMA discovery found 147
+sessions; completion gating and parser checks must remain visible in the update
+manifest. Empty VSM placeholders do not replace embedded curves. DMA, FMR, manual
+stress/strain, microscopy and existing VSM data remain preserved. EBSD, XRD,
+ac-susceptibility, R-vs-T and VSM-isotherm folders are inventoried; this does not
+claim their import into an unsupported Builder section. New readings from
+fabrication videos remain a separate evidence-based review.

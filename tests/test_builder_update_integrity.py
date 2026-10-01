@@ -418,3 +418,207 @@ def test_legacy_treatments_do_not_merge_into_one_hysteresis_plot_group(tmp_path)
     assert len(groups) == 2
     assert {group.variant for group in groups} == {"NG CA", "as cast"}
     assert a.variant is None and b.variant is None
+
+
+def test_fabrication_relevance_requires_composition_not_just_draw_number(qtbot, tmp_path):
+    section = ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    relevant = tmp_path / "Ni50Fe27Ga23" / "1.Ni50Fe27Ga23" / "pieces.xlsx"
+    unrelated = tmp_path / "Fe77Mo4B18Cu1" / "1.Fe77Mo4B18Cu1" / "pieces.xlsx"
+    paths, skipped, fallback = section._filter_candidates_for_relevance(
+        [relevant, unrelated], {"Ni50Fe27Ga23": {1: {1}}}, {"Ni50Fe27Ga23"})
+    assert paths == [relevant] and skipped == 1 and not fallback
+
+
+def test_video_process_uses_the_same_sample_relevance_filter_as_ui(qtbot, tmp_path, monkeypatch):
+    section = ui.VideoSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    relevant = tmp_path / "Ni50Fe27Ga23" / "1.Ni50Fe27Ga23" / "video.mkv"
+    unrelated = tmp_path / "Fe77Mo4B18Cu1" / "1.Fe77Mo4B18Cu1" / "video.mkv"
+    monkeypatch.setattr(section, "_load_relevant_map", lambda: ({"Ni50Fe27Ga23": {1: {1}}}, {"Ni50Fe27Ga23"}))
+    seen = []
+    monkeypatch.setattr(ui, "_collect_video_metrics", lambda paths, *_args, **_kwargs: seen.extend(paths) or {})
+    section.process([relevant, unrelated])
+    assert seen == [relevant]
+
+
+def test_refreshing_video_references_preserves_saved_measurement_lists_and_sources(qtbot, tmp_path):
+    folder = tmp_path / "Ni50Fe27Ga23" / "1.Ni50Fe27Ga23"
+    folder.mkdir(parents=True)
+    video = folder / "video.mkv"
+    video.write_bytes(b"synthetic video reference only")
+    old_path = folder / "historical.mkv"
+    summary = ui.VideoMetricsSummary(temperatures=[998.2], underpressures=[41.18],
+                                   winding_speeds=[27.69], glass_feeds=[1.1], sources={old_path})
+    section = {"section": "videos", "title": "Videos", "columns": [], "rows": [], "index": [],
+               "extra": {}, "sources": [], "processed": {},
+               "payloads": {"video_index": safe_codec.encode_envelope({("Ni50Fe27Ga23", 1, None): summary})}}
+    sections = {"videos": section}
+    launcher._run_builder_update_section_command(builder_ui=ui, command={"paths": [str(video)]},
+        section_name="videos", command_index=0, sections=sections, base_dir=tmp_path)
+    result = storage.MiniDatabaseStore("videos").load_payload("video_index")[("Ni50Fe27Ga23", 1, None)]
+    assert result.temperatures == [998.2] and result.underpressures == [41.18]
+    assert result.winding_speeds == [27.69] and result.glass_feeds == [1.1]
+    assert result.sources == {old_path, video}
+
+
+@pytest.mark.parametrize("section_name", ["fabrication", "videos"])
+def test_automation_restores_microscope_relevance_before_dependent_refresh(qtbot, tmp_path, monkeypatch, section_name):
+    section_class = ui.FabricationSection if section_name == "fabrication" else ui.VideoSection
+    measured = pd.DataFrame([{"Composition": "Ni50Fe27Ga23", "Microwire": "1/1"}])
+    sections = {"microscope": {"section": "microscope", "title": "Microscope",
+                "columns": list(measured.columns), "rows": measured.to_dict(orient="records"),
+                "index": [0], "extra": {}, "sources": [], "processed": {}, "payloads": {}}}
+    seen = []
+    def process(self, _paths, progress=None):
+        seen.append(self._load_relevant_map())
+        payload = ui.FabricationIndex() if section_name == "fabrication" else {}
+        payload_name = "fabrication_index" if section_name == "fabrication" else "video_index"
+        return ui.SectionProcessResult(table=pd.DataFrame(), processed={}, payloads={payload_name: payload})
+    monkeypatch.setattr(section_class, "process", process)
+    launcher._run_builder_update_section_command(builder_ui=ui, command={"paths": [str(tmp_path)]},
+        section_name=section_name, command_index=0, sections=sections, base_dir=tmp_path)
+    assert seen == [({"Ni50Fe27Ga23": {1: {1}}}, {"Ni50Fe27Ga23"})]
+
+
+@pytest.mark.parametrize("folder", [
+    "Ni50Fe25Ga25_2-3_1_0e-5_6_757g_20260930-104616",
+    "Ni50Fe25Ga25_5-1_VSM_20260921-135648",
+])
+def test_electrical_session_metadata_uses_explicit_sample_folder_not_current_limit(tmp_path, folder):
+    from microwire_data_builder.core import _metadata_from_path, _load_annealing
+    run = tmp_path / folder
+    run.mkdir()
+    measurement = run / "measurement.csv"
+    pd.DataFrame({"measured_current_mA": [1.0, 2.0], "voltage_V": [0.1, 0.2],
+                  "resistance_ohm": [100.0, 100.0], "cycle_index": [1, 1]}).to_csv(measurement, index=False)
+    (run / "metadata.json").write_text(json.dumps({"schema": "current_program_logger_v1",
+                                                  "max_current_mA": 100}), encoding="utf-8")
+    metadata = _metadata_from_path(measurement)
+    assert metadata.composition_token == "Ni50Fe25Ga25"
+    assert (metadata.draw_x, metadata.piece_y) == ((2, 3) if "2-3" in folder else (5, 1))
+    assert metadata.setpoint_mA is None
+    assert metadata.file_name == folder
+    assert _load_annealing(measurement)["I_mA"].tolist() == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("folder", [
+    "current-program_20260901-165217",
+    "Cu1Co1_1-5_1e-3hPa_4g_20260910-122429",
+    "Ni50Fe25Ga25_pressure_1_0e-5hPa_20260930-104616",
+])
+def test_electrical_session_without_sample_identity_is_not_assigned_from_ancestor(tmp_path, folder):
+    from microwire_data_builder.core import _metadata_from_path
+    run = tmp_path / "Ni50Fe25Ga25_2-3" / folder
+    run.mkdir(parents=True)
+    measurement = run / "measurement.csv"
+    measurement.write_text("measured_current_mA,voltage_V,resistance_ohm\n1,0.1,100\n", encoding="utf-8")
+    (run / "metadata.json").write_text('{"schema":"current_program_logger_v1"}', encoding="utf-8")
+    metadata = _metadata_from_path(measurement)
+    assert (metadata.draw_x, metadata.piece_y) == (None, None)
+
+
+def test_skipped_source_resolution_is_linear_not_per_retained_record(qtbot, tmp_path, monkeypatch):
+    skipped = [tmp_path / f"unreadable-{n}.dat" for n in range(3)]
+    for path in skipped:
+        path.write_text("placeholder", encoding="utf-8")
+    records = [_record(tmp_path / f"old-{n}.dat") for n in range(4)]
+    sections = _project("vsm_hysteresis", records)["sections"]
+    monkeypatch.setattr(launcher, "_collect_builder_paths", lambda *_a, **_k: skipped)
+    monkeypatch.setattr(ui.VsmHysteresisSection, "process", lambda *_a, **_k:
+        ui.SectionProcessResult(table=pd.DataFrame(), processed={}, payloads={"vsm_hysteresis_records": []}))
+    original = Path.resolve
+    calls = {path: 0 for path in skipped}
+    def resolve(path, *args, **kwargs):
+        if path in calls:
+            calls[path] += 1
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    result = launcher._run_builder_update_section_command(builder_ui=ui,
+        command={"paths": [str(tmp_path)]}, section_name="vsm_hysteresis",
+        command_index=0, sections=sections, base_dir=tmp_path)
+    assert result["skipped_count"] == 3
+    assert all(count == 1 for count in calls.values())
+
+
+def test_additive_annealing_refresh_retains_saved_phase_points(qtbot, tmp_path, monkeypatch):
+    points = {"reviewed-group": {"As": 16.5, "Af": 23.4}}
+    sections = _project("annealing", [])["sections"]
+    sections["annealing"]["extra"]["phase_points"] = points
+    monkeypatch.setattr(ui.AnnealingSection, "process", lambda *_a, **_k:
+        ui.SectionProcessResult(table=pd.DataFrame(), processed={}, payloads={"annealing_records": []},
+                               extra={"phase_points": {}}))
+    launcher._run_builder_update_section_command(builder_ui=ui,
+        command={"paths": [str(tmp_path)]}, section_name="annealing",
+        command_index=0, sections=sections, base_dir=tmp_path)
+    assert sections["annealing"]["extra"]["phase_points"] == points
+
+
+def test_successful_builder_update_reports_unicode_paths_on_legacy_console(qtbot, tmp_path):
+    import contextlib
+    import io
+    source = tmp_path / "source.pydpj"
+    project_package.write_project_package(source, _project("vsm_hysteresis", [_record(tmp_path / "old.dat")]))
+    empty = tmp_path / "České meranie"
+    empty.mkdir()
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(json.dumps({"kind": "builder", "version": 1, "project": str(source),
+        "output_project": str(tmp_path / "output.pydpj"), "working_copy_dir": str(tmp_path / "work"),
+        "commands": [{"action": "update_section", "section": "vsm_hysteresis", "paths": [str(empty)]}]}), encoding="utf-8")
+    buffer = io.BytesIO()
+    console = io.TextIOWrapper(buffer, encoding="cp1252")
+    with contextlib.redirect_stdout(console):
+        assert launcher._run_builder_automation_recipe(recipe) == 0
+        console.flush()
+        printed = json.loads(buffer.getvalue().decode("cp1252").splitlines()[-1])
+    assert printed["status"] == "ok"
+    assert printed["commands"][0]["sources"] == [str(empty)]
+
+
+def test_equivalent_legacy_accepted_ca_review_does_not_become_a_conflict():
+    existing = {"status": "accepted_auto", "final_values_mA": {"As1": 22.88},
+                "manual_values_mA": {"As1": 22.88}, "included": True}
+    portable = {"status": "manual_adjusted", "final_values_mA": {"As1": 22.88},
+                "manual_values_mA": {"As1": 22.88}, "included": True, "content_identity": "sha256:same"}
+    merged = ui._merge_portable_annealing_review(existing, portable)
+    assert merged["status"] == "accepted_auto" and merged["included"]
+    assert "portable_conflict" not in merged
+    assert merged["manual_values_mA"] == existing["manual_values_mA"]
+
+
+def test_reopening_same_ca_review_conflict_does_not_nest_original_decision():
+    original = {"status": "accepted_auto", "final_values_mA": {"As1": 18.0}}
+    portable = {"status": "manual_adjusted", "final_values_mA": {"As1": 20.0},
+                "content_identity": "sha256:same", "portable_review_revision": 2}
+    conflict = ui._merge_portable_annealing_review(original, portable)
+    reopened = ui._merge_portable_annealing_review(conflict, portable)
+    assert reopened == conflict
+    assert reopened["project_review"] == original
+    changed = ui._merge_portable_annealing_review(conflict, {**portable, "final_values_mA": {"As1": 21.0}})
+    assert changed["portable_review"]["final_values_mA"] == {"As1": 21.0}
+
+
+def test_reopening_same_tma_sidecar_conflict_preserves_original_history(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import copy
+    from plotting.shared import transition_review as sidecars, transition_review_adapters as adapters
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "transition_review.json").write_text("{}", encoding="utf-8")
+    record = ui.MiniDmaRecord(path=run, sample="Ni50Fe27Ga23 1_1", data=pd.DataFrame())
+    entry = SimpleNamespace(target_summary=SimpleNamespace(stress_mpa=50.0), sweep_index=1,
+        sample=record.sample, run_label="run", target_label="1st: 50MPa / 0.8g", status="accepted")
+    payload = {"experiment_family": "tma", "measurement_fingerprint": "sha256:same", "targets": [
+        {"target": {"stress_mpa": 50.0, "sweep_index": 1}, "status": "manual_adjusted",
+         "final_values": {"As": 20.0}, "manual_values": {"As": 20.0}}]}
+    monkeypatch.setattr(sidecars, "load_review", lambda _p: payload)
+    monkeypatch.setattr(adapters, "tma_review_draft", lambda _p: {"measurement_fingerprint": "sha256:same"})
+    monkeypatch.setattr(ui, "_mini_dma_transition_review_entries", lambda *_a: [entry])
+    key = ui._mini_dma_review_record_id(record, entry.target_label)
+    original = {"status": "accepted", "values": {"As": 18.0}}
+    reviews = {key: original}
+    assert ui._import_portable_tma_reviews([record], reviews, logging.getLogger("test"))
+    before = copy.deepcopy(reviews)
+    assert not ui._import_portable_tma_reviews([record], reviews, logging.getLogger("test"))
+    assert reviews == before
+    assert reviews[key]["project_review"] == original

@@ -880,6 +880,21 @@ def _merge_builder_fabrication_indexes(builder_ui: Any, previous: Any, incoming:
     return merged
 
 
+def _merge_builder_video_indexes(builder_ui: Any, previous: Mapping, incoming: Mapping) -> dict:
+    """A reference-only refresh must not erase saved video measurements."""
+    merged = dict(previous)
+    for key, summary in incoming.items():
+        old = previous.get(key)
+        if isinstance(old, builder_ui.VideoMetricsSummary) and isinstance(summary, builder_ui.VideoMetricsSummary):
+            summary = builder_ui.VideoMetricsSummary(
+                **{field: list(getattr(summary, field) or getattr(old, field))
+                   for field in ("temperatures", "underpressures", "winding_speeds", "glass_feeds")},
+                sources=set(old.sources) | set(summary.sources),
+            )
+        merged[key] = summary
+    return merged
+
+
 def _prepare_builder_section_for_import(
     builder_ui: Any, sections: Mapping[str, Any], section_name: str,
 ) -> dict[str, Any]:
@@ -1004,14 +1019,17 @@ def _run_builder_update_section_command(
         raise _AutomationRecipeError(f"{section_name} prune_missing must be a boolean.")
     if prune_missing and spec.get("payload_kind", "sequence") != "sequence":
         raise _AutomationRecipeError("prune_missing is supported only for graph record sections.")
-    if section_name == "videos" and isinstance(sections.get("fabrication"), Mapping):
-        dependency = builder_ui.FabricationSection(LOGGER, lambda *_args: None)
-        try:
-            dependency.import_project_payload(
-                _prepare_builder_section_for_import(builder_ui, sections, "fabrication")
-            )
-        finally:
-            dependency.close()
+    dependency_names = ("annealing", "microscope", "fabrication") if section_name == "videos" else (
+        ("annealing", "microscope") if section_name == "fabrication" else ())
+    for dependency_name in dependency_names:
+        if isinstance(sections.get(dependency_name), Mapping):
+            dependency = section_specs[dependency_name]["class"](LOGGER, lambda *_args: None)
+            try:
+                dependency.import_project_payload(
+                    _prepare_builder_section_for_import(builder_ui, sections, dependency_name)
+                )
+            finally:
+                dependency.close()
     section = section_class(LOGGER, lambda *_args: None)
     exclude_names = [str(name) for name in raw_exclude_dir_names]
     exclude_prefixes = [str(prefix) for prefix in raw_exclude_dir_prefixes]
@@ -1128,24 +1146,28 @@ def _run_builder_update_section_command(
         processed_keys = set()
         for processed_path in result.processed:
             try:
-                processed_keys.add(str(Path(processed_path).resolve()))
+                processed_keys.add(os.path.normcase(str(Path(processed_path).resolve())))
             except Exception:
-                processed_keys.add(str(processed_path))
+                processed_keys.add(os.path.normcase(str(processed_path)))
         skipped_sources: list[str] = []
+        skipped_keys: set[str] = set()
         for candidate in candidates:
             try:
                 candidate_key = str(candidate.resolve())
             except Exception:
                 candidate_key = str(candidate)
+            candidate_key = os.path.normcase(candidate_key)
             if candidate_key not in processed_keys:
                 skipped_sources.append(str(candidate))
+                skipped_keys.add(candidate_key)
 
         payload_kind = spec.get("payload_kind", "sequence")
         if payload_kind == "mapping":
             existing_mapping = dict(existing_payload) if isinstance(existing_payload, Mapping) else {}
             new_payload = result.payloads.get(payload_name, {})
             new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
-            merged_records = {**existing_mapping, **new_mapping}
+            merged_records = (_merge_builder_video_indexes(builder_ui, existing_mapping, new_mapping)
+                              if section_name == "videos" else {**existing_mapping, **new_mapping})
         elif payload_kind == "object":
             merged_records = _merge_builder_fabrication_indexes(
                 builder_ui, existing_payload, result.payloads.get(payload_name),
@@ -1203,6 +1225,12 @@ def _run_builder_update_section_command(
                 section.data.table = merge_rows(existing_table, refresh_rows)
         section.data.processed = {**section.data.processed, **result.processed}
         if isinstance(result.extra, dict):
+            if section_name == "annealing" and not prune_missing:
+                saved_points = sections.get(section_name, {}).get("extra", {}).get("phase_points", {})
+                if isinstance(saved_points, Mapping):
+                    result.extra["phase_points"] = {
+                        **result.extra.get("phase_points", {}), **saved_points,
+                    }
             section.data.extra.update(result.extra)
         payload_refs: dict[str, str] = {payload_name: payload_name}
         for result_payload_name, result_payload in result.payloads.items():
@@ -1228,8 +1256,7 @@ def _run_builder_update_section_command(
             "skipped_sources": skipped_sources,
             "retained_skipped_count": sum(
                 1 for record in existing_records
-                if os.path.normcase(_record_path_key(record)) in
-                {os.path.normcase(str(Path(p).resolve())) for p in skipped_sources}
+                if os.path.normcase(_record_path_key(record)) in skipped_keys
             ),
             "prune_missing": prune_missing,
             "record_count": _builder_payload_record_count(merged_records),
@@ -4125,7 +4152,9 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             )
         else:
             _write_json(manifest_path, manifest)
-        print(json.dumps(manifest, ensure_ascii=False))
+        # Machine-facing output must survive Windows consoles with legacy encodings.
+        # The saved UTF-8 manifest retains human-readable Unicode paths.
+        print(json.dumps(manifest, ensure_ascii=True))
         return 0
     except _AutomationRecipeError as exc:
         print(f"[automation-recipe] {exc}")

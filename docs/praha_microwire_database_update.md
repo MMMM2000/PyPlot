@@ -28,8 +28,8 @@ generating the update commands:
 | Family | Sources to check |
 | --- | --- |
 | VSM temperatures and hysteresis | `Praha/data/VSM temp scan`, `Praha/data/VSM hysteresis loops`, new USB data |
-| TMA | `Praha/data/TMA` and saved project roots |
-| Current annealing | `Praha/data/current annealing` and the saved Kosice Current Annealing shared-drive root |
+| TMA | `Praha/data/TMA`, supported run folders in `Praha/data/elastrocaloric_effect`, and saved project roots |
+| Current annealing / resistance-current | `Praha/data/current annealing`, the saved Kosice Current Annealing shared-drive root, `Praha/data/vacuum`, and standalone current-program sessions |
 | Fabrication and videos | Saved `databaza mikrodrotov` shortcut target, new workbooks and recordings |
 | Microscopy | `Praha/data/microscope`, saved individual files and manual diameter overrides |
 | DMA, FMR, manual stress/strain | `Praha/data/DMA`, `Praha/data/FMR`, `Praha/data/manual stress-strain` |
@@ -44,6 +44,18 @@ they can supply new production parameters.
 The installed `$praha-microwire-database` skill captures the full workflow and
 historical evidence. Its source-inventory helper checks all supported families;
 its strict VSM validation/promotion helper is specifically for VSM-only candidates.
+
+Resistance/current sessions with `current_program_logger_v1` metadata use the
+explicit composition and draw/piece in the run-folder name. The importer does
+not assign unidentified `current-program_*` runs from nearby files, turn a
+supply current limit into a treatment setpoint, or infer a numerical pressure.
+Record skipped empty runs and unresolved sample identities in the update report.
+TMA completion gating applies across all refreshed supported roots.
+
+Fabrication and Video automation restore saved annealing/microscopy dependencies
+for sample relevance. A shared draw number alone is not a material match.
+Reference-only video refreshes retain numerical readings and source history;
+new readings still require the frame-review procedure.
 
 ## Stage, Validate, Promote, Review
 
@@ -64,6 +76,14 @@ its strict VSM validation/promotion helper is specifically for VSM-only candidat
    scientific review. Snapshot a substantial review session into `archive/`
    before editing. Save accepted/excluded decisions through the app; import
    success does not establish scientific acceptance.
+
+Review validation must compare scientific decisions, including accepted-auto and
+manual-adjusted sidecars with identical final points. Existing conflict history
+must not grow another wrapper merely from opening/importing the same sidecar.
+After correcting review metadata, rebuild Assemble so its values and statuses
+correspond to the same final reviews. A console encoding failure after saving is
+not proof that the package failed; inspect and validate the saved artifacts before
+retrying an update or promotion.
 
 ## Update Command
 

@@ -4034,6 +4034,17 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _current_program_sample_from_folder(name: str) -> Optional[str]:
+    composition = COMPOSITION_TOKEN_PATTERN.match(name)
+    if composition is None:
+        return None
+    # Short alloy labels such as Cu1Co1 do not identify the full composition.
+    if sum(int(value) for value in re.findall(r"\d+", composition.group("composition"))) != 100:
+        return None
+    identity = re.match(r"^[\s_-]+\d{1,3}[/_-]\d{1,3}(?=$|[\s_-])", name[composition.end():])
+    return name if identity else None
+
+
 def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementMetadata:
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
@@ -4064,6 +4075,16 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
                     )
                     if str(value).strip()
                 )
+            elif (
+                isinstance(candidate, dict)
+                and candidate.get("schema") == "current_program_logger_v1"
+                and path.name.casefold() == "measurement.csv"
+                and (session_name := _current_program_sample_from_folder(path.parent.name)) is not None
+            ):
+                # These resistance/current sessions record their sample in the
+                # run folder. A supply current limit is not a treatment setpoint.
+                logger_metadata = candidate
+                base = session_name
         except (OSError, ValueError, json.JSONDecodeError):
             logger_metadata = {}
     parts = base.split()
