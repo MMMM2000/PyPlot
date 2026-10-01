@@ -27,6 +27,8 @@ import warnings
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from functools import partial
+
+from .video_lengths import cumulative_piece_lengths, video_piece_range
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import (
@@ -5363,6 +5365,22 @@ def _format_vsm_hysteresis_group_label(
     return " — ".join(parts)
 
 
+def _vsm_hysteresis_record_variant(record: VsmHysteresisRecord) -> Optional[str]:
+    variant = getattr(record, "variant", None)
+    if isinstance(variant, str) and variant.strip():
+        return variant.strip()
+    _, variant = _split_sample_variant(getattr(record, "sample", ""))
+    if variant:
+        return variant
+    # Older codecs omitted the dynamic variant attribute. Recover only an
+    # explicit treatment already present in the saved temperature label.
+    match = re.fullmatch(
+        r"T[+-]?(?:\d+(?:\.\d*)?|\.\d+)C\s*(?:—|·)\s*(.+)",
+        str(getattr(record, "label", "") or "").strip(), re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
 def _group_vsm_hysteresis_plot_groups(
     records: Sequence[VsmHysteresisRecord],
 ) -> List[_VsmHysteresisPlotGroup]:
@@ -5380,9 +5398,7 @@ def _group_vsm_hysteresis_plot_groups(
         return len(angles) if angles else 1
 
     for record in records:
-        variant = getattr(record, "variant", None)
-        if isinstance(variant, str):
-            variant = variant.strip() or None
+        variant = _vsm_hysteresis_record_variant(record)
         temp = _coerce_finite_float(getattr(record, "temperature", None))
         if temp is None:
             setattr(record, "_group_temperature", None)
@@ -6872,11 +6888,31 @@ def _portable_annealing_review(record: MeasurementRecord) -> Dict[str, Any]:
 
 def _review_semantics(payload: Mapping[str, Any]) -> Tuple[str, Tuple[Tuple[str, float], ...], Tuple[str, ...]]:
     status = str(payload.get("status") or "").strip()
+    if status in {TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED}:
+        status = "accepted"
     values = _clean_transition_values(
         payload.get("final_values_mA") if isinstance(payload.get("final_values_mA"), Mapping) else {}
     )
     cleared = tuple(sorted(str(label) for label in payload.get("cleared_labels", ()) if str(label)))
     return status, tuple(sorted(values.items())), cleared
+
+
+def _refresh_unchanged_portable_conflict(
+    existing: Mapping[str, Any], portable: Mapping[str, Any],
+    semantics: Callable[[Mapping[str, Any]], Any], identity_field: str,
+) -> Dict[str, Any] | None:
+    previous = existing.get("portable_review")
+    if (existing.get("portable_conflict") != "project_and_sidecar_differ"
+            or not isinstance(previous, Mapping)
+            or semantics(previous) != semantics(portable)
+            or previous.get(identity_field) != portable.get(identity_field)):
+        return None
+    merged = dict(existing)
+    merged["portable_review"] = {**previous, **portable}
+    for key in (identity_field, "portable_sidecar_path", "portable_review_revision"):
+        if portable.get(key) not in (None, ""):
+            merged[key] = portable[key]
+    return merged
 
 
 def _merge_portable_annealing_review(
@@ -6885,6 +6921,9 @@ def _merge_portable_annealing_review(
 ) -> Dict[str, Any]:
     if not existing or str(existing.get("status") or "") in {"", TRANSITION_REVIEW_STATUS_UNREVIEWED}:
         return dict(portable)
+    refreshed = _refresh_unchanged_portable_conflict(existing, portable, _review_semantics, "content_identity")
+    if refreshed is not None:
+        return refreshed
     if _review_semantics(existing) == _review_semantics(portable):
         merged = dict(existing)
         for key in ("content_identity", "portable_sidecar_path", "portable_review_revision"):
@@ -8439,6 +8478,11 @@ def _mini_dma_cleared_transition_labels(review: Mapping[str, Any] | None) -> Set
     return {str(label).strip() for label in candidates if str(label).strip() in valid}
 
 
+def _mini_dma_portable_review_semantics(review: Mapping[str, Any]) -> tuple:
+    return (str(review.get("status") or ""), _clean_mini_dma_transition_values(review.get("values")),
+            _mini_dma_cleared_transition_labels(review))
+
+
 def _mini_dma_review_status_label(status: str) -> str:
     if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
         return "Accepted"
@@ -8866,17 +8910,12 @@ def _import_portable_tma_reviews(
                 reviews[record_id] = portable_review
                 changed = True
                 continue
-            existing_semantics = (
-                str(existing.get("status") or ""),
-                _clean_mini_dma_transition_values(existing.get("values")),
-                _mini_dma_cleared_transition_labels(existing),
+            refreshed = _refresh_unchanged_portable_conflict(
+                existing, portable_review, _mini_dma_portable_review_semantics, "measurement_fingerprint",
             )
-            portable_semantics = (
-                str(portable_review.get("status") or ""),
-                _clean_mini_dma_transition_values(portable_review.get("values")),
-                _mini_dma_cleared_transition_labels(portable_review),
-            )
-            if existing_semantics == portable_semantics:
+            if refreshed is not None:
+                merged = refreshed
+            elif _mini_dma_portable_review_semantics(existing) == _mini_dma_portable_review_semantics(portable_review):
                 merged = dict(existing)
                 merged.update(
                     {
@@ -14809,18 +14848,6 @@ class FabricationSection(MiniDatabaseSection):
         }
         if not composition_tokens:
             return candidates, 0, False
-        draw_tokens: Dict[str, Set[str]] = {}
-        for comp, draw_map in relevant_map.items():
-            comp_key = self._normalise_token(comp)
-            if not comp_key:
-                continue
-            bucket = draw_tokens.setdefault(comp_key, set())
-            for draw, pieces in draw_map.items():
-                if draw is not None:
-                    bucket.add(self._normalise_token(draw))
-                for piece in pieces:
-                    if piece is not None:
-                        bucket.add(self._normalise_token(f"{draw}{piece}"))
         filtered: List[Path] = []
         skipped = 0
         for path in candidates:
@@ -14831,10 +14858,6 @@ class FabricationSection(MiniDatabaseSection):
             matched = False
             for _, token in composition_tokens.items():
                 if token and token in text:
-                    matched = True
-                    break
-                draw_set = draw_tokens.get(token)
-                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
                     matched = True
                     break
             if matched:
@@ -23586,6 +23609,11 @@ class VideoSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered = self._filter_candidates_for_relevance(
+            unique_paths, relevant_map, relevant_compositions,
+        )
+        unique_paths = filtered or unique_paths
         index = _collect_video_metrics(
             unique_paths,
             self.logger,
@@ -23942,20 +23970,7 @@ class VideoSection(MiniDatabaseSection):
             length_val = self._coerce_float(row.get("Length (m)"))
             lengths[(composition, draw, piece)] = length_val
 
-        cumulative_map: Dict[Tuple[str, int, int], Optional[float]] = {}
-        grouped: Dict[Tuple[str, int], List[Tuple[int, Optional[float]]]] = {}
-        for (composition, draw, piece), length_val in lengths.items():
-            grouped.setdefault((composition, draw), []).append((piece, length_val))
-        for (composition, draw), entries in grouped.items():
-            running: Optional[float] = 0.0
-            for piece, length_val in sorted(entries, key=lambda item: item[0]):
-                if running is None or length_val is None:
-                    running = None
-                    cumulative_map[(composition, draw, piece)] = None
-                else:
-                    running += length_val
-                    cumulative_map[(composition, draw, piece)] = running
-        return cumulative_map
+        return cumulative_piece_lengths(lengths)
 
     def _compute_video_range(
         self,
@@ -23977,16 +23992,7 @@ class VideoSection(MiniDatabaseSection):
         length_value = self._coerce_float(row.get("Length (m)"))
         if length_value is None:
             return None
-        cumulative_previous = cumulative_current - length_value
-        start_value = end_length - cumulative_previous
-        end_value = end_length - cumulative_current
-        if not (math.isfinite(start_value) and math.isfinite(end_value)):
-            return None
-        low_value = min(start_value, end_value)
-        high_value = max(start_value, end_value)
-        low_int = int(round(low_value))
-        high_int = int(round(high_value))
-        return f"{low_int}-{high_int}"
+        return video_piece_range(end_length, cumulative_current, length_value)
 
     def _load_overrides(self) -> None:
         stored = self.data.extra.get("overrides")
@@ -24257,7 +24263,6 @@ class VideoSection(MiniDatabaseSection):
             if column not in updated.columns:
                 updated[column] = None
         fabrication_frame = self._fabrication_table()
-        cumulative_map = self._build_cumulative_lengths(updated, fabrication_frame)
         shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
         for idx, row in updated.iterrows():
             key_raw = row.get("_group_key")
@@ -24289,6 +24294,7 @@ class VideoSection(MiniDatabaseSection):
                 if self._is_missing(shared_value):
                     continue
                 updated.at[idx, VIDEO_END_LENGTH_COLUMN] = shared_value
+        cumulative_map = self._build_cumulative_lengths(updated, fabrication_frame)
         for idx, row in updated.iterrows():
             try:
                 composition = str(updated.at[idx, "Composition"]).strip()
@@ -25312,6 +25318,9 @@ class VsmHysteresisSection(MiniDatabaseSection):
             visible_records,
             self._current_angle_filter_mode(),
         )
+        # Preview normalization must never rewrite persisted record identity or
+        # treatment labels. DataFrames can be shared because grouping is metadata-only.
+        display_records = [copy.copy(record) for record in display_records]
         if display_records:
             for record in display_records:
                 sample = getattr(record, "sample", None)
@@ -25328,8 +25337,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                             except Exception:
                                 pass
                             sample = base_sample
-                        if parsed_variant:
-                            variant = parsed_variant
+                        variant = parsed_variant or _vsm_hysteresis_record_variant(record)
                         setattr(record, "variant", variant)
                     label = _format_vsm_hysteresis_group_label(
                         _coerce_finite_float(getattr(record, "temperature", None)),
@@ -26384,7 +26392,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
     ) -> None:
         grouped: Dict[str, List[DmaIsoStressRecord]] = {}
         self._all_records = list(all_records)
-        visible_records = self._visible_records(all_records)
+        visible_records = [copy.copy(record) for record in self._visible_records(all_records)]
         if visible_records:
             for record in visible_records:
                 sample = getattr(record, "sample", None)
@@ -30046,7 +30054,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 payload = None
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
-        visible_records = self._visible_records(all_records)
+        visible_records = [copy.copy(record) for record in self._visible_records(all_records)]
         self._records_by_path = {}
         for record in visible_records:
             path_key = _record_path_key(record)
@@ -31348,7 +31356,7 @@ class FmrSection(MiniDatabaseSection):
             payload = None
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
-        visible_records = self._visible_records(all_records)
+        visible_records = [copy.copy(record) for record in self._visible_records(all_records)]
         if visible_records:
             for record in visible_records:
                 sample = getattr(record, "sample", None)

@@ -16,11 +16,12 @@ The source project must remain untouched unless the user explicitly asks to over
 ## Implemented
 
 - `launcher.py --automation-recipe <recipe.json>` now accepts `kind: "builder"` recipes.
-- `action: "update_section"` supports `microscope` plus graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
+- `action: "update_section"` supports `fabrication`, `videos`, `microscope` and graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
 - `action: "rebuild_assemble"` refreshes saved Assemble rows from the copied project's embedded section payloads without opening the full Builder UI.
-- Builder section project payloads now embed parsed graph payloads as `pickle-base64`, so copied `.pydpj` files can restore graph records without the global AppData store.
-- Automation runs patch the Builder storage root to a working-copy-local `_builder_store` folder while processing, so tests and CLI recipes do not depend on the user's real Builder cache.
-- `database_dir` recipes maintain a rolling `microwire_database_latest.pydpj` plus `update_manifest_latest.json`, archiving the previous latest files before promoting a successful update.
+- Version 3 projects use a ZIP package containing safe `microwire-json` metadata and content-addressed numeric blobs. Legacy executable pickle payloads are blocked on normal reads; trusted-copy migration is a separate explicit operation.
+- Automation uses unique working-copy-local store and payload staging folders, then removes only its own temporary folders.
+- `database_dir` recipes maintain a rolling latest project and manifest, prepare recovery copies, reject concurrent changes, and roll back the project if a later promotion step reports failure.
+- Refreshes preserve unparsed existing curves and saved VSM grouping by default. `prune_missing` is an explicit graph-only replacement option. Fabrication refreshes merge both visible and raw indexes; video refreshes preserve saved readings and use project Fabrication data for length mapping.
 - Builder startup can be configured to open the latest project from that database folder instead of the older last-opened project.
 
 ## Remaining Work
@@ -30,7 +31,7 @@ The source project must remain untouched unless the user explicitly asks to over
 
 ## Project Payload Requirement
 
-Before or alongside the first automation command, `.pydpj` saving must become self-contained for parsed records.
+Version 3 `.pydpj` packages are self-contained for parsed records and their numeric data.
 
 Preferred shape:
 
@@ -42,8 +43,9 @@ Preferred shape:
       "rows": [],
       "payloads": {
         "vsm_temperature_scan_records": {
-          "encoding": "pickle-base64",
-          "value": "..."
+          "encoding": "microwire-json",
+          "version": 1,
+          "value": {"$type": "list", "items": []}
         }
       }
     }
@@ -83,13 +85,12 @@ For the Praha rolling database workflow, use `database_dir` instead of fixed
 {
   "kind": "builder",
   "version": 1,
-  "project": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
   "database_dir": "G:/My Drive/1 Projects/Praha/microwire_database",
   "commands": [
     {
       "action": "update_section",
       "section": "mini_dma",
-      "paths": ["G:/My Drive/1 Projects/Praha/mini DMA"]
+      "paths": ["G:/My Drive/1 Projects/Praha/data/TMA"]
     },
     {
       "action": "rebuild_assemble",
@@ -101,7 +102,8 @@ For the Praha rolling database workflow, use `database_dir` instead of fixed
 
 The database folder keeps `microwire_database_latest.pydpj` and
 `update_manifest_latest.json` at the root, and moves the previous latest files
-to timestamped copies in `archive/` before promoting a successful new run.
+to timestamped copies in `archive/`. For a review-only dry run, omit `database_dir`
+and set `project`, `working_copy_dir`, and a distinct `output_project` explicitly.
 
 ## Safety Rules
 

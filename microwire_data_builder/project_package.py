@@ -30,6 +30,7 @@ from uuid import uuid4
 from .safe_codec import (
     SafeCodecError,
     decode_envelope,
+    decode_record_list_envelope,
     iterencode_envelope_with_blobs,
     read_json_file,
 )
@@ -439,6 +440,11 @@ class ProjectPayloadResolver:
                         )
                     return reader.read_blob(digest)
 
+                value = encoded.get("value") if isinstance(encoded, Mapping) else None
+                if payload_id.endswith("_records") and isinstance(value, Mapping) and value.get("$type") == "list":
+                    return decode_record_list_envelope(
+                        encoded, blob_resolver=_resolve, max_total_bytes=MAX_AGGREGATE_BYTES,
+                    )
                 return decode_envelope(
                     encoded,
                     blob_resolver=_resolve,
@@ -465,6 +471,15 @@ class ProjectPayloadResolver:
         }
         if not wanted:
             return []
+        return self._load_record_list(section_key, payload_id, wanted)
+
+    def load_record_list(self, section_key: str, payload_id: str) -> list[Any]:
+        """Load all measurement records under per-record and project limits."""
+        return self._load_record_list(section_key, payload_id, None)
+
+    def _load_record_list(
+        self, section_key: str, payload_id: str, wanted: set[str] | None,
+    ) -> list[Any]:
         with self._lock:
             with self.index.open_reader(budget=self.budget) as reader:
                 encoded = self._encoded_payload(section_key, payload_id, reader)
@@ -479,6 +494,9 @@ class ProjectPayloadResolver:
 
                 selected: list[Any] = []
                 for item in items:
+                    if wanted is None:
+                        selected.append(item)
+                        continue
                     if not isinstance(item, dict) or item.get("$type") != "dataclass":
                         continue
                     state = item.get("state")
@@ -516,10 +534,10 @@ class ProjectPayloadResolver:
                         )
                     return reader.read_blob(digest)
 
-                decoded = decode_envelope(subset, blob_resolver=_resolve)
-                if not isinstance(decoded, list):
-                    raise SafeCodecError("Builder record subset did not decode to a list")
-                return decoded
+                return decode_record_list_envelope(
+                    subset, blob_resolver=_resolve,
+                    max_total_bytes=MAX_AGGREGATE_BYTES,
+                )
 
 
 def _json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

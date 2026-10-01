@@ -1139,8 +1139,8 @@ def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_ro
 
         updated = section._apply_overrides_to_table(frame)
 
-        assert updated.iloc[0][VIDEO_MW_LENGTH_COLUMN] == "346-396"
-        assert updated.iloc[1][VIDEO_MW_LENGTH_COLUMN] == "276-346"
+        assert updated.iloc[0][VIDEO_MW_LENGTH_COLUMN] == "345.6-395.6"
+        assert pd.isna(updated.iloc[1][VIDEO_MW_LENGTH_COLUMN])
     finally:
         fabrication_store.save(original_data)
         if original_raw is not None:
