@@ -260,6 +260,23 @@ class Ui_MainWindow(object):
         channel_row.addWidget(self.comboBox_channel, 1)
         gb_layout.addLayout(channel_row)
 
+        self.frame_keithley_connection = QtWidgets.QWidget(gb_serial)
+        visa_row = QtWidgets.QHBoxLayout(self.frame_keithley_connection)
+        visa_row.setContentsMargins(0, 0, 0, 0)
+        visa_row.addWidget(QtWidgets.QLabel("VISA resource:"))
+        self.comboBox_keithley_resource = QtWidgets.QComboBox()
+        self.comboBox_keithley_resource.setEditable(True)
+        visa_row.addWidget(self.comboBox_keithley_resource, 1)
+        self.pushButton_refresh_keithley = QtWidgets.QPushButton("Refresh")
+        visa_row.addWidget(self.pushButton_refresh_keithley)
+        gb_layout.addWidget(self.frame_keithley_connection)
+        self.label_keithley_rates = QtWidgets.QLabel(
+            "Keithley: 50 Hz ramp control, 100 Hz I/V logging target; 0.1 NPLC, local 2-wire sensing. "
+            "Live plots show the latest 2,000 points; saved data are not thinned."
+        )
+        self.label_keithley_rates.setWordWrap(True)
+        gb_layout.addWidget(self.label_keithley_rates)
+
         self.label_broker_hint = QtWidgets.QLabel("Uses the shared HMP broker; auto-starts it from an HMP port if needed.")
         self.label_broker_hint.setWordWrap(True)
         self.label_broker_hint.setToolTip(
