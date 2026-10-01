@@ -15,9 +15,63 @@ update manifest has been inspected.
 - Reusable recipe template:
   `docs/automation_templates/praha_microwire_database_update.json`
 
+There is one canonical latest database. `_working/<UTC-run-id>/` is temporary
+staging, not a competing latest or the normal place to save scientific reviews.
+Older backups belong in `archive/`; preserve user edits and avoid overwriting
+archive names when organizing legacy files.
+
+## Complete Source Inventory
+
+Unless the user limits the import, check all supported source families before
+generating the update commands:
+
+| Family | Sources to check |
+| --- | --- |
+| VSM temperatures and hysteresis | `Praha/data/VSM temp scan`, `Praha/data/VSM hysteresis loops`, new USB data |
+| TMA | `Praha/data/TMA` and saved project roots |
+| Current annealing | `Praha/data/current annealing` and the saved Kosice Current Annealing shared-drive root |
+| Fabrication and videos | Saved `databaza mikrodrotov` shortcut target, new workbooks and recordings |
+| Microscopy | `Praha/data/microscope`, saved individual files and manual diameter overrides |
+| DMA, FMR, manual stress/strain | `Praha/data/DMA`, `Praha/data/FMR`, `Praha/data/manual stress-strain` |
+| Other data | Inventory newly discovered folders and verify importer support; preserve saved strain/transition values |
+
+Report every family as updated, unchanged, unavailable or awaiting evidence.
+Metadata discovery alone does not establish content identity or completed runs.
+The `mw data sheets` folder contains report exports; do not treat DOCX files as
+source fabrication spreadsheets. New videos require reviewed readings before
+they can supply new production parameters.
+
+The installed `$praha-microwire-database` skill captures the full workflow and
+historical evidence. Its source-inventory helper checks all supported families;
+its strict VSM validation/promotion helper is specifically for VSM-only candidates.
+
+## Stage, Validate, Promote, Review
+
+1. Snapshot the canonical latest and its manifest hashes and create a verified
+   input copy under a unique `_working/<UTC-run-id>/` directory.
+2. Generate explicit copied `project`, `output_project`, `manifest_path` and
+   `working_copy_dir` recipe paths, omitting `database_dir` during staging.
+   Refresh new/changed families and their dependencies, with Fabrication before
+   Videos and Assemble last. Use isolated Builder stores/settings.
+3. Check the saved candidate's actual records/arrays, existing sample/source
+   groups, hidden/excluded state, manual reviews and overrides, unrelated
+   sections, Assemble identities and manifest counts. Do not validate from
+   status=ok or table rows alone.
+4. Recheck the original latest and manifest hashes. Archive the previous versions
+   and promote the same validated candidate with the guarded application helper.
+   If a newer user save exists, stop and reconcile it.
+5. Open `microwire_database_latest.pydpj` with the fixed Builder for normal
+   scientific review. Snapshot a substantial review session into `archive/`
+   before editing. Save accepted/excluded decisions through the app; import
+   success does not establish scientific acceptance.
+
 ## Update Command
 
-From the PyPlot repo root, on the current approved integration branch:
+The supplied rolling recipe is a **TMA-only auto-promoting template**, not a full
+database update or a staged validation recipe. For a general update, generate
+batch-specific commands from the complete source inventory above. Use the
+rolling template only within its intended scope after validating the candidate.
+From the fixed PyPlot checkout, with existing ASCII temp/cache directories:
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
@@ -25,13 +79,13 @@ $env:MPLBACKEND='Agg'
 $env:TEMP='C:\Users\Martin\PyPlot\artifacts\tool-temp'
 $env:TMP='C:\Users\Martin\PyPlot\artifacts\tool-temp'
 $env:UV_CACHE_DIR='C:\Users\Martin\PyPlot\artifacts\uv-cache'
-.\.venv\Scripts\python.exe launcher.py --automation-recipe docs\automation_templates\praha_microwire_database_update.json
+uv run --frozen python launcher.py --automation-recipe <staged-recipe.json>
 ```
 
 ## Required Behavior
 
 - The recipe refreshes the TMA section from
-  `G:/My Drive/1 Projects/Praha/mini DMA`.
+  `G:/My Drive/1 Projects/Praha/data/TMA`.
 - It ignores `archive`, `automation_history`, `automated_control_tests`, and
   `automated` folders.
 - TMA import is sample-gated: if the newest active run for a sample is not
