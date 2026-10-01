@@ -28,6 +28,7 @@ class OwnedKeithley2636Adapter(Keithley2636Adapter):
     """Batch-only ownership: exclusive lock, output-off preflight and verified cleanup."""
 
     def open(self) -> None:
+        self.output_off_verified = False
         super().open()
         device = self._device()
         self._locked = False
@@ -84,6 +85,8 @@ class OwnedKeithley2636Adapter(Keithley2636Adapter):
             errors.append(f"VISA release failed: {exc}")
         if errors:
             raise RuntimeError("Keithley batch shutdown: " + "; ".join(errors))
+        if device is not None:
+            self.output_off_verified = True
 
 
 def running_controllers() -> list[str]:
@@ -94,8 +97,16 @@ def running_controllers() -> list[str]:
         try:
             if process.info["pid"] == own:
                 continue
+            name = (process.info.get("name") or "").lower()
+            # Shell/uv command lines may mention the script without owning it.
+            if not (name.startswith("python") or name in {"pyplot.exe", "currentprogramlogger.exe"}):
+                continue
             command = " ".join(process.info.get("cmdline") or []).lower()
-            if "experiments.current_program_logger" in command or "launcher.py" in command:
+            if any(name in command for name in (
+                "experiments.current_program_logger", "launcher.py", "current_program_batch.py",
+                "current_program_hold_batch.py", "current_annealing_logger", "mini_dma_logger",
+                "tma_logger",
+            )):
                 found.append(f"PID {process.info['pid']}: {command[:160]}")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             # Inability to inspect another Python process is an ownership failure.

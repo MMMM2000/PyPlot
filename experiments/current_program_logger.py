@@ -23,7 +23,9 @@ from typing import Any, Callable, Protocol, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from experiments.siglent_spd1305x import SiglentSPD1305XAdapter
-from experiments.current_program_support import BufferedCsv, ElectricalLimits, ElectricalMonitor
+from experiments.current_program_support import (
+    BufferedCsv, ElectricalLimits, ElectricalMonitor, ColdResetLimits, ColdResetMonitor,
+)
 from experiments.current_program_profiles import PROFILES
 from plotting.shared.power_guard import create_experiment_sleep_guard
 
@@ -544,8 +546,26 @@ class RunConfig:
     electrical_limits: ElectricalLimits = ElectricalLimits()
     advance_on_resistance_timeout: bool = False
     stop_when_sequence_complete: bool = False
+    cold_reset: ColdResetLimits | None = None
+    emergency_resistance_ohm: float | None = None
 
     def __post_init__(self) -> None:
+        if self.emergency_resistance_ohm is not None and (
+            not math.isfinite(self.emergency_resistance_ohm)
+            or self.max_resistance_ohm is None
+            or self.emergency_resistance_ohm <= self.max_resistance_ohm
+        ):
+            raise ValueError("Emergency resistance must exceed the cooling guard.")
+        if self.cold_reset is not None:
+            if (self.repeat_count != 1 or not self.stop_when_sequence_complete
+                    or self.resistance_action != "readout_current" or len(self.blocks) < 3
+                    or any(block.kind != "Hold" for block in self.blocks)
+                    or any(self.blocks[i].target_mA != self.initial_current_mA for i in (0, -1))
+                    or any(self.blocks[i].duration_s is None for i in (0, -1))
+                    or any(self.blocks[i].resistance_ohm is not None for i in (0, -1))
+                    or self.blocks[0].duration_s < self.cold_reset.window_s
+                    or self.blocks[-1].duration_s > self.cold_reset.timeout_s):
+                raise ValueError("Cold-reset batches require finite initial/final readout holds and one cycle.")
         if self.log_rate_hz is not None and (not math.isfinite(self.log_rate_hz) or self.log_rate_hz <= 0):
             raise ValueError("CSV rate must be positive and finite.")
         for block_index, from_s, rate_hz in self.log_rate_schedule:
@@ -873,6 +893,10 @@ class ProgramWorker(QtCore.QThread):
         fault_sample = None
         writer = None
         sleep_guard = None
+        cold = ColdResetMonitor(self.config.cold_reset) if self.config.cold_reset else None
+        baseline_complete = False
+        cooling_started = None
+        forced_cooling_started = None
         try:
             run_dir.mkdir(parents=True, exist_ok=False)
             metadata = {
@@ -900,6 +924,8 @@ class ProgramWorker(QtCore.QThread):
                 "log_rate_hz": self.config.log_rate_hz or self.config.measurement_rate_hz,
                 "log_rate_schedule": [list(item) for item in self.config.log_rate_schedule],
                 "electrical_limits": asdict(self.config.electrical_limits),
+                "cold_reset": asdict(self.config.cold_reset) if self.config.cold_reset else None,
+                "emergency_resistance_ohm": self.config.emergency_resistance_ohm,
             }
             metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             self.paths_ready.emit(str(csv_path) if self.config.record_csv else "", str(metadata_path))
@@ -986,6 +1012,8 @@ class ProgramWorker(QtCore.QThread):
                         opened = False
                         self._stop_event.set()
             start = time.monotonic()
+            metadata["sequence_started_monotonic_s"] = start
+            metadata["sequence_started_utc"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             sequence_start = start
             control_interval_s = 1.0 / self.config.control_rate_hz
             acquisition_interval_s = 1.0 / max(
@@ -1039,6 +1067,25 @@ class ProgramWorker(QtCore.QThread):
                     next_ui = now
                 if now >= next_control:
                     state = engine.state_at(now - sequence_start)
+                    if cold is not None:
+                        if forced_cooling_started is not None:
+                            age = now - forced_cooling_started
+                            state = ProgramState(0, len(self.config.blocks)-1, self.config.blocks[-1],
+                                                 self.config.initial_current_mA, age,
+                                                 age >= self.config.blocks[-1].duration_s)
+                        if not baseline_complete and state.block_index != 0:
+                            if not cold.stable():
+                                raise RuntimeError("Cold baseline was not stable/in band; heating refused.")
+                            baseline_complete = True
+                            metadata["cold_reference_ohm"] = cold.reference
+                            cold.clear()
+                            sequence_events.append(dict(event="cold_baseline_qualified", elapsed_s=now-start))
+                        if state.block_index == len(self.config.blocks)-1:
+                            if cooling_started is None:
+                                cooling_started = now
+                                cold.clear()
+                            if now - cooling_started > cold.limits.timeout_s:
+                                raise RuntimeError("Cold reset timed out; refusing the next trial.")
                     timeout_events = getattr(engine, "timeout_events", ())
                     for cycle, block_index, at in timeout_events[seen_timeout_events:]:
                         sequence_events.append(dict(event="resistance_timeout_continue",
@@ -1061,10 +1108,12 @@ class ProgramWorker(QtCore.QThread):
                         else:
                             target = min(target, resistance_current_ceiling_mA)
                 if now >= next_control and (last_target is None or abs(target - last_target) >= 1e-9):
+                    command_started = time.monotonic()
                     self.adapter.set_current(target)
                     last_target = target
                     if self.config.stop_when_sequence_complete:
                         current_commands.append(dict(elapsed_s=time.monotonic()-start,
+                                                     issue_elapsed_s=command_started-start,
                                                      sequence_id=sequence_id,
                                                      block_index=state.block_index,
                                                      target_current_mA=target))
@@ -1112,6 +1161,19 @@ class ProgramWorker(QtCore.QThread):
                     ):
                         raise RuntimeError("Invalid resistance protection measurement; stopping output.")
                     tripped_now = False
+                    if (self.config.emergency_resistance_ohm is not None
+                            and target >= self.config.max_resistance_active_above_mA
+                            and resistance is not None
+                            and resistance >= self.config.emergency_resistance_ohm):
+                        self.adapter.close()
+                        opened = False
+                        fault_sample = dict(timestamp_utc=_utc_now(), elapsed_s=acquired_at-start,
+                                            target_current_mA=target, measured_current_mA=measured,
+                                            voltage_V=voltage, resistance_ohm=resistance,
+                                            electrical_fault="Absolute resistance cutoff")
+                        if writer is not None:
+                            writer.submit(fault_sample, flush=True)
+                        raise RuntimeError("Absolute resistance cutoff; output OFF.")
                     if (
                         resistance_current_ceiling_mA is None
                         and self.config.max_resistance_ohm is not None
@@ -1133,6 +1195,14 @@ class ProgramWorker(QtCore.QThread):
                             )
                             self.adapter.set_current(resistance_current_ceiling_mA)
                             last_target = resistance_current_ceiling_mA
+                            if cold is not None:
+                                forced_cooling_started = time.monotonic()
+                                sequence_events.append(dict(event="guard_to_cooling",
+                                                            elapsed_s=forced_cooling_started-start))
+                                current_commands.append(dict(elapsed_s=forced_cooling_started-start,
+                                    sequence_id=sequence_id, block_index=len(self.config.blocks)-1,
+                                    target_current_mA=last_target))
+                                next_control = forced_cooling_started
                         if self.config.resistance_action == "output_off":
                             # Shut down before logging, UI signals, or another recipe command.
                             self.adapter.close()
@@ -1167,9 +1237,12 @@ class ProgramWorker(QtCore.QThread):
                         "sequence_id": sequence_id,
                         "sequence_elapsed_s": acquired_at - sequence_start,
                     }
+                    if cold is not None and state.block_index in (0, len(self.config.blocks)-1):
+                        cold.observe(acquired_at, resistance)
                     log_rate = self.config.log_rate_for(state)
                     log_phase = (state.cycle_index, state.block_index, log_rate)
-                    if log_phase != last_log_phase or acquired_at >= next_log or tripped_now:
+                    if (log_rate >= 1.0 / acquisition_interval_s
+                            or log_phase != last_log_phase or acquired_at >= next_log or tripped_now):
                         if writer is not None:
                             writer.submit(row, flush=tripped_now)
                         next_log = acquired_at + 1.0 / log_rate
@@ -1193,7 +1266,11 @@ class ProgramWorker(QtCore.QThread):
                             }
                         )
                         next_ui = max(next_ui + ui_interval_s, now + ui_interval_s)
-                    if self.config.stop_when_sequence_complete and state.sequence_complete:
+                    if (self.config.stop_when_sequence_complete and state.sequence_complete
+                            and (cold is None or cold.stable())):
+                        if cold is not None:
+                            metadata["cold_reset_verified"] = True
+                            metadata["cold_reset_elapsed_s"] = acquired_at-start
                         sequence_events.append(dict(event="sequence_complete_stop",
                                                     elapsed_s=acquired_at-start, sequence_id=sequence_id))
                         self._stop_event.set()
@@ -1241,6 +1318,7 @@ class ProgramWorker(QtCore.QThread):
                         sequence_events_retained_limit=1024,
                         electrical_fault=monitor.fault,
                         fault_sample=fault_sample,
+                        output_off_verified=getattr(self.adapter, "output_off_verified", None),
                     )
                     metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 except Exception:

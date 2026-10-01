@@ -4,10 +4,77 @@ from __future__ import annotations
 import csv
 import math
 import time
+import statistics
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, Thread
+
+
+@dataclass(frozen=True)
+class ColdResetLimits:
+    """Batch-only cold reset, measured at the same readout current throughout."""
+    reference_ohm: float | None = None
+    window_s: float = 2.0
+    tolerance_ohm: float = 2.0
+    timeout_s: float = 90.0
+
+    def __post_init__(self):
+        values = (self.window_s, self.tolerance_ohm, self.timeout_s)
+        if not all(math.isfinite(v) and v > 0 for v in values) or self.timeout_s < self.window_s:
+            raise ValueError("Cold reset requires positive finite limits and a sufficient timeout.")
+        if self.reference_ohm is not None and (not math.isfinite(self.reference_ohm) or self.reference_ohm <= 0):
+            raise ValueError("Cold reference must be positive and finite.")
+
+
+class ColdResetMonitor:
+    def __init__(self, limits: ColdResetLimits):
+        self.limits = limits
+        self.samples = deque(maxlen=10000)
+        self.reference = limits.reference_ohm
+        self.band = limits.tolerance_ohm
+        self.last_qualification = -math.inf
+        self.qualified = False
+
+    def observe(self, now, resistance):
+        if resistance is None or not math.isfinite(resistance) or resistance <= 0:
+            raise RuntimeError("Invalid cold-reset resistance")
+        self.samples.append((now, resistance))
+        while len(self.samples) > 1 and now - self.samples[1][0] >= self.limits.window_s:
+            self.samples.popleft()
+
+    def stable(self):
+        if len(self.samples) < 3 or self.samples[-1][0] - self.samples[0][0] < self.limits.window_s:
+            return False
+        now = self.samples[-1][0]
+        if now-self.last_qualification < min(.1, self.limits.window_s/4):
+            return self.qualified
+        self.last_qualification = now
+        self.qualified = self._qualify_window()
+        return self.qualified
+
+    def _qualify_window(self):
+        points = list(self.samples)
+        if max(b[0]-a[0] for a, b in zip(points, points[1:])) > self.limits.window_s * .6:
+            return False
+        values = [value for _, value in points]
+        center = statistics.median(values)
+        middle = len(values)//2
+        halves = (statistics.median(values[:middle]), statistics.median(values[middle:]))
+        # At 0.1 mA individual V/I readings can be noisy. Qualify two window
+        # medians, not raw peaks. The fixed band is never widened after heating.
+        # All individual readings, including outliers, remain in the raw CSV.
+        if abs(halves[0]-halves[1]) > self.band:
+            return False
+        if self.reference is None:
+            self.reference = center
+        return all(abs(value-self.reference) <= self.band for value in (center, *halves))
+
+    def clear(self):
+        self.samples.clear()
+        self.last_qualification = -math.inf
+        self.qualified = False
 
 
 @dataclass(frozen=True)
