@@ -6,6 +6,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
+import pandas as pd
+
 from plotting.plugins.current_annealing import core as annealing_core
 from plotting.plugins.mini_dma import core as tma_core
 from plotting.shared.transition_review import (
@@ -69,16 +71,11 @@ def current_annealing_review_draft(
     )
 
 
-def tma_review_draft(
-    run_path: Path,
-    *,
-    loaded_run: tma_core.MiniDmaRun | None = None,
-) -> dict[str, Any]:
-    run = loaded_run if loaded_run is not None else tma_core.load_run(Path(run_path))
-    if not tma_core.supports_transition_review(run):
-        raise ValueError(f"TMA run does not support transition review: {run_path}")
-    fingerprint = dataframe_fingerprint(
-        run.frame,
+def tma_measurement_fingerprint(frame: pd.DataFrame) -> str:
+    """Identify the same normalized measurement values used by the TMA editor."""
+
+    return dataframe_fingerprint(
+        frame,
         namespace="tma",
         columns=(
             "elapsed_s",
@@ -91,6 +88,17 @@ def tma_review_draft(
             "load_g",
         ),
     )
+
+
+def tma_review_draft(
+    run_path: Path,
+    *,
+    loaded_run: tma_core.MiniDmaRun | None = None,
+) -> dict[str, Any]:
+    run = loaded_run if loaded_run is not None else tma_core.load_run(Path(run_path))
+    if not tma_core.supports_transition_review(run):
+        raise ValueError(f"TMA run does not support transition review: {run_path}")
+    fingerprint = tma_measurement_fingerprint(run.frame)
     summary = tma_core.summarize_current_sweep(run)
     target_items = list(summary.targets)
     sweep_counts = Counter(
@@ -147,4 +155,5 @@ __all__ = [
     "ANALYSIS_VERSION",
     "current_annealing_review_draft",
     "tma_review_draft",
+    "tma_measurement_fingerprint",
 ]
