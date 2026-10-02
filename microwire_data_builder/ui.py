@@ -27439,9 +27439,22 @@ class MiniDmaSection(MiniDatabaseSection):
         return metadata
 
     def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
-        deferred_paths = {
-            _mini_dma_review_record_path(record)
+        def normalized_path(path: str) -> str:
+            return os.path.normcase(os.path.normpath(path)) if path else ""
+
+        # A partial preview can omit other current sources entirely. Keep their
+        # paths visible before filtering lazy frames, and let this batch's loaded
+        # records override stale placeholders in the section-wide inventory.
+        known_by_path = {
+            normalized_path(_mini_dma_review_record_path(record)): record
+            for record in (getattr(self, "_all_mini_dma_records", ()) or ())
+        }
+        known_by_path.update({
+            normalized_path(_mini_dma_review_record_path(record)): record
             for record in records
+        })
+        deferred_paths = {
+            path for path, record in known_by_path.items()
             if not _mini_dma_has_review_content(record)
         }
         records = [record for record in records if _mini_dma_has_review_content(record)]
@@ -27452,25 +27465,35 @@ class MiniDmaSection(MiniDatabaseSection):
         direct: List[Tuple[str, MiniDmaRecord]] = []
         direct_mismatches: List[str] = []
         for stored_id, payload in self._transition_reviews.items():
-            if (
-                not stored_id.startswith("unmatched:")
-                and stored_id.rsplit("::", 1)[0] in deferred_paths
-            ):
-                # A preview batch may load only one run. Keep decisions for the
-                # remaining lazy runs untouched until their content is available.
+            source_path = str(payload.get("record_path") or "").strip()
+            if not source_path and not stored_id.startswith("unmatched:"):
+                source_path = stored_id.rsplit("::", 1)[0]
+            source_path = normalized_path(source_path)
+            if source_path in deferred_paths:
+                # This applies to quarantined portable saves as well as active
+                # keys: another loaded copy cannot stand in for a known lazy run.
                 continue
             target_label = str(payload.get("target_label") or "").strip()
             if not target_label and "::" in stored_id:
                 target_label = stored_id.rsplit("::", 1)[-1].strip()
             if not target_label:
                 continue
-            direct_matches = [
-                record
-                for record in records
-                if _mini_dma_review_record_id(record, target_label) == stored_id
-            ]
             content_identity = str(payload.get("content_identity") or "").strip()
             fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
+            candidate_records = records
+            if not content_identity and fingerprint and source_path in known_by_path:
+                # A pending portable decision has not yet been verified against
+                # embedded content. While its explicit source remains present,
+                # verify that source itself instead of relocating to a duplicate.
+                candidate_records = [
+                    record for record in records
+                    if normalized_path(_mini_dma_review_record_path(record)) == source_path
+                ]
+            direct_matches = [
+                record
+                for record in candidate_records
+                if _mini_dma_review_record_id(record, target_label) == stored_id
+            ]
             if direct_matches and (
                 len(direct_matches) != 1
                 or (
@@ -27490,7 +27513,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     payload,
                     [
                         record
-                        for record in records
+                        for record in candidate_records
                         if all(
                             record is not conflicting
                             for conflicting in direct_matches
@@ -27505,7 +27528,7 @@ class MiniDmaSection(MiniDatabaseSection):
             if len(direct_matches) == 1:
                 direct.append((stored_id, direct_matches[0]))
                 continue
-            candidates = self._mini_dma_review_candidates(stored_id, payload, records)
+            candidates = self._mini_dma_review_candidates(stored_id, payload, candidate_records)
             if len(candidates) != 1:
                 continue
             record = candidates[0]

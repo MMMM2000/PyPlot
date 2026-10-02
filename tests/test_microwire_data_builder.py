@@ -17077,3 +17077,99 @@ def test_tma_identity_delayed_older_pending_acknowledgement_preserves_newest_dec
     assert saved[record_id]["portable_review_revision"] == 2
     assert saved[record_id]["values"] == {"As": 11.0, "Af": 21.0}
     assert any(review == stale for key, review in saved.items() if key.startswith("unmatched:tma:"))
+
+
+@pytest.mark.parametrize("partial_preview", [False, True])
+def test_tma_identity_known_lazy_source_defers_duplicate_content_until_own_preview_loads(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial_preview: bool
+) -> None:
+    section = tma_identity_section
+    duplicate = _tma_identity_record(tmp_path / "run-a")
+    lazy = _tma_identity_record(tmp_path / "run-b", loaded=False)
+    loaded = _tma_identity_record(lazy.path)
+    target = "20 MPa"
+    section._all_mini_dma_records = [duplicate, lazy]
+    builder_ui._apply_saved_tma_review_payload(lazy, {
+        "measurement_fingerprint": builder_ui._mini_dma_record_measurement_fingerprint(loaded),
+        "review_revision": 1,
+        "targets": [{"display_label": target, "status": "manual_adjusted",
+                     "final_values": {"As": 10.0, "Af": 20.0}, "cleared_labels": ["Ms", "Mf"]}],
+    }, section, section.logger)
+    pending = section.transition_reviews_snapshot()
+    assert len(pending) == 1
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda *_args: False)
+    section._reconcile_transition_reviews([duplicate] if partial_preview else [duplicate, lazy])
+    assert section.transition_reviews_snapshot() == pending
+    duplicate_id = builder_ui._mini_dma_review_record_id(duplicate, target)
+    own_id = builder_ui._mini_dma_review_record_id(loaded, target)
+    assert duplicate_id not in pending
+    assert own_id not in pending
+    # The current preview must override the stale lazy global record, even when
+    # another loaded source has identical content and no global refresh occurred.
+    section._reconcile_transition_reviews([loaded] if partial_preview else [duplicate, loaded])
+    rebound = section.transition_reviews_snapshot()
+    assert list(rebound) == [own_id]
+    assert rebound[own_id]["record_path"] == str(loaded.path)
+    assert rebound[own_id]["values"] == {"As": 10.0, "Af": 20.0}
+    assert rebound[own_id]["cleared_labels"] == ["Mf", "Ms"]
+    assert section._all_mini_dma_records[1].data.empty
+    # A subsequent preview of only the duplicate cannot move the decision.
+    section._reconcile_transition_reviews([duplicate])
+    assert section.transition_reviews_snapshot() == rebound
+    section._store_transition_reviews()
+    section.data = section.store.load()
+    section._load_transition_reviews()
+    section._reconcile_transition_reviews([duplicate])
+    assert section.transition_reviews_snapshot() == rebound
+
+
+@pytest.mark.parametrize("partial_preview", [False, True])
+def test_tma_identity_known_lazy_source_keeps_verified_history_quarantined(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial_preview: bool
+) -> None:
+    section = tma_identity_section
+    duplicate = _tma_identity_record(tmp_path / "run-a")
+    original = _tma_identity_record(tmp_path / "run-b")
+    target = "20 MPa"
+    section._all_mini_dma_records = [original]
+    original_id = builder_ui._mini_dma_review_record_id(original, target)
+    section.set_transition_review_for_target(original_id, {
+        "status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0},
+        "measurement_fingerprint": builder_ui._mini_dma_record_measurement_fingerprint(original),
+    })
+    builder_ui._move_transition_review_to_orphan(section._transition_reviews, original_id, "tma")
+    pending = section.transition_reviews_snapshot()
+    lazy = _tma_identity_record(original.path, loaded=False)
+    section._all_mini_dma_records = [duplicate, lazy]
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda *_args: False)
+    section._reconcile_transition_reviews([duplicate] if partial_preview else [duplicate, lazy])
+    assert section.transition_reviews_snapshot() == pending
+
+
+@pytest.mark.parametrize("verified_identity", [False, True])
+def test_tma_identity_absent_original_source_allows_unique_moved_content_recovery(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_identity: bool
+) -> None:
+    section = tma_identity_section
+    original = _tma_identity_record(tmp_path / "old-run", loaded=verified_identity)
+    moved = _tma_identity_record(tmp_path / "renamed-run")
+    target = "20 MPa"
+    section._all_mini_dma_records = [original]
+    original_id = builder_ui._mini_dma_review_record_id(original, target)
+    section.set_transition_review_for_target(original_id, {
+        "status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0},
+        "measurement_fingerprint": builder_ui._mini_dma_record_measurement_fingerprint(moved),
+        "portable_review_revision": 1,
+    })
+    if verified_identity:
+        builder_ui._move_transition_review_to_orphan(section._transition_reviews, original_id, "tma")
+    pending = section.transition_reviews_snapshot()
+    assert len(pending) == 1
+    section._all_mini_dma_records = [moved]
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda *_args: False)
+    section._reconcile_transition_reviews([moved])
+    moved_id = builder_ui._mini_dma_review_record_id(moved, target)
+    rebound = section.transition_reviews_snapshot()
+    assert list(rebound) == [moved_id]
+    assert rebound[moved_id]["values"] == {"As": 10.0, "Af": 20.0}
+    assert rebound[moved_id]["record_path"] == str(moved.path)
