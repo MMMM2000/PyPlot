@@ -8400,6 +8400,17 @@ def _move_transition_review_to_orphan(
     return True
 
 
+# Legacy lazy records were incorrectly hashed as a measured empty DataFrame.
+_MINI_DMA_EMPTY_CONTENT_IDENTITY = (
+    "tma:3ab2ad10a3e3cc32fa3b07883329bb8397c1e200599339760df3dc5486623256"
+)
+
+
+def _mini_dma_has_review_content(record: MiniDmaRecord) -> bool:
+    frame = getattr(record, "data", None)
+    return isinstance(frame, pd.DataFrame) and not frame.empty
+
+
 def _mini_dma_review_record_path(record: MiniDmaRecord) -> str:
     cached = getattr(record, "_builder_review_path", None)
     if isinstance(cached, str) and cached:
@@ -8436,6 +8447,9 @@ def _canonical_mini_dma_review_record_id(
     stored_id: str,
     payload: Mapping[str, Any],
 ) -> str:
+    # An orphan payload retains its old path for provenance, not reattachment.
+    if stored_id.startswith("unmatched:"):
+        return stored_id
     record_path = str(payload.get("record_path") or "").strip()
     if not record_path and "::" in stored_id:
         record_path = stored_id.rsplit("::", 1)[0].strip()
@@ -27331,7 +27345,11 @@ class MiniDmaSection(MiniDatabaseSection):
         payload: Mapping[str, Any],
         records: Sequence[MiniDmaRecord],
     ) -> List[MiniDmaRecord]:
+        records = [record for record in records if _mini_dma_has_review_content(record)]
         content_identity = str(payload.get("content_identity") or "").strip()
+        if stored_id.startswith("unmatched:") and not content_identity:
+            # Sample/run labels alone cannot release quarantined history.
+            return []
         if content_identity:
             candidates = [
                 record
@@ -27341,7 +27359,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 )
                 == content_identity
             ]
-            if len(candidates) <= 1:
+            if len(candidates) <= 1 or stored_id.startswith("unmatched:"):
                 return candidates
         else:
             candidates = list(records)
@@ -27380,11 +27398,11 @@ class MiniDmaSection(MiniDatabaseSection):
         return candidates
 
     def _mini_dma_review_metadata(self, record: MiniDmaRecord) -> Dict[str, str]:
-        metadata = {
-            "content_identity": _transition_review_content_identity(
+        metadata: Dict[str, str] = {}
+        if _mini_dma_has_review_content(record):
+            metadata["content_identity"] = _transition_review_content_identity(
                 record, "tma", self._review_content_identity_cache
             )
-        }
         path = getattr(record, "path", None)
         if isinstance(path, Path):
             metadata["record_path"] = str(path)
@@ -27392,6 +27410,12 @@ class MiniDmaSection(MiniDatabaseSection):
         return metadata
 
     def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
+        deferred_paths = {
+            _mini_dma_review_record_path(record)
+            for record in records
+            if not _mini_dma_has_review_content(record)
+        }
+        records = [record for record in records if _mini_dma_has_review_content(record)]
         changed = _import_portable_tma_reviews(
             records, self._transition_reviews, self.logger
         )
@@ -27399,6 +27423,13 @@ class MiniDmaSection(MiniDatabaseSection):
         direct: List[Tuple[str, MiniDmaRecord]] = []
         direct_mismatches: List[str] = []
         for stored_id, payload in self._transition_reviews.items():
+            if (
+                not stored_id.startswith("unmatched:")
+                and stored_id.rsplit("::", 1)[0] in deferred_paths
+            ):
+                # A preview batch may load only one run. Keep decisions for the
+                # remaining lazy runs untouched until their content is available.
+                continue
             target_label = str(payload.get("target_label") or "").strip()
             if not target_label and "::" in stored_id:
                 target_label = stored_id.rsplit("::", 1)[-1].strip()
@@ -27585,7 +27616,24 @@ class MiniDmaSection(MiniDatabaseSection):
                 if _mini_dma_review_record_id(record, target_label) == str(record_id)
             ]
             if len(matches) == 1:
-                payload = {**payload, **self._mini_dma_review_metadata(matches[0])}
+                metadata = self._mini_dma_review_metadata(matches[0])
+                if "content_identity" not in metadata:
+                    if payload.get("content_identity") == _MINI_DMA_EMPTY_CONTENT_IDENTITY:
+                        payload = dict(payload)
+                        payload.pop("content_identity")
+                    previous = self._transition_reviews.get(str(record_id), {})
+                    fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
+                    previous_identity = str(previous.get("content_identity") or "").strip()
+                    if (
+                        fingerprint
+                        and fingerprint == previous.get("measurement_fingerprint")
+                        and previous_identity
+                        and previous_identity != _MINI_DMA_EMPTY_CONTENT_IDENTITY
+                    ):
+                        # The portable editor has verified this exact source;
+                        # retain an earlier loaded-content identity while lazy.
+                        payload = {"content_identity": previous_identity, **payload}
+                payload = {**payload, **metadata}
         entry = self._clean_transition_review_payload(record_id, payload)
         if entry:
             self._transition_reviews[str(record_id)] = entry

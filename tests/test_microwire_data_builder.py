@@ -16537,3 +16537,223 @@ def test_transition_review_controls_wrap_and_empty_state_is_exclusive(qtbot) -> 
         ca_dialog.close()
         tma_dialog.close()
         vsm_panel.close()
+
+
+@pytest.fixture
+def tma_identity_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Use only synthetic runs and the test's isolated Builder store."""
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    yield section
+    section._transition_review_store_timer.stop()
+    section._transition_table_apply_timer.stop()
+    section.close()
+    section.deleteLater()
+    QtWidgets.QApplication.processEvents()
+
+
+def _tma_identity_record(path: Path, *, loaded: bool = True, strain: float = 1.0):
+    return builder_ui.MiniDmaRecord(
+        path=path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, strain]})
+        if loaded else pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label=path.name,
+    )
+
+
+@pytest.mark.parametrize("fingerprint", ["sha256:" + "a" * 64, "sha256:" + "b" * 64, ""])
+def test_tma_identity_lazy_portable_save_preserves_only_verified_prior_identity(
+    tma_identity_section, tmp_path: Path, fingerprint: str
+) -> None:
+    section = tma_identity_section
+    loaded = _tma_identity_record(tmp_path / "run")
+    target = "20 MPa / 0.16 g"
+    record_id = builder_ui._mini_dma_review_record_id(loaded, target)
+    prior_fingerprint = "sha256:" + "a" * 64
+    section._all_mini_dma_records = [loaded]
+    section.set_transition_review_for_target(record_id, {
+        "status": "accepted", "target_label": target,
+        "values": {"As": 10.0, "Af": 21.0},
+        "measurement_fingerprint": prior_fingerprint,
+    })
+    previous_identity = section.transition_reviews_snapshot()[record_id]["content_identity"]
+    lazy = _tma_identity_record(loaded.path, loaded=False)
+    section._all_mini_dma_records = [lazy]
+    portable = {
+        "measurement_fingerprint": fingerprint, "review_revision": 9,
+        "targets": [{
+            "display_label": target, "status": "manual_adjusted", "analysis_included": True,
+            "final_values": {"As": 10.0, "Af": 20.0},
+            "manual_values": {"Af": 20.0}, "cleared_labels": ["Ms", "Mf"],
+            "strain_reference": {"method": "motor-counter", "l0_mm": 20.0},
+        }],
+    }
+    assert builder_ui._apply_saved_tma_review_payload(lazy, portable, section, section.logger)
+    saved = section.transition_reviews_snapshot()[record_id]
+    assert saved["status"] == "accepted"
+    assert saved["values"] == {"As": 10.0, "Af": 20.0}
+    assert saved["manual_values_mA"] == {"Af": 20.0}
+    assert saved["cleared_labels"] == ["Mf", "Ms"]
+    assert saved["portable_review_revision"] == 9
+    assert saved["strain_reference"] == {"method": "motor-counter", "l0_mm": 20.0}
+    if fingerprint == prior_fingerprint:
+        assert saved["content_identity"] == previous_identity
+    else:
+        assert "content_identity" not in saved
+    if fingerprint:
+        assert saved["measurement_fingerprint"] == fingerprint
+
+
+@pytest.mark.parametrize("with_legacy_identity", [False, True])
+def test_tma_identity_fresh_lazy_save_never_stamps_empty_content(
+    tma_identity_section, tmp_path: Path, with_legacy_identity: bool
+) -> None:
+    section = tma_identity_section
+    frame = pd.DataFrame({
+        "_sample": ["run-a", "run-b"],
+        "_sources": [[str(tmp_path / "run-a")], [str(tmp_path / "run-b")]],
+        builder_ui.MINI_DMA_COLUMN: [["run-a"], ["run-b"]],
+    })
+    records = builder_ui._mini_dma_records_from_project_table(frame)
+    section._all_mini_dma_records = records
+    assert len(records) == 2
+    empty_identity = builder_ui._transition_review_content_identity(records[0], "tma")
+    assert empty_identity == builder_ui._MINI_DMA_EMPTY_CONTENT_IDENTITY
+    for record in records:
+        payload = {"status": "accepted", "target_label": "20 MPa", "values": {"As": 10.0, "Af": 20.0}}
+        if with_legacy_identity:
+            payload["content_identity"] = empty_identity
+        section.set_transition_review_for_target(
+            builder_ui._mini_dma_review_record_id(record, "20 MPa"), payload
+        )
+    assert all("content_identity" not in review for review in section.transition_reviews_snapshot().values())
+
+
+def test_tma_identity_mixed_preview_batch_keeps_unresolved_decisions(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    section = tma_identity_section
+    loaded = [_tma_identity_record(tmp_path / f"run-{i}", strain=float(i + 1)) for i in range(3)]
+    lazy = [_tma_identity_record(record.path, loaded=False) for record in loaded]
+    target = "20 MPa"
+    for i, record in enumerate(loaded):
+        record_id = builder_ui._mini_dma_review_record_id(record, target)
+        payload = {"status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0}}
+        if i < 2:
+            payload.update(section._mini_dma_review_metadata(record))
+        section._transition_reviews[record_id] = section._clean_transition_review_payload(record_id, payload)
+    before = copy.deepcopy(section.transition_reviews_snapshot())
+    imported_batches = []
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda records, *_args: imported_batches.append(list(records)) or False)
+    section._set_record_groups(lazy, reconcile_reviews=False)
+    section._accept_project_overview_records([loaded[0]])
+    assert imported_batches == [[loaded[0]]]
+    assert section.transition_reviews_snapshot() == before
+    assert section._all_mini_dma_records[1].data.empty
+    assert section._all_mini_dma_records[2].data.empty
+
+
+def test_tma_identity_orphan_round_trip_cannot_overwrite_current_review(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    section = tma_identity_section
+    record = _tma_identity_record(tmp_path / "run", strain=9.0)
+    prior = _tma_identity_record(record.path, strain=1.0)
+    target = "20 MPa"
+    record_id = builder_ui._mini_dma_review_record_id(record, target)
+    orphan_id = "unmatched:tma:synthetic-history"
+    current = {"status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0}, **section._mini_dma_review_metadata(record)}
+    history = {"status": "no_transition", "target_label": target, **section._mini_dma_review_metadata(prior)}
+    section._transition_reviews = {record_id: current, orphan_id: history}
+    before = copy.deepcopy(section.transition_reviews_snapshot())
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda *_args: False)
+    for _ in range(3):
+        section._store_transition_reviews()
+        section.data = section.store.load()
+        section._load_transition_reviews()
+        section._reconcile_transition_reviews([record])
+        assert section.transition_reviews_snapshot() == before
+    assert builder_ui._canonical_mini_dma_review_record_id(orphan_id, history) == orphan_id
+
+
+@pytest.mark.parametrize("match", ["no_identity", "different", "unique", "ambiguous"])
+def test_tma_identity_orphan_reattachment_requires_unique_loaded_content(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, match: str
+) -> None:
+    section = tma_identity_section
+    record = _tma_identity_record(tmp_path / "run-a")
+    target = "20 MPa"
+    orphan_id = "unmatched:tma:synthetic-history"
+    payload = {
+        "status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0},
+        "sample": record.sample, "run_label": record.label, "record_path": str(record.path),
+    }
+    if match != "no_identity":
+        content = record if match != "different" else _tma_identity_record(record.path, strain=9.0)
+        payload["content_identity"] = builder_ui._transition_review_content_identity(content, "tma")
+    section._transition_reviews = {orphan_id: section._clean_transition_review_payload(orphan_id, payload)}
+    records = [record]
+    if match == "ambiguous":
+        records.append(_tma_identity_record(tmp_path / "different-name"))
+    monkeypatch.setattr(builder_ui, "_import_portable_tma_reviews", lambda *_args: False)
+    section._reconcile_transition_reviews(records)
+    saved = section.transition_reviews_snapshot()
+    if match == "unique":
+        current_id = builder_ui._mini_dma_review_record_id(record, target)
+        assert orphan_id not in saved
+        assert saved[current_id]["values"] == {"As": 10.0, "Af": 20.0}
+    else:
+        assert list(saved) == [orphan_id]
+
+
+def test_tma_identity_true_portable_conflict_is_stable_across_reload(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from plotting.shared import transition_review, transition_review_adapters
+
+    section = tma_identity_section
+    record = _tma_identity_record(tmp_path / "run")
+    target = "20 MPa / 0.16 g"
+    fingerprint = "sha256:" + "a" * 64
+    entry = SimpleNamespace(
+        sample=record.sample, run_label=record.label, target_label=target, status="Detected",
+        target_summary=SimpleNamespace(stress_mpa=20.0), sweep_index=1,
+    )
+    sidecar = tmp_path / "synthetic-review.json"
+    sidecar.write_text("{}", encoding="utf-8")
+    portable = {
+        "experiment_family": "tma", "measurement_fingerprint": fingerprint, "review_revision": 4,
+        "targets": [{
+            "target": {"stress_mpa": 20.0, "sweep_index": 1}, "status": "manual_adjusted",
+            "final_values": {"As": 11.0, "Af": 22.0}, "manual_values": {"Af": 22.0},
+            "cleared_labels": ["Ms", "Mf"],
+        }],
+    }
+    monkeypatch.setattr(transition_review, "sidecar_path_for_measurement", lambda *_args, **_kwargs: sidecar)
+    monkeypatch.setattr(transition_review, "load_review", lambda *_args: copy.deepcopy(portable))
+    monkeypatch.setattr(transition_review_adapters, "tma_review_draft", lambda *_args: {"measurement_fingerprint": fingerprint})
+    monkeypatch.setattr(builder_ui, "_mini_dma_transition_review_entries", lambda *_args: [entry])
+    record_id = builder_ui._mini_dma_review_record_id(record, target)
+    section._all_mini_dma_records = [record]
+    section.set_transition_review_for_target(record_id, {
+        "status": "accepted", "target_label": target, "values": {"As": 10.0, "Af": 20.0},
+        "manual_values_mA": {"Af": 20.0}, "cleared_labels": ["Ms", "Mf"],
+        "measurement_fingerprint": fingerprint,
+    })
+    assert section._reconcile_transition_reviews([record])
+    before = copy.deepcopy(section.transition_reviews_snapshot())
+    conflict = before[record_id]
+    assert conflict["status"] == "needs_attention"
+    assert conflict["project_review"]["values"] == {"As": 10.0, "Af": 20.0}
+    assert conflict["project_review"]["cleared_labels"] == ["Mf", "Ms"]
+    assert conflict["portable_review"]["values"] == {"As": 11.0, "Af": 22.0}
+    assert conflict["portable_review"]["measurement_fingerprint"] == fingerprint
+    for _ in range(3):
+        section._store_transition_reviews()
+        section.data = section.store.load()
+        section._load_transition_reviews()
+        section._reconcile_transition_reviews([record])
+        assert section.transition_reviews_snapshot() == before
