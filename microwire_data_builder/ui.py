@@ -8799,10 +8799,9 @@ def _apply_saved_tma_review_payload(
             if value not in (None, "", [], {})
         }
         record_id = _mini_dma_review_record_id(record, target_label)
-        before = section._transition_reviews.get(record_id)
-        before_count = len(section._transition_reviews)
+        before = dict(section._transition_reviews)
         section.set_transition_review_for_target(record_id, project_review)
-        if section._transition_reviews.get(record_id) != before or len(section._transition_reviews) != before_count:
+        if section._transition_reviews != before:
             changed = True
     if changed:
         try:
@@ -27339,9 +27338,10 @@ class MiniDmaSection(MiniDatabaseSection):
             MINI_DMA_REVIEW_STATUS_EXCLUDED,
         }:
             entry["cleared_labels"] = sorted(cleared_labels)
-        revision = payload.get("portable_review_revision")
-        if isinstance(revision, int) and revision > 0:
-            entry["portable_review_revision"] = revision
+        for field in ("portable_review_revision", "superseded_by_review_revision"):
+            revision = payload.get(field)
+            if isinstance(revision, int) and revision > 0:
+                entry[field] = revision
         for field in ("project_review", "portable_review"):
             value = payload.get(field)
             if isinstance(value, Mapping):
@@ -27364,6 +27364,8 @@ class MiniDmaSection(MiniDatabaseSection):
         payload: Mapping[str, Any],
         records: Sequence[MiniDmaRecord],
     ) -> List[MiniDmaRecord]:
+        if payload.get("superseded_by_review_revision"):
+            return []
         records = [record for record in records if _mini_dma_has_review_content(record)]
         content_identity = str(payload.get("content_identity") or "").strip()
         fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
@@ -27684,13 +27686,60 @@ class MiniDmaSection(MiniDatabaseSection):
             if defer_review:
                 # Keep the old project decision and the freshly saved decision
                 # separate until loaded content proves which source each uses.
-                orphan_id = _transition_review_orphan_id("tma", f"{record_id}::{fingerprint}", entry)
-                suffix = 2
-                base_id = orphan_id
-                while orphan_id in self._transition_reviews and self._transition_reviews[orphan_id] != entry:
-                    orphan_id = f"{base_id}:{suffix}"
-                    suffix += 1
-                self._transition_reviews[orphan_id] = entry
+                pending = [
+                    (key, review) for key, review in self._transition_reviews.items()
+                    if key.startswith("unmatched:tma:")
+                    and fingerprint
+                    and entry.get("record_path")
+                    and review.get("measurement_fingerprint") == fingerprint
+                    and review.get("target_label") == entry.get("target_label")
+                    and os.path.normcase(os.path.normpath(str(review.get("record_path") or "")))
+                    == os.path.normcase(os.path.normpath(str(entry.get("record_path") or "")))
+                    and not review.get("content_identity")
+                    and not review.get("superseded_by_review_revision")
+                    and not review.get("portable_conflict")
+                ]
+                equivalent = [
+                    (key, review) for key, review in pending
+                    if _mini_dma_portable_review_semantics(review) == _mini_dma_portable_review_semantics(entry)
+                    and review.get("strain_at_transition_pct") == entry.get("strain_at_transition_pct")
+                    and review.get("strain_reference") == entry.get("strain_reference")
+                ]
+                revision = int(entry.get("portable_review_revision") or 0)
+                if equivalent:
+                    orphan_id, saved = max(equivalent, key=lambda item: int(item[1].get("portable_review_revision") or 0))
+                    if revision >= int(saved.get("portable_review_revision") or 0):
+                        self._transition_reviews[orphan_id] = entry
+                    for redundant_id, _review in equivalent:
+                        if redundant_id != orphan_id:
+                            self._transition_reviews.pop(redundant_id)
+                else:
+                    newest_revision = max(
+                        (int(review.get("portable_review_revision") or 0) for _key, review in pending),
+                        default=0,
+                    )
+                    if revision and newest_revision > revision:
+                        # A delayed acknowledgement must not compete with a
+                        # newer decision already acknowledged for this source.
+                        entry = {**entry, "superseded_by_review_revision": newest_revision}
+                    orphan_id = _transition_review_orphan_id("tma", f"{record_id}::{fingerprint}", entry)
+                    suffix = 2
+                    base_id = orphan_id
+                    while orphan_id in self._transition_reviews and self._transition_reviews[orphan_id] != entry:
+                        orphan_id = f"{base_id}:{suffix}"
+                        suffix += 1
+                    self._transition_reviews[orphan_id] = entry
+                # A newly acknowledged higher revision supersedes earlier
+                # decisions for this same source, while retaining their values.
+                if revision and pending and all(
+                    revision > int(review.get("portable_review_revision") or 0)
+                    for _key, review in pending
+                ):
+                    for key, review in pending:
+                        if key in self._transition_reviews and key != orphan_id:
+                            self._transition_reviews[key] = {
+                                **review, "superseded_by_review_revision": revision,
+                            }
             else:
                 previous_identity = str(previous.get("content_identity") or "").strip()
                 current_identity = str(entry.get("content_identity") or "").strip()

@@ -16931,3 +16931,149 @@ def test_tma_identity_source_replacement_preserves_both_decisions_even_without_l
         pending = next(review for key, review in saved.items() if key.startswith("unmatched:tma:"))
         assert pending["values"] == {"As": 30.0, "Af": 40.0}
         assert pending["record_path"] == str(replaced.path)
+
+
+
+def test_tma_identity_repeat_pending_save_binds_latest_revision_with_embedded_data_only(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    section = tma_identity_section
+    loaded = _tma_identity_record(tmp_path / "run")
+    lazy = _tma_identity_record(loaded.path, loaded=False)
+    target = "20 MPa"
+    fingerprint = builder_ui._mini_dma_record_measurement_fingerprint(loaded)
+    section._all_mini_dma_records = [lazy]
+    payload = {
+        "measurement_fingerprint": fingerprint,
+        "targets": [{"display_label": target, "status": "manual_adjusted",
+                     "final_values": {"As": 10.0, "Af": 20.0}, "manual_values": {"Af": 20.0},
+                     "cleared_labels": ["Ms", "Mf"]}],
+    }
+    for revision in (1, 2):
+        assert builder_ui._apply_saved_tma_review_payload(lazy, {**payload, "review_revision": revision}, section, section.logger)
+    pending = section.transition_reviews_snapshot()
+    assert len(pending) == 1
+    pending_review = next(iter(pending.values()))
+    assert pending_review["portable_review_revision"] == 2
+    assert not builder_ui._apply_saved_tma_review_payload(lazy, {**payload, "review_revision": 2}, section, section.logger)
+    # Reload the project/store with no raw run or sidecar available.
+    monkeypatch.setattr(builder_ui.mini_dma_core, "load_run", lambda *_args, **_kwargs: pytest.fail("embedded-only reconciliation must not reopen a raw run"))
+    section._store_transition_reviews()
+    section.data = section.store.load()
+    section._load_transition_reviews()
+    section._reconcile_transition_reviews([loaded])
+    record_id = builder_ui._mini_dma_review_record_id(loaded, target)
+    rebound = section.transition_reviews_snapshot()
+    assert list(rebound) == [record_id]
+    assert rebound[record_id]["portable_review_revision"] == 2
+    assert rebound[record_id]["values"] == {"As": 10.0, "Af": 20.0}
+    assert rebound[record_id]["cleared_labels"] == ["Mf", "Ms"]
+    for _ in range(3):
+        section._store_transition_reviews()
+        section.data = section.store.load()
+        section._load_transition_reviews()
+        section._reconcile_transition_reviews([loaded])
+        assert section.transition_reviews_snapshot() == rebound
+
+
+@pytest.mark.parametrize("second_revision", [1, 2])
+def test_tma_identity_changed_pending_decision_preserves_history_or_real_ambiguity(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_revision: int
+) -> None:
+    section = tma_identity_section
+    loaded = _tma_identity_record(tmp_path / "run")
+    lazy = _tma_identity_record(loaded.path, loaded=False)
+    target = "20 MPa"
+    fingerprint = builder_ui._mini_dma_record_measurement_fingerprint(loaded)
+    section._all_mini_dma_records = [lazy]
+    for revision, values in [(1, {"As": 10.0, "Af": 20.0}), (second_revision, {"As": 11.0, "Af": 21.0})]:
+        builder_ui._apply_saved_tma_review_payload(lazy, {
+            "measurement_fingerprint": fingerprint, "review_revision": revision,
+            "targets": [{"display_label": target, "status": "manual_adjusted", "final_values": values}],
+        }, section, section.logger)
+    pending = section.transition_reviews_snapshot()
+    assert len(pending) == 2
+    assert {tuple(sorted(review["values"].items())) for review in pending.values()} == {
+        (("Af", 20.0), ("As", 10.0)), (("Af", 21.0), ("As", 11.0)),
+    }
+    monkeypatch.setattr(builder_ui.mini_dma_core, "load_run", lambda *_args, **_kwargs: pytest.fail("no raw source is available"))
+    section._store_transition_reviews()
+    section.data = section.store.load()
+    section._load_transition_reviews()
+    section._reconcile_transition_reviews([loaded])
+    saved = section.transition_reviews_snapshot()
+    record_id = builder_ui._mini_dma_review_record_id(loaded, target)
+    if second_revision == 2:
+        assert saved[record_id]["values"] == {"As": 11.0, "Af": 21.0}
+        history = next(review for key, review in saved.items() if key.startswith("unmatched:tma:"))
+        assert history["values"] == {"As": 10.0, "Af": 20.0}
+        assert history["superseded_by_review_revision"] == 2
+    else:
+        assert record_id not in saved
+        assert saved == pending
+        assert not any(review.get("superseded_by_review_revision") for review in saved.values())
+    section._store_transition_reviews()
+    section.data = section.store.load()
+    section._load_transition_reviews()
+    section._reconcile_transition_reviews([loaded])
+    assert section.transition_reviews_snapshot() == saved
+
+
+def test_tma_identity_pending_consolidation_keeps_other_sources_and_targets_separate(
+    tma_identity_section, tmp_path: Path
+) -> None:
+    section = tma_identity_section
+    source_a = _tma_identity_record(tmp_path / "run-a", loaded=False)
+    source_b = _tma_identity_record(tmp_path / "run-b", loaded=False)
+    loaded = _tma_identity_record(source_a.path)
+    fingerprint = builder_ui._mini_dma_record_measurement_fingerprint(loaded)
+    section._all_mini_dma_records = [source_a, source_b]
+    for source, target, revision in [(source_a, "20 MPa", 1), (source_b, "20 MPa", 1),
+                                      (source_a, "40 MPa", 1), (source_a, "20 MPa", 2)]:
+        builder_ui._apply_saved_tma_review_payload(source, {
+            "measurement_fingerprint": fingerprint, "review_revision": revision,
+            "targets": [{"display_label": target, "status": "manual_adjusted", "final_values": {"As": 10.0, "Af": 20.0}}],
+        }, section, section.logger)
+    saved = section.transition_reviews_snapshot()
+    assert len(saved) == 3
+    source_target_revisions = {(review["record_path"], review["target_label"]): review["portable_review_revision"] for review in saved.values()}
+    assert source_target_revisions == {(str(source_a.path), "20 MPa"): 2,
+                                       (str(source_b.path), "20 MPa"): 1,
+                                       (str(source_a.path), "40 MPa"): 1}
+
+
+
+def test_tma_identity_delayed_older_pending_acknowledgement_preserves_newest_decision(
+    tma_identity_section, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    section = tma_identity_section
+    loaded = _tma_identity_record(tmp_path / "run")
+    lazy = _tma_identity_record(loaded.path, loaded=False)
+    target = "20 MPa"
+    fingerprint = builder_ui._mini_dma_record_measurement_fingerprint(loaded)
+    section._all_mini_dma_records = [lazy]
+    for revision, values in [(2, {"As": 11.0, "Af": 21.0}), (1, {"As": 10.0, "Af": 20.0})]:
+        builder_ui._apply_saved_tma_review_payload(lazy, {
+            "measurement_fingerprint": fingerprint, "review_revision": revision,
+            "targets": [{"display_label": target, "status": "manual_adjusted", "final_values": values}],
+        }, section, section.logger)
+    pending = section.transition_reviews_snapshot()
+    assert len(pending) == 2
+    stale = next(review for review in pending.values() if review["portable_review_revision"] == 1)
+    assert stale["superseded_by_review_revision"] == 2
+    assert stale["values"] == {"As": 10.0, "Af": 20.0}
+    # A repeated delayed acknowledgement adds no duplicate history.
+    assert not builder_ui._apply_saved_tma_review_payload(lazy, {
+        "measurement_fingerprint": fingerprint, "review_revision": 1,
+        "targets": [{"display_label": target, "status": "manual_adjusted", "final_values": {"As": 10.0, "Af": 20.0}}],
+    }, section, section.logger)
+    monkeypatch.setattr(builder_ui.mini_dma_core, "load_run", lambda *_args, **_kwargs: pytest.fail("embedded data only"))
+    section._store_transition_reviews()
+    section.data = section.store.load()
+    section._load_transition_reviews()
+    section._reconcile_transition_reviews([loaded])
+    record_id = builder_ui._mini_dma_review_record_id(loaded, target)
+    saved = section.transition_reviews_snapshot()
+    assert saved[record_id]["portable_review_revision"] == 2
+    assert saved[record_id]["values"] == {"As": 11.0, "Af": 21.0}
+    assert any(review == stale for key, review in saved.items() if key.startswith("unmatched:tma:"))
