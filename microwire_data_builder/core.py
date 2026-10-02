@@ -1332,6 +1332,9 @@ def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
                 measurement_path=path / module.MEASUREMENT_FILE,
                 frame=data.copy(),
                 sample_name=sample_name,
+                initial_length_mm=module.resolve_initial_length_mm(
+                    data, measurement_path=path / module.MEASUREMENT_FILE
+                ),
             )
         except Exception:
             return cached
