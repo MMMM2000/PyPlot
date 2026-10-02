@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import re
 from pathlib import Path
 from typing import Collection, Iterable, Mapping, Sequence
 
@@ -190,7 +191,9 @@ def load_run(path: Path) -> MiniDmaRun:
         measurement_path=measurement_path,
         frame=cleaned.reset_index(drop=True),
         sample_name=sample_name,
-        initial_length_mm=_initial_length_from_metadata(metadata),
+        initial_length_mm=resolve_initial_length_mm(
+            cleaned, measurement_path=measurement_path, metadata=metadata
+        ),
         wire_diameter_mm=_wire_diameter_from_metadata(metadata),
     )
 
@@ -1087,7 +1090,76 @@ def _initial_length_from_metadata(payload: dict[str, object]) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed > 0.0 else None
+    return parsed if math.isfinite(parsed) and parsed > 0.0 else None
+
+
+def resolve_initial_length_mm(
+    frame: pd.DataFrame,
+    *,
+    measurement_path: Path | None = None,
+    metadata: dict[str, object] | None = None,
+) -> float | None:
+    """Use a setup calibration only when the recorded acquisition corroborates it.
+
+    Some logger metadata retains the preceding setup's length. The measurement's
+    position_mm/strain_pct pair records the actual acquisition length; setup.txt
+    independently supplies its computed millimetre calibration. Never choose a
+    later setup blindly or reconstruct a history whose position reference reset.
+    Original positions and strain offsets are left unchanged.
+    """
+    if metadata is None:
+        metadata = _metadata_for_run(measurement_path) if measurement_path else {}
+    fallback = _initial_length_from_metadata(metadata)
+    if fallback is None and "current_l0_mm" in frame:
+        values = pd.to_numeric(frame["current_l0_mm"], errors="coerce")
+        values = values[np.isfinite(values) & (values > 0)]
+        # Per-target lengths can differ legitimately; a median is not a global L0.
+        if not values.empty and float(values.max() - values.min()) <= 1e-5:
+            fallback = float(values.median())
+    if measurement_path is None or not {
+        "position_mm", "raw_position_mm", "strain_pct"
+    }.issubset(frame):
+        return fallback
+    acquisition = frame
+    if "automation_phase" in frame:
+        plotted = frame[frame["automation_phase"].isin(PLOT_PHASES)]
+        if not plotted.empty:
+            acquisition = plotted
+    position = pd.to_numeric(acquisition["position_mm"], errors="coerce")
+    strain = pd.to_numeric(acquisition["strain_pct"], errors="coerce")
+    raw = pd.to_numeric(acquisition["raw_position_mm"], errors="coerce")
+    valid = np.isfinite(position) & np.isfinite(strain) & (position.abs() > 1e-5) & (strain.abs() > 1e-4)
+    ratios = 100.0 * position[valid] / strain[valid]
+    ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
+    if len(ratios) < 2:
+        return fallback
+    recorded = float(ratios.median())
+    if float(((ratios - recorded).abs() / recorded).quantile(0.95)) > 1e-4:
+        return fallback
+    references = pd.concat([raw + position, raw - position], axis=1)
+    spans = references.max() - references.min()
+    if not np.isfinite(spans).any() or float(spans.min()) > 1e-5:
+        return fallback
+    setup_path = Path(measurement_path).with_name("setup.txt")
+    try:
+        lines = setup_path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError):
+        return fallback
+    corroborating = set()
+    for line in lines:
+        match = re.match(r"^# Computed l0 mm\s+([-+\d.eE]+)\s*$", line)
+        if match is None:
+            continue
+        try:
+            value = float(match[1])
+        except ValueError:
+            continue
+        if math.isfinite(value) and value > 0 and abs(value - recorded) <= 0.001:
+            corroborating.add(round(value, 6))
+    if len(corroborating) != 1:
+        return fallback
+    # The logger's length spinbox records millimetres to three decimal places.
+    return round(recorded, 3)
 
 
 def _wire_diameter_from_metadata(payload: dict[str, object]) -> float | None:

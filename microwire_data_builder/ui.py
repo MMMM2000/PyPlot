@@ -10509,11 +10509,9 @@ def _mini_dma_preview_run(
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         run = mini_dma_core.load_run(path)
     else:
-        initial_length_mm = None
-        if "current_l0_mm" in frame.columns:
-            values = pd.to_numeric(frame["current_l0_mm"], errors="coerce").dropna()
-            if not values.empty:
-                initial_length_mm = _coerce_finite_float(values.median())
+        initial_length_mm = mini_dma_core.resolve_initial_length_mm(
+            frame, measurement_path=path / mini_dma_core.MEASUREMENT_FILE
+        )
         run = mini_dma_core.MiniDmaRun(
             path=path,
             measurement_path=path / mini_dma_core.MEASUREMENT_FILE,
