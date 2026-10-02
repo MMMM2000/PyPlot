@@ -1030,7 +1030,8 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
     run_dir = tmp_path / "tma_run"
     run_dir.mkdir()
     (run_dir / "transition_review.json").write_text("{}", encoding="utf-8")
-    fingerprint = "sha256:" + "a" * 64
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain_pct": [0.0, 1.0]})
+    fingerprint = adapter_module.tma_measurement_fingerprint(frame)
     payload = {
         "experiment_family": "tma",
         "measurement_fingerprint": fingerprint,
@@ -1069,7 +1070,7 @@ def test_builder_imports_matching_tma_sidecar_by_stress_target(
         "_mini_dma_transition_review_entries",
         lambda _records, _logger: [entry],
     )
-    record = SimpleNamespace(path=run_dir)
+    record = SimpleNamespace(path=run_dir, data=frame)
     reviews = {}
 
     assert builder_ui._import_portable_tma_reviews(
@@ -1885,7 +1886,8 @@ def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatc
     run_dir = tmp_path / "tma-run"
     run_dir.mkdir()
     (run_dir / "transition_review.json").write_text("{}", encoding="utf-8")
-    fingerprint = "sha256:" + "c" * 64
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain_pct": [0.0, 1.0]})
+    fingerprint = adapter_module.tma_measurement_fingerprint(frame)
     payload = {
         "experiment_family": "tma",
         "measurement_fingerprint": fingerprint,
@@ -1930,7 +1932,7 @@ def test_builder_imports_repeated_tma_sweeps_by_sweep_index(tmp_path, monkeypatc
     reviews = {}
 
     assert builder_ui._import_portable_tma_reviews(
-        [SimpleNamespace(path=run_dir)], reviews, logging.getLogger(__name__)
+        [SimpleNamespace(path=run_dir, data=frame)], reviews, logging.getLogger(__name__)
     ) is True
     assert {review["target_label"] for review in reviews.values()} == {
         "50 MPa - sweep 1/2",

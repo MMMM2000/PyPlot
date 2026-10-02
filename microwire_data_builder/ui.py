@@ -8400,6 +8400,31 @@ def _move_transition_review_to_orphan(
     return True
 
 
+# Legacy lazy records were incorrectly hashed as a measured empty DataFrame.
+_MINI_DMA_EMPTY_CONTENT_IDENTITY = (
+    "tma:3ab2ad10a3e3cc32fa3b07883329bb8397c1e200599339760df3dc5486623256"
+)
+
+
+def _mini_dma_has_review_content(record: MiniDmaRecord) -> bool:
+    frame = getattr(record, "data", None)
+    return isinstance(frame, pd.DataFrame) and not frame.empty
+
+
+def _mini_dma_record_measurement_fingerprint(record: MiniDmaRecord) -> str:
+    if not _mini_dma_has_review_content(record):
+        return ""
+    frame = record.data
+    cached = getattr(record, "_builder_measurement_fingerprint", None)
+    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] is frame:
+        return cached[1]
+    from plotting.shared.transition_review_adapters import tma_measurement_fingerprint
+
+    fingerprint = tma_measurement_fingerprint(frame)
+    setattr(record, "_builder_measurement_fingerprint", (frame, fingerprint))
+    return fingerprint
+
+
 def _mini_dma_review_record_path(record: MiniDmaRecord) -> str:
     cached = getattr(record, "_builder_review_path", None)
     if isinstance(cached, str) and cached:
@@ -8436,6 +8461,9 @@ def _canonical_mini_dma_review_record_id(
     stored_id: str,
     payload: Mapping[str, Any],
 ) -> str:
+    # An orphan payload retains its old path for provenance, not reattachment.
+    if stored_id.startswith("unmatched:"):
+        return stored_id
     record_path = str(payload.get("record_path") or "").strip()
     if not record_path and "::" in stored_id:
         record_path = stored_id.rsplit("::", 1)[0].strip()
@@ -8743,6 +8771,8 @@ def _apply_saved_tma_review_payload(
                 )
             ),
             "target_label": target_label,
+            "record_path": str(path),
+            "source_name": path.name,
             "values": _clean_mini_dma_transition_values(target.get("final_values")),
             "auto_values_mA": _clean_mini_dma_transition_values(
                 target.get("auto_values")
@@ -8769,9 +8799,9 @@ def _apply_saved_tma_review_payload(
             if value not in (None, "", [], {})
         }
         record_id = _mini_dma_review_record_id(record, target_label)
-        before = section._transition_reviews.get(record_id)
+        before = dict(section._transition_reviews)
         section.set_transition_review_for_target(record_id, project_review)
-        if section._transition_reviews.get(record_id) != before:
+        if section._transition_reviews != before:
             changed = True
     if changed:
         try:
@@ -8808,6 +8838,8 @@ def _import_portable_tma_reviews(
             portable_payload.get("experiment_family") != "tma"
             or portable_payload.get("measurement_fingerprint")
             != draft.get("measurement_fingerprint")
+            or draft.get("measurement_fingerprint")
+            != _mini_dma_record_measurement_fingerprint(record)
         ):
             logger.warning(
                 "Ignoring stale portable TMA review with a measurement mismatch: %s",
@@ -27306,9 +27338,10 @@ class MiniDmaSection(MiniDatabaseSection):
             MINI_DMA_REVIEW_STATUS_EXCLUDED,
         }:
             entry["cleared_labels"] = sorted(cleared_labels)
-        revision = payload.get("portable_review_revision")
-        if isinstance(revision, int) and revision > 0:
-            entry["portable_review_revision"] = revision
+        for field in ("portable_review_revision", "superseded_by_review_revision"):
+            revision = payload.get(field)
+            if isinstance(revision, int) and revision > 0:
+                entry[field] = revision
         for field in ("project_review", "portable_review"):
             value = payload.get(field)
             if isinstance(value, Mapping):
@@ -27331,7 +27364,19 @@ class MiniDmaSection(MiniDatabaseSection):
         payload: Mapping[str, Any],
         records: Sequence[MiniDmaRecord],
     ) -> List[MiniDmaRecord]:
+        if payload.get("superseded_by_review_revision"):
+            return []
+        records = [record for record in records if _mini_dma_has_review_content(record)]
         content_identity = str(payload.get("content_identity") or "").strip()
+        fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
+        if fingerprint:
+            records = [
+                record for record in records
+                if _mini_dma_record_measurement_fingerprint(record) == fingerprint
+            ]
+        if stored_id.startswith("unmatched:") and not content_identity and not fingerprint:
+            # Sample/run labels alone cannot release quarantined history.
+            return []
         if content_identity:
             candidates = [
                 record
@@ -27341,10 +27386,12 @@ class MiniDmaSection(MiniDatabaseSection):
                 )
                 == content_identity
             ]
-            if len(candidates) <= 1:
+            if len(candidates) <= 1 or stored_id.startswith("unmatched:"):
                 return candidates
         else:
             candidates = list(records)
+            if stored_id.startswith("unmatched:"):
+                return candidates
         sample = str(payload.get("sample") or "").strip().casefold()
         if sample:
             narrowed = [
@@ -27380,11 +27427,11 @@ class MiniDmaSection(MiniDatabaseSection):
         return candidates
 
     def _mini_dma_review_metadata(self, record: MiniDmaRecord) -> Dict[str, str]:
-        metadata = {
-            "content_identity": _transition_review_content_identity(
+        metadata: Dict[str, str] = {}
+        if _mini_dma_has_review_content(record):
+            metadata["content_identity"] = _transition_review_content_identity(
                 record, "tma", self._review_content_identity_cache
             )
-        }
         path = getattr(record, "path", None)
         if isinstance(path, Path):
             metadata["record_path"] = str(path)
@@ -27392,6 +27439,25 @@ class MiniDmaSection(MiniDatabaseSection):
         return metadata
 
     def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
+        def normalized_path(path: str) -> str:
+            return os.path.normcase(os.path.normpath(path)) if path else ""
+
+        # A partial preview can omit other current sources entirely. Keep their
+        # paths visible before filtering lazy frames, and let this batch's loaded
+        # records override stale placeholders in the section-wide inventory.
+        known_by_path = {
+            normalized_path(_mini_dma_review_record_path(record)): record
+            for record in (getattr(self, "_all_mini_dma_records", ()) or ())
+        }
+        known_by_path.update({
+            normalized_path(_mini_dma_review_record_path(record)): record
+            for record in records
+        })
+        deferred_paths = {
+            path for path, record in known_by_path.items()
+            if not _mini_dma_has_review_content(record)
+        }
+        records = [record for record in records if _mini_dma_has_review_content(record)]
         changed = _import_portable_tma_reviews(
             records, self._transition_reviews, self.logger
         )
@@ -27399,23 +27465,47 @@ class MiniDmaSection(MiniDatabaseSection):
         direct: List[Tuple[str, MiniDmaRecord]] = []
         direct_mismatches: List[str] = []
         for stored_id, payload in self._transition_reviews.items():
+            source_path = str(payload.get("record_path") or "").strip()
+            if not source_path and not stored_id.startswith("unmatched:"):
+                source_path = stored_id.rsplit("::", 1)[0]
+            source_path = normalized_path(source_path)
+            if source_path in deferred_paths:
+                # This applies to quarantined portable saves as well as active
+                # keys: another loaded copy cannot stand in for a known lazy run.
+                continue
             target_label = str(payload.get("target_label") or "").strip()
             if not target_label and "::" in stored_id:
                 target_label = stored_id.rsplit("::", 1)[-1].strip()
             if not target_label:
                 continue
+            content_identity = str(payload.get("content_identity") or "").strip()
+            fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
+            candidate_records = records
+            if not content_identity and fingerprint and source_path in known_by_path:
+                # A pending portable decision has not yet been verified against
+                # embedded content. While its explicit source remains present,
+                # verify that source itself instead of relocating to a duplicate.
+                candidate_records = [
+                    record for record in records
+                    if normalized_path(_mini_dma_review_record_path(record)) == source_path
+                ]
             direct_matches = [
                 record
-                for record in records
+                for record in candidate_records
                 if _mini_dma_review_record_id(record, target_label) == stored_id
             ]
-            content_identity = str(payload.get("content_identity") or "").strip()
-            if direct_matches and content_identity and (
+            if direct_matches and (
                 len(direct_matches) != 1
-                or _transition_review_content_identity(
-                    direct_matches[0], "tma", self._review_content_identity_cache
+                or (
+                    content_identity
+                    and _transition_review_content_identity(
+                        direct_matches[0], "tma", self._review_content_identity_cache
+                    ) != content_identity
                 )
-                != content_identity
+                or (
+                    fingerprint
+                    and _mini_dma_record_measurement_fingerprint(direct_matches[0]) != fingerprint
+                )
             ):
                 direct_mismatches.append(stored_id)
                 candidates = self._mini_dma_review_candidates(
@@ -27423,7 +27513,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     payload,
                     [
                         record
-                        for record in records
+                        for record in candidate_records
                         if all(
                             record is not conflicting
                             for conflicting in direct_matches
@@ -27438,7 +27528,7 @@ class MiniDmaSection(MiniDatabaseSection):
             if len(direct_matches) == 1:
                 direct.append((stored_id, direct_matches[0]))
                 continue
-            candidates = self._mini_dma_review_candidates(stored_id, payload, records)
+            candidates = self._mini_dma_review_candidates(stored_id, payload, candidate_records)
             if len(candidates) != 1:
                 continue
             record = candidates[0]
@@ -27578,6 +27668,9 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def set_transition_review_for_target(self, record_id: str, payload: Dict[str, Any]) -> None:
         target_label = str(payload.get("target_label") or "").strip()
+        fingerprint = str(payload.get("measurement_fingerprint") or "").strip()
+        previous = self._transition_reviews.get(str(record_id), {})
+        defer_review = bool(fingerprint)
         if target_label:
             matches = [
                 record
@@ -27585,10 +27678,101 @@ class MiniDmaSection(MiniDatabaseSection):
                 if _mini_dma_review_record_id(record, target_label) == str(record_id)
             ]
             if len(matches) == 1:
-                payload = {**payload, **self._mini_dma_review_metadata(matches[0])}
+                record = matches[0]
+                metadata = self._mini_dma_review_metadata(record)
+                previous_identity = str(previous.get("content_identity") or "").strip()
+                supplied_identity = str(payload.get("content_identity") or "").strip()
+                if supplied_identity == _MINI_DMA_EMPTY_CONTENT_IDENTITY:
+                    payload = dict(payload)
+                    payload.pop("content_identity")
+                    supplied_identity = ""
+                if "content_identity" in metadata:
+                    defer_review = bool(
+                        (fingerprint and fingerprint != _mini_dma_record_measurement_fingerprint(record))
+                        or (supplied_identity and supplied_identity != metadata["content_identity"])
+                    )
+                elif (
+                    fingerprint
+                    and fingerprint == previous.get("measurement_fingerprint")
+                    and previous_identity
+                    and previous_identity != _MINI_DMA_EMPTY_CONTENT_IDENTITY
+                ):
+                    payload = {"content_identity": previous_identity, **payload}
+                    defer_review = False
+                else:
+                    defer_review = True
+                if defer_review:
+                    metadata.pop("content_identity", None)
+                payload = {**payload, **metadata}
         entry = self._clean_transition_review_payload(record_id, payload)
         if entry:
-            self._transition_reviews[str(record_id)] = entry
+            if defer_review:
+                # Keep the old project decision and the freshly saved decision
+                # separate until loaded content proves which source each uses.
+                pending = [
+                    (key, review) for key, review in self._transition_reviews.items()
+                    if key.startswith("unmatched:tma:")
+                    and fingerprint
+                    and entry.get("record_path")
+                    and review.get("measurement_fingerprint") == fingerprint
+                    and review.get("target_label") == entry.get("target_label")
+                    and os.path.normcase(os.path.normpath(str(review.get("record_path") or "")))
+                    == os.path.normcase(os.path.normpath(str(entry.get("record_path") or "")))
+                    and not review.get("content_identity")
+                    and not review.get("superseded_by_review_revision")
+                    and not review.get("portable_conflict")
+                ]
+                equivalent = [
+                    (key, review) for key, review in pending
+                    if _mini_dma_portable_review_semantics(review) == _mini_dma_portable_review_semantics(entry)
+                    and review.get("strain_at_transition_pct") == entry.get("strain_at_transition_pct")
+                    and review.get("strain_reference") == entry.get("strain_reference")
+                ]
+                revision = int(entry.get("portable_review_revision") or 0)
+                if equivalent:
+                    orphan_id, saved = max(equivalent, key=lambda item: int(item[1].get("portable_review_revision") or 0))
+                    if revision >= int(saved.get("portable_review_revision") or 0):
+                        self._transition_reviews[orphan_id] = entry
+                    for redundant_id, _review in equivalent:
+                        if redundant_id != orphan_id:
+                            self._transition_reviews.pop(redundant_id)
+                else:
+                    newest_revision = max(
+                        (int(review.get("portable_review_revision") or 0) for _key, review in pending),
+                        default=0,
+                    )
+                    if revision and newest_revision > revision:
+                        # A delayed acknowledgement must not compete with a
+                        # newer decision already acknowledged for this source.
+                        entry = {**entry, "superseded_by_review_revision": newest_revision}
+                    orphan_id = _transition_review_orphan_id("tma", f"{record_id}::{fingerprint}", entry)
+                    suffix = 2
+                    base_id = orphan_id
+                    while orphan_id in self._transition_reviews and self._transition_reviews[orphan_id] != entry:
+                        orphan_id = f"{base_id}:{suffix}"
+                        suffix += 1
+                    self._transition_reviews[orphan_id] = entry
+                # A newly acknowledged higher revision supersedes earlier
+                # decisions for this same source, while retaining their values.
+                if revision and pending and all(
+                    revision > int(review.get("portable_review_revision") or 0)
+                    for _key, review in pending
+                ):
+                    for key, review in pending:
+                        if key in self._transition_reviews and key != orphan_id:
+                            self._transition_reviews[key] = {
+                                **review, "superseded_by_review_revision": revision,
+                            }
+            else:
+                previous_identity = str(previous.get("content_identity") or "").strip()
+                current_identity = str(entry.get("content_identity") or "").strip()
+                previous_fingerprint = str(previous.get("measurement_fingerprint") or "").strip()
+                if previous and (
+                    (fingerprint and previous_fingerprint and fingerprint != previous_fingerprint)
+                    or (previous_identity and current_identity and previous_identity != current_identity)
+                ):
+                    _move_transition_review_to_orphan(self._transition_reviews, str(record_id), "tma")
+                self._transition_reviews[str(record_id)] = entry
         else:
             self._transition_reviews.pop(str(record_id), None)
         self._schedule_transition_review_store()
