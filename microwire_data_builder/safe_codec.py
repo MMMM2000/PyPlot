@@ -27,7 +27,10 @@ CODEC_ENCODING = "microwire-json"
 CODEC_VERSION = 2
 MAX_CODEC_DEPTH = 100
 MAX_CONTAINER_ITEMS = 2_000_000
-MAX_COLUMNAR_DATAFRAME_CELLS = 5_000_000
+# Long fatigue acquisitions contain more than 50 million cells while each
+# column is still a bounded binary buffer. Retain their original rectangular
+# frame rather than splitting one measurement into artificial records.
+MAX_COLUMNAR_DATAFRAME_CELLS = 64_000_000
 MAX_NDARRAY_ITEMS = 20_000_000
 MAX_JSON_BYTES = 256 * 1024 * 1024
 MAX_BINARY_BYTES = 256 * 1024 * 1024
@@ -39,6 +42,10 @@ MAX_DECODE_NODES = 5_000_000
 # above the real multi-record payloads while byte/node and per-frame limits
 # remain independently enforced.
 MAX_DECODE_ITEMS = 20_000_000
+# Typed buffers do not allocate one Python object per cell. Bound them
+# separately from recursive containers, retaining the per-array and total-byte
+# ceilings as well as the general item/node limits.
+MAX_DECODE_ARRAY_ITEMS = 64_000_000
 MAX_DECODE_BYTES = 512 * 1024 * 1024
 
 
@@ -50,16 +57,23 @@ class _DecodeBudget:
     def __init__(self) -> None:
         self.nodes = 0
         self.items = 0
+        self.array_items = 0
         self.bytes = 0
 
-    def consume(self, *, nodes: int = 0, items: int = 0, bytes_: int = 0) -> None:
+    def consume(
+        self, *, nodes: int = 0, items: int = 0, array_items: int = 0,
+        bytes_: int = 0,
+    ) -> None:
         self.nodes += nodes
         self.items += items
+        self.array_items += array_items
         self.bytes += bytes_
         if self.nodes > MAX_DECODE_NODES:
             raise SafeCodecError("Aggregate codec node budget exceeded")
         if self.items > MAX_DECODE_ITEMS:
             raise SafeCodecError("Aggregate codec item budget exceeded")
+        if self.array_items > MAX_DECODE_ARRAY_ITEMS:
+            raise SafeCodecError("Aggregate codec array item budget exceeded")
         if self.bytes > MAX_DECODE_BYTES:
             raise SafeCodecError("Aggregate codec byte budget exceeded")
 
@@ -450,6 +464,9 @@ def decode_value(
         _check_size(item_count, "numpy array", MAX_NDARRAY_ITEMS)
         expected = item_count * dtype.itemsize
         _check_size(expected, "numpy array bytes", MAX_BINARY_BYTES)
+        # Reject an allocation that exceeds aggregate limits before resolving
+        # another blob or copying its ndarray buffer.
+        _budget.consume(array_items=item_count, bytes_=expected)
         if has_blob:
             binary = _resolve_external_blob(node["$blob"], _blob_resolver)
         else:
@@ -465,7 +482,6 @@ def decode_value(
                 raise SafeCodecError("Invalid ndarray data") from exc
         if len(binary) != expected:
             raise SafeCodecError("ndarray byte length does not match shape/dtype")
-        _budget.consume(items=item_count, bytes_=len(binary))
         return np.frombuffer(binary, dtype=dtype).copy().reshape(tuple(shape))
     if tag == "range-index":
         start, stop, step = node.get("start"), node.get("stop"), node.get("step")
@@ -556,22 +572,23 @@ def decode_value(
     if tag == "dataframe-columnar":
         index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         columns = decode_value(node.get("columns"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
-        data = decode_value(node.get("data"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         dtypes = decode_value(node.get("dtypes"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         if (
             not isinstance(index, pd.Index)
             or not isinstance(columns, pd.Index)
-            or not isinstance(data, list)
             or not isinstance(dtypes, list)
         ):
             raise SafeCodecError("Malformed columnar pandas DataFrame")
-        if len(dtypes) != len(columns) or len(data) != len(columns):
+        if len(dtypes) != len(columns):
             raise SafeCodecError("Columnar DataFrame width does not match metadata")
         _check_size(
             len(index) * max(1, len(columns)),
             "columnar pandas DataFrame",
             MAX_COLUMNAR_DATAFRAME_CELLS,
         )
+        data = decode_value(node.get("data"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        if not isinstance(data, list) or len(data) != len(columns):
+            raise SafeCodecError("Columnar DataFrame width does not match metadata")
         series: list[pd.Series] = []
         for position, values in enumerate(data):
             if isinstance(values, dict) and set(values) == {
