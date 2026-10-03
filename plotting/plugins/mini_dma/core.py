@@ -436,6 +436,9 @@ def _make_current_figure(
             continue
         plotted_groups.append((target, group))
 
+    # Read this figure's source once. Cloud sidecars can block each filesystem
+    # access; a long fatigue history must not reread them twice per curve.
+    first_overheating_target = first_overheating_target_mpa(run)
     for target, group in plotted_groups:
         if show_power_top_axis:
             power_currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
@@ -451,11 +454,15 @@ def _make_current_figure(
                     global_l0_mm,
                     global_strain_min,
                 )
-        is_first_overheating = _is_first_overheating_group(run, target, group)
+        is_first_overheating = _matches_first_overheating_group(
+            first_overheating_target, target, group
+        )
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
             y_values,
-            label=_format_plot_target_label(run, target, group),
+            label=_format_plot_target_label(
+                run, target, group, is_first_overheating=is_first_overheating
+            ),
             linewidth=1.8 if is_first_overheating else 1.4,
             linestyle="--" if is_first_overheating else "-",
             marker="D" if is_first_overheating else "o",
@@ -1199,8 +1206,16 @@ def _format_target_label(run: MiniDmaRun, value: float, *, compact: bool = False
     return f"{stress_label} / {load_label}"
 
 
-def _format_plot_target_label(run: MiniDmaRun, value: float, group: pd.DataFrame) -> str:
-    if _is_first_overheating_group(run, value, group):
+def _format_plot_target_label(
+    run: MiniDmaRun,
+    value: float,
+    group: pd.DataFrame,
+    *,
+    is_first_overheating: bool | None = None,
+) -> str:
+    if is_first_overheating is None:
+        is_first_overheating = _is_first_overheating_group(run, value, group)
+    if is_first_overheating:
         return f"1st: {_format_target_label(run, value, compact=True)}"
     return _format_target_label(run, value)
 
@@ -1234,6 +1249,12 @@ def first_overheating_target_mpa(run: MiniDmaRun) -> float | None:
 
 def _is_first_overheating_group(run: MiniDmaRun, target: float, group: pd.DataFrame) -> bool:
     first_target = first_overheating_target_mpa(run)
+    return _matches_first_overheating_group(first_target, target, group)
+
+
+def _matches_first_overheating_group(
+    first_target: float | None, target: float, group: pd.DataFrame
+) -> bool:
     if first_target is None:
         return False
     if not math.isclose(float(target), first_target, rel_tol=1e-9, abs_tol=1e-6):
