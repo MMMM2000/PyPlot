@@ -45,7 +45,10 @@ MANIFEST_PATH = "manifest.json"
 CODEC_ID = "microwire-json/2"
 
 MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
-MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+# Every content-addressed blob has both an entry descriptor and a blob index
+# descriptor. A valid project can exceed 8 MiB before the independent 50,000
+# archive-entry cap; retain a bounded index budget that accommodates that cap.
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 50_000
 MAX_SECTIONS = 64
 MAX_JSON_ENTRY_BYTES = 256 * 1024 * 1024
