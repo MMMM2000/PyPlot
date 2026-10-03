@@ -1289,6 +1289,91 @@ class MiniDmaRecord:
     strain_summary: Tuple[str, ...] = ()
     transition_summary: Tuple[str, ...] = ()
     break_summary: str = ""
+    initial_length_calibration: Optional[Dict[str, Any]] = None
+
+
+def mini_dma_calibration_frame_identity(frame: pd.DataFrame) -> str:
+    """Bind portable calibration to the complete unchanged embedded frame."""
+    digest = hashlib.sha256(b"tma-initial-length-v1")
+    digest.update(repr(tuple(str(c) for c in frame.columns)).encode("utf-8"))
+    digest.update(repr(tuple(str(d) for d in frame.dtypes)).encode("utf-8"))
+    digest.update(repr(tuple(int(n) for n in frame.shape)).encode("ascii"))
+    try:
+        values = pd.util.hash_pandas_object(frame, index=True, categorize=True)
+        digest.update(values.to_numpy(copy=False).tobytes())
+    except (TypeError, ValueError):
+        return ""
+    return "sha256:" + digest.hexdigest()
+
+
+def capture_mini_dma_initial_length_calibration(record: MiniDmaRecord) -> Optional[Dict[str, Any]]:
+    """Save only an independent setup calibration corroborated by logged data."""
+    module = _mini_dma_core_module()
+    if module is None or not isinstance(record.data, pd.DataFrame) or record.data.empty:
+        return None
+    measurement = Path(record.path) / module.MEASUREMENT_FILE
+    value = module.resolve_initial_length_mm(record.data, measurement_path=measurement, require_verified=True)
+    if value is None:
+        return None
+    identity = mini_dma_calibration_frame_identity(record.data)
+    if not identity:
+        return None
+    setup = measurement.with_name("setup.txt")
+    metadata = measurement.with_name("metadata.json")
+    try:
+        setup_hash = hashlib.sha256(setup.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    try:
+        metadata_hash = hashlib.sha256(metadata.read_bytes()).hexdigest()
+    except OSError:
+        metadata_hash = None
+    return {"version": 1, "basis": "unique_setup_and_stable_logged_position_strain",
+            "unit": "mm", "initial_length_mm": value, "frame_identity": identity,
+            "measurement_path": str(measurement), "setup_path": str(setup),
+            "setup_sha256": setup_hash, "metadata_path": str(metadata),
+            "metadata_sha256": metadata_hash}
+
+
+def verified_mini_dma_initial_length_mm(record: MiniDmaRecord) -> Optional[float]:
+    """Validate saved calibration without reading synchronized source files."""
+    payload = getattr(record, "initial_length_calibration", None)
+    if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload.get("version") != 1 or payload.get("unit") != "mm":
+        return None
+    if payload.get("basis") != "unique_setup_and_stable_logged_position_strain":
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("setup_sha256") or "")):
+        return None
+    try:
+        if isinstance(payload.get("initial_length_mm"), bool):
+            return None
+        value = float(payload.get("initial_length_mm"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    measurement = Path(record.path) / "measurement.csv"
+    if os.path.normcase(os.path.normpath(str(measurement))) != os.path.normcase(os.path.normpath(str(payload.get("measurement_path")))):
+        return None
+    if payload.get("frame_identity") != mini_dma_calibration_frame_identity(record.data):
+        return None
+    module = _mini_dma_core_module()
+    recorded = module.recorded_initial_length_mm(record.data) if module is not None else None
+    if recorded is None or abs(value - recorded) > 0.001:
+        return None
+    return value
+
+
+def mini_dma_record_initial_length_mm(record: MiniDmaRecord) -> Optional[float]:
+    """Prefer frame-bound calibration; legacy source-free lengths stay unknown."""
+    value = verified_mini_dma_initial_length_mm(record)
+    if value is not None:
+        return value
+    path = Path(record.path)
+    if not ((path / "metadata.json").is_file() or (path / "setup.txt").is_file()):
+        return None
+    module = _mini_dma_core_module()
+    return module.resolve_initial_length_mm(record.data, measurement_path=path / module.MEASUREMENT_FILE) if module is not None else None
 
 
 def _mini_dma_core_module() -> Any:
@@ -1332,9 +1417,7 @@ def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
                 measurement_path=path / module.MEASUREMENT_FILE,
                 frame=data.copy(),
                 sample_name=sample_name,
-                initial_length_mm=module.resolve_initial_length_mm(
-                    data, measurement_path=path / module.MEASUREMENT_FILE
-                ),
+                initial_length_mm=mini_dma_record_initial_length_mm(record),
             )
         except Exception:
             return cached
