@@ -6910,10 +6910,15 @@ def _refresh_unchanged_portable_conflict(
             or previous.get(identity_field) != portable.get(identity_field)):
         return None
     merged = dict(existing)
-    merged["portable_review"] = {**previous, **portable}
+    # An unchanged portable decision must not replace the conflict's saved
+    # analysis context with newly computed candidates. Only its provenance
+    # may move forward while the user resolves the original disagreement.
+    previous = dict(previous)
     for key in (identity_field, "portable_sidecar_path", "portable_review_revision"):
         if portable.get(key) not in (None, ""):
+            previous[key] = portable[key]
             merged[key] = portable[key]
+    merged["portable_review"] = previous
     return merged
 
 
@@ -8509,8 +8514,14 @@ def _mini_dma_cleared_transition_labels(review: Mapping[str, Any] | None) -> Set
 
 
 def _mini_dma_portable_review_semantics(review: Mapping[str, Any]) -> tuple:
-    return (str(review.get("status") or ""), _clean_mini_dma_transition_values(review.get("values")),
-            _mini_dma_cleared_transition_labels(review))
+    status = str(review.get("status") or "")
+    values = _clean_mini_dma_transition_values(review.get("values"))
+    cleared = _mini_dma_cleared_transition_labels(review)
+    if status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION and not values:
+        # Older accepted no-transition reviews omitted the explicit clears.
+        # With no final thresholds, both formats express the same decision.
+        cleared = set(MINI_DMA_TRANSITION_LABELS)
+    return status, values, cleared
 
 
 def _mini_dma_review_status_label(status: str) -> str:
