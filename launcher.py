@@ -1243,6 +1243,12 @@ def _run_builder_update_section_command(
         if payload_name not in result.payloads:
             section.store.save_payload(payload_name, merged_records)
         section.data.extra["payloads"] = payload_refs
+        if section_name == "mini_dma":
+            # Export reapplies accepted reviews from the section's record groups.
+            # Import populated those groups with the old project records; leaving
+            # them stale would replace the merged table with old-only source rows,
+            # even though the merged measurement payload is saved correctly.
+            section._set_record_groups(merged_records, reconcile_reviews=False)
         section.store.save(section.data)
         sections[section_name] = section.export_project_payload()
         return {
