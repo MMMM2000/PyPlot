@@ -1105,6 +1105,7 @@ def resolve_initial_length_mm(
     *,
     measurement_path: Path | None = None,
     metadata: dict[str, object] | None = None,
+    require_verified: bool = False,
 ) -> float | None:
     """Use a setup calibration only when the recorded acquisition corroborates it.
 
@@ -1126,32 +1127,15 @@ def resolve_initial_length_mm(
     if measurement_path is None or not {
         "position_mm", "raw_position_mm", "strain_pct"
     }.issubset(frame):
-        return fallback
-    acquisition = frame
-    if "automation_phase" in frame:
-        plotted = frame[frame["automation_phase"].isin(PLOT_PHASES)]
-        if not plotted.empty:
-            acquisition = plotted
-    position = pd.to_numeric(acquisition["position_mm"], errors="coerce")
-    strain = pd.to_numeric(acquisition["strain_pct"], errors="coerce")
-    raw = pd.to_numeric(acquisition["raw_position_mm"], errors="coerce")
-    valid = np.isfinite(position) & np.isfinite(strain) & (position.abs() > 1e-5) & (strain.abs() > 1e-4)
-    ratios = 100.0 * position[valid] / strain[valid]
-    ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
-    if len(ratios) < 2:
-        return fallback
-    recorded = float(ratios.median())
-    if float(((ratios - recorded).abs() / recorded).quantile(0.95)) > 1e-4:
-        return fallback
-    references = pd.concat([raw + position, raw - position], axis=1)
-    spans = references.max() - references.min()
-    if not np.isfinite(spans).any() or float(spans.min()) > 1e-5:
-        return fallback
+        return None if require_verified else fallback
+    recorded = recorded_initial_length_mm(frame)
+    if recorded is None:
+        return None if require_verified else fallback
     setup_path = Path(measurement_path).with_name("setup.txt")
     try:
         lines = setup_path.read_text(encoding="utf-8-sig").splitlines()
     except (OSError, UnicodeError):
-        return fallback
+        return None if require_verified else fallback
     corroborating = set()
     for line in lines:
         match = re.match(r"^# Computed l0 mm\s+([-+\d.eE]+)\s*$", line)
@@ -1164,9 +1148,36 @@ def resolve_initial_length_mm(
         if math.isfinite(value) and value > 0 and abs(value - recorded) <= 0.001:
             corroborating.add(round(value, 6))
     if len(corroborating) != 1:
-        return fallback
+        return None if require_verified else fallback
     # The logger's length spinbox records millimetres to three decimal places.
     return round(recorded, 3)
+
+
+def recorded_initial_length_mm(frame: pd.DataFrame) -> float | None:
+    """Return a consistent logged position/strain length; not a setup approval."""
+    if not {"position_mm", "raw_position_mm", "strain_pct"}.issubset(frame):
+        return None
+    acquisition = frame
+    if "automation_phase" in frame:
+        plotted = frame[frame["automation_phase"].isin(PLOT_PHASES)]
+        if not plotted.empty:
+            acquisition = plotted
+    position = pd.to_numeric(acquisition["position_mm"], errors="coerce")
+    strain = pd.to_numeric(acquisition["strain_pct"], errors="coerce")
+    raw = pd.to_numeric(acquisition["raw_position_mm"], errors="coerce")
+    valid = np.isfinite(position) & np.isfinite(strain) & (position.abs() > 1e-5) & (strain.abs() > 1e-4)
+    ratios = 100.0 * position[valid] / strain[valid]
+    ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
+    if len(ratios) < 2:
+        return None
+    recorded = float(ratios.median())
+    if float(((ratios - recorded).abs() / recorded).quantile(0.95)) > 1e-4:
+        return None
+    references = pd.concat([raw + position, raw - position], axis=1)
+    spans = references.max() - references.min()
+    if not np.isfinite(spans).any() or float(spans.min()) > 1e-5:
+        return None
+    return recorded
 
 
 def _wire_diameter_from_metadata(payload: dict[str, object]) -> float | None:

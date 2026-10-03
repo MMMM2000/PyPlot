@@ -165,6 +165,8 @@ from .core import (
     VsmTemperatureScanRecord,
     DmaIsoStressRecord,
     MiniDmaRecord,
+    capture_mini_dma_initial_length_calibration,
+    mini_dma_record_initial_length_mm,
     ShapeMemoryStressStrainRecord,
     FmrRecord,
     OUTPUT_COLUMNS,
@@ -10509,9 +10511,7 @@ def _mini_dma_preview_run(
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         run = mini_dma_core.load_run(path)
     else:
-        initial_length_mm = mini_dma_core.resolve_initial_length_mm(
-            frame, measurement_path=path / mini_dma_core.MEASUREMENT_FILE
-        )
+        initial_length_mm = mini_dma_record_initial_length_mm(record)
         run = mini_dma_core.MiniDmaRun(
             path=path,
             measurement_path=path / mini_dma_core.MEASUREMENT_FILE,
@@ -26928,6 +26928,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 transition_summary=transition_summary,
                 break_summary=break_summary,
             )
+            record.initial_length_calibration = capture_mini_dma_initial_length_calibration(record)
             if variant:
                 setattr(record, "variant", variant)
             records.append(record)
@@ -27660,6 +27661,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     strain_summary=tuple(record.strain_summary),
                     transition_summary=tuple(reviewed_lines),
                     break_summary=record.break_summary,
+                    initial_length_calibration=copy.deepcopy(getattr(record, "initial_length_calibration", None)),
                 )
             )
         return result
