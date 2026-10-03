@@ -1,0 +1,1 @@
+TMA current sweeps are now always bidirectional: the obsolete one-way setting and stale saved values can no longer suppress the decreasing-current leg. Run summaries distinguish only the directions actually recorded.
