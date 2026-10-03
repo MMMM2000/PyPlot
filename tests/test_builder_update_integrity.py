@@ -554,6 +554,77 @@ def test_additive_annealing_refresh_retains_saved_phase_points(qtbot, tmp_path, 
     assert sections["annealing"]["extra"]["phase_points"] == points
 
 
+def test_tma_automation_export_keeps_new_and_repeated_runs_in_lazy_review_queue(
+    qtbot, tmp_path, monkeypatch,
+):
+    refresh_root = tmp_path / "new-tma"
+    refresh_root.mkdir()
+
+    def record(folder, piece, label):
+        folder.mkdir(parents=True)
+        measurement = folder / "measurement.csv"
+        measurement.write_text("synthetic source", encoding="utf-8")
+        return ui.MiniDmaRecord(
+            path=folder, sample=f"Ni50Fe27Ga23 1-{piece}",
+            data=pd.DataFrame({"current_mA": [0.0, 1.0, 2.0],
+                               "strain_percent": [0.0, 0.1, 0.0]}),
+            key=("Ni50Fe27Ga23", 1, piece, None), label=label,
+            strain_summary=(f"{label}: 0.1 %",),
+            transition_summary=("20 MPa / 0.1 g: As=0.5 mA, Af=1 mA",),
+        )
+
+    old = record(tmp_path / "saved-tma", 1, "old history")
+    repeated = record(refresh_root / "repeat", 1, "repeat history")
+    new_wire = record(refresh_root / "new-wire", 2, "new wire")
+    old_table = ui._mini_dma_records_to_frame([old])
+    review_id = ui._mini_dma_review_record_id(old, "20 MPa / 0.1 g")
+    reviews = {review_id: {"status": "accepted", "values": {"As": 0.5, "Af": 1.0},
+                          "target_label": "20 MPa / 0.1 g", "analysis_included": True}}
+    sections = {"mini_dma": {
+        "section": "mini_dma", "title": "TMA", "columns": old_table.columns.tolist(),
+        "rows": old_table.to_dict(orient="records"), "index": old_table.index.tolist(),
+        "extra": {ui.MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY: {"records": reviews}},
+        "sources": [], "processed": {},
+        "payloads": {"mini_dma_records": safe_codec.encode_envelope([old])},
+    }}
+    captured_reviews = {}
+
+    def process(section, _paths, progress=None):
+        captured_reviews.update(section.transition_reviews_snapshot())
+        return ui.SectionProcessResult(
+            table=ui._mini_dma_records_to_frame([repeated, new_wire]),
+            processed={str(r.path / "measurement.csv"): 1.0 for r in [repeated, new_wire]},
+            payloads={"mini_dma_records": [repeated, new_wire]},
+        )
+
+    monkeypatch.setattr(ui.MiniDmaSection, "process", process)
+    result = launcher._run_builder_update_section_command(
+        builder_ui=ui, command={"paths": [str(refresh_root)]}, section_name="mini_dma",
+        command_index=0, sections=sections, base_dir=tmp_path,
+    )
+    assert result["record_count"] == 3
+    assert result["row_count"] == 2
+    saved = sections["mini_dma"]
+    source_paths = {source for row in saved["rows"] for source in row["_sources"]}
+    assert source_paths == {str(r.path) for r in [old, repeated, new_wire]}
+    assert saved["extra"][ui.MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY]["records"] == captured_reviews
+    restored = safe_codec.decode_envelope(saved["payloads"]["mini_dma_records"])
+    for actual, expected in zip(restored, [old, repeated, new_wire]):
+        assert (actual.path, actual.key, actual.label) == (expected.path, expected.key, expected.label)
+        pd.testing.assert_frame_equal(actual.data, expected.data)
+    target = tmp_path / "new-and-repeated.pydpj"
+    index = project_package.write_project_package(target, {
+        "kind": "MicrowireDataBuilder", "version": 3, "sections": sections,
+    })
+    compact = pd.DataFrame(index.read_section("mini_dma", load_payloads=False)["rows"])
+    lazy_queue = ui._mini_dma_records_from_project_table(compact)
+    assert {str(r.path) for r in lazy_queue} == source_paths
+    selected = project_package.ProjectPayloadResolver(index).load_records_for_paths(
+        "mini_dma", "mini_dma_records", [r.path for r in lazy_queue],
+    )
+    assert {str(r.path) for r in selected} == source_paths
+
+
 def test_successful_builder_update_reports_unicode_paths_on_legacy_console(qtbot, tmp_path):
     import contextlib
     import io
@@ -613,6 +684,8 @@ def test_reopening_same_tma_sidecar_conflict_preserves_original_history(tmp_path
          "final_values": {"As": 20.0}, "manual_values": {"As": 20.0}}]}
     monkeypatch.setattr(sidecars, "load_review", lambda _p: payload)
     monkeypatch.setattr(adapters, "tma_review_draft", lambda _p: {"measurement_fingerprint": "sha256:same"})
+    # The importer now verifies the embedded record rather than reopening a draft.
+    monkeypatch.setattr(ui, "_mini_dma_record_measurement_fingerprint", lambda _r: "sha256:same")
     monkeypatch.setattr(ui, "_mini_dma_transition_review_entries", lambda *_a: [entry])
     key = ui._mini_dma_review_record_id(record, entry.target_label)
     original = {"status": "accepted", "values": {"As": 18.0}}
