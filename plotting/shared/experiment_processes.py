@@ -52,13 +52,23 @@ def experiment_process_log_path(
 
 
 def gui_python_executable(path: Path) -> Path:
-    if sys.platform != "win32":
-        return path
-    if path.name.lower() != "python.exe":
+    if sys.platform != "win32" or path.name.lower() != "python.exe":
         return path
     pythonw = path.with_name("pythonw.exe")
-    if pythonw.exists():
-        return pythonw
+    return pythonw if pythonw.exists() else path
+
+
+def control_python_executable(path: Path) -> Path:
+    if sys.platform != "win32":
+        return path
+    if path.name.lower() != "pythonw.exe":
+        return path
+    # Experiment apps can spawn hardware-control children.  Keep the console
+    # interpreter (the launcher already supplies CREATE_NO_WINDOW) so Windows
+    # multiprocessing has a real stderr stream and a stable child executable.
+    python = path.with_name("python.exe")
+    if python.exists():
+        return python
     return path
 
 
@@ -67,8 +77,11 @@ def build_experiment_process_command(
     *,
     executable: Path | None = None,
 ) -> list[str]:
-    python_exe = gui_python_executable(
-        Path(sys.executable) if executable is None else executable
+    requested_executable = Path(sys.executable) if executable is None else executable
+    python_exe = (
+        control_python_executable(requested_executable)
+        if spec.resource_tag == "tma"
+        else gui_python_executable(requested_executable)
     )
     if getattr(sys, "frozen", False):
         return [str(python_exe), "--experiment-process", spec.resource_tag]

@@ -16,6 +16,8 @@ a = Analysis(
         'data_logging.current_annealing_logger.current_annealing_logger',
         'data_logging.ac_susceptibility_logger.ac_susceptibility_logger',
         'data_logging.mini_dma_logger.mini_dma_logger',
+        'data_logging.mini_dma_logger.control_process',
+        'data_logging.mini_dma_logger.production_control_backend',
     ],
     hookspath=[],
     hooksconfig={},
