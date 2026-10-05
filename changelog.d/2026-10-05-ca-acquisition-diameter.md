@@ -1,0 +1,1 @@
+- Current annealing current-density rows now use source-verified microscopy diameters tied to the accepted review's exact acquisition. Independent pieces retain their microscope values, and conflicting cycle diameters leave current density unset for review.
