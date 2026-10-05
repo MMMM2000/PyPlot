@@ -4457,6 +4457,60 @@ def _annealing_wire_diameter_um(
     return None
 
 
+def _source_verified_annealing_diameter(
+    record: MeasurementRecord,
+    review: Mapping[str, Any] | None,
+) -> Tuple[float | None, str]:
+    """Resolve microscopy provenance for this acquisition, never a sibling piece."""
+
+    if not isinstance(review, Mapping) or review.get("status") not in {
+        TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+        TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+    }:
+        return None, ""
+    if review.get("included") is False or review.get("analysis_included") is False:
+        return None, ""
+    if review.get("portable_conflict"):
+        return None, "Acquisition diameter review conflict"
+    provenance = review.get("project_review")
+    if not isinstance(provenance, Mapping):
+        return None, ""
+    entries = provenance.get("author_report_entries")
+    if not isinstance(entries, (list, tuple)) or not entries:
+        return None, ""
+    path = _record_path_key(record)
+    if not path:
+        return None, ""
+    path_key = os.path.normcase(os.path.normpath(path))
+    metadata = record.metadata
+    identity = str(review.get("content_identity") or "")
+    diameters: List[float] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping) or entry.get("exact_raw_match_verified") is not True:
+            continue
+        source = str(entry.get("source_path") or "")
+        if os.path.normcase(os.path.normpath(source)) != path_key:
+            continue
+        if (
+            entry.get("composition") != metadata.composition_token
+            or entry.get("microwire") != f"{metadata.draw_x}/{metadata.piece_y}"
+            or entry.get("diameter_kind") != "author_documented_microscopy"
+        ):
+            continue
+        raw_hash = str(entry.get("raw_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_hash) or identity != f"sha256:{raw_hash}":
+            return None, "Acquisition diameter provenance identity mismatch"
+        diameter = _positive_float_or_none(entry.get("core_diameter_um"))
+        if diameter is None:
+            return None, "Invalid acquisition microscopy diameter"
+        diameters.append(diameter)
+    if not diameters:
+        return None, ""
+    if any(not math.isclose(d, diameters[0], rel_tol=1e-9, abs_tol=1e-6) for d in diameters):
+        return None, "Conflicting acquisition microscopy diameters across cycles"
+    return diameters[0], ""
+
+
 def _render_measurement_pixmap(
     record: Optional[MeasurementRecord],
     logger: logging.Logger,
@@ -20112,6 +20166,12 @@ class CurrentDensitySection(QtWidgets.QWidget):
         setpoint_map = self._collect_setpoint_data()
         phase_map = self._collect_phase_points()
         groups = getattr(self._annealing_section, "_record_groups", {})
+        snapshot_provider = getattr(self._annealing_section, "transition_reviews_snapshot", None)
+        reviews = (
+            snapshot_provider()
+            if callable(snapshot_provider)
+            else getattr(self._annealing_section, "_transition_reviews", {})
+        )
         keys = sorted(
             set(setpoint_map.keys()) | set(phase_map.keys()),
             key=lambda item: (
@@ -20167,6 +20227,20 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 )
                 continue
             for record in records:
+                review = (
+                    reviews.get(_transition_record_id_for_annealing_record(record), {})
+                    if isinstance(reviews, Mapping)
+                    else {}
+                )
+                acquisition_diameter, diameter_issue = _source_verified_annealing_diameter(record, review)
+                # Generic wire microscopy remains the fallback for older reviews.
+                # Verified acquisition provenance belongs to this tested piece.
+                record_diameter = (
+                    acquisition_diameter if acquisition_diameter is not None else diameter_um
+                )
+                if diameter_issue:
+                    record_diameter = None
+                record_area = self._diameter_to_area(record_diameter)
                 row_sources = list(sources)
                 path = getattr(record, "path", None)
                 if path:
@@ -20179,14 +20253,15 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     self._current_density_row(
                         composition_label,
                         microwire_label,
-                        diameter_um,
-                        area_mm2,
+                        record_diameter,
+                        record_area,
                         self._phase_values_for_annealing_record(record),
                         setpoints,
                         row_sources,
                         key_text,
                         graph_label=_record_label_for_display(record),
                         record=record,
+                        diameter_issue=diameter_issue,
                     )
                 )
         self._last_sources = sorted(all_sources)
@@ -20231,13 +20306,14 @@ class CurrentDensitySection(QtWidgets.QWidget):
         *,
         graph_label: str,
         record: Optional[MeasurementRecord],
+        diameter_issue: str = "",
     ) -> Dict[str, Any]:
         phase_values = dict(phase_info)
         if phase_values.get("As1") is None and phase_values.get("As") is not None:
             phase_values["As1"] = phase_values.get("As")
         if phase_values.get("Ms1") is None and phase_values.get("Ms") is not None:
             phase_values["Ms1"] = phase_values.get("Ms")
-        notes: List[str] = []
+        notes: List[str] = [diameter_issue] if diameter_issue else []
         if diameter_um is None or area_mm2 is None:
             notes.append("Missing diameter")
         as1_value = phase_values.get("As1")
