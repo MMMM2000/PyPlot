@@ -12,9 +12,7 @@
   "guardrails": {
     "max_stress_mpa": 120.0,
     "recovery_stress_mpa": 30.0,
-    "wire_break_stops_plan": true,
-    "allow_mechanical_slack_takeup": true,
-    "mechanical_slack_max_seek_mm": 4.0
+    "wire_break_stops_plan": true
   },
   "runs": [
     {

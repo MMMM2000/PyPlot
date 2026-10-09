@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from data_logging.mini_dma_logger import campaign as campaign_mod
 from data_logging.mini_dma_logger.campaign import load_campaign, validate_campaign
 from scripts.mini_dma_report import generate_report
 
@@ -113,6 +114,21 @@ def test_campaign_manifest_accepts_utf8_bom(tmp_path: Path) -> None:
     result = validate_campaign(manifest, skip_git=True)
 
     assert result.ok
+
+
+def test_campaign_git_status_ignores_nonfatal_stderr_warning(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        args=["git", "status", "--porcelain"],
+        returncode=0,
+        stdout="",
+        stderr="warning: could not open ignored cache directory\n",
+    )
+    monkeypatch.setattr(campaign_mod.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    assert campaign_mod._git(["status", "--porcelain"], tmp_path) == ""
 
 
 def test_mini_dma_report_generates_standard_outputs(tmp_path: Path) -> None:

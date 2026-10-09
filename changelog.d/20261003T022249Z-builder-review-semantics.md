@@ -1,0 +1,1 @@
+Preserve accepted legacy TMA no-transition reviews when equivalent sidecars explicitly clear every transition. Re-importing an unchanged portable review now retains the original conflict's analysis context while updating only its source identity, sidecar path and revision; changed decisions still require conflict resolution.

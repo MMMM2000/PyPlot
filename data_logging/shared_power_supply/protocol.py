@@ -30,6 +30,12 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super().__init__(address, BrokerRequestHandler)
         self.broker = broker
 
+    def server_close(self) -> None:
+        try:
+            self.broker.stop_scheduler()
+        finally:
+            super().server_close()
+
     def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "")
         broker = self.broker
@@ -87,6 +93,56 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return {"ok": True, "output_on": broker.output_state(channel=int(request["channel"]))}
         if action == "measure_channel":
             return {"ok": True, "readback": broker.measure_channel(channel=int(request["channel"]))}
+        if action == "preview_polling":
+            return {
+                "ok": True,
+                "preview": broker.preview_polling(
+                    channel=int(request["channel"]),
+                    requested_hz=float(request["requested_hz"]),
+                    owner=str(request["owner"]),
+                    role=str(request["role"]),
+                ),
+            }
+        if action == "configure_polling":
+            return {
+                "ok": True,
+                "status": broker.configure_polling(
+                    channel=int(request["channel"]),
+                    lease_id=str(request["lease_id"]),
+                    requested_hz=float(request["requested_hz"]),
+                ),
+            }
+        if action == "disable_polling":
+            broker.disable_polling(
+                channel=int(request["channel"]),
+                lease_id=str(request["lease_id"]),
+            )
+            return {"ok": True}
+        if action == "polling_status":
+            return {"ok": True, "status": broker.polling_status(channel=int(request["channel"]))}
+        if action == "schedule_current":
+            broker.schedule_current(
+                channel=int(request["channel"]),
+                lease_id=str(request["lease_id"]),
+                current_mA=float(request["current_mA"]),
+            )
+            return {"ok": True}
+        if action == "latest_readback":
+            max_age = request.get("max_age_s")
+            return {
+                "ok": True,
+                "readback": broker.latest_readback(
+                    channel=int(request["channel"]),
+                    max_age_s=None if max_age is None else float(max_age),
+                    fallback_to_measure=bool(request.get("fallback_to_measure", True)),
+                ),
+            }
+        if action == "start_scheduler":
+            broker.start_scheduler(tick_s=float(request.get("tick_s", 0.05)))
+            return {"ok": True}
+        if action == "stop_scheduler":
+            broker.stop_scheduler()
+            return {"ok": True}
         if action == "snapshot":
             return {"ok": True, "snapshot": broker.snapshot()}
         raise ValueError(f"Unsupported broker action: {action}")
@@ -185,6 +241,71 @@ class BrokerJsonClient:
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         return dict(self.request("measure_channel", channel=channel)["readback"])
+
+    def preview_polling(
+        self,
+        *,
+        channel: int,
+        requested_hz: float,
+        owner: str,
+        role: str,
+    ) -> dict[str, Any]:
+        return dict(
+            self.request(
+                "preview_polling",
+                channel=channel,
+                requested_hz=requested_hz,
+                owner=owner,
+                role=role,
+            )["preview"]
+        )
+
+    def configure_polling(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        requested_hz: float,
+    ) -> dict[str, Any]:
+        return dict(
+            self.request(
+                "configure_polling",
+                channel=channel,
+                lease_id=lease_id,
+                requested_hz=requested_hz,
+            )["status"]
+        )
+
+    def disable_polling(self, *, channel: int, lease_id: str) -> None:
+        self.request("disable_polling", channel=channel, lease_id=lease_id)
+
+    def polling_status(self, *, channel: int) -> dict[str, Any]:
+        return dict(self.request("polling_status", channel=channel)["status"])
+
+    def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        self.request("schedule_current", channel=channel, lease_id=lease_id, current_mA=current_mA)
+
+    def latest_readback(
+        self,
+        *,
+        channel: int,
+        max_age_s: float | None = None,
+        fallback_to_measure: bool = True,
+    ) -> dict[str, Any]:
+        return dict(
+            self.request(
+                "latest_readback",
+                channel=channel,
+                max_age_s=max_age_s,
+                fallback_to_measure=fallback_to_measure,
+            )["readback"]
+        )
+
+    def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+        self.request("start_scheduler", tick_s=tick_s)
+
+    def stop_scheduler(self) -> None:
+        self.request("stop_scheduler")
 
 
 class BrokerConnectionError(RuntimeError):

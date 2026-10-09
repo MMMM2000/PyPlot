@@ -1,0 +1,1 @@
+Read first-overheating metadata once per TMA current-sweep figure instead of twice per curve. This avoids repeated cloud-sidecar reads in long fatigue histories, preserves every curve and first-overheating label/style, and reads fresh metadata when creating the next figure.

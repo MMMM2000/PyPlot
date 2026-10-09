@@ -1,0 +1,1 @@
+Fixed the Microwire Data Builder transition workspace so first-time VSM and TMA tab loads remain responsive, saved TMA target reviews survive lazy project restoration, and overview rows show canonical samples plus meaningful VSM cycle counts and TMA stress targets.

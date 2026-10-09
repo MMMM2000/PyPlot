@@ -13,6 +13,8 @@ import logging
 import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+from plotting.shared.qt_settings import create_qsettings
 from matplotlib import ticker as mticker
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -50,6 +52,9 @@ LOGGER = logging.getLogger(__name__)
 MM_PER_INCH = 25.4
 DEFAULT_PAPER_WIDTH_MM = 85.0
 DEFAULT_FIGURE_ASPECT_RATIO = 1.5
+PLOTTER_NAME_ALIASES = {
+    "Mini DMA": "TMA",
+}
 
 
 def _builtin_plugin_factories() -> Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]]:
@@ -99,7 +104,7 @@ class PyPlotWorkbench(PyPlotWindow):
         plotters: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] | None = None,
         initial_plotter: str | None = None,
     ) -> None:
-        self.settings = QtCore.QSettings("MicrowireLab", "PyPlotWorkbench")
+        self.settings = create_qsettings("MicrowireLab", "PyPlotWorkbench")
         self._shared_settings = self.settings
         raw_dirs = self.settings.value("plugin_last_dirs", "{}")
         try:
@@ -132,7 +137,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._plotter_combo: QtWidgets.QComboBox | None = None
         self._plot_scope_combo: QtWidgets.QComboBox | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
-        self._initial_plotter = initial_plotter
+        self._initial_plotter = PLOTTER_NAME_ALIASES.get(initial_plotter or "", initial_plotter)
         self._plotter_history: list[str] = self._load_plotter_history()
         self._spawned_windows: list[PyPlotWorkbench] = []
         self._last_graph_dir: Path | None = None

@@ -1,0 +1,1 @@
+Use the acquisition's setup calibration for TMA strain and power-per-length plots when recorded position/strain and a stable position reference independently corroborate it. Keep metadata fallback for ambiguous resets or missing evidence, and apply the same reference to embedded Builder previews without reopening raw CSV data.

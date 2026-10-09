@@ -36,6 +36,10 @@ from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
 from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.discovery import (
+    SerialPortIdentity,
+    hmp_port_preference_key,
+)
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, SupplyProfile
 from data_logging.shared_power_supply.protocol import (
     BrokerJsonClient,
@@ -800,6 +804,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._init_mode_menu(menu_bar)
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        cadence_combo = getattr(self.ui, "comboBox_hmp_readback_rate", None)
+        if isinstance(cadence_combo, QtWidgets.QComboBox):
+            saved_hz = float(self.settings.value("hmp_readback_hz", 1.0))
+            cadence_index = cadence_combo.findData(saved_hz)
+            cadence_combo.setCurrentIndex(max(0, cadence_index))
         self._metadata_records_by_composition: dict[str, list[AnnealingSampleRecord]] = {}
         self._metadata_composition_lookup: dict[str, str] = {}
         self._metadata_record_lookup: dict[tuple[str, str], AnnealingSampleRecord] = {}
@@ -872,6 +881,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_role_checked_channel: int | None = None
         self._shared_broker_current_limit_mA: float | None = None
         self._shared_broker_limit_warning_shown = False
+        self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
+        self._shared_broker_cadence_generation = 0
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
@@ -885,6 +896,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._keithley_output_off_verified = False
         self._keithley_last_measured_target = 0.0
         self.is_connected = False
+        self._update_hmp_cadence_label()
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -932,6 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.process_running = False
 
         self.current_current_set = self._start_current_A()
+        self._ramp_ideal_current_A = self.current_current_set
         self.current_current_read = 0.0
         self.current_increment = 0.001
         self.temp_resistance_maximum = 0.0
@@ -1057,6 +1070,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_broker_host.textChanged.connect(self.handle_broker_settings_changed)
         if hasattr(self.ui, 'spinBox_broker_port'):
             self.ui.spinBox_broker_port.valueChanged.connect(self.handle_broker_settings_changed)
+        if hasattr(self.ui, 'comboBox_hmp_readback_rate'):
+            self.ui.comboBox_hmp_readback_rate.currentIndexChanged.connect(
+                self.handle_hmp_readback_rate_changed
+            )
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
         if hasattr(self.ui, 'pushButton_open_dir'):
@@ -1966,7 +1983,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return f" Exact match: imported d = {float(record.diameter_um):.3g} um."
 
     def _read_builder_project_payload(self, path: Path) -> Any:
-        return json.loads(path.read_text(encoding="utf-8"))
+        from microwire_data_builder.project_package import load_project_table_projection
+
+        return load_project_table_projection(
+            path,
+            section_keys=("microscope", "fabrication", "assemble", "current_density"),
+        )
 
     @classmethod
     def _records_from_project_payload(cls, payload: Any, *, source: str) -> list[AnnealingSampleRecord]:
@@ -2643,7 +2665,7 @@ class MainWindow(QtWidgets.QMainWindow):
         step_mA = max(
             self._current_resolution_mA(),
             abs(float(getattr(self, "current_step_mA", self._current_resolution_mA()) or self._current_resolution_mA())),
-        )
+        ) / self._effective_hmp_command_hz()
         up_steps = max(0, math.ceil(max(0.0, float(max_mA - start_mA)) / step_mA))
         down_steps = up_steps if self._reverse_to_zero_after_max_enabled() else 0
         return max(1, int(up_steps + down_steps))
@@ -3168,6 +3190,150 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _requested_hmp_readback_hz(self) -> float:
+        combo = getattr(self.ui, "comboBox_hmp_readback_rate", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            try:
+                return 2.0 if float(combo.currentData()) >= 2.0 else 1.0
+            except (TypeError, ValueError):
+                pass
+        return 1.0
+
+    def _effective_hmp_command_hz(self) -> float:
+        if self._using_shared_broker():
+            return max(1.0, float(getattr(self, "_shared_broker_effective_hz", 1.0)))
+        return self._requested_hmp_readback_hz()
+
+    def _current_increment_for_direction(self, direction: float) -> float:
+        magnitude = abs(float(getattr(self, "current_step_A", 0.001)))
+        magnitude /= self._effective_hmp_command_hz()
+        return math.copysign(magnitude, direction)
+
+    def _set_current_ramp_direction(self, direction: float) -> None:
+        self.current_increment = self._current_increment_for_direction(direction)
+        self._ramp_ideal_current_A = float(getattr(self, "current_current_set", 0.0) or 0.0)
+
+    def _advance_current_setpoint(self) -> None:
+        current = float(getattr(self, "current_current_set", 0.0) or 0.0)
+        ideal = float(getattr(self, "_ramp_ideal_current_A", current) or current)
+        ideal += float(getattr(self, "current_increment", 0.0) or 0.0)
+        self._ramp_ideal_current_A = ideal
+        resolution_a = self._current_resolution_mA() / 1000.0
+        quantized = round(ideal / resolution_a) * resolution_a
+        self.current_current_set = max(0.0, quantized)
+
+    def _refresh_current_increment_for_cadence(self) -> None:
+        current = float(getattr(self, "current_increment", 0.0) or 0.0)
+        if current:
+            self.current_increment = self._current_increment_for_direction(current)
+
+    def _update_hmp_cadence_label(self) -> None:
+        label = getattr(self.ui, "label_hmp_cadence_status", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        requested = self._requested_hmp_readback_hz()
+        effective = self._effective_hmp_command_hz()
+        sharing = self._using_shared_broker() and effective + 1e-12 < requested
+        suffix = " (shared broker capacity)" if sharing else ""
+        label.setText(f"Effective PSU rate: {effective:g} Hz{suffix}")
+        label.setStyleSheet("color: #b45309;" if sharing else "color: #15803d;")
+
+    def _apply_shared_broker_cadence_status(
+        self,
+        status: Mapping[str, Any] | None,
+        *,
+        announce: bool,
+    ) -> None:
+        if not isinstance(status, Mapping):
+            return
+        polling = status.get("polling")
+        if not isinstance(polling, Mapping):
+            return
+        try:
+            effective_hz = float(polling.get("effective_hz", 1.0))
+        except (TypeError, ValueError):
+            return
+        if effective_hz <= 0:
+            return
+        before_hz = float(getattr(self, "_shared_broker_effective_hz", 1.0))
+        self._shared_broker_effective_hz = effective_hz
+        try:
+            self._shared_broker_cadence_generation = int(status.get("generation", 0))
+        except (TypeError, ValueError):
+            pass
+        self._refresh_current_increment_for_cadence()
+        if self.timer_command.isActive():
+            self.timer_command.setInterval(max(1, round(1000.0 / effective_hz)))
+        self._update_hmp_cadence_label()
+        if announce and abs(before_hz - effective_hz) > 1e-12:
+            requested = self._requested_hmp_readback_hz()
+            reason = " because another broker client is active" if effective_hz < requested else ""
+            message = f"Shared HMP readback changed to {effective_hz:g} Hz{reason}."
+            LOGGER.info(message)
+            self._show_status_message(message, timeout_ms=15000)
+
+    def handle_hmp_readback_rate_changed(self) -> None:
+        requested_hz = self._requested_hmp_readback_hz()
+        try:
+            self.settings.setValue("hmp_readback_hz", requested_hz)
+        except Exception:
+            pass
+        if not self._using_shared_broker():
+            self._shared_broker_effective_hz = requested_hz
+        elif self.process_running and self._shared_broker_lease_id:
+            try:
+                status = self._get_shared_broker_client().configure_polling(
+                    channel=self._shared_broker_channel(),
+                    lease_id=self._shared_broker_lease_id,
+                    requested_hz=requested_hz,
+                )
+                self._apply_shared_broker_cadence_status(status, announce=True)
+            except Exception as exc:
+                self._show_status_message(f"Could not change shared HMP readback rate: {exc}")
+        self._refresh_current_increment_for_cadence()
+        if self.timer_command.isActive():
+            self.timer_command.setInterval(max(1, round(1000.0 / self._effective_hmp_command_hz())))
+        self._update_hmp_cadence_label()
+
+    def _confirm_shared_broker_cadence_start(self) -> bool:
+        if not self._using_shared_broker():
+            return True
+        client = self._get_shared_broker_client()
+        preview_polling = getattr(client, "preview_polling", None)
+        if not callable(preview_polling):
+            return True
+        requested_hz = self._requested_hmp_readback_hz()
+        preview = preview_polling(
+            channel=self._shared_broker_channel(),
+            requested_hz=requested_hz,
+            owner=self._shared_broker_owner,
+            role=ROLE_CURRENT_ANNEALING,
+        )
+        if not bool(preview.get("requires_confirmation")):
+            return True
+        candidate = preview.get("candidate") if isinstance(preview, Mapping) else None
+        effective_hz = (
+            float(candidate.get("effective_hz", 1.0))
+            if isinstance(candidate, Mapping)
+            else 1.0
+        )
+        downgrades = preview.get("downgrades") if isinstance(preview, Mapping) else []
+        affected = ", ".join(
+            f"{item.get('owner', 'another app')} CH{item.get('channel', '?')}"
+            for item in downgrades
+            if isinstance(item, Mapping)
+        )
+        detail = f" This also reduces {affected} to 1 Hz." if affected else ""
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Shared PSU readback rate",
+            f"The requested {requested_hz:g} Hz rate will run at {effective_hz:g} Hz because the "
+            f"shared HMP broker has 2 Hz total readback capacity.{detail}\n\nStart anyway?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _connect_shared_broker_mode(self) -> None:
         host = self._shared_broker_host()
         configured_port = self._shared_broker_port()
@@ -3262,18 +3428,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _candidate_hmp_ports_for_broker(self, *, include_all: bool = False) -> list[str]:
         candidates: list[str] = []
         selected = self._selected_hmp_port_name()
-        if selected:
+        if selected and not include_all:
             candidates.append(selected)
         if not include_all:
             return candidates
         combo = getattr(self.ui, "comboBox_port", None)
         if isinstance(combo, QtWidgets.QComboBox):
+            items: list[tuple[tuple[int, str], str]] = []
             for index in range(combo.count()):
                 data = combo.itemData(index)
                 text = combo.itemText(index).strip()
                 value = str(data or text.split(" - ")[0]).strip()
-                if value and value not in candidates:
+                if value:
+                    items.append(
+                        (
+                            hmp_port_preference_key(
+                                SerialPortIdentity(device=value, description=text)
+                            ),
+                            value,
+                        )
+                    )
+            for _key, value in sorted(items):
+                if value not in candidates:
                     candidates.append(value)
+        if selected and selected not in candidates:
+            candidates.append(selected)
         return candidates
 
     def _probe_hmp_candidate(self, port_name: str) -> dict[str, Any] | None:
@@ -3598,6 +3777,17 @@ class MainWindow(QtWidgets.QMainWindow):
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
         client = self._get_shared_broker_client()
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            status = configure_polling(
+                channel=channel,
+                lease_id=lease_id,
+                requested_hz=self._requested_hmp_readback_hz(),
+            )
+            self._apply_shared_broker_cadence_status(status, announce=False)
         client.configure_channel(
             channel=channel,
             lease_id=lease_id,
@@ -3605,12 +3795,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_a=max(0.0, float(self.current_current_set)),
             output_on=True,
         )
-        configure_polling = getattr(client, "configure_polling", None)
-        if callable(configure_polling):
-            configure_polling(channel=channel, interval_s=1.0)
-        start_scheduler = getattr(client, "start_scheduler", None)
-        if callable(start_scheduler):
-            start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
         if self._read_shared_broker_sample_once():
@@ -3628,6 +3812,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 latest_readback = getattr(client, "latest_readback", None)
                 if callable(latest_readback):
                     readback = latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True)
+                    cadence = readback.get("cadence") if isinstance(readback, Mapping) else None
+                    self._apply_shared_broker_cadence_status(cadence, announce=True)
                 else:
                     readback = client.measure_channel(channel=channel)
             except Exception:
@@ -3741,6 +3927,8 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             client.release(channel=channel, lease_id=lease_id)
             self._shared_broker_lease_id = None
+            self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
+            self._update_hmp_cadence_label()
 
     def _handle_loop_value_changed(self, value: int) -> None:
         try:
@@ -4371,7 +4559,10 @@ class MainWindow(QtWidgets.QMainWindow):
             planned_max = float(self.ui.spinBox_max_current.value())
         except Exception:
             planned_max = float(getattr(self, 'max_current_mA', 0))
-        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+        step_mA = (
+            abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+            / self._effective_hmp_command_hz()
+        )
         tolerance = step_mA * 0.5
         if limit_mA is None:
             if self._applied_limit_current_mA is not None or force:
@@ -5387,6 +5578,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if preflight_errors:
                 self._show_start_preflight_errors(preflight_errors)
                 return
+            if not self._confirm_shared_broker_cadence_start():
+                self._show_status_message("Annealing start cancelled; shared PSU rate was not accepted.")
+                return
             self.process_running = True
             self._last_run_error = ""
             self._update_mode_action_state()
@@ -5437,9 +5631,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
-                self.current_increment = self.current_step_A
+                self._set_current_ramp_direction(1.0)
                 self.direction_ascending = True
                 self.current_current_set = self._start_current_A()
+                self._ramp_ideal_current_A = self.current_current_set
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -5454,7 +5649,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
                 if self.process_running:
-                    self.timer_command.start(1000 // CONTROL_HZ if self._using_keithley() else 1000)
+                    rate = CONTROL_HZ if self._using_keithley() else self._effective_hmp_command_hz()
+                    self.timer_command.start(max(1, round(1000.0 / rate)))
                 
             elif(self.operation_mode == 2):
                 # Prepare output file with overwrite prompt
@@ -5466,9 +5662,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._set_process_state("idle")
                     return
                 self._record_name_history()
-                self.current_increment = self.current_step_A
+                self._set_current_ramp_direction(1.0)
                 self.direction_ascending = True
                 self.current_current_set = self._start_current_A()
+                self._ramp_ideal_current_A = self.current_current_set
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -5503,7 +5700,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 # measurement starts without a one-second delay.
                 self.handle_send_new_command()
                 if self.process_running:
-                    self.timer_command.start(1000 // CONTROL_HZ if self._using_keithley() else 1000)
+                    rate = CONTROL_HZ if self._using_keithley() else self._effective_hmp_command_hz()
+                    self.timer_command.start(max(1, round(1000.0 / rate)))
                 
             else:
                 pass
@@ -5513,7 +5711,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Immediately ramp current down toward zero."""
         if not self.process_running:
             return
-        self.current_increment = -abs(self.current_step_A)
+        self._set_current_ramp_direction(-1.0)
         self.line_color = "b"
         self.force_stop_at_zero = True
         self.direction_ascending = False
@@ -5531,11 +5729,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_status_message("Updated running settings.")
             return
         if self.current_increment != 0:
-            self.current_increment = math.copysign(abs(self.current_step_A), self.current_increment)
+            self.current_increment = self._current_increment_for_direction(self.current_increment)
         if self.direction_ascending and self.current_increment > 0:
             current_set_mA = float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0
             if current_set_mA >= float(getattr(self, "max_current_mA", current_set_mA)):
-                self.current_increment = -abs(self.current_step_A)
+                self._set_current_ramp_direction(-1.0)
                 self.line_color = "b"
                 self.direction_ascending = False
                 self._reset_voltage_projection()
@@ -5666,6 +5864,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_loop_tracking()
         if final_state is None:
             final_state = "completed" if message.startswith("Run complete") else "idle"
+        finished_output = str(self.f_name or "")
+        if finished_output:
+            self._finalize_metadata_file(finished_output, final_state=final_state, detail=message)
         self._set_process_state(final_state, message)
         if self._using_keithley() and self.f_name:
             try:
@@ -5680,6 +5881,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             except (OSError, ValueError) as exc:
                 self._show_status_message(f"Run-result metadata could not be saved: {exc}", timeout_ms=0)
+        if final_state == "completed" and finished_output:
+            QtCore.QTimer.singleShot(0, lambda path=finished_output: self._offer_transition_review(path))
         self._show_status_message(message, timeout_ms=0 if final_state == "failed" else 15000)
         if show_dialog:
             try:
@@ -5744,7 +5947,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
             # Iterate the current set point
-            self.current_current_set += self.current_increment
+            self._advance_current_setpoint()
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             # Stop the process once we are below the configured start current.
@@ -5804,7 +6007,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
-                self.current_increment = -self.current_step_A
+                self._set_current_ramp_direction(-1.0)
                 self.line_color = "b"
                 self.direction_ascending = False
                 self._reset_voltage_projection()
@@ -5812,7 +6015,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Iterate the current set point
             if not self.process_running:
                 return
-            self.current_current_set += self.current_increment
+            self._advance_current_setpoint()
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             if not self.process_running:
@@ -5829,8 +6032,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.stop_annealing("Reverse completed; stopping measurement.", show_dialog=True)
                 elif loops_pending:
                     # prepare next loop
-                    self.current_increment = self.current_step_A
+                    self._set_current_ramp_direction(1.0)
                     self.current_current_set = self._start_current_A()
+                    self._ramp_ideal_current_A = self.current_current_set
                     self.line_color = "r"
                     self.direction_ascending = True
                     self._reset_voltage_projection()
@@ -6179,7 +6383,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _adjust_progress_for_reverse(self) -> None:
         if not self.total_steps:
             return
-        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+        step_mA = (
+            abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+            / self._effective_hmp_command_hz()
+        )
         current_mA = getattr(self, 'curr_value_x', None)
         if current_mA is None:
             current_mA = self.current_current_set * 1000.0
@@ -6198,12 +6405,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action = "reverse"
         limit_label = f"{self._format_voltage_limit()} V"
         if action == "reverse":
-            step = abs(getattr(self, "current_step_A", 0.0))
-            if step == 0.0:
-                step = abs(getattr(self, "current_step_mA", 1)) / 1000.0
-                if step == 0.0:
-                    step = 0.001
-            self.current_increment = -step
+            self._set_current_ramp_direction(-1.0)
             self.line_color = "b"
             next_loop = int(getattr(self, 'loop_idx', 0)) + 1
             if self._has_remaining_loops(next_loop):
@@ -6304,9 +6506,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
                 self.ui.pushButton_configure_plots.setObjectName("pushButton_configure_plots")
                 self.ui.pushButton_configure_plots.clicked.connect(self.handle_configure_plots_clicked)
+                self.ui.pushButton_review_transitions = QtWidgets.QToolButton(container)
+                self.ui.pushButton_review_transitions.setText("Review transitions...")
+                self.ui.pushButton_review_transitions.setToolTip(
+                    "Review the latest completed Current Annealing run. "
+                    "Use the arrow to choose an older measurement."
+                )
+                self.ui.pushButton_review_transitions.setPopupMode(
+                    QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+                )
+                self.ui.pushButton_review_transitions.clicked.connect(
+                    self._review_latest_transition_measurement
+                )
+                transition_menu = QtWidgets.QMenu(self.ui.pushButton_review_transitions)
+                choose_run_folder = transition_menu.addAction("Choose run folder...")
+                choose_run_folder.triggered.connect(self._choose_transition_run_folder)
+                choose_parent_folder = transition_menu.addAction("Review runs in parent folder...")
+                choose_parent_folder.triggered.connect(self._choose_transition_parent_folder)
+                choose_legacy_file = transition_menu.addAction("Choose legacy measurement file...")
+                choose_legacy_file.triggered.connect(self._choose_transition_measurement_file)
+                self.ui.pushButton_review_transitions.setMenu(transition_menu)
                 header_row.addStretch(1)
                 header_row.addWidget(title_label, 3)
                 header_row.addWidget(self.ui.pushButton_configure_plots, 0)
+                header_row.addWidget(self.ui.pushButton_review_transitions, 0)
                 layout.addLayout(header_row)
                 self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
                 self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
@@ -6571,7 +6794,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 base = "anneal_log"
             if d:
                 os.makedirs(d, exist_ok=True)
-                return os.path.join(d, f"{base}.txt")
+                return os.path.join(d, base, "measurement.txt")
         except Exception:
             pass
         # Fallback to legacy full-path field if present
@@ -6706,6 +6929,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "broker_source": "owned"
             if self._owned_shared_broker_server is not None
             else ("existing" if self._using_shared_broker() else "direct"),
+            "readback_requested_hz": self._requested_hmp_readback_hz(),
+            "readback_effective_hz": self._effective_hmp_command_hz(),
+            "readback_cadence_generation": int(
+                getattr(self, "_shared_broker_cadence_generation", 0)
+            ),
         }
         diameter_um = self._diameter_um()
         if self._using_keithley():
@@ -6717,8 +6945,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return {
             "schema": "current_annealing_logger_metadata_v1",
+            "session_state": "running",
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "data_file": output.name,
+            "run_folder": output.parent.name if output.name.casefold() == "measurement.txt" else "",
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "output_file": str(output_path),
             "composition": self._ui_text("lineEdit_composition"),
@@ -6758,6 +6988,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _metadata_path(self, output_path: str) -> Path:
         output = Path(output_path)
+        if output.name.casefold() == "measurement.txt":
+            return output.parent / "metadata.json"
         return output.parent / "metadata" / output.stem / "metadata.json"
 
     def _write_metadata_file(
@@ -6767,7 +6999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         source_provenance_token: object | None = None,
     ) -> bool:
         output = Path(output_path)
-        metadata_dir = output.parent / "metadata" / output.stem
+        metadata_dir = self._metadata_path(output_path).parent
         try:
             metadata_dir.mkdir(parents=True, exist_ok=True)
             self._metadata_path(output_path).write_text(
@@ -6795,6 +7027,183 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
+    def _finalize_metadata_file(self, output_path: str, *, final_state: str, detail: str) -> None:
+        metadata_path = self._metadata_path(output_path)
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("metadata JSON root is not an object")
+            payload["session_state"] = "finished"
+            payload["finished_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            payload["stop"] = {"state": str(final_state), "detail": str(detail)}
+            temporary = metadata_path.with_name(f".{metadata_path.name}.tmp")
+            temporary.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, metadata_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.error("Current Annealing metadata finalization failed for %s: %s", metadata_path, exc)
+            self._show_status_message(f"Metadata finalization failed: {exc}", timeout_ms=12000)
+
+    def _offer_transition_review(self, output_path: str) -> None:
+        if self._window_closing or not self.isVisible():
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Review transitions",
+            "The run finished and the output is safely off. Review transition currents now?",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._open_transition_review(Path(output_path))
+
+    def _transition_review_sample(self, output_path: Path) -> Dict[str, str]:
+        try:
+            payload = json.loads(self._metadata_path(str(output_path)).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            key: str(payload.get(key) or self._ui_text(widget_name))
+            for key, widget_name in (
+                ("composition", "lineEdit_composition"),
+                ("microwire", "lineEdit_microwire"),
+                ("sample", "lineEdit_sample"),
+                ("load", "lineEdit_load"),
+            )
+        }
+
+    def _open_transition_review(self, output_path: Path) -> None:
+        try:
+            from plotting.shared.transition_review_dialog import review_current_annealing_file
+
+            path = Path(output_path)
+            review_current_annealing_file(
+                self,
+                path,
+                sample=self._transition_review_sample(path),
+            )
+        except Exception as exc:
+            LOGGER.exception("Post-run Current Annealing transition review failed")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+    def _latest_completed_transition_measurement(self) -> Path | None:
+        candidates: list[Path] = []
+        if not self.process_running and self.f_name:
+            candidates.append(Path(self.f_name))
+        for entry in self._measurement_history:
+            source = str(entry.get("source") or "").strip()
+            if source:
+                candidates.append(Path(source))
+        existing = list(dict.fromkeys(path for path in candidates if path.is_file()))
+        if not existing:
+            return None
+        return max(existing, key=lambda path: path.stat().st_mtime_ns)
+
+    def _review_latest_transition_measurement(self) -> None:
+        if self.process_running:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Transition review unavailable",
+                "Finish or stop the active Current Annealing run before reviewing transitions.",
+            )
+            return
+        output_path = self._latest_completed_transition_measurement()
+        if output_path is None:
+            self._choose_transition_run_folder()
+            return
+        self._open_transition_review(output_path)
+
+    def _choose_transition_run_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose completed Current Annealing run folder",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        measurement = Path(selected) / "measurement.txt"
+        if not measurement.is_file():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Transition review unavailable",
+                "The selected folder does not contain measurement.txt.",
+            )
+            return
+        self._open_transition_review(measurement)
+
+    def _choose_transition_parent_folder(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent.parent if latest is not None else Path.cwd()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose parent folder containing Current Annealing runs",
+            str(start_dir),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        measurements: list[Path] = []
+        own_measurement = root / "measurement.txt"
+        if own_measurement.is_file():
+            measurements.append(own_measurement)
+        try:
+            children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+            return
+        measurements.extend(
+            child / "measurement.txt"
+            for child in children
+            if child.is_dir() and (child / "measurement.txt").is_file()
+        )
+        if not measurements:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No completed runs found",
+                "No direct child run folders containing measurement.txt were found.",
+            )
+            return
+        try:
+            from plotting.shared.transition_review_dialog import (
+                review_current_annealing_files,
+            )
+
+            review_current_annealing_files(
+                self,
+                measurements,
+                sample_for_path=self._transition_review_sample,
+            )
+        except Exception as exc:
+            LOGGER.exception("Current Annealing transition review queue failed")
+            QtWidgets.QMessageBox.warning(self, "Transition review unavailable", str(exc))
+
+
+    def _choose_transition_measurement_file(self) -> None:
+        if self.process_running:
+            self._review_latest_transition_measurement()
+            return
+        latest = self._latest_completed_transition_measurement()
+        start_dir = latest.parent if latest is not None else Path.cwd()
+        selected, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose Current Annealing measurement",
+            str(start_dir),
+            "Current Annealing measurements (*.txt *.dat *.csv);;All files (*)",
+        )
+        if selected:
+            self._open_transition_review(Path(selected))
+
     def _write_source_provenance_completion(self, output_path: str, token: object) -> None:
         if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
             return
@@ -6817,7 +7226,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
         moved: list[str] = []
-        metadata_dir = output.parent / "metadata" / output.stem
+        if output.name.casefold() == "measurement.txt" and output.parent.exists():
+            destination = _move_path_to_trash(output.parent)
+            moved.append(str(destination or output.parent))
+            self._show_status_message(
+                "Moved previous output to Trash before replacing: " + "; ".join(moved),
+                timeout_ms=12000,
+            )
+            return
+        metadata_dir = self._metadata_path(output_path).parent
         for path in (output, metadata_dir):
             if not path.exists():
                 continue
@@ -6837,13 +7254,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_runtime_settings()
         self._store_loop_preferences()
         path = self.build_log_path()
+        output_path = Path(path)
+        run_folder_existed = (
+            output_path.name.casefold() == "measurement.txt"
+            and output_path.parent.exists()
+        )
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
         except Exception:
             pass
 
         mode = "w"
-        if os.path.exists(path):
+        output_exists = os.path.exists(path) or (
+            output_path.name.casefold() == "measurement.txt" and run_folder_existed
+        )
+        if output_exists:
             msg = QtWidgets.QMessageBox(self)
             msg.setWindowTitle("File exists")
             msg.setIcon(QtWidgets.QMessageBox.Icon.Question)
@@ -6870,6 +7295,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"Failed to move previous output to Trash before replacing {path}: {exc}",
                     )
                     return False
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to create run folder: {exc}")
+            return False
         try:
             if mode == "a":
                 self._ensure_log_header(path)
@@ -6899,7 +7329,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.comboBox_port.clear()
             # 1) Normal OS-reported ports
             seen: set[str] = set()
-            for info in QSerialPortInfo.availablePorts():
+            port_infos = list(QSerialPortInfo.availablePorts())
+
+            def _identity(info: QSerialPortInfo) -> SerialPortIdentity:
+                sysloc = info.systemLocation() if hasattr(info, 'systemLocation') else info.portName()
+                try:
+                    manufacturer = info.manufacturer()
+                except Exception:
+                    manufacturer = ""
+                try:
+                    vid = info.vendorIdentifier() if info.hasVendorIdentifier() else None
+                except Exception:
+                    vid = None
+                try:
+                    pid = info.productIdentifier() if info.hasProductIdentifier() else None
+                except Exception:
+                    pid = None
+                try:
+                    description = info.description()
+                except Exception:
+                    description = ""
+                return SerialPortIdentity(
+                    device=str(sysloc or info.portName()),
+                    description=str(description or ""),
+                    manufacturer=str(manufacturer or ""),
+                    vid=vid,
+                    pid=pid,
+                )
+
+            for info in sorted(port_infos, key=lambda item: hmp_port_preference_key(_identity(item))):
                 sysloc = info.systemLocation() if hasattr(info, 'systemLocation') else info.portName()
                 name = info.portName()
                 label = name

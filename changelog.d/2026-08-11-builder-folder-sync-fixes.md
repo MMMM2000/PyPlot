@@ -1,0 +1,4 @@
+- Import current-annealing logger `current_annealing_session_v2` run folders as one `measurement.csv` measurement in both Microwire Data Builder and PyPlot, including metadata identity and cycle data.
+- Keep refreshed TMA runs grouped by their direct child run-folder names instead of collapsing them into the connected root name.
+- Rebuild VSM transition cycles after deferred source loading and avoid counting multiple magnetic-field traces as multiple thermal cycles.
+- Dictionary-compress repeated string columns in packaged DataFrames so complete refreshed TMA payloads stay within project safety limits.

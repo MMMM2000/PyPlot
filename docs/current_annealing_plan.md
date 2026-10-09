@@ -121,6 +121,10 @@ Preferred output fields:
 
 `Setpoints (mA)` and `Sources` should continue to act as the complete audit trail.
 
+## Logger run folders and portable review
+
+New Current Annealing acquisitions are stored as `<base-name>/measurement.txt` with sibling `metadata.json`. Metadata records the running/finished state and final stop information. After a safely completed run, the logger offers immediate transition review and atomically stores `transition_review.json` in that run folder. Existing flat measurement files remain readable and use `<stem>.transition-review.json` when reviewed retrospectively.
+
 ## Implemented Scope
 
 - simplify the current annealing UI model to `1000 mA + other`

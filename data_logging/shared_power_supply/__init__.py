@@ -13,6 +13,12 @@ from .profiles import (
     SupplyProfile,
     detect_hmp_profile,
 )
+from .discovery import (
+    SerialPortIdentity,
+    hmp_port_preference_key,
+    is_native_hmp_usb,
+    sort_hmp_port_identities,
+)
 
 __all__ = [
     "BenchChannel",
@@ -21,7 +27,11 @@ __all__ = [
     "HMP4030_PROFILE",
     "HMP4040_PROFILE",
     "HMP_PROFILES",
+    "SerialPortIdentity",
     "SharedPowerSupplyBroker",
     "SupplyProfile",
     "detect_hmp_profile",
+    "hmp_port_preference_key",
+    "is_native_hmp_usb",
+    "sort_hmp_port_identities",
 ]

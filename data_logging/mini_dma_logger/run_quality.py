@@ -9,7 +9,9 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,10 +45,67 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    rows, _row_count, _warnings = _read_csv_rows_validated(path)
+    return rows
+
+
+def _read_csv_rows_validated(
+    path: Path,
+    *,
+    wanted_fields: set[str] | None = None,
+    retain_limit_events_only: bool = False,
+) -> tuple[list[dict[str, str]], int, list[str]]:
     if not path.exists():
-        return []
+        return [], 0, []
+    rows: list[dict[str, str]] = []
+    row_count = 0
+    malformed_count = 0
+    malformed_lines: list[int] = []
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
-        return list(csv.DictReader(handle))
+        reader = csv.reader(handle)
+        header = next(reader, [])
+        if not header:
+            return [], 0, []
+        selected = header if wanted_fields is None else [name for name in header if name in wanted_fields]
+        index_by_name = {name: index for index, name in enumerate(header)}
+        for values in reader:
+            row_count += 1
+            if len(values) == len(header) + 1 and values and values[0] == "":
+                # Known Drive/concurrent-writer corruption shape: a complete
+                # row shifted by one empty field. Recover the data but report it.
+                values = values[1:]
+                malformed_count += 1
+                if len(malformed_lines) < 20:
+                    malformed_lines.append(reader.line_num)
+            elif len(values) != len(header):
+                malformed_count += 1
+                if len(malformed_lines) < 20:
+                    malformed_lines.append(reader.line_num)
+                continue
+            row = {
+                name: values[index_by_name[name]]
+                for name in selected
+                if index_by_name[name] < len(values)
+            }
+            if retain_limit_events_only:
+                phase = str(row.get("automation_phase") or "")
+                text = " ".join(
+                    str(row.get(key) or "") for key in ("decision", "result", "reason")
+                ).lower()
+                if (
+                    phase not in CURRENT_LIMIT_PHASES
+                    and "voltage_limit" not in text
+                    and "current_limit" not in text
+                ):
+                    continue
+            rows.append(row)
+    warnings: list[str] = []
+    if malformed_count:
+        lines = ",".join(str(value) for value in malformed_lines)
+        warnings.append(
+            f"malformed:{path.name}:rows={malformed_count}:lines={lines or 'unknown'}"
+        )
+    return rows, row_count, warnings
 
 
 def _read_ir_temperature_rows_for_quality(path: Path) -> tuple[list[dict[str, str]], int, str | None]:
@@ -335,8 +394,11 @@ def _metadata_warnings(
     rows: list[dict[str, str]],
     trace_rows: list[dict[str, str]],
     ir_rows: list[dict[str, str]],
+    *,
+    trace_row_count: int | None = None,
+    integrity_warnings: list[str] | None = None,
 ) -> list[str]:
-    warnings: list[str] = []
+    warnings: list[str] = list(integrity_warnings or [])
     metadata_warning = _json_warning(run_path / "metadata.json")
     if metadata_warning is not None:
         warnings.append(metadata_warning)
@@ -348,7 +410,9 @@ def _metadata_warnings(
         path = run_path / filename
         if not path.exists():
             warnings.append(f"missing:{filename}")
-        elif filename != "ir_temperature.csv" and not present_rows:
+        elif filename == "control_trace.csv" and trace_row_count is not None and trace_row_count <= 0:
+            warnings.append(f"empty:{filename}")
+        elif filename not in {"ir_temperature.csv", "control_trace.csv"} and not present_rows:
             warnings.append(f"empty:{filename}")
     name_fields = _metadata_mapping(metadata, "name_fields")
     stop = _metadata_mapping(metadata, "stop")
@@ -482,8 +546,14 @@ def analyze_run_quality(
 ) -> RunQuality:
     run_path = Path(run_dir)
     metadata = _read_json(run_path / "metadata.json")
-    rows = _read_csv_rows(run_path / "measurement.csv")
-    trace_rows = _read_csv_rows(run_path / "control_trace.csv")
+    rows, _measurement_row_count, measurement_integrity_warnings = _read_csv_rows_validated(
+        run_path / "measurement.csv"
+    )
+    trace_rows, trace_row_count, trace_integrity_warnings = _read_csv_rows_validated(
+        run_path / "control_trace.csv",
+        wanted_fields={"elapsed_s", "automation_phase", "decision", "result", "reason"},
+        retain_limit_events_only=True,
+    )
     ir_rows, ir_temperature_row_count, ir_warning = _read_ir_temperature_rows_for_quality(
         run_path / "ir_temperature.csv"
     )
@@ -529,7 +599,15 @@ def analyze_run_quality(
     stop_reason = str(stop.get("reason") or "")
     stop_category = str(stop.get("category") or "")
     stop_classification = _classify_stop(stop_reason, stop_category)
-    metadata_warnings = _metadata_warnings(run_path, metadata, rows, trace_rows, ir_rows)
+    metadata_warnings = _metadata_warnings(
+        run_path,
+        metadata,
+        rows,
+        trace_rows,
+        ir_rows,
+        trace_row_count=trace_row_count,
+        integrity_warnings=measurement_integrity_warnings + trace_integrity_warnings,
+    )
     if ir_warning is not None:
         metadata_warnings.append(ir_warning)
     exclusion_reasons: list[str] = []
@@ -599,7 +677,7 @@ def analyze_run_quality(
         stop_classification=stop_classification,
         stop_detail=str(stop.get("detail") or ""),
         measurement_rows=len(rows),
-        control_trace_rows=len(trace_rows),
+        control_trace_rows=trace_row_count,
         ir_temperature_rows=ir_temperature_row_count,
         current_loop_count_estimate=current_loop_count,
         total_elapsed_s=total_elapsed,
@@ -641,7 +719,18 @@ def analyze_run_quality(
 def write_run_quality(quality: RunQuality, output_path: Path | str) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(quality.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(quality.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
     return path
 
 

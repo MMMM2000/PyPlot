@@ -1,0 +1,1 @@
+Fixed Microwire Data Builder automation updates that saved newly imported TMA measurements but omitted their rows and source folders from the project table and lazy transition-review queue. The export now applies existing reviewed summaries to the complete merged record set while preserving source frames, accepted decisions and repeated runs.

@@ -1,0 +1,2 @@
+- Split VSM temperature scans into independent `Cycle 1`, `Cycle 2`, ... transition reviews before automatic detection, and organize the graphical reviewer as sample -> scan -> cycle.
+- Preserve existing scan-level VSM decisions by copying them to each detected cycle with explicit migration provenance while retaining the superseded source review for audit.

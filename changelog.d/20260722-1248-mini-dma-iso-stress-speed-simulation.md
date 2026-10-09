@@ -1,0 +1,3 @@
+2026-07-22 12:48 UTC
+- Added a deterministic, software-only closed-loop simulator and portable technical report generator comparing current TMA iso-stress hold/resume behavior with the proposed evidence, probation, and rate-limiting policies; no controller or hardware behavior changed.
+- Added a Prague-derived fixed-current hunting scenario and cycle-center policy ablations, including fixed-current-only windowing, delayed motor response, post-move resume confirmation, and long-hold metrics; the selected offline result suppresses phase-chasing motor corrections but is not enabled in the controller.

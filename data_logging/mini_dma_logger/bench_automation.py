@@ -19,6 +19,8 @@ PLAN_KIND = "mini_dma_bench_sequence"
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_DURATION_S = 3600.0
 DEFAULT_BENCH_LOCK_TIMEOUT_S = 300.0
+DEFAULT_SERIAL_PORT_SCAN_TIMEOUT_S = 10.0
+DEFAULT_TMA_HISTORY_SCAN_TIMEOUT_S = 30.0
 
 
 class MiniDmaBenchAutomationError(RuntimeError):
@@ -40,8 +42,6 @@ class MiniDmaBenchGuardrails:
     max_stress_mpa: float | None = None
     recovery_stress_mpa: float | None = None
     wire_break_stops_plan: bool = True
-    allow_mechanical_slack_takeup: bool = False
-    mechanical_slack_max_seek_mm: float | None = None
     current_hold_quality_timeout_s: float | None = None
     current_hold_quality_error_mpa: float | None = None
 
@@ -209,9 +209,6 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     recovery_stress_mpa = _optional_float(raw_guardrails, "recovery_stress_mpa")
     if recovery_stress_mpa is not None and recovery_stress_mpa <= 0.0:
         raise MiniDmaBenchAutomationError("TMA bench plan guardrail recovery_stress_mpa must be positive.")
-    mechanical_slack_max_seek_mm = _optional_float(raw_guardrails, "mechanical_slack_max_seek_mm")
-    if mechanical_slack_max_seek_mm is not None and mechanical_slack_max_seek_mm <= 0.0:
-        raise MiniDmaBenchAutomationError("TMA bench plan guardrail mechanical_slack_max_seek_mm must be positive.")
     current_hold_quality_timeout_s = _optional_float(raw_guardrails, "current_hold_quality_timeout_s")
     if current_hold_quality_timeout_s is not None and current_hold_quality_timeout_s <= 0.0:
         raise MiniDmaBenchAutomationError(
@@ -226,8 +223,6 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         max_stress_mpa=max_stress_mpa,
         recovery_stress_mpa=recovery_stress_mpa,
         wire_break_stops_plan=bool(raw_guardrails.get("wire_break_stops_plan", True)),
-        allow_mechanical_slack_takeup=bool(raw_guardrails.get("allow_mechanical_slack_takeup", False)),
-        mechanical_slack_max_seek_mm=mechanical_slack_max_seek_mm,
         current_hold_quality_timeout_s=current_hold_quality_timeout_s,
         current_hold_quality_error_mpa=current_hold_quality_error_mpa,
     )
@@ -406,7 +401,7 @@ def _write_summary(path: Path | None, summary: Mapping[str, Any]) -> None:
 def _ensure_qapplication(qt_args: Sequence[str] | None) -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if not isinstance(app, QtWidgets.QApplication):
-        app = QtWidgets.QApplication(["mini-dma-bench", *(qt_args or [])])
+        app = QtWidgets.QApplication(["tma-bench", *(qt_args or [])])
     ensure_app_theme(app)
     return app
 
@@ -432,18 +427,6 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
             starting_length_mm=run.starting_length_mm,
             preload_length_mm=run.preload_length_mm,
         )
-
-
-def _apply_bench_guardrails(window: Any, guardrails: MiniDmaBenchGuardrails) -> None:
-    method = getattr(window, "set_bench_mechanical_slack_takeup", None)
-    if callable(method):
-        method(
-            allow=guardrails.allow_mechanical_slack_takeup,
-            max_seek_mm=guardrails.mechanical_slack_max_seek_mm,
-        )
-        return
-    setattr(window, "_bench_allow_mechanical_slack_takeup", guardrails.allow_mechanical_slack_takeup)
-    setattr(window, "_bench_mechanical_slack_max_seek_mm", guardrails.mechanical_slack_max_seek_mm)
 
 
 def _ensure_measurement_logging_session(window: Any) -> None:
@@ -534,6 +517,58 @@ def _apply_hardware_config(window: Any, hardware: MiniDmaHardwareConfig) -> None
     persist = getattr(window, "_persist_settings_if_enabled", None)
     if callable(persist):
         persist()
+
+
+def _wait_for_serial_port_scan(
+    window: Any,
+    hardware: MiniDmaHardwareConfig,
+    *,
+    app: Any,
+    sleep_fn: Callable[[float], None],
+    timeout_s: float = DEFAULT_SERIAL_PORT_SCAN_TIMEOUT_S,
+) -> None:
+    if hardware.supply_port is None and hardware.scale_port is None:
+        return
+    if not hasattr(window, "_serial_port_scan_completed"):
+        return
+    start_scan = getattr(window, "_start_serial_port_enumeration", None)
+    if not bool(getattr(window, "_serial_port_scan_completed", False)) and callable(start_scan):
+        start_scan()
+    deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+    while not bool(getattr(window, "_serial_port_scan_completed", False)):
+        app.processEvents()
+        if time.monotonic() >= deadline_s:
+            raise MiniDmaBenchAutomationError(
+                "Timed out waiting for serial-port discovery before applying pinned bench hardware."
+            )
+        sleep_fn(0.05)
+    app.processEvents()
+
+
+def _wait_for_tma_history_scan(
+    window: Any,
+    *,
+    app: Any,
+    sleep_fn: Callable[[float], None],
+    timeout_s: float = DEFAULT_TMA_HISTORY_SCAN_TIMEOUT_S,
+) -> None:
+    current_root = getattr(window, "_current_tma_history_root", None)
+    start_scan = getattr(window, "_start_pending_tma_history_scan", None)
+    if not callable(current_root) or not callable(start_scan):
+        return
+    target_root = current_root()
+    if getattr(window, "_tma_history_root", None) == target_root:
+        return
+    start_scan()
+    deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+    while getattr(window, "_tma_history_root", None) != target_root:
+        app.processEvents()
+        if time.monotonic() >= deadline_s:
+            raise MiniDmaBenchAutomationError(
+                "Timed out waiting for TMA history discovery before unattended recipe preflight."
+            )
+        sleep_fn(0.05)
+    app.processEvents()
 
 
 def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
@@ -824,7 +859,6 @@ def _execute_run(
     window._load_recipe_from_path(run.recipe_path)
     _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
-    _apply_bench_guardrails(window, guardrails)
     _prefer_next_output_run(window)
     _ensure_measurement_logging_session(window)
     window._start_auto_ramp()
@@ -984,8 +1018,6 @@ def run_mini_dma_bench_plan(
                         "max_stress_mpa": plan.guardrails.max_stress_mpa,
                         "recovery_stress_mpa": plan.guardrails.recovery_stress_mpa,
                         "wire_break_stops_plan": plan.guardrails.wire_break_stops_plan,
-                        "allow_mechanical_slack_takeup": plan.guardrails.allow_mechanical_slack_takeup,
-                        "mechanical_slack_max_seek_mm": plan.guardrails.mechanical_slack_max_seek_mm,
                     },
                 }
                 for run in plan.runs
@@ -1071,8 +1103,19 @@ def run_mini_dma_bench_plan(
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _wait_for_serial_port_scan(
+                        window,
+                        plan.hardware,
+                        app=app,
+                        sleep_fn=sleep_fn,
+                    )
                     _apply_hardware_config(window, plan.hardware)
                     _apply_sample_identity(window, plan.sample_identity)
+                    _wait_for_tma_history_scan(
+                        window,
+                        app=app,
+                        sleep_fn=sleep_fn,
+                    )
                     run_summary = _execute_run(
                         run,
                         app=app,

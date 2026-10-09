@@ -1,3 +1,3 @@
-from .mini_dma_plugin import MiniDmaPlugin
+from .mini_dma_plugin import MiniDmaPlugin, TmaPlugin
 
-__all__ = ["MiniDmaPlugin"]
+__all__ = ["TmaPlugin", "MiniDmaPlugin"]

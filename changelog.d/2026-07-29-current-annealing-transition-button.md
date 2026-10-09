@@ -1,0 +1,2 @@
+- Add a **Review transitions...** split button to the Current Annealing logger for reopening the latest completed run, another run folder, or a legacy measurement file.
+- Preserve manually adjusted transition-review status in the Microwire Data Builder and normalize historically mislabelled reviews during sidecar backfill.
