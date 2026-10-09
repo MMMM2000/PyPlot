@@ -178,8 +178,40 @@ def test_keithley_live_view_does_not_discard_saved_or_retained_points(qtbot, mon
     drawn = []
     monkeypatch.setattr(window, "_redraw_segments", lambda: drawn.append(len(window._samples_current)))
     window._redraw_keithley_live()
-    assert drawn == [2000]
+    assert drawn == [5000]
     assert window._samples_current == values
+
+
+def test_keithley_finite_history_retains_early_points_and_microstep_colors(qtbot, monkeypatch):
+    monkeypatch.setattr(logger_mod.MainWindow, "_refresh_keithley_resources", lambda self: None)
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.comboBox_supply.setCurrentIndex(window.ui.comboBox_supply.findData("keithley2636b"))
+    window.infinite_loops = False
+    window._reset_sample_buffers()
+    for n in range(21001):
+        command = 1 + (n if n <= 10500 else 21000 - n) * 0.002
+        window._append_measurement_sample(command, 160, commanded_current_mA=command)
+    assert len(window._samples_current) == 21001
+    assert window._samples_current[0] == 1
+    runs = window._segment_runs(window._samples_current)
+    assert [run[0] for run in runs] == ["#dc2626", "#2563eb"]
+    assert runs[0][1] == 0
+    assert runs[-1][2] == 21000
+    window._redraw_keithley_live()
+    assert max(window._segment_lines_ax2[-1].xData) == 21001
+
+
+def test_annealing_rebuilt_plot_has_one_wrapping_header(qtbot):
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = "Ni50Fe27Ga23 12_2 100mA EBSD_Limpat 2loops.txt"
+    for _ in range(3):
+        window.init_graph_window()
+        logger_mod.QtWidgets.QApplication.sendPostedEvents(None, logger_mod.QtCore.QEvent.Type.DeferredDelete)
+    labels = window.ui.plot_container.findChildren(logger_mod.QtWidgets.QLabel, "annealing_plot_title")
+    assert len(labels) == 1
+    assert labels[0].wordWrap()
 
 
 def test_supply_switch_restores_limits_before_loading_saved_current(qtbot, monkeypatch):

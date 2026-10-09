@@ -358,11 +358,11 @@ def _cycle_color(direction: float, cycle_index: int) -> str:
     return palette[(max(1, cycle_index) - 1) % len(palette)]
 
 
-def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[str]:
+def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0, minimum_tolerance_mA: float = 0.5) -> List[str]:
     if len(currents) < 2:
         return []
     step_value = abs(float(step_mA or 1.0))
-    tolerance = max(0.5, step_value * 0.6)
+    tolerance = max(minimum_tolerance_mA, step_value * 0.6)
     reversal_threshold = max(tolerance * 2.0, step_value * 1.5)
     inc_count = 0
     dec_count = 0
@@ -420,12 +420,12 @@ def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0)
     return colors
 
 
-def _segment_runs_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[tuple[str, int, int]]:
+def _segment_runs_for_currents(currents: List[float], *, step_mA: float = 1.0, minimum_tolerance_mA: float = 0.5) -> List[tuple[str, int, int]]:
     if not currents:
         return []
     if len(currents) == 1:
         return [(_cycle_color(1.0, 1), 0, 0)]
-    colors = _segment_colors_for_currents(currents, step_mA=step_mA)
+    colors = _segment_colors_for_currents(currents, step_mA=step_mA, minimum_tolerance_mA=minimum_tolerance_mA)
     if not colors:
         return [(_cycle_color(1.0, 1), 0, len(currents) - 1)]
     runs: List[tuple[str, int, int]] = []
@@ -973,6 +973,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._estimated_limit_current_mA: float | None = None
         self._applied_limit_current_mA: float | None = None
         self._samples_current: List[float] = []
+        self._samples_commanded_current: List[float] = []
         self._samples_resistance: List[float] = []
         self._samples_voltage: List[float] = []
         self._segment_lines_ax1: list[Any] = []
@@ -1519,6 +1520,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if plot is None or pg is None:
             return None
         item = plot.plot(x_values, y_values, **self._pyqtgraph_plot_kwargs(color))
+        if self._using_keithley():
+            item.setDownsampling(auto=True, method="peak")
         return item
 
     def _remove_live_plot_item(self, item: Any) -> None:
@@ -2336,6 +2339,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reset_sample_buffers(self) -> None:
         self._samples_current = []
+        self._samples_commanded_current = []
         self._samples_resistance = []
         self._samples_voltage = []
         self._clear_segment_lines()
@@ -2479,11 +2483,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return resistance >= MIN_PLOTTABLE_RESISTANCE_OHM
 
-    def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None) -> None:
+    def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None, *, commanded_current_mA: float | None = None) -> None:
         if not self._measurement_sample_is_plottable(current_mA, resistance):
             return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
+        self._samples_commanded_current.append(float(current_mA if commanded_current_mA is None else commanded_current_mA))
         self._samples_resistance.append(float(resistance))
         if voltage is None:
             try:
@@ -2493,9 +2498,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._samples_voltage.append(float(voltage))
         self.sample_index = len(self._samples_current)
         if self._using_keithley():
-            # Disk retains all rows; the live view stays bounded and refreshes at 10 Hz.
-            for values in (self._samples_current, self._samples_resistance, self._samples_voltage):
-                if len(values) > 20000:
+            # Finite recipes retain the whole measurement. Endless runs remain bounded.
+            for values in (self._samples_current, self._samples_resistance, self._samples_voltage, self._samples_commanded_current):
+                if getattr(self, "infinite_loops", False) and len(values) > 20000:
                     del values[:-20000]
         else:
             self._redraw_segments()
@@ -2511,6 +2516,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _segment_runs(self, currents: List[float]) -> List[tuple[str, int, int]]:
+        if self._using_keithley():
+            commands = self._samples_commanded_current
+            direction_values = commands if len(commands) == len(currents) else currents
+            return _segment_runs_for_currents(direction_values, step_mA=0.001, minimum_tolerance_mA=0.001)
         return _segment_runs_for_currents(
             currents,
             step_mA=float(getattr(self, 'current_step_mA', 1) or 1),
@@ -3912,7 +3921,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if not self._write_sample_to_file(initial_sample=False):
                         return
                     self.first_sample = False
-                    self._append_measurement_sample(current, self.current_resistance, voltage)
+                    self._append_measurement_sample(current, self.current_resistance, voltage, commanded_current_mA=target)
                     self.step_idx += 1
             if len(self._keithley_sample_times) > 1:
                 times = self._keithley_sample_times
@@ -3983,16 +3992,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.stop_annealing(f"Keithley acquisition failed: {exc}", final_state="failed")
 
     def _redraw_keithley_live(self) -> None:
-        # Drawing many complete cycles creates hundreds of scene objects. Keep
-        # the live viewport small without decimating or discarding saved data.
-        original = self._samples_current, self._samples_resistance, self._samples_voltage
-        try:
-            self._samples_current, self._samples_resistance, self._samples_voltage = (
-                values[-2000:] for values in original
-            )
-            self._redraw_segments()
-        finally:
-            self._samples_current, self._samples_resistance, self._samples_voltage = original
+        # Preserve the full run extent; pyqtgraph reduces rendering work only.
+        self._redraw_segments()
 
     def _record_sample_progress(self) -> None:
         """Update progress/rate counters for a persisted non-initial sample."""
@@ -5612,6 +5613,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 final_state = "failed"
                 message = f"{message} Shutdown problem: {exc}"
         saved_samples = self.step_idx
+        if self._using_keithley():
+            self._redraw_keithley_live()
         self._finalize_measurement_history()
         try:
             self.timer_command.stop()
@@ -6263,6 +6266,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+                child_layout = item.layout()
+                if child_layout is not None:
+                    while child_layout.count():
+                        child = child_layout.takeAt(0)
+                        if child.widget() is not None:
+                            child.widget().deleteLater()
+                    child_layout.deleteLater()
             self._pg_placeholder_labels = []
             self.pg_plot_resistance_vs_current = None
             self.pg_plot_resistance_vs_sample = None
@@ -6284,6 +6294,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 header_row.setContentsMargins(0, 0, 0, 0)
                 header_row.setSpacing(8)
                 title_label = QtWidgets.QLabel(title, container)
+                title_label.setObjectName("annealing_plot_title")
+                title_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+                title_label.setWordWrap(True)
+                title_label.setMinimumWidth(0)
+                title_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
                 title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 title_label.setStyleSheet("font-weight: 700; padding: 4px;")
                 self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
