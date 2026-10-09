@@ -107,6 +107,129 @@ class _MemorySettings:
         pass
 
 
+def test_keithley_annealing_full_recipe_and_unchanged_rows(qtbot, monkeypatch, tmp_path):
+    from test_current_annealing_keithley import FakeVisa, FakeManager
+    from data_logging.current_annealing_logger.keithley import AnnealingKeithley
+
+    device = FakeVisa()
+    monkeypatch.setattr(logger_mod.MainWindow, "_refresh_keithley_resources", lambda self: None)
+    monkeypatch.setattr(logger_mod, "AnnealingKeithley", lambda **kwargs: AnnealingKeithley(
+        **kwargs, resource_manager_factory=lambda: FakeManager(device)))
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.comboBox_supply.setCurrentIndex(window.ui.comboBox_supply.findData("keithley2636b"))
+    window.ui.comboBox_channel.setCurrentIndex(1)
+    window.ui.comboBox_keithley_resource.setCurrentText("FAKE")
+    assert window.max_voltage == 3
+    assert window.max_current_mA == 2
+    assert window.ui.comboBox_channel.itemText(1) == "A"
+    window.ui.spinBox_max_current.setValue(2)
+    window.ui.spinBox_step_mA.setValue(1)
+    window.ui.spinBox_loops.setValue(1)
+    window.ui.checkBox_infinite_loops.setChecked(False)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("keithley")
+    output = logger_mod.Path(window.build_log_path())
+    monkeypatch.setattr(window, "_record_name_history", lambda: None)
+    window.handle_toggle_process_clicked()
+    assert window.process_running
+    qtbot.waitUntil(lambda: not window.process_running, timeout=6000)
+    assert window._process_state == "completed"
+    assert window._keithley_output_off_verified
+    rows = [line for line in output.read_text().splitlines() if not line.startswith("#")]
+    assert len(rows) > 100
+    assert all(len(row.split()) == 3 for row in rows)
+    assert max(float(row.split()[0]) for row in rows) <= 2.000001
+    levels = [float(c.split(" = ")[-1]) * 1000 for c in device.writes if "source.leveli =" in c]
+    assert len(levels) > 50
+    assert max(levels) == pytest.approx(2)
+    assert max(abs(b-a) for a, b in zip(levels[1:-1], levels[2:-1])) < 0.2
+    metadata = logger_mod.json.loads(window._metadata_path(str(output)).read_text())
+    assert metadata["run_result"]["saved_samples"] == len(rows)
+    assert metadata["run_result"]["output_off_verified"] is True
+
+
+def test_keithley_ramp_uses_elapsed_time_not_tick_count(qtbot, monkeypatch):
+    monkeypatch.setattr(logger_mod.MainWindow, "_refresh_keithley_resources", lambda self: None)
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.comboBox_supply.setCurrentIndex(window.ui.comboBox_supply.findData("keithley2636b"))
+    window.max_current_mA = 10
+    window.current_current_set = 0.001
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.process_running = True
+    targets = []
+    window._keithley_acquisition = types.SimpleNamespace(
+        thread=types.SimpleNamespace(is_alive=lambda: True), error="", started_at=1,
+        drain=lambda: [], set_target=targets.append)
+    window._keithley_last_tick = 10
+    monkeypatch.setattr(logger_mod.time, "monotonic", lambda: 10.123)
+    window._handle_keithley_tick()
+    assert targets[-1] == pytest.approx(1.123)
+    window.process_running = False
+    window._keithley_acquisition = None
+
+
+def test_keithley_live_view_does_not_discard_saved_or_retained_points(qtbot, monkeypatch):
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    values = [float(n) for n in range(5000)]
+    window._samples_current = values.copy()
+    window._samples_resistance = values.copy()
+    window._samples_voltage = values.copy()
+    drawn = []
+    monkeypatch.setattr(window, "_redraw_segments", lambda: drawn.append(len(window._samples_current)))
+    window._redraw_keithley_live()
+    assert drawn == [5000]
+    assert window._samples_current == values
+
+
+def test_keithley_finite_history_retains_early_points_and_microstep_colors(qtbot, monkeypatch):
+    monkeypatch.setattr(logger_mod.MainWindow, "_refresh_keithley_resources", lambda self: None)
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.comboBox_supply.setCurrentIndex(window.ui.comboBox_supply.findData("keithley2636b"))
+    window.infinite_loops = False
+    window._reset_sample_buffers()
+    for n in range(21001):
+        command = 1 + (n if n <= 10500 else 21000 - n) * 0.002
+        window._append_measurement_sample(command, 160, commanded_current_mA=command)
+    assert len(window._samples_current) == 21001
+    assert window._samples_current[0] == 1
+    runs = window._segment_runs(window._samples_current)
+    assert [run[0] for run in runs] == ["#dc2626", "#2563eb"]
+    assert runs[0][1] == 0
+    assert runs[-1][2] == 21000
+    window._redraw_keithley_live()
+    assert max(window._segment_lines_ax2[-1].xData) == 21001
+
+
+def test_annealing_rebuilt_plot_has_one_wrapping_header(qtbot):
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = "Ni50Fe27Ga23 12_2 100mA EBSD_Limpat 2loops.txt"
+    for _ in range(3):
+        window.init_graph_window()
+        logger_mod.QtWidgets.QApplication.sendPostedEvents(None, logger_mod.QtCore.QEvent.Type.DeferredDelete)
+    labels = window.ui.plot_container.findChildren(logger_mod.QtWidgets.QLabel, "annealing_plot_title")
+    assert len(labels) == 1
+    assert labels[0].wordWrap()
+
+
+def test_supply_switch_restores_limits_before_loading_saved_current(qtbot, monkeypatch):
+    monkeypatch.setattr(logger_mod.MainWindow, "_refresh_keithley_resources", lambda self: None)
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("hmp4030")
+    window.ui.spinBox_max_current.setValue(2000)
+    window._apply_supply_profile("keithley2636b")
+    assert window.max_current_mA == 2
+    assert window.ui.spinBox_max_current.maximum() == 1500
+    window._apply_supply_profile("hmp4030")
+    assert window.max_current_mA == 2000
+
+
 @pytest.fixture(autouse=True)
 def _isolate_current_annealing_qsettings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep Current Annealing tests from writing the operator's real settings."""

@@ -55,6 +55,9 @@ def _lazy(module: str, attr: str = "main", *, label: str | None = None) -> Exper
 
 
 EXPERIMENTS: Dict[str, ExperimentFactory] = {
+    "Current Program Logger": _lazy(
+        "experiments.current_program_logger", "launch", label="Current Program Logger"
+    ),
     "Strain Worksheet Updater": _lazy(
         "experiments.strain_worksheet_updater", label="Strain Worksheet Updater"
     ),

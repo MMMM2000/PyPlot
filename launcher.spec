@@ -13,6 +13,9 @@ a = Analysis(
     binaries=[],
     datas=plotting_datas,
     hiddenimports=[
+        'experiments.current_program_logger',
+        'pyvisa',
+        'pyvisa_py',
         'data_logging.current_annealing_logger.current_annealing_logger',
         'data_logging.ac_susceptibility_logger.ac_susceptibility_logger',
         'data_logging.mini_dma_logger.mini_dma_logger',

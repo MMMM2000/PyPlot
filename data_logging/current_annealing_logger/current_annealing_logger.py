@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Current Annealing Logger for HMP4030.
+"""Current Annealing Logger for HMP supplies and Keithley 2636B.
 
 Modern PyQt6 application that logs voltage/current from an HMP4030 power
 source during current annealing. Includes automatic and manual modes,
@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
+from .keithley import AnnealingKeithley, KeithleyAcquisition, CONTROL_HZ, READ_HZ, NPLC
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
@@ -288,6 +289,18 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "voltage_first": False,
         "shared_broker": True,
     },
+    "keithley2636b": {
+        "label": "Keithley 2636B (VISA)",
+        "start_current_mA": 1,
+        "max_current_mA": 2,
+        "min_start_current_mA": 1,
+        "max_voltage": 3.0,
+        "channel_count": 2,
+        "current_resolution_mA": 0.000001,
+        "min_current_mA": 0.001,
+        "requires_channel": True,
+        "reset_on_start": False,
+    },
 }
 
 INCREASING_CYCLE_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
@@ -349,11 +362,11 @@ def _cycle_color(direction: float, cycle_index: int) -> str:
     return palette[(max(1, cycle_index) - 1) % len(palette)]
 
 
-def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[str]:
+def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0, minimum_tolerance_mA: float = 0.5) -> List[str]:
     if len(currents) < 2:
         return []
     step_value = abs(float(step_mA or 1.0))
-    tolerance = max(0.5, step_value * 0.6)
+    tolerance = max(minimum_tolerance_mA, step_value * 0.6)
     reversal_threshold = max(tolerance * 2.0, step_value * 1.5)
     inc_count = 0
     dec_count = 0
@@ -411,12 +424,12 @@ def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0)
     return colors
 
 
-def _segment_runs_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[tuple[str, int, int]]:
+def _segment_runs_for_currents(currents: List[float], *, step_mA: float = 1.0, minimum_tolerance_mA: float = 0.5) -> List[tuple[str, int, int]]:
     if not currents:
         return []
     if len(currents) == 1:
         return [(_cycle_color(1.0, 1), 0, 0)]
-    colors = _segment_colors_for_currents(currents, step_mA=step_mA)
+    colors = _segment_colors_for_currents(currents, step_mA=step_mA, minimum_tolerance_mA=minimum_tolerance_mA)
     if not colors:
         return [(_cycle_color(1.0, 1), 0, len(currents) - 1)]
     runs: List[tuple[str, int, int]] = []
@@ -875,6 +888,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_driver: Any = None
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._sleep_guard: Any = None
+        self._keithley_adapter: AnnealingKeithley | None = None
+        self._keithley_acquisition: KeithleyAcquisition | None = None
+        self._keithley_last_tick: float | None = None
+        self._keithley_last_draw = 0.0
+        self._keithley_sample_times: Deque[float] = deque(maxlen=1000)
+        self._keithley_output_off_verified = False
+        self._keithley_last_measured_target = 0.0
         self.is_connected = False
         self._update_hmp_cadence_label()
         self._init_supply_profile()
@@ -966,6 +986,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._estimated_limit_current_mA: float | None = None
         self._applied_limit_current_mA: float | None = None
         self._samples_current: List[float] = []
+        self._samples_commanded_current: List[float] = []
         self._samples_resistance: List[float] = []
         self._samples_voltage: List[float] = []
         self._segment_lines_ax1: list[Any] = []
@@ -1044,6 +1065,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
         if hasattr(self.ui, 'comboBox_supply'):
             self.ui.comboBox_supply.currentIndexChanged.connect(self.handle_supply_profile_changed)
+        self.ui.pushButton_refresh_keithley.clicked.connect(self._refresh_keithley_resources)
         if hasattr(self.ui, 'lineEdit_broker_host'):
             self.ui.lineEdit_broker_host.textChanged.connect(self.handle_broker_settings_changed)
         if hasattr(self.ui, 'spinBox_broker_port'):
@@ -1515,6 +1537,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if plot is None or pg is None:
             return None
         item = plot.plot(x_values, y_values, **self._pyqtgraph_plot_kwargs(color))
+        if self._using_keithley():
+            item.setDownsampling(auto=True, method="peak")
         return item
 
     def _remove_live_plot_item(self, item: Any) -> None:
@@ -2337,6 +2361,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _reset_sample_buffers(self) -> None:
         self._samples_current = []
+        self._samples_commanded_current = []
         self._samples_resistance = []
         self._samples_voltage = []
         self._clear_segment_lines()
@@ -2480,11 +2505,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return resistance >= MIN_PLOTTABLE_RESISTANCE_OHM
 
-    def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None) -> None:
+    def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None, *, commanded_current_mA: float | None = None) -> None:
         if not self._measurement_sample_is_plottable(current_mA, resistance):
             return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
+        self._samples_commanded_current.append(float(current_mA if commanded_current_mA is None else commanded_current_mA))
         self._samples_resistance.append(float(resistance))
         if voltage is None:
             try:
@@ -2493,7 +2519,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 voltage = math.nan
         self._samples_voltage.append(float(voltage))
         self.sample_index = len(self._samples_current)
-        self._redraw_segments()
+        if self._using_keithley():
+            # Finite recipes retain the whole measurement. Endless runs remain bounded.
+            for values in (self._samples_current, self._samples_resistance, self._samples_voltage, self._samples_commanded_current):
+                if getattr(self, "infinite_loops", False) and len(values) > 20000:
+                    del values[:-20000]
+        else:
+            self._redraw_segments()
 
     @staticmethod
     def _cycle_color(direction: float, cycle_index: int) -> str:
@@ -2506,6 +2538,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _segment_runs(self, currents: List[float]) -> List[tuple[str, int, int]]:
+        if self._using_keithley():
+            commands = self._samples_commanded_current
+            direction_values = commands if len(commands) == len(currents) else currents
+            return _segment_runs_for_currents(direction_values, step_mA=0.001, minimum_tolerance_mA=0.001)
         return _segment_runs_for_currents(
             currents,
             step_mA=float(getattr(self, 'current_step_mA', 1) or 1),
@@ -2841,6 +2877,8 @@ class MainWindow(QtWidgets.QMainWindow):
             'pushButton_refresh_ports',
             'pushButton_auto_detect_hmp',
             'checkBox_show_hmp_port_options',
+            'comboBox_keithley_resource',
+            'pushButton_refresh_keithley',
         ):
             w = getattr(self.ui, name, None)
             if w is not None:
@@ -2854,6 +2892,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_hardware_connection_controls(self) -> None:
         shared = self._using_shared_broker()
+        keithley = self._using_keithley()
+        self.ui.frame_keithley_connection.setVisible(keithley)
+        self.ui.label_keithley_rates.setVisible(keithley)
         disclosure = getattr(self.ui, "checkBox_show_hmp_port_options", None)
         if isinstance(disclosure, QtWidgets.QCheckBox):
             disclosure.setVisible(shared)
@@ -2870,7 +2911,7 @@ class MainWindow(QtWidgets.QMainWindow):
             hint.setVisible(shared)
         frame = getattr(self.ui, "frame_hmp_port_options", None)
         if isinstance(frame, QtWidgets.QWidget):
-            frame.setVisible(show_hmp_port_options)
+            frame.setVisible(show_hmp_port_options and not keithley)
         for name in (
             'label_port',
             'comboBox_port',
@@ -2890,12 +2931,88 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setText("Connect broker" if shared else "Connect to port")
 
     def _connect_overlay_message(self) -> str:
+        if self._using_keithley():
+            return "Connect Keithley VISA resource to enable settings"
         if self._using_shared_broker():
             return "Connect shared HMP broker to enable settings"
         return "Connect COM port to enable settings"
 
     def _using_shared_broker(self) -> bool:
         return str(getattr(self, "supply_profile_id", "")) == "shared_hmp_broker"
+
+    def _using_keithley(self) -> bool:
+        return str(getattr(self, "supply_profile_id", "")) == "keithley2636b"
+
+    def _refresh_keithley_resources(self) -> None:
+        from experiments.current_program_logger import _default_visa_resource_manager
+        combo = self.ui.comboBox_keithley_resource
+        previous = combo.currentText().strip()
+        manager = None
+        try:
+            manager = _default_visa_resource_manager()
+            resources = [r for r in manager.list_resources() if "0X05E6::0X2636" in r.upper()]
+            combo.clear()
+            combo.addItems(resources)
+            if previous in resources or not resources:
+                combo.setCurrentText(previous)
+        except Exception as exc:
+            self._show_status_message(f"VISA discovery failed: {exc}")
+        finally:
+            if manager is not None:
+                manager.close()
+
+    def _connect_keithley(self) -> None:
+        if self._keithley_acquisition is not None and self._keithley_acquisition.thread.is_alive():
+            raise RuntimeError("Previous Keithley worker has not stopped; cannot reconnect.")
+        channel = int(self.channel_select)
+        if channel not in (1, 2):
+            raise RuntimeError("Select Keithley channel A or B before connecting.")
+        resource = self.ui.comboBox_keithley_resource.currentText().strip()
+        adapter = AnnealingKeithley(resource_name=resource, channel="a" if channel == 1 else "b",
+                                   remote_sense=False, current_limit_mA=float(self.max_current_mA))
+        adapter.open()  # Identity, exclusive lock and output-OFF preflight; no energization.
+        self._keithley_adapter = adapter
+        self.is_connected = True
+        self.settings.setValue("keithley_resource", resource)
+        self.ui.pushButton_connect_port.setText("Disconnect")
+        self._set_port_controls_enabled(False)
+        self._show_connect_overlay(False)
+        self.handle_mode_changed(self.operation_mode)
+        self._update_mode_action_state()
+        self._set_hardware_status(f"Keithley channel {'A' if channel == 1 else 'B'}; output OFF", state="connected")
+
+    def _shutdown_keithley(self) -> None:
+        worker, adapter = self._keithley_acquisition, self._keithley_adapter
+        if worker is None and adapter is None:
+            return
+        try:
+            if worker is not None:
+                worker.stop()
+                # Save acquisitions made between the last UI tick and output-OFF.
+                for stamp, target, current, voltage in worker.drain():
+                    if current > 0 and self.f_name:
+                        resistance = voltage / (current / 1000)
+                        if self._measurement_sample_is_plottable(current, resistance):
+                            self.current_current_read = current / 1000
+                            self.current_voltage, self.current_resistance = voltage, resistance
+                            self._keithley_sample_times.append(stamp)
+                            self._write_sample_to_file(initial_sample=False)
+                            self._append_measurement_sample(current, resistance, voltage)
+                            self.step_idx += 1
+            elif adapter is not None:
+                adapter.close()
+        finally:
+            self._keithley_output_off_verified = bool(adapter and adapter.output_off_verified)
+            if worker is None or not worker.thread.is_alive():
+                self._keithley_acquisition = None
+                self._keithley_adapter = None
+            self.is_connected = False
+            self._set_port_controls_enabled(True)
+            self.ui.pushButton_connect_port.setText("Connect to port")
+            self._set_hardware_status(
+                "Keithley output OFF verified" if self._keithley_output_off_verified else "Keithley output state unverified",
+                state="idle" if self._keithley_output_off_verified else "failed",
+            )
 
     def _shared_broker_channel(self) -> int:
         channel = int(getattr(self, "channel_select", 0) or 0)
@@ -2909,6 +3026,10 @@ class MainWindow(QtWidgets.QMainWindow):
         profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
         if bool(profile.get("requires_channel", False)) and int(getattr(self, "channel_select", 0) or 0) <= 0:
             errors.append("Select the physically connected PSU channel before starting.")
+        if self._using_keithley() and self._keithley_adapter is not None:
+            channel = "a" if self.channel_select == 1 else "b"
+            if self._keithley_adapter.channel != channel:
+                errors.append("Keithley channel changed: disconnect and reconnect before starting.")
         if check_connection and self._using_shared_broker() and not bool(getattr(self, "is_connected", False)):
             errors.append("Connect or auto-connect the shared HMP broker before starting.")
         if check_connection and self._using_shared_broker() and bool(getattr(self, "is_connected", False)):
@@ -3932,8 +4053,14 @@ class MainWindow(QtWidgets.QMainWindow):
             ) + "\n"
             try:
                 self.f_out.write(line)
-                self.f_out.flush()
-                self.f_out.close()
+                if self._using_keithley():
+                    now = time.monotonic()
+                    if now - getattr(self, "_keithley_last_flush", 0.0) >= 1.0:
+                        self.f_out.flush()
+                        self._keithley_last_flush = now
+                else:
+                    self.f_out.flush()
+                    self.f_out.close()
             except OSError as exc:
                 try:
                     self.f_out.close()
@@ -3941,7 +4068,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     pass
                 self.f_out = None
                 return self._handle_measurement_write_failure(exc)
-            self.f_out = None
+            if not self._using_keithley():
+                self.f_out = None
             return True
         return self._handle_measurement_write_failure(OSError("output file is unavailable"))
 
@@ -3960,6 +4088,100 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return False
+
+    def _handle_keithley_tick(self) -> None:
+        worker = self._keithley_acquisition
+        if worker is None:
+            return
+        if worker.error or not worker.thread.is_alive():
+            self.stop_annealing(worker.error or "Keithley acquisition stopped unexpectedly.", final_state="failed")
+            return
+        try:
+            samples = worker.drain()
+            for stamp, target, current, voltage in samples:
+                self._keithley_last_measured_target = target
+                self._keithley_sample_times.append(stamp)
+                self.current_current_read = current / 1000
+                self.current_voltage = voltage
+                self.current_resistance = voltage / self.current_current_read if current > 0 else math.nan
+                self.curr_value_x, self.curr_value_y = current, self.current_resistance
+                if self._measurement_sample_is_plottable(current, self.current_resistance):
+                    if not self._write_sample_to_file(initial_sample=False):
+                        return
+                    self.first_sample = False
+                    self._append_measurement_sample(current, self.current_resistance, voltage, commanded_current_mA=target)
+                    self.step_idx += 1
+            if len(self._keithley_sample_times) > 1:
+                times = self._keithley_sample_times
+                self.sample_rate = (len(times) - 1) / (times[-1] - times[0])
+            now = time.monotonic()
+            if samples and now - self._keithley_last_draw >= 0.1:
+                self._keithley_last_draw = now
+                self._redraw_keithley_live()
+                self._display_ui_value('lcd_current_mA', f"{self.curr_value_x:.4f}")
+                self._display_ui_value('label_live_voltage', f"{self.current_voltage:.5f}")
+                self._display_ui_value('label_set_current', f"{self.current_current_set * 1000:.4f}")
+                self._record_voltage_progress()
+                if self.operation_mode == 2 and not bool(getattr(self, 'infinite_loops', False)):
+                    start = self._start_current_A() * 1000
+                    peak = self.max_current_mA
+                    current = self.current_current_set * 1000
+                    rate = self.current_step_mA
+                    remaining = max(0, current - start)
+                    if self.current_increment > 0:
+                        remaining = max(0, peak - current) + max(0, peak - start)
+                    cycles_after = max(0, self._loop_target_count() - int(getattr(self, 'loop_idx', 0)) - 1)
+                    if self.force_stop_at_zero:
+                        cycles_after = 0
+                    remaining += cycles_after * 2 * max(0, peak - start)
+                    self._finish_time = time.perf_counter() + remaining / rate
+                    planned = max(1e-9, 2 * (peak - start) * self._loop_target_count())
+                    self.ui.progressBar_process.setRange(0, 100)
+                    self.ui.progressBar_process.setValue(int(max(0, min(100, 100 * (1 - remaining / planned)))))
+            if samples and self.current_voltage >= 0.999 * self.max_voltage and self.current_increment > 0:
+                self.handle_max_voltage()
+                if not self.process_running:
+                    return
+            # Elapsed-time ramp: USB latency or a missed UI tick never changes mA/s.
+            if worker.started_at is None:
+                worker.set_target(self.current_current_set * 1000)
+                return
+            previous = self._keithley_last_tick
+            self._keithley_last_tick = now
+            dt = max(0.0, now - (previous if previous is not None else now))
+            if self.operation_mode == 2 and self.current_current_set >= self.max_current_mA / 1000 and self.current_increment > 0:
+                # A coalescing command queue must not skip the peak setpoint.
+                if self._keithley_last_measured_target < self.max_current_mA - 1e-9:
+                    self._send_current_setpoint()
+                    return
+                self.current_increment = -abs(self.current_step_A)
+                self.direction_ascending = False
+                self.line_color = "b"
+                self._reset_voltage_projection()
+            next_current = self.current_current_set
+            if self.current_increment:
+                next_current += math.copysign(self.current_step_A * dt, self.current_increment)
+            if self.current_increment < 0 and next_current < self._start_current_A() - 1e-12:
+                next_loop = int(getattr(self, 'loop_idx', 0)) + 1
+                if self.operation_mode == 2 and not self.force_stop_at_zero and self._has_remaining_loops(next_loop):
+                    self.loop_idx = next_loop
+                    self.current_increment = abs(self.current_step_A)
+                    self.direction_ascending = True
+                    self.line_color = "r"
+                    next_current = self._start_current_A()
+                    self._reset_voltage_projection()
+                else:
+                    self.stop_annealing("Run complete; measurement stopped safely.", final_state="completed")
+                    return
+            self.current_current_set = min(self.max_current_mA / 1000, max(self._start_current_A(), next_current))
+            self._send_current_setpoint()
+        except Exception as exc:
+            if self.process_running:
+                self.stop_annealing(f"Keithley acquisition failed: {exc}", final_state="failed")
+
+    def _redraw_keithley_live(self) -> None:
+        # Preserve the full run extent; pyqtgraph reduces rendering work only.
+        self._redraw_segments()
 
     def _record_sample_progress(self) -> None:
         """Update progress/rate counters for a persisted non-initial sample."""
@@ -4054,6 +4276,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # Connect signals and slots
     def handle_connect_port_clicked(self):
+        if self._using_keithley():
+            try:
+                if not self.is_connected:
+                    self._connect_keithley()
+                elif self.process_running:
+                    self.stop_annealing("Disconnected by user.")
+                else:
+                    self._shutdown_keithley()
+            except Exception as exc:
+                self._last_auto_connect_error = str(exc)
+                self._set_hardware_status(str(exc), state="failed")
+                self._show_status_message(str(exc), timeout_ms=0)
+            return
         if self._using_shared_broker():
             if not self.is_connected:
                 try:
@@ -4451,6 +4686,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self.settings.contains(key):
                 return self.settings.value(key, default, type=value_type)
+            if profile_id == "keithley2636b":
+                return default  # Do not inherit HMP voltage/current limits.
             return self.settings.value(name, default, type=value_type)
         except Exception:
             return default
@@ -4500,6 +4737,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def _current_resolution_mA(self) -> float:
+        if self._using_keithley():
+            return 0.000001
         profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
         try:
             return max(0.2, float(profile.get("current_resolution_mA", 0.2) or 0.2))
@@ -4515,6 +4754,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0
 
     def _minimum_plottable_current_mA(self) -> float:
+        if self._using_keithley():
+            return self._min_positive_current_mA()
         try:
             start_current = float(getattr(self, "start_current_mA", self._min_positive_current_mA()) or 0.0)
         except Exception:
@@ -4573,6 +4814,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.supply_profile_id = profile_id
         self.min_start_current_mA = int(profile.get("min_start_current_mA", 1))
         self.voltage_first = bool(profile.get("voltage_first", False))
+        for name in ("spinBox_start_current", "spinBox_max_current"):
+            widget = getattr(self.ui, name, None)
+            if isinstance(widget, QtWidgets.QSpinBox):
+                widget.blockSignals(True)
+                widget.setMaximum(1500 if self._using_keithley() else 10000)
+                widget.blockSignals(False)
         # Apply profile-specific defaults to UI and internal state.
         start_spin = getattr(self.ui, 'spinBox_start_current', None)
         if isinstance(start_spin, QtWidgets.QSpinBox):
@@ -4590,7 +4837,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_current_mA = int(start_spin.value())
         max_spin = getattr(self.ui, 'spinBox_max_current', None)
         if isinstance(max_spin, QtWidgets.QSpinBox):
-            default_max = self._load_profile_int(profile_id, "max_current", 10, self.min_start_current_mA)
+            default_max = self._load_profile_int(profile_id, "max_current", int(profile.get("max_current_mA", 10)), self.min_start_current_mA)
             max_value = self._load_profile_int(
                 profile_id,
                 "max_current",
@@ -4643,7 +4890,11 @@ class MainWindow(QtWidgets.QMainWindow):
             selected_channel = self._load_profile_int(profile_id, "channel_select", default_channel, 0)
             self._set_detected_hmp_profile(hmp_profile, selected=selected_channel)
         else:
-            self._populate_channel_options(0, selected=0)
+            self._populate_channel_options(int(profile.get("channel_count", 0)),
+                selected=self._load_profile_int(profile_id, "channel_select", 0, 0))
+            if self._using_keithley():
+                for index, label in ((1, "A"), (2, "B")):
+                    self.ui.comboBox_channel.setItemText(index, label)
         try:
             self._apply_profile_max_voltage_action(profile_id)
         except Exception:
@@ -4654,7 +4905,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         shared = self._using_shared_broker()
         if isinstance(reset_box, QtWidgets.QCheckBox):
-            reset_box.setVisible(not shared)
+            reset_box.setVisible(not shared and not self._using_keithley())
         self._set_broker_controls_visible(shared)
         for name in (
             "lineEdit_serial_command",
@@ -4662,7 +4913,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             widget = getattr(self.ui, name, None)
             if widget is not None:
-                widget.setEnabled(not shared)
+                widget.setEnabled(not shared and not self._using_keithley())
         for name in ("comboBox_port", "comboBox_baudrate", "pushButton_refresh_ports", "pushButton_auto_detect_hmp"):
             widget = getattr(self.ui, name, None)
             if widget is not None:
@@ -4678,9 +4929,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not shared:
             self._shared_broker_lease_id = None
         self._sync_hardware_connection_controls()
+        if self._using_keithley():
+            self.ui.comboBox_keithley_resource.setCurrentText(
+                self.settings.value("keithley_resource", "", type=str))
+            self._refresh_keithley_resources()
         self._refresh_command_profiles()
 
     def handle_supply_profile_changed(self) -> None:
+        if self.process_running:
+            return
+        if self.is_connected:
+            self.handle_connect_port_clicked()
         combo = getattr(self.ui, 'comboBox_supply', None)
         if not isinstance(combo, QtWidgets.QComboBox):
             return
@@ -5060,6 +5319,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_serial_command()
         
     def send_serial_command(self):
+        if self._using_keithley():
+            raise RuntimeError("Raw serial commands are disabled in Keithley mode.")
         if self._using_shared_broker():
             raise RuntimeError("Raw serial commands are disabled in shared HMP broker mode.")
         self.ser_mcu.write(bytes(self.serial_command, encoding='ascii'))
@@ -5084,6 +5345,10 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
             if requested_mA > max_current_mA + tolerance_mA:
                 self.current_current_set = max_current_mA / 1000.0
+        if self._using_keithley():
+            if self._keithley_acquisition is not None:
+                self._keithley_acquisition.set_target(max(0.0, self.current_current_set * 1000))
+            return
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
@@ -5383,7 +5648,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 # for the one-second timer interval to elapse.  This avoids
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
-                self.timer_command.start(max(1, round(1000.0 / self._effective_hmp_command_hz())))
+                if self.process_running:
+                    rate = CONTROL_HZ if self._using_keithley() else self._effective_hmp_command_hz()
+                    self.timer_command.start(max(1, round(1000.0 / rate)))
                 
             elif(self.operation_mode == 2):
                 # Prepare output file with overwrite prompt
@@ -5432,7 +5699,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Kick off the first acquisition immediately so the
                 # measurement starts without a one-second delay.
                 self.handle_send_new_command()
-                self.timer_command.start(max(1, round(1000.0 / self._effective_hmp_command_hz())))
+                if self.process_running:
+                    rate = CONTROL_HZ if self._using_keithley() else self._effective_hmp_command_hz()
+                    self.timer_command.start(max(1, round(1000.0 / rate)))
                 
             else:
                 pass
@@ -5476,6 +5745,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _set_process_controls_enabled(self, enabled: bool) -> None:
+        if self._using_keithley():
+            self.ui.comboBox_supply.setEnabled(enabled)
+            self.ui.comboBox_channel.setEnabled(enabled)
         if not hasattr(self.ui, 'groupBox_process_settings'):
             return
         keep = {self.ui.pushButton_start_process}
@@ -5521,8 +5793,8 @@ class MainWindow(QtWidgets.QMainWindow):
         message = reason or "Measurement stopped."
         self._last_stop_reason = message
         self._set_process_state("stopping", message)
-        QtWidgets.QApplication.processEvents()
         self.process_running = False
+        QtWidgets.QApplication.processEvents()
         self.wait = False  # break any pending delays
         self.force_stop_at_zero = False
         self._contact_lost = False
@@ -5532,15 +5804,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._process_start_time = None
         self._last_nonzero_current_time = None
         self._clear_zero_placeholders()
+        if self._using_keithley():
+            try:
+                self._shutdown_keithley()
+            except Exception as exc:
+                final_state = "failed"
+                message = f"{message} Shutdown problem: {exc}"
+        saved_samples = self.step_idx
+        if self._using_keithley():
+            self._redraw_keithley_live()
         self._finalize_measurement_history()
         try:
             self.timer_command.stop()
         except Exception:
             pass
         if self.f_out:
-            self.f_out.close()
+            try:
+                self.f_out.close()
+            except OSError as exc:
+                final_state = "failed"
+                message = f"{message} Measurement file could not be flushed: {exc}"
             self.f_out = None
-        if not self._using_shared_broker():
+        if not self._using_shared_broker() and not self._using_keithley():
             # Immediately ramp the supply to zero before running the shutdown sequence
             try:
                 channel = int(getattr(self, "channel_select", 0) or 0)
@@ -5559,8 +5844,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         try:
             self.send_safe_end_commands()
-        except Exception:
-            pass
+        except Exception as exc:
+            final_state = "failed"
+            message = f"{message} Shutdown problem: {exc}"
         self.ui.pushButton_start_process.setText("Start annealing process")
         self._set_process_controls_enabled(True)
         if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -5582,6 +5868,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if finished_output:
             self._finalize_metadata_file(finished_output, final_state=final_state, detail=message)
         self._set_process_state(final_state, message)
+        if self._using_keithley() and self.f_name:
+            try:
+                path = self._metadata_path(self.f_name)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["run_result"] = {
+                    "state": final_state, "reason": message,
+                    "output_off_verified": self._keithley_output_off_verified,
+                    "saved_samples": saved_samples,
+                    "achieved_read_rate_hz": self.sample_rate,
+                }
+                path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except (OSError, ValueError) as exc:
+                self._show_status_message(f"Run-result metadata could not be saved: {exc}", timeout_ms=0)
         if final_state == "completed" and finished_output:
             QtCore.QTimer.singleShot(0, lambda path=finished_output: self._offer_transition_review(path))
         self._show_status_message(message, timeout_ms=0 if final_state == "failed" else 15000)
@@ -5597,6 +5896,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._sync_runtime_settings()
+        if self._using_keithley():
+            self._handle_keithley_tick()
+            return
 
         # Manual annealing
         if self.operation_mode == 1:
@@ -5752,6 +6054,12 @@ class MainWindow(QtWidgets.QMainWindow):
         
 
     def send_safe_end_commands(self):
+        if self._using_keithley():
+            try:
+                self._shutdown_keithley()
+            finally:
+                self._release_experiment_sleep_guard()
+            return
         if self._using_shared_broker():
             self._shutdown_shared_broker_output()
             self.ui.label_last_command.setText("broker output off")
@@ -5767,6 +6075,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_init_commands(self):
         if self.process_running:
             self._acquire_experiment_sleep_guard()
+        if self._using_keithley():
+            try:
+                if self._keithley_adapter is None:
+                    raise RuntimeError("Keithley is not connected.")
+                self._keithley_adapter.current_limit_mA = float(self.max_current_mA)
+                self._keithley_output_off_verified = False
+                self._keithley_last_tick = None
+                self._keithley_last_measured_target = 0.0
+                self._keithley_sample_times.clear()
+                self._keithley_acquisition = KeithleyAcquisition(
+                    self._keithley_adapter, self.max_voltage, self.current_current_set * 1000)
+                self._keithley_acquisition.thread.start()
+                self.timer_command.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+            except Exception as exc:
+                self.stop_annealing(str(exc), final_state="failed")
+            return
         if self._using_shared_broker():
             if self.process_running:
                 self._initialize_shared_broker_output()
@@ -6144,6 +6468,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+                child_layout = item.layout()
+                if child_layout is not None:
+                    while child_layout.count():
+                        child = child_layout.takeAt(0)
+                        if child.widget() is not None:
+                            child.widget().deleteLater()
+                    child_layout.deleteLater()
             self._pg_placeholder_labels = []
             self.pg_plot_resistance_vs_current = None
             self.pg_plot_resistance_vs_sample = None
@@ -6165,6 +6496,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 header_row.setContentsMargins(0, 0, 0, 0)
                 header_row.setSpacing(8)
                 title_label = QtWidgets.QLabel(title, container)
+                title_label.setObjectName("annealing_plot_title")
+                title_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+                title_label.setWordWrap(True)
+                title_label.setMinimumWidth(0)
+                title_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
                 title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 title_label.setStyleSheet("font-weight: 700; padding: 4px;")
                 self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
@@ -6600,6 +6936,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         }
         diameter_um = self._diameter_um()
+        if self._using_keithley():
+            hardware_payload.update(
+                visa_resource=self.ui.comboBox_keithley_resource.currentText().strip(),
+                channel="A" if self.channel_select == 1 else "B",
+                control_rate_hz=CONTROL_HZ, read_rate_target_hz=READ_HZ,
+                measure_nplc=NPLC, sense="local_2_wire",
+            )
         return {
             "schema": "current_annealing_logger_metadata_v1",
             "session_state": "running",
@@ -7080,6 +7423,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._window_closing = True
             self._closing_safe_end = True
             try:
+                if self._keithley_adapter is not None:
+                    if self.process_running:
+                        self.stop_annealing("Window closed.")
+                    else:
+                        self._shutdown_keithley()
                 if self.ser_mcu.isOpen():
                     self.handle_connect_port_clicked()
             finally:
