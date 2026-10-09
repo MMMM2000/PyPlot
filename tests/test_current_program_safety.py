@@ -105,6 +105,39 @@ def test_zero_steps_and_transient_contact_loss_reset_confirmation():
     assert monitor.check(3, 80, 80, 8)  # remains latched even after recovery
 
 
+@pytest.mark.parametrize("heating_resistance, failed", [(191, False), (196, True)])
+def test_guard_readout_between_recipe_ticks_uses_applied_current(tmp_path, heating_resistance, failed):
+    class GuardAdapter(Adapter):
+        def measure(self):
+            self.calls += 1
+            resistance = heating_resistance if self.target >= 10 else 205
+            if self.calls >= 8:
+                worker.stop()
+            return dict(current_mA=self.target, voltage_V=self.target*resistance/1000)
+
+    adapter = GuardAdapter()
+    worker = m.ProgramWorker(config(tmp_path, initial_current_mA=.1,
+        control_rate_hz=1, measurement_rate_hz=100, log_rate_hz=100,
+        max_resistance_ohm=190, emergency_resistance_ohm=195,
+        max_resistance_active_above_mA=10, resistance_action="readout_current"), adapter)
+    worker.start()
+    assert worker.wait(3000)
+    assert adapter.closed
+    data = json.loads(next(tmp_path.glob("*/metadata.json")).read_text())
+    assert (data["status"] == "failed") is failed
+    if failed:
+        assert data["fault_sample"]["target_current_mA"] == 80
+        assert data["fault_sample"]["electrical_fault"] == "Absolute resistance cutoff"
+    else:
+        assert data["resistance_limit_reached"]
+        with next(tmp_path.glob("*/measurement.csv")).open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        readout = [r for r in rows if float(r["measured_current_mA"]) == .1]
+        assert len(readout) >= 2
+        assert all(float(r["target_current_mA"]) == .1 for r in readout)
+        assert all(not r["electrical_fault"] for r in rows)
+
+
 def test_settling_keeps_raw_csv_but_qualifies_separately(tmp_path):
     a = Adapter()
     a.resistance_quality = lambda: "settling" if a.calls < 4 else "settled_interval"

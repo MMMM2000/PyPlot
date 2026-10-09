@@ -1120,6 +1120,10 @@ class ProgramWorker(QtCore.QThread):
                 if now >= next_control:
                     next_control = max(next_control + control_interval_s, now + control_interval_s)
                 if now >= next_measurement:
+                    # A resistance guard can command readout current between recipe
+                    # ticks. Qualify this acquisition using the last applied command,
+                    # not the stale recipe target, including in fault/CSV reporting.
+                    measurement_target = float(last_target if last_target is not None else target)
                     resistance_quality = getattr(self.adapter, "resistance_quality", lambda: "unfiltered")()
                     readback = self.adapter.measure()
                     acquired_at = time.monotonic()
@@ -1130,10 +1134,10 @@ class ProgramWorker(QtCore.QThread):
                         last_check_time = acquired_at
                     measured = readback.get("current_mA")
                     voltage = readback.get("voltage_V")
-                    fault = monitor.check(acquired_at, target, measured, voltage)
+                    fault = monitor.check(acquired_at, measurement_target, measured, voltage)
                     if fault:
                         fault_sample = dict(timestamp_utc=_utc_now(), elapsed_s=acquired_at-start,
-                                            target_current_mA=target, measured_current_mA=measured,
+                                            target_current_mA=measurement_target, measured_current_mA=measured,
                                             voltage_V=voltage, electrical_fault=fault)
                         # Never enqueue disk/UI work before the shutdown attempt.
                         self.adapter.close()
@@ -1150,25 +1154,25 @@ class ProgramWorker(QtCore.QThread):
                         else:
                             power = 0.0
                     if (self.config.max_resistance_ohm is not None
-                            and target >= self.config.max_resistance_active_above_mA) and (
+                            and measurement_target >= self.config.max_resistance_active_above_mA) and (
                         measured is None or voltage is None
                         or not math.isfinite(float(measured))
                         or not math.isfinite(float(voltage))
-                        or (target > 0 and not (
+                        or (measurement_target > 0 and not (
                             monitor.limits.open_current_fraction is not None
-                            and target >= monitor.limits.active_above_mA and measured == 0
+                            and measurement_target >= monitor.limits.active_above_mA and measured == 0
                         ) and (resistance is None or not math.isfinite(resistance) or resistance <= 0))
                     ):
                         raise RuntimeError("Invalid resistance protection measurement; stopping output.")
                     tripped_now = False
                     if (self.config.emergency_resistance_ohm is not None
-                            and target >= self.config.max_resistance_active_above_mA
+                            and measurement_target >= self.config.max_resistance_active_above_mA
                             and resistance is not None
                             and resistance >= self.config.emergency_resistance_ohm):
                         self.adapter.close()
                         opened = False
                         fault_sample = dict(timestamp_utc=_utc_now(), elapsed_s=acquired_at-start,
-                                            target_current_mA=target, measured_current_mA=measured,
+                                            target_current_mA=measurement_target, measured_current_mA=measured,
                                             voltage_V=voltage, resistance_ohm=resistance,
                                             electrical_fault="Absolute resistance cutoff")
                         if writer is not None:
@@ -1177,7 +1181,7 @@ class ProgramWorker(QtCore.QThread):
                     if (
                         resistance_current_ceiling_mA is None
                         and self.config.max_resistance_ohm is not None
-                        and target >= self.config.max_resistance_active_above_mA
+                        and measurement_target >= self.config.max_resistance_active_above_mA
                         and resistance is not None
                         and math.isfinite(resistance)
                         and resistance >= self.config.max_resistance_ohm
@@ -1224,7 +1228,7 @@ class ProgramWorker(QtCore.QThread):
                         "block_type": state.block.kind,
                         "block_label": state.block.label,
                         "sequence_complete": state.sequence_complete,
-                        "target_current_mA": target,
+                        "target_current_mA": measurement_target,
                         "measured_current_mA": measured,
                         "voltage_V": voltage,
                         "resistance_ohm": resistance,
