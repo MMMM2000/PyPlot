@@ -2074,7 +2074,14 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             records = self._records_from_project_payload(self._read_builder_project_payload(path), source=path.name)
         except Exception as exc:
-            self._set_metadata_status(f"Failed to import project: {exc}")
+            message = f"Failed to import project: {exc}"
+            if "central size mismatch" in str(exc) or "checksum mismatch" in str(exc):
+                message += (
+                    " Package contents do not match their manifest. Keep the original;"
+                    " import a verified recovered copy or a known-good archive."
+                    " Do not disable integrity checks."
+                )
+            self._set_metadata_status(message)
             return False
         self._merge_metadata_records(records)
         self._store_microwire_metadata_settings()
