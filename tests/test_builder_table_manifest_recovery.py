@@ -64,3 +64,38 @@ def test_valid_package_does_not_need_recovery(tmp_path):
     pp.write_project_package(source, {'kind': pp.PROJECT_KIND, 'sections': {}})
     with pytest.raises(SafeCodecError,match='No table descriptor mismatch'):
         recover_table_manifest(source,tmp_path/'unnecessary.pydpj')
+
+
+@pytest.mark.parametrize('damage', ['mimetype', 'header_order', 'compressed_mimetype',
+                                   'compressed_manifest', 'revision_bool', 'revision_zero',
+                                   'empty_writer', 'empty_saved_at'])
+def test_recovery_rejects_damaged_headers_and_overwritten_metadata(tmp_path, damage):
+    edited = edited_package(tmp_path)
+    source, destination = tmp_path/'damaged.pydpj', tmp_path/'recovered.pydpj'
+    with zipfile.ZipFile(edited) as old, zipfile.ZipFile(source, 'w') as new:
+        infos = old.infolist()
+        if damage == 'header_order':
+            infos[0], infos[1] = infos[1], infos[0]
+        for info in infos:
+            raw = old.read(info)
+            if info.filename == pp.MIMETYPE_PATH:
+                if damage == 'mimetype':
+                    raw = b'not-a-builder-package'
+                if damage == 'compressed_mimetype':
+                    info.compress_type = zipfile.ZIP_DEFLATED
+            if info.filename == pp.MANIFEST_PATH:
+                manifest = json.loads(raw)
+                if damage == 'revision_bool': manifest['revision'] = True
+                if damage == 'revision_zero': manifest['revision'] = 0
+                if damage == 'empty_writer': manifest['writer'] = ''
+                if damage == 'empty_saved_at': manifest['saved_at'] = ''
+                raw = json.dumps(manifest).encode()
+                if damage == 'compressed_manifest':
+                    info.compress_type = zipfile.ZIP_DEFLATED
+            new.writestr(info, raw)
+    before = source.read_bytes()
+    with pytest.raises(SafeCodecError):
+        recover_table_manifest(source, destination)
+    assert source.read_bytes() == before
+    assert not destination.exists()
+    assert not list(tmp_path.glob('.table-recovery-*'))

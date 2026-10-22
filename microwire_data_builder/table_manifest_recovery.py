@@ -35,12 +35,19 @@ def recover_table_manifest(source: Path, destination: Path) -> list[str]:
     changed: list[str] = []
     try:
         with pp._open_archive(source) as original:
-            pp._validate_archive_boundaries(source, original.infolist())
+            archive_infos = original.infolist()
+            pp._validate_archive_boundaries(source, archive_infos)
             infos = pp._validated_info_map(original)
-            manifest = pp._read_json_bytes(pp._read_entry_bounded(
-                original, infos[pp.MANIFEST_PATH], limit=pp.MAX_MANIFEST_BYTES), 'manifest')
+            manifest = pp._read_json_bytes(pp._read_package_manifest_header(
+                original, archive_infos), 'manifest')
             if not isinstance(manifest, dict) or manifest.get('version') != pp.PACKAGE_VERSION:
                 raise SafeCodecError('Recovery requires a Builder v3 package')
+            revision = manifest.get('revision')
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise SafeCodecError('Recovery refuses invalid source revision')
+            for key in ('saved_at', 'writer'):
+                if not isinstance(manifest.get(key), str) or not manifest[key]:
+                    raise SafeCodecError(f'Recovery refuses invalid source {key}')
             descriptors = [pp._descriptor_from_json(e) for e in manifest['entries']]
             by_path = {e.path: e for e in descriptors}
             if len(by_path) != len(descriptors) or set(infos) != set(by_path) | {pp.MIMETYPE_PATH, pp.MANIFEST_PATH}:
