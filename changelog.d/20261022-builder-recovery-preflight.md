@@ -1,0 +1,1 @@
+Explicit table-manifest recovery now validates the original mimetype, header order/compression and overwritten revision/writer metadata before rebuilding. Corrupt non-table headers are rejected rather than silently normalized; ordinary imports share the same header check.

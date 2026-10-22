@@ -1,0 +1,1 @@
+Builder database corrections now have copy-only table-update and validated publication commands, preserving deferred data, regenerating manifests, retaining an exact backup and refusing stale targets or concurrent saves. Added regressions for corrected microscope/assembled diameters and strict rejection of damaged packages; ordinary imports remain strict.

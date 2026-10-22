@@ -86,9 +86,10 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 Use the Windows runner when invoking pytest from Codex or a local PowerShell
 session. It forces headless Qt/Matplotlib defaults, stores Microwire Data Builder
 state under `artifacts/test-runs/`, and keeps tool caches inside the workspace.
-On Windows, pytest's disposable base temp uses a short `C:\tmp\pyt\` path so
-xdist worker suffixes do not exceed the platform path limit. Full mode uses four
-pytest-xdist workers by default, with
+On Windows, pytest's disposable base temp stays under `artifacts/p/`, using
+8.3 aliases and an extended-length path for deep fixtures. This avoids requiring
+machine-wide temp permissions or changing Windows long-path settings. Full mode
+uses four pytest-xdist workers by default, with
 private temp, Qt settings, Matplotlib, and Builder storage for every worker.
 Tests marked `serial` run afterward in a separate single-process lane:
 
