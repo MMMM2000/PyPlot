@@ -24,10 +24,12 @@ def invoke(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
         key: value for key, value in os.environ.items()
         if not key.startswith('PYTEST_XDIST_')
     }
+    env['PYTHONIOENCODING'] = 'utf-8'
     return subprocess.run(
         [sys.executable, str(RUNNER), '--artifacts-dir', str(tmp_path / 'runs'),
          '--run-id', 'unit', *extra],
-        cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False, timeout=60,
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, encoding='utf-8',
+        check=False, timeout=60,
     )
 
 
@@ -53,6 +55,38 @@ def test_default_paths_stay_in_workspace(tmp_path: Path, monkeypatch) -> None:
     assert values['MPLBACKEND'] == 'Agg'
     assert values['PYPLOT_TEST_TEMP_ISOLATED'] == '1'
     assert 'test_launcher_detects_pyplot_automation_flags' in result.stdout
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows short-path aliases')
+def test_unicode_windows_workspace_uses_ascii_temp_aliases(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv('PYPLOT_VERIFY_TEMP_ROOT', raising=False)
+    workspace = tmp_path / 'Martin Eliáš'
+    workspace.mkdir()
+    if not str(runner._windows_short_path(workspace)).isascii():
+        pytest.skip('Filesystem does not provide an ASCII short-path alias')
+    monkeypatch.setattr(runner, 'REPO_ROOT', workspace)
+    args = runner.build_parser().parse_args(['--run-id', 'unicode-workspace'])
+
+    env, basetemp = runner.prepare_environment(args)
+
+    assert env['TEMP'].isascii()
+    assert str(basetemp).isascii()
+    assert any(parent.samefile(workspace / 'artifacts' / 't') for parent in Path(env['TEMP']).parents)
+    assert any(parent.samefile(workspace / 'artifacts' / 't') for parent in basetemp.parents)
+    for root in (Path(env['TEMP']), basetemp):
+        payload = root / 'readback.bin'
+        payload.write_bytes(b'private verification state')
+        assert payload.read_bytes() == b'private verification state'
+
+
+def test_unicode_temp_root_without_ascii_alias_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv('PYPLOT_VERIFY_TEMP_ROOT', raising=False)
+    monkeypatch.setattr(runner, 'REPO_ROOT', tmp_path / 'Martin Eliáš')
+    monkeypatch.setattr(runner, '_windows_short_path', lambda path: path)
+    args = runner.build_parser().parse_args(['--run-id', 'no-short-alias'])
+
+    with pytest.raises(ValueError, match='--temp-root'):
+        runner.prepare_environment(args)
 
 
 def test_explicit_temp_parent_is_private_and_preserves_existing_files(tmp_path: Path) -> None:
@@ -139,6 +173,17 @@ def test_workers_zero_keeps_one_lane(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout.count('lane=') == 1
     assert '-n ' not in result.stdout
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows Qt collection-order guard')
+def test_windows_parallel_default_preserves_qt_collection_order(tmp_path: Path) -> None:
+    result = invoke(tmp_path, '--mode', 'full', '--dry-run')
+    assert result.returncode == 0, result.stderr
+    assert '--dist load ' in result.stdout
+
+    override = invoke(tmp_path, '--mode', 'full', '--dist', 'worksteal', '--dry-run')
+    assert override.returncode == 0, override.stderr
+    assert '--dist worksteal ' in override.stdout
 
 
 def test_real_lanes_preserve_reports_and_failure_exit(tmp_path: Path) -> None:

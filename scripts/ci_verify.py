@@ -212,8 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dist",
         choices=("worksteal", "load", "loadfile", "loadscope"),
-        default="worksteal",
-        help="pytest-xdist distribution strategy for the parallel lane.",
+        default="load" if os.name == "nt" else "worksteal",
+        help=(
+            "pytest-xdist distribution strategy (Windows: load to preserve Qt "
+            "collection order within each worker; other platforms: worksteal)."
+        ),
     )
     return parser
 
@@ -229,10 +232,6 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     run_root = artifacts_dir / run_id
 
     temp_root, basetemp = _temp_paths(run_id, run_root, args.temp_root)
-    if not str(temp_root).isascii():
-        raise ValueError(
-            "--temp-root must resolve to an ASCII path; choose a short writable parent"
-        )
     qsettings_root = run_root / "qsettings"
     builder_root = run_root / "microwire-builder-storage"
     mpl_cache = run_root / "matplotlib"
@@ -270,6 +269,12 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
         mpl_cache = _windows_short_path(mpl_cache)
         uv_cache = _windows_short_path(uv_cache)
         pip_cache = _windows_short_path(pip_cache)
+
+    if not str(temp_root).isascii():
+        raise ValueError(
+            "--temp-root must provide an ASCII path or a usable Windows short-path alias; "
+            "choose a short writable parent"
+        )
 
     env = os.environ.copy()
     env.update(
