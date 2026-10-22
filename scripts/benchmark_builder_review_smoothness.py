@@ -20,6 +20,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.core import MiniDmaRecord
+from plotting.plugins.mini_dma import core as mini_dma_core
 from scripts.benchmark_current_annealing_review import run_benchmark as run_current_annealing_benchmark
 
 
@@ -89,11 +90,11 @@ def _measure(
 
 
 def _mini_dma_record(run_path: Path) -> MiniDmaRecord:
+    run = mini_dma_core.load_run(run_path)
     return MiniDmaRecord(
         path=run_path,
-        sample="Ni50Fe27Ga23 12_2",
+        sample=run.sample_name,
         data=pd.DataFrame(),
-        key=("Ni50Fe27Ga23", 12, 2, None),
         label=run_path.name,
     )
 
