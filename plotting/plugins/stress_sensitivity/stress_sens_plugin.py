@@ -500,6 +500,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        # The dedicated exporter preserves sample categories and proxy legends.
         self._apply_settings_to_core()
 
         def _task() -> None:

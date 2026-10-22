@@ -488,6 +488,8 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._log(f"Exported TXT files to {target}")
 
     def open_origin(self) -> None:  # type: ignore[override]
+        if self._export_existing_plot_tabs_to_origin():
+            return
         if self._dataset is None:
             self.load_data()
         self._apply_smoothing_settings()

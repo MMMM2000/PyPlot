@@ -243,6 +243,28 @@ def _isolate_current_annealing_qsettings(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(logger_mod.QtCore, "QSettings", _settings_factory)
 
 
+@pytest.fixture(autouse=True)
+def _collect_graphics_between_tests():
+    """Collect Qt graphics wrappers after pytest-qt has closed the window.
+
+    Automatic cyclic collection during construction of the next pyqtgraph
+    scene can invalidate QGraphicsTextItem wrappers on Windows/Qt 6.11.
+    Keep collection enabled outside each test, and exercise it at teardown.
+    """
+    if os.name != "nt":
+        yield
+        return
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        logger_mod.QtWidgets.QApplication.sendPostedEvents(None, logger_mod.QtCore.QEvent.Type.DeferredDelete)
+        gc.collect()
+        if enabled:
+            gc.enable()
+
+
 class _FakeBrokerClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []

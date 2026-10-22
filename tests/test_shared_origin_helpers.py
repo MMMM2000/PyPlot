@@ -7,7 +7,55 @@ from plotting.shared.origin import (
     origin_title_xy,
     set_origin_axis_title,
     set_origin_graph_title,
+    origin_lt_exec,
+    finish_origin_graph,
+    set_origin_categorical_axis,
 )
+
+
+def test_title_position_respects_log_scales_and_page_headroom() -> None:
+    class Layer:
+        def get_float(self, name):
+            return {"x.from": 1, "x.to": 100, "y.from": 1, "y.to": 1000,
+                    "x.type": 2, "y.type": 2, "top": 12, "height": 72}[name]
+
+    x, y = origin_title_xy(Layer())
+    assert abs(x - 10) < 1e-9
+    assert 2000 < y < 2300
+
+
+def test_labtalk_failure_is_not_hidden_by_sdk_none_return() -> None:
+    class Native:
+        def LT_execute(self, command):
+            return 0
+
+    class Wrapper:
+        obj = Native()
+
+        def lt_exec(self, command):
+            self.obj.LT_execute(command)  # originpro discards its native status.
+
+    assert origin_lt_exec(Wrapper().lt_exec, "legend.smartpos=1;") is False
+
+
+def test_matplotlib_axis_math_is_translated_to_origin_text() -> None:
+    assert escape_origin_text(r"$\Delta h^{3/2}$") == "Δ h\\+(3/2)"
+    assert escape_origin_text(r"$\ln(dp/dh)$") == "ln(dp/dh)"
+
+
+def test_dedicated_export_finishing_uses_larger_frame_and_smart_legend() -> None:
+    class Layer:
+        def __init__(self):
+            self.commands = []
+
+        def lt_exec(self, command):
+            self.commands.append(command)
+            return True
+
+    layer = Layer()
+    finish_origin_graph(layer)
+    assert "layer -u 1; layer 80 72 14 12;" in layer.commands
+    assert layer.commands[-1] == "legend.smartpos=1;"
 
 
 class _Label:
@@ -30,6 +78,9 @@ class _Label:
 class _Axis:
     def __init__(self) -> None:
         self.label = _Label()
+
+    def set_limits(self, *limits):
+        self.limits = limits
 
 
 class _Layer:
@@ -64,6 +115,39 @@ class _Layer:
             "y.to": 100.0,
         }
         return values[key]
+
+
+def test_sample_captions_are_outside_the_data_frame_and_need_no_existing_labels():
+    class Layer(_Layer):
+        def __init__(self):
+            super().__init__()
+            self.labels = []
+
+        def label(self, name):
+            return next((label for label in self.labels if label.name == name), None)
+
+        def add_label(self, text, *position):
+            label = _Label()
+            label.text = text
+            label.name = ""
+            label.set_float("width", 20)
+            self.labels.append(label)
+            return label
+
+        def remove_label(self, label):
+            assert label is not None
+            self.labels.remove(label)
+
+    layer = Layer()
+    set_origin_categorical_axis(layer, ['Piece "A"', 'Piece B'])
+    assert layer.axis("x").limits == (.5, 2.5, 1)
+    first, second, caption = layer.labels
+    assert first.text == 'Piece "A"'
+    assert first._floats["y1"] < layer.get_float("y.from")
+    assert first._floats["x1"] == 1 and second._floats["x1"] == 2
+    assert caption._floats["y1"] < first._floats["y1"]
+    assert caption.text == "Sample"
+    assert "layer.x.showAxes=1; layer.x.showLabels=0;" in layer.commands
 
 
 class _Graph:
@@ -118,12 +202,14 @@ def test_set_origin_axis_title_falls_back_to_ltalk_when_axis_missing() -> None:
     assert "layer.x.color = color(black);" in layer.commands
 
 
-def test_set_origin_axis_title_clamps_right_label_position() -> None:
+def test_set_origin_axis_title_uses_the_axis_range_for_right_label_position() -> None:
     layer = _Layer()
+    original_get_float = layer.get_float
+    layer.get_float = lambda key: {"x.from": 20.0, "x.to": 150.0}.get(key, original_get_float(key))
     layer._yr.set_float("x", 173.0)
     set_origin_axis_title(layer, "y2", "Magnetization (50 Oe) [emu]")
     assert layer.axis("y2").label.text == "Magnetization (50 Oe) [emu]"
-    assert layer._yr.get_float("x") == 130.0
+    assert 150.0 < layer._yr.get_float("x") <= 180.0
     assert "layer.y2.color = color(black);" in layer.commands
 
 

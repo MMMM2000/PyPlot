@@ -704,6 +704,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             cleanup()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        # The dedicated exporter preserves sample categories and proxy legends.
         def _task() -> None:
             self._apply_settings_to_core()
             temp_sens_core.SHOW_PLOTS = False

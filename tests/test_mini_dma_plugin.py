@@ -438,7 +438,7 @@ def test_origin_line_symbol_style_uses_mini_dma_markers() -> None:
     class _FakePlot:
         def __init__(self) -> None:
             self.commands: list[str] = []
-            self.symbol_shape = 0
+            self.symbol_kind = 0
             self.symbol_size = 0.0
 
         def set_cmd(self, command: str, *_args: object) -> None:
@@ -457,7 +457,7 @@ def test_origin_line_symbol_style_uses_mini_dma_markers() -> None:
     assert "-k 2" in plot.commands
     assert "-kf 0" in plot.commands
     assert "-z 6" in plot.commands
-    assert plot.symbol_shape == 2
+    assert plot.symbol_kind == 2
     assert plot.symbol_size == pytest.approx(6.0)
 
 

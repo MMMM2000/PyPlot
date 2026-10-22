@@ -26,12 +26,20 @@ from plotting.plugins import ExternalPlotterPlugin, PyPlotPlugin, builtin_plugin
 from plotting.plugins.temperature_sensitivity import core as temp_sens_core
 from plotting.plugins.temperature_sensitivity import temp_sens_plugin
 
-_HEADLESS = not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+_HEADLESS = sys.platform != "win32" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 _OFFSCREEN = os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen"
 pytestmark = pytest.mark.skipif(
     _HEADLESS or _OFFSCREEN,
     reason="PyQt plug-in tests require a display-capable Qt platform",
 )
+
+
+@pytest.fixture(autouse=True)
+def _retain_qt_application(qapp, monkeypatch):
+    """Retain Qt and keep synthetic widget checks out of unrelated modal flows."""
+    monkeypatch.setattr(PyPlotWorkbench, "_prompt_plugin_window_choice", lambda *args: False)
+    monkeypatch.setattr(PyPlotWorkbench, "_confirm_close_with_unsaved_data", lambda *args: True)
+    yield
 
 
 def _ensure_app() -> QtWidgets.QApplication:
@@ -891,7 +899,7 @@ def test_available_plotters_wrapped_as_external_plugins() -> None:
         window.close()
 
 
-def test_temperature_plugin_registers_group_workbooks(signal_data_root: Path) -> None:
+def test_temperature_plugin_registers_group_workbooks(signal_data_root: Path, monkeypatch, tmp_path) -> None:
     _ensure_app()
     window = PyPlotWorkbench(plotters={})
     try:
@@ -902,7 +910,13 @@ def test_temperature_plugin_registers_group_workbooks(signal_data_root: Path) ->
             sample_dir / "Synthetic 2_1 77mA 100C.txt",
         ]
         plugin._data = temp_sens_core.load_data([str(path) for path in files])
-        plugin._register_workbooks(files)
+        plugin._loaded_files = [str(path) for path in files]
+        monkeypatch.setattr(plugin, "_apply_settings_to_core", lambda: {
+            "variables": list(temp_sens_core.TS_LABELS), "baseline_mode": "zero_25",
+            "include_continuous": False, "med_window": 3, "ma_window": 3,
+            "save": False, "output_dir": tmp_path,
+        })
+        plugin.generate()
         managed = plugin._managed_workbooks
         assert managed
         assert len(managed) == len(temp_sens_core.TS_LABELS)
@@ -913,6 +927,7 @@ def test_temperature_plugin_registers_group_workbooks(signal_data_root: Path) ->
             first_sheet_key = workbook.worksheets[0]
             worksheet = window._worksheets.get(first_sheet_key)
             assert worksheet is not None
-            assert "plot_value" in worksheet.dataframe.columns
+            assert {"x_position", "plotted_value", "raw_value", "sample_label"}.issubset(worksheet.dataframe.columns)
+            assert not worksheet.dataframe["plotted_value"].isna().all()
     finally:
         window.close()
