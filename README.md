@@ -138,4 +138,6 @@ Verification is run within Codex sessions or local shells; this change installs
 no GitHub Actions workflow and consumes no Actions minutes. Choose additional
 checks for the changed feature. Full-suite verification and live Origin/Office
 or hardware acceptance remain separate. Use `--workers 0` to diagnose ordering
-problems; `--dist` controls parallel distribution (default `worksteal`).
+problems; `--dist` controls parallel distribution. Windows defaults to `load`
+to preserve the Qt test collection order within each worker; other platforms
+default to `worksteal`.
