@@ -1,0 +1,81 @@
+name: Windows verification
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  software:
+    name: Windows software gate
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/artifacts/uv-cache
+      QT_QPA_PLATFORM: offscreen
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: pyproject.toml
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          version: '0.11.16'
+          enable-cache: false
+      - name: Install locked test dependencies
+        run: |
+          New-Item -ItemType Directory -Force artifacts/install-temp | Out-Null
+          $env:TEMP = Join-Path $PWD 'artifacts/install-temp'
+          $env:TMP = $env:TEMP
+          $env:TMPDIR = $env:TEMP
+          uv sync --locked --extra test
+      - name: Verify required test backends
+        run: |
+          uv --version
+          uv run --locked --extra test python -c "import sys, pytest, xdist; from PyQt6 import QtCore, QtWidgets; import numpy, pandas, scipy, openpyxl; print(sys.version); print('Qt', QtCore.QT_VERSION_STR)"
+      - name: Run isolated software gate
+        run: |
+          New-Item -ItemType Directory -Force artifacts/ci | Out-Null
+          $PSNativeCommandUseErrorActionPreference = $false
+          uv run --locked --extra test python scripts/ci_verify.py `
+            --mode full --workers 2 --run-id github `
+            --junit-dir artifacts/ci `
+            tests/test_ci_verify.py `
+            tests/test_parallel_test_isolation.py `
+            tests/test_fixture_inputs.py `
+            tests/test_filename_parsing.py `
+            tests/test_vsm_temperature_scan.py `
+            tests/test_microwire_project_package.py `
+            tests/test_microwire_safe_codec.py `
+            tests/test_builder_update_integrity.py `
+            tests/test_power_guard.py `
+            tests/test_hmp_bench_guard.py `
+            tests/test_shared_power_supply_broker.py `
+            tests/test_experiment_processes.py `
+            tests/test_config.py `
+            tests/test_gui_smoke_headless.py `
+            -q --durations=10 2>&1 | Tee-Object -FilePath artifacts/ci/verification.log
+          exit $LASTEXITCODE
+      - name: Retain lane reports and skip reasons
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci/*.xml
+            artifacts/ci/verification.log
+          if-no-files-found: warn
+          retention-days: 7

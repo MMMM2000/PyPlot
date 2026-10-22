@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -41,28 +44,38 @@ def _repo_path(raw: str) -> Path:
     return path.resolve()
 
 
-def _safe_path_token(raw: str) -> str:
-    token = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw)
-    return token[:48] or "run"
+def _temp_paths(
+    run_id: str, run_root: Path, configured_root: str | None
+) -> tuple[Path, Path]:
+    if configured_root or os.name == "nt":
+        parent = (
+            _repo_path(configured_root)
+            if configured_root
+            else REPO_ROOT / "artifacts" / "t"
+        )
+        # Keep the resolved path short even when a descriptive run id is used.
+        # Always append our own run directory: pytest deletes its basetemp.
+        private_root = parent / hashlib.sha256(run_id.encode("ascii")).hexdigest()[:10]
+        return private_root / "t", private_root / "p"
+    return run_root / "temp", run_root / "pytest-basetemp"
 
 
-def _temp_root_for_run(run_id: str, run_root: Path) -> Path:
-    if os.name == "nt":
-        # tests/conftest.py deliberately falls back to C:/tmp when the temp path
-        # is long. Use a short, ignored, workspace-local per-run root up front
-        # so Excel/xlsxwriter tests do not collide in a shared temp directory.
-        return REPO_ROOT / "artifacts" / "t" / _safe_path_token(run_id)
-    return run_root / "temp"
-
-
-def _basetemp_for_run(run_id: str, run_root: Path) -> Path:
-    if os.name == "nt":
-        # xdist adds worker-specific paths and Builder fixtures intentionally
-        # reproduce deep Google Drive directory structures. Windows expands
-        # workspace 8.3 aliases before those fixtures are created, so use a
-        # genuinely short, disposable per-run base directory.
-        return Path("C:/tmp/pyt") / _safe_path_token(run_id)
-    return run_root / "pytest-basetemp"
+def _preflight_directory(path: Path) -> None:
+    """Exercise create/write/read/rename/delete without touching existing files."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".probe-", dir=path) as probe:
+            source = Path(probe) / "write"
+            source.write_bytes(b"pyplot-verification")
+            if source.read_bytes() != b"pyplot-verification":
+                raise OSError("temporary-file readback did not match")
+            source.rename(Path(probe) / "renamed")
+    except OSError as exc:
+        raise ValueError(
+            f"Verification directory preflight failed for {path}: {exc}. "
+            "Choose a writable ASCII --temp-root (or PYPLOT_VERIFY_TEMP_ROOT) "
+            "and --artifacts-dir; no fallback directory was used."
+        ) from exc
 
 
 def _windows_short_path(path: Path) -> Path:
@@ -75,6 +88,8 @@ def _windows_short_path(path: Path) -> Path:
     if not length or length >= len(buffer):
         return path
     return Path(buffer.value)
+
+
 def _has_pytest_target(args: Iterable[str]) -> bool:
     skip_next = False
     value_options = {
@@ -137,12 +152,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifacts-dir",
         default="artifacts/test-runs",
-        help="Workspace-scoped directory for per-run temp roots and pytest basetemp.",
+        help="Directory for per-run isolated settings, storage and reports.",
+    )
+    parser.add_argument(
+        "--temp-root",
+        default=os.environ.get("PYPLOT_VERIFY_TEMP_ROOT"),
+        help=(
+            "Parent for private temp/basetemp directories. Defaults to artifacts/t "
+            "on Windows; PYPLOT_VERIFY_TEMP_ROOT supplies an explicit alternative. "
+            "Use a short writable ASCII path for deep fixtures."
+        ),
+    )
+    parser.add_argument(
+        "--junit-dir",
+        default=None,
+        help="Write separate parallel.xml/serial.xml pytest reports in this directory.",
     )
     parser.add_argument(
         "--run-id",
         default=None,
-        help="Optional stable run id for deterministic artifact paths.",
+        help="Unique run id: 1-48 ASCII letters, digits, hyphens or underscores.",
     )
     parser.add_argument(
         "--python",
@@ -175,13 +204,21 @@ def build_parser() -> argparse.ArgumentParser:
 def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]:
     artifacts_dir = _repo_path(args.artifacts_dir)
     run_id = args.run_id or _default_run_id()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}", run_id):
+        raise ValueError(
+            "--run-id must be 1-48 ASCII letters, digits, hyphens or underscores, "
+            "starting with a letter or digit"
+        )
     run_root = artifacts_dir / run_id
 
-    temp_root = _temp_root_for_run(run_id, run_root)
-    basetemp = _basetemp_for_run(run_id, run_root)
+    temp_root, basetemp = _temp_paths(run_id, run_root, args.temp_root)
+    if not str(temp_root).isascii():
+        raise ValueError(
+            "--temp-root must resolve to an ASCII path; choose a short writable parent"
+        )
     qsettings_root = run_root / "qsettings"
     builder_root = run_root / "microwire-builder-storage"
-    mpl_cache = REPO_ROOT / "artifacts" / "mpl-cache"
+    mpl_cache = run_root / "matplotlib"
     uv_cache = REPO_ROOT / "artifacts" / "uv-cache"
     pip_cache = REPO_ROOT / "artifacts" / "pip-cache"
 
@@ -194,7 +231,9 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
         uv_cache,
         pip_cache,
     ):
-        path.mkdir(parents=True, exist_ok=True)
+        _preflight_directory(path)
+    if args.junit_dir:
+        _preflight_directory(_repo_path(args.junit_dir))
 
     # Preserve the same directories while presenting their 8.3 aliases to
     # Windows subprocesses. This saves enough path budget for deeply nested
@@ -284,6 +323,7 @@ def _base_pytest_command(
     ]
     if not args.keep_pytest_cache:
         command.extend(["-p", "no:cacheprovider"])
+    command.append("-ra")
     command.extend(pytest_args)
     return command
 
@@ -335,8 +375,22 @@ def main(argv: list[str] | None = None) -> int:
     args, pytest_args = parser.parse_known_args(argv)
     args.pytest_args = [arg for arg in pytest_args if arg != "--"]
     try:
+        _resolved_workers(args)
+        if any(
+            option.startswith("--") and "--basetemp".startswith(option)
+            for arg in args.pytest_args
+            for option in [arg.split("=", 1)[0]]
+        ):
+            raise ValueError(
+                "Use --temp-root instead of overriding pytest --basetemp; "
+                "the runner owns disposable lane directories"
+            )
         env, basetemp = prepare_environment(args)
         commands = build_pytest_commands(args, basetemp)
+        if args.junit_dir:
+            for lane, command in commands:
+                report = _repo_path(args.junit_dir) / f"{lane}.xml"
+                command.extend(["--junitxml", str(report)])
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -346,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"PyPlot verification mode: {args.mode}", flush=True)
     print(f"Pytest basetemp: {basetemp}", flush=True)
+    print(f"Resolved basetemp length: {len(str(basetemp.resolve()))}", flush=True)
     print(
         f"Microwire Builder storage: {env['MICROWIRE_BUILDER_STORAGE_ROOT']}",
         flush=True,

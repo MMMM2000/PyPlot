@@ -83,37 +83,56 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 
 ### Windows Verification
 
-Use the Windows runner when invoking pytest from Codex or a local PowerShell
-session. It forces headless Qt/Matplotlib defaults, stores Microwire Data Builder
-state under `artifacts/test-runs/`, and keeps tool caches inside the workspace.
-On Windows, pytest's disposable base temp uses a short `C:\tmp\pyt\` path so
-xdist worker suffixes do not exceed the platform path limit. Full mode uses four
-pytest-xdist workers by default, with
-private temp, Qt settings, Matplotlib, and Builder storage for every worker.
-Tests marked `serial` run afterward in a separate single-process lane:
+Install the locked test environment with `uv sync --locked --extra test`, then
+use the Windows runner from Codex or PowerShell. It forces offscreen Qt and Agg,
+keeps settings and Builder storage private to each run, and gives each xdist
+worker private temp, Qt settings, Matplotlib and Builder paths. Tests marked
+`serial` run afterward in a separate process. Full mode defaults to four
+workers; focused mode defaults to one process and, without targets, runs only
+one launcher smoke test.
 
 ```powershell
-.\scripts\run_tests.ps1 -Mode focused tests\test_launcher.py::test_launcher_detects_pyplot_automation_flags
-.\scripts\run_tests.ps1 -Mode full
-.\scripts\run_tests.ps1 -Mode full -Workers 8
+.\scripts\run_tests.ps1 -Mode focused tests\test_ci_verify.py
+.\scripts\run_tests.ps1 -Mode full -JunitDir artifacts\verification-reports
 .\scripts\run_tests.ps1 -Mode full -Workers 0
 .\scripts\run_tests.ps1 -Mode focused -DryRun tests\test_launcher.py
 ```
 
-If local execution policy blocks `.ps1` scripts, invoke the same runner with:
+The equivalent Python entrypoint works when PowerShell script execution is
+restricted:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_tests.ps1 -Mode focused -DryRun
+uv run --locked --extra test python scripts/ci_verify.py --mode focused tests/test_ci_verify.py
+uv run --locked --extra test python scripts/ci_verify.py --mode full --junit-dir artifacts/verification-reports
 ```
 
-The underlying Python entrypoint is also available for CI-like callers:
+Windows temp and pytest basetemp now default to short per-run directories under
+`artifacts/t/`; settings and storage stay under `artifacts/test-runs/`. The runner
+checks create/write/read/rename/delete access before starting pytest and reports
+the failing path without falling back to a shared directory. It prints the
+resolved basetemp length and retains Windows short aliases where available.
+Deep fixtures may still need a shorter checkout or an explicitly chosen writable
+ASCII parent: use `-TempRoot <path>`, `--temp-root <path>`, or
+`PYPLOT_VERIFY_TEMP_ROOT` (the command-line option takes precedence). The runner
+appends its own private run directory; do not override pytest's `--basetemp`.
+Use a unique `--run-id` for concurrent runs; supplied ids must be 1-48 ASCII
+letters, digits, hyphens or underscores, starting with a letter or digit.
+Reusing an id allows pytest to replace that run's disposable lane directories.
 
-```powershell
-uv run python scripts\ci_verify.py --mode focused --dry-run tests\test_launcher.py
-uv run python scripts\ci_verify.py --mode full
-```
+The [Windows PR workflow](.github/workflows/windows-verification.yml) runs on
+`windows-2025`, selects Python from `pyproject.toml`, installs locked dependencies,
+and runs an explicit software gate with two workers plus the serial lane. Its
+PowerShell run block can also be copied into a local session to reproduce the
+same target list. The gate covers runner failures and worker isolation, synthetic
+parser fixtures, numerical scan handling, package/codec integrity, Builder update
+integrity, fake power-supply checks, process contracts, configuration and offscreen
+GUI smoke checks. It does not use the large `sample_data/` tree.
 
-Use `-Workers 0` (or `--workers 0` with the Python entrypoint) when diagnosing
-an order-dependent failure. Focused mode remains serial unless workers are
-requested explicitly. The parallel distribution strategy defaults to
-`worksteal` and can be changed with the Python runner's `--dist` option.
+The workflow has a 15-minute limit, cancels superseded runs for the same PR, and
+retains only its console log and separate lane JUnit XML reports for seven days.
+Skip reasons appear in the console (`-ra`) and XML. Failures and runs with no
+selected tests fail the job; an empty companion lane is allowed. Full-suite
+verification and live Origin/Office or hardware acceptance remain separate.
+Review hosted results before making
+it a required merge check. Use `--workers 0` to diagnose ordering problems;
+`--dist` controls the parallel distribution strategy (default `worksteal`).

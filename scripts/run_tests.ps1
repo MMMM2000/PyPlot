@@ -13,6 +13,10 @@ param(
 
     [string]$ArtifactsDir,
 
+    [string]$TempRoot,
+
+    [string]$JunitDir,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PytestArgs
 )
@@ -39,6 +43,12 @@ if ($RunId) {
 }
 if ($ArtifactsDir) {
     $scriptArgs += @("--artifacts-dir", $ArtifactsDir)
+}
+if ($TempRoot) {
+    $scriptArgs += @("--temp-root", $TempRoot)
+}
+if ($JunitDir) {
+    $scriptArgs += @("--junit-dir", $JunitDir)
 }
 if ($PytestArgs) {
     $scriptArgs += $PytestArgs
