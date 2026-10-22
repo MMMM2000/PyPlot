@@ -144,4 +144,3 @@ This migration is done when Windows confirms:
 - Python is 3.14.x.
 - `launcher.py --help` succeeds.
 - The test suite passes or any Windows-only failures are documented and fixed.
-
