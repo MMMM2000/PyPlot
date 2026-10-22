@@ -5,6 +5,10 @@ __pycache__/
 # macOS metadata
 .DS_Store
 
+# Virtual serial pairs are created locally by the emulator.
+/ttyV0
+/ttyV1
+
 # VS Code settings
 .vscode/*
 !.vscode/tasks.json
