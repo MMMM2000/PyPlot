@@ -57,11 +57,10 @@ def _temp_root_for_run(run_id: str, run_root: Path) -> Path:
 
 def _basetemp_for_run(run_id: str, run_root: Path) -> Path:
     if os.name == "nt":
-        # xdist adds worker-specific paths and Builder fixtures intentionally
-        # reproduce deep Google Drive directory structures. Windows expands
-        # workspace 8.3 aliases before those fixtures are created, so use a
-        # genuinely short, disposable per-run base directory.
-        return Path("C:/tmp/pyt") / _safe_path_token(run_id)
+        # Keep a short, disposable root inside the checkout. A machine-wide
+        # C:/tmp needs permissions that desktop/sandbox accounts may not have.
+        # prepare_environment presents its 8.3 alias to Windows subprocesses.
+        return REPO_ROOT / "artifacts" / "p" / _safe_path_token(run_id)
     return run_root / "pytest-basetemp"
 
 
@@ -202,6 +201,13 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     if os.name == "nt":
         temp_root = _windows_short_path(temp_root)
         basetemp = _windows_short_path(basetemp)
+        # Deep synthetic Drive/payload paths can exceed MAX_PATH even with
+        # 8.3 aliases. Opt this disposable tree into Win32 extended paths
+        # without requiring the machine-wide LongPathsEnabled registry flag.
+        raw_base = str(basetemp)
+        if not raw_base.startswith('\\\\?\\'):
+            basetemp = Path('\\\\?\\UNC\\' + raw_base[2:] if raw_base.startswith('\\\\')
+                            else '\\\\?\\' + raw_base)
         qsettings_root = _windows_short_path(qsettings_root)
         builder_root = _windows_short_path(builder_root)
         mpl_cache = _windows_short_path(mpl_cache)

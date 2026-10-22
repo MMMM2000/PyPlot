@@ -1,0 +1,1 @@
+Windows verification now keeps pytest's per-run base directory under ignored workspace artifacts instead of requiring write access to C:\tmp. Extended-path support handles deep synthetic fixtures without changing Windows registry settings. Added regressions for workspace scope, run isolation and long paths.
