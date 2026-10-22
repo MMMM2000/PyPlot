@@ -110,8 +110,9 @@ Windows temp and pytest basetemp now default to short per-run directories under
 `artifacts/t/`; settings and storage stay under `artifacts/test-runs/`. The runner
 checks create/write/read/rename/delete access before starting pytest and reports
 the failing path without falling back to a shared directory. It prints the
-resolved basetemp length and retains Windows short aliases where available.
-Deep fixtures may still need a shorter checkout or an explicitly chosen writable
+resolved basetemp length, warns above 60 characters (a conservative path-budget
+heuristic), and retains Windows short aliases where available. Pytest can expand
+those aliases. Deep fixtures may still need a shorter checkout or an explicitly chosen writable
 ASCII parent: use `-TempRoot <path>`, `--temp-root <path>`, or
 `PYPLOT_VERIFY_TEMP_ROOT` (the command-line option takes precedence). The runner
 appends its own private run directory; do not override pytest's `--basetemp`.

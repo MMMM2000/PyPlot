@@ -394,13 +394,24 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    resolved_length = len(str(basetemp.resolve()))
+    if os.name == "nt" and resolved_length > 60:
+        print(
+            f"Path preflight warning: resolved basetemp is {resolved_length} characters. "
+            "Deep fixtures and payload staging may exceed legacy Windows path limits; "
+            "choose a shorter writable --temp-root (or PYPLOT_VERIFY_TEMP_ROOT). "
+            "Short aliases can be expanded by pytest; no fallback was used.",
+            file=sys.stderr,
+            flush=True,
+        )
+
     if args.dry_run:
         print_dry_run(args, env, commands)
         return 0
 
     print(f"PyPlot verification mode: {args.mode}", flush=True)
     print(f"Pytest basetemp: {basetemp}", flush=True)
-    print(f"Resolved basetemp length: {len(str(basetemp.resolve()))}", flush=True)
+    print(f"Resolved basetemp length: {resolved_length}", flush=True)
     print(
         f"Microwire Builder storage: {env['MICROWIRE_BUILDER_STORAGE_ROOT']}",
         flush=True,

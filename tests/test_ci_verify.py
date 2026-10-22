@@ -172,3 +172,11 @@ def test_no_selected_tests_remains_a_failure(tmp_path: Path) -> None:
     result = invoke(tmp_path, '--temp-root', str(tmp_path / 'temp'), str(suite), '-k', 'absent', '-q')
     assert result.returncode == 5
     assert 'No tests selected' in result.stdout
+
+
+def test_long_resolved_temp_root_warns_before_pytest(tmp_path: Path) -> None:
+    result = invoke(tmp_path, '--temp-root', str(tmp_path / 'long-parent-path'), '--dry-run')
+    assert result.returncode == 0, result.stderr
+    assert 'resolved basetemp' in result.stderr.lower()
+    assert 'deep' in result.stderr.lower()
+    assert '--temp-root' in result.stderr
