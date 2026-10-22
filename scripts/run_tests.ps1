@@ -1,6 +1,6 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [ValidateSet("focused", "full")]
+    [ValidateSet("focused", "software", "full")]
     [string]$Mode = "focused",
 
     [switch]$DryRun,

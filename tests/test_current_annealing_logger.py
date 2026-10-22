@@ -903,6 +903,41 @@ def test_current_annealing_reports_actionable_corrupt_builder_project(
     assert "codec can't decode" not in status
 
 
+def test_current_annealing_imports_verified_table_recovery(tmp_path, qtbot):
+    import zipfile
+    from microwire_data_builder.table_manifest_recovery import recover_table_manifest
+
+    original = tmp_path / "original.pydpj"
+    project_package.write_project_package(original, {
+        "kind": project_package.PROJECT_KIND,
+        "sections": {"microscope": {
+            "columns": ["Composition", "Microwire", "d (um)"],
+            "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "11/1", "d (um)": 14.0}],
+            "index": [0],
+        }},
+    })
+    edited = tmp_path / "edited.pydpj"
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(edited, "w") as target:
+        for info in source.infolist():
+            raw = source.read(info)
+            if info.filename == "sections/microscope/table.json":
+                raw = json.dumps(json.loads(raw), indent=2).encode("utf-8")
+            target.writestr(info, raw)
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("11-1")
+    window.ui.lineEdit_builder_project.setText(str(edited))
+    assert window._import_builder_project_from_ui() is False
+    assert "verified recovered copy" in window.ui.label_microwire_metadata_status.text()
+    recovered = tmp_path / "recovered.pydpj"
+    recover_table_manifest(edited, recovered)
+    window.ui.lineEdit_builder_project.setText(str(recovered))
+    assert window._import_builder_project_from_ui() is True
+    assert window.ui.doubleSpinBox_wire_diameter_um.value() == pytest.approx(14.0)
+    assert window._metadata_diameter_imported is True
+
+
 def test_current_annealing_imported_diameter_reverts_to_untrusted_on_manual_or_stale_sample(
     tmp_path,
     qtbot,

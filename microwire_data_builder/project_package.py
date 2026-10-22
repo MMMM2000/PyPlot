@@ -805,6 +805,17 @@ def _validated_migration_provenance(value: Any) -> dict[str, Any] | None:
     return result
 
 
+def _read_package_manifest_header(archive: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> bytes:
+    """Check fixed package headers before returning bounded manifest bytes."""
+    if len(infos) < 2 or infos[0].filename != MIMETYPE_PATH or infos[1].filename != MANIFEST_PATH:
+        raise SafeCodecError("Builder package must start with mimetype then manifest.json")
+    if infos[0].compress_type != zipfile.ZIP_STORED or infos[1].compress_type != zipfile.ZIP_STORED:
+        raise SafeCodecError("Builder package mimetype and manifest must be uncompressed")
+    if _read_entry_bounded(archive, infos[0], limit=256) != MIMETYPE.encode('ascii'):
+        raise SafeCodecError("Builder package mimetype is unsupported")
+    return _read_entry_bounded(archive, infos[1], limit=MAX_MANIFEST_BYTES)
+
+
 def inspect_project_package(path: Path, *, verify_entries: bool = False) -> ProjectIndex:
     target = Path(path)
     fingerprint = FileFingerprint.capture(target)
@@ -821,14 +832,7 @@ def inspect_project_package(path: Path, *, verify_entries: bool = False) -> Proj
             and total_uncompressed > max(1, total_compressed) * MAX_COMPRESSION_RATIO
         ):
             raise SafeCodecError("Suspicious aggregate Builder package compression ratio")
-        if len(infos) < 2 or infos[0].filename != MIMETYPE_PATH or infos[1].filename != MANIFEST_PATH:
-            raise SafeCodecError("Builder package must start with mimetype then manifest.json")
-        if infos[0].compress_type != zipfile.ZIP_STORED or infos[1].compress_type != zipfile.ZIP_STORED:
-            raise SafeCodecError("Builder package mimetype and manifest must be uncompressed")
-        mimetype = _read_entry_bounded(archive, infos[0], limit=256)
-        if mimetype.decode("ascii", errors="strict") != MIMETYPE:
-            raise SafeCodecError("Builder package mimetype is unsupported")
-        manifest_raw = _read_entry_bounded(archive, infos[1], limit=MAX_MANIFEST_BYTES)
+        manifest_raw = _read_package_manifest_header(archive, infos)
     manifest = _read_json_bytes(manifest_raw, "manifest")
     if not isinstance(manifest, dict):
         raise SafeCodecError("Builder package manifest must be an object")

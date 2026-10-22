@@ -48,7 +48,7 @@ def test_default_paths_stay_in_workspace(tmp_path: Path, monkeypatch) -> None:
     assert result.returncode == 0, result.stderr
     values = environment_lines(result.stdout)
     for key in ('TEMP', 'TMP', 'TMPDIR', 'pytest_basetemp'):
-        assert Path(values[key]).resolve().is_relative_to(REPO_ROOT / 'artifacts' / 't')
+        assert any(parent.samefile(REPO_ROOT / 'artifacts' / 't') for parent in Path(values[key]).parents)
     assert values['QT_QPA_PLATFORM'] == 'offscreen'
     assert values['MPLBACKEND'] == 'Agg'
     assert values['PYPLOT_TEST_TEMP_ISOLATED'] == '1'
@@ -64,7 +64,8 @@ def test_explicit_temp_parent_is_private_and_preserves_existing_files(tmp_path: 
     assert result.returncode == 0, result.stderr
     values = environment_lines(result.stdout)
     base = Path(values['pytest_basetemp']).resolve()
-    assert base.is_relative_to(parent.resolve()) and base != parent.resolve()
+    assert any(ancestor.samefile(parent) for ancestor in base.parents)
+    assert not base.samefile(parent)
     assert sentinel.read_text(encoding='ascii') == 'unrelated'
     assert Path(values['TEMP']).resolve() != base
 
@@ -180,3 +181,48 @@ def test_long_resolved_temp_root_warns_before_pytest(tmp_path: Path) -> None:
     assert 'resolved basetemp' in result.stderr.lower()
     assert 'deep' in result.stderr.lower()
     assert '--temp-root' in result.stderr
+
+
+def test_ci_verify_supports_deep_fixture_paths_without_machine_settings(tmp_path: Path) -> None:
+    from scripts.ci_verify import build_parser, prepare_environment
+
+    args = build_parser().parse_args(['--artifacts-dir', str(tmp_path/'artifacts'),
+                                      '--run-id', 'long-path-regression'])
+    _env, base = prepare_environment(args)
+    payload = base/('a'*80)/('b'*80)/('c'*80)/'payload.bin'
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_bytes(b'isolated fixture')
+    assert payload.read_bytes() == b'isolated fixture'
+
+
+
+def test_ci_verify_basetemp_is_workspace_scoped_and_run_isolated(tmp_path: Path) -> None:
+    args = runner.build_parser().parse_args([
+        '--artifacts-dir', str(tmp_path / 'runs'), '--run-id', 'run-first',
+    ])
+    _, first = runner.prepare_environment(args)
+    args.run_id = 'run-second'
+    _, second = runner.prepare_environment(args)
+    assert not first.samefile(second)
+    for base in (first, second):
+        assert any(parent.samefile(REPO_ROOT / 'artifacts') for parent in base.parents)
+
+
+def test_software_mode_selects_representative_checks_in_both_lanes(tmp_path: Path) -> None:
+    result = invoke(tmp_path, '--mode', 'software', '--dry-run')
+    assert result.returncode == 0, result.stderr
+    assert 'lane=parallel' in result.stdout and '-n 2' in result.stdout
+    assert 'lane=serial' in result.stdout and '-n 0' in result.stdout
+    for target in ('tests/test_fixture_inputs.py', 'tests/test_microwire_project_package.py',
+                   'tests/test_power_guard.py', 'tests/test_gui_smoke_headless.py'):
+        assert target in result.stdout
+    assert 'test_launcher_detects_pyplot_automation_flags' not in result.stdout
+
+
+def test_software_mode_respects_explicit_target_and_worker_override(tmp_path: Path) -> None:
+    result = invoke(tmp_path, '--mode', 'software', '--workers', '0',
+                    '--dry-run', 'tests/test_config.py')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count('lane=') == 1
+    assert 'tests/test_config.py' in result.stdout
+    assert 'tests/test_microwire_project_package.py' not in result.stdout

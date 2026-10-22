@@ -17,6 +17,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FOCUSED_TARGETS = [
     "tests/test_launcher.py::test_launcher_detects_pyplot_automation_flags",
 ]
+DEFAULT_SOFTWARE_TARGETS = [
+    "tests/test_ci_verify.py",
+    "tests/test_parallel_test_isolation.py",
+    "tests/test_fixture_inputs.py",
+    "tests/test_filename_parsing.py",
+    "tests/test_vsm_temperature_scan.py",
+    "tests/test_microwire_project_package.py",
+    "tests/test_microwire_safe_codec.py",
+    "tests/test_builder_update_integrity.py",
+    "tests/test_power_guard.py",
+    "tests/test_hmp_bench_guard.py",
+    "tests/test_shared_power_supply_broker.py",
+    "tests/test_experiment_processes.py",
+    "tests/test_config.py",
+    "tests/test_gui_smoke_headless.py",
+]
 SELECTED_ENV_KEYS = [
     "QT_QPA_PLATFORM",
     "MPLBACKEND",
@@ -137,11 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("focused", "full"),
+        choices=("focused", "software", "full"),
         default="focused",
         help=(
             "focused runs supplied pytest targets, or a tiny launcher smoke target "
-            "when none are supplied; full defaults to the full tests directory."
+            "when none are supplied; software defaults to representative local "
+            "software checks; full defaults to the full tests directory."
         ),
     )
     parser.add_argument(
@@ -188,8 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Number of pytest-xdist workers. Full mode defaults to 4; focused "
-            "mode defaults to 0. Use 0 to force one serial pytest process."
+            "Number of pytest-xdist workers. Full mode defaults to 4, software to 2, "
+            "and focused to 0. Use 0 to force one serial pytest process."
         ),
     )
     parser.add_argument(
@@ -241,6 +258,13 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     if os.name == "nt":
         temp_root = _windows_short_path(temp_root)
         basetemp = _windows_short_path(basetemp)
+        # Deep synthetic Drive/payload paths can exceed MAX_PATH even with
+        # 8.3 aliases. Opt this disposable tree into Win32 extended paths
+        # without requiring the machine-wide LongPathsEnabled registry flag.
+        raw_base = str(basetemp)
+        if not raw_base.startswith('\\\\?\\'):
+            basetemp = Path('\\\\?\\UNC\\' + raw_base[2:] if raw_base.startswith('\\\\')
+                            else '\\\\?\\' + raw_base)
         qsettings_root = _windows_short_path(qsettings_root)
         builder_root = _windows_short_path(builder_root)
         mpl_cache = _windows_short_path(mpl_cache)
@@ -270,7 +294,7 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
 def _resolved_workers(args: argparse.Namespace) -> int:
     workers = args.workers
     if workers is None:
-        workers = 4 if args.mode == "full" else 0
+        workers = {"full": 4, "software": 2, "focused": 0}[args.mode]
     if workers < 0:
         raise ValueError("--workers must be zero or greater")
     return workers
@@ -279,7 +303,11 @@ def _resolved_workers(args: argparse.Namespace) -> int:
 def _selected_pytest_args(args: argparse.Namespace) -> list[str]:
     pytest_args = [arg for arg in args.pytest_args if arg != "--"]
     if not _has_pytest_target(pytest_args):
-        default_targets = ["tests"] if args.mode == "full" else DEFAULT_FOCUSED_TARGETS
+        default_targets = {
+            "full": ["tests"],
+            "software": DEFAULT_SOFTWARE_TARGETS,
+            "focused": DEFAULT_FOCUSED_TARGETS,
+        }[args.mode]
         pytest_args = [*default_targets, *pytest_args]
     return pytest_args
 
@@ -398,8 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     if os.name == "nt" and resolved_length > 60:
         print(
             f"Path preflight warning: resolved basetemp is {resolved_length} characters. "
-            "Deep fixtures and payload staging may exceed legacy Windows path limits; "
-            "choose a shorter writable --temp-root (or PYPLOT_VERIFY_TEMP_ROOT). "
+            "Extended paths protect deep fixtures; libraries that drop that prefix may "
+            "still need a shorter writable --temp-root (or PYPLOT_VERIFY_TEMP_ROOT). "
             "Short aliases can be expanded by pytest; no fallback was used.",
             file=sys.stderr,
             flush=True,

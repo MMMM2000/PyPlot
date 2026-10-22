@@ -83,57 +83,59 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 
 ### Windows Verification
 
-Install the locked test environment with `uv sync --locked --extra test`, then
-use the Windows runner from Codex or PowerShell. It forces offscreen Qt and Agg,
-keeps settings and Builder storage private to each run, and gives each xdist
-worker private temp, Qt settings, Matplotlib and Builder paths. Tests marked
-`serial` run afterward in a separate process. Full mode defaults to four
-workers; focused mode defaults to one process and, without targets, runs only
-one launcher smoke test.
+Run verification locally in Codex on Windows or from PowerShell. Install the
+locked test environment first with `uv sync --locked --extra test`.
 
 ```powershell
+.\scripts\run_tests.ps1 -Mode software -JunitDir artifacts\verification-reports
 .\scripts\run_tests.ps1 -Mode focused tests\test_ci_verify.py
-.\scripts\run_tests.ps1 -Mode full -JunitDir artifacts\verification-reports
+.\scripts\run_tests.ps1 -Mode full -JunitDir artifacts\full-verification-reports
 .\scripts\run_tests.ps1 -Mode full -Workers 0
-.\scripts\run_tests.ps1 -Mode focused -DryRun tests\test_launcher.py
 ```
 
 The equivalent Python entrypoint works when PowerShell script execution is
 restricted:
 
 ```powershell
+uv run --locked --extra test python scripts/ci_verify.py --mode software --junit-dir artifacts/verification-reports
 uv run --locked --extra test python scripts/ci_verify.py --mode focused tests/test_ci_verify.py
-uv run --locked --extra test python scripts/ci_verify.py --mode full --junit-dir artifacts/verification-reports
 ```
 
-Windows temp and pytest basetemp now default to short per-run directories under
-`artifacts/t/`; settings and storage stay under `artifacts/test-runs/`. The runner
-checks create/write/read/rename/delete access before starting pytest and reports
-the failing path without falling back to a shared directory. It prints the
-resolved basetemp length, warns above 60 characters (a conservative path-budget
-heuristic), and retains Windows short aliases where available. Pytest can expand
-those aliases. Deep fixtures may still need a shorter checkout or an explicitly chosen writable
-ASCII parent: use `-TempRoot <path>`, `--temp-root <path>`, or
-`PYPLOT_VERIFY_TEMP_ROOT` (the command-line option takes precedence). The runner
-appends its own private run directory; do not override pytest's `--basetemp`.
-Use a unique `--run-id` for concurrent runs; supplied ids must be 1-48 ASCII
+`software` runs a representative set with two workers plus a separate serial
+lane: runner/isolation checks, synthetic parser fixtures, numerical scan handling,
+package/codec integrity, Builder update integrity, fake power-supply checks,
+process contracts, configuration and offscreen GUI smoke checks. This selection
+uses small synthetic fixtures independently of `sample_data/` and Drive.
+`full` selects the complete tests directory and defaults to four workers.
+`focused` runs supplied targets in one process, or just one launcher smoke test
+when no targets are supplied. Use `-DryRun` / `--dry-run` to inspect the selection.
+
+The runner forces offscreen Qt and Agg, keeps settings and Builder storage
+private to each run, and gives each xdist worker private temp, Qt settings,
+Matplotlib and Builder paths. Tests marked `serial` run afterward in a separate
+process. Console output includes skip reasons (`-ra`); `-JunitDir` / `--junit-dir`
+writes separate lane XML reports. Failures and runs with no selected tests return
+a failure exit code; an empty companion lane is allowed.
+
+Windows temp and pytest basetemp default to per-run folders under `artifacts/t/`;
+settings and storage stay under `artifacts/test-runs/`. The runner checks
+create/write/read/rename/delete access before testing and reports the failing
+path without falling back to a shared directory. Windows basetemp retains 8.3
+aliases where available and uses an extended-length path for deep fixtures,
+without changing machine permissions or Windows long-path settings. Libraries
+that discard that prefix may still need a shorter writable ASCII parent: use
+`-TempRoot <path>`, `--temp-root <path>`, or `PYPLOT_VERIFY_TEMP_ROOT` (CLI wins).
+The runner prints the resolved path length and warns above 60 characters as a
+conservative diagnostic. It appends its own private directory; do not override
+pytest's `--basetemp`.
+
+Use a unique `--run-id` for concurrent runs. Supplied ids must be 1-48 ASCII
 letters, digits, hyphens or underscores, starting with a letter or digit.
-Reusing an id allows pytest to replace that run's disposable lane directories.
+Reusing an id lets pytest replace that run's disposable lane directories. Keep
+reports under ignored `artifacts/` and preserve evidence until review.
 
-The [Windows PR workflow](.github/workflows/windows-verification.yml) runs on
-`windows-2025`, selects Python from `pyproject.toml`, installs locked dependencies,
-and runs an explicit software gate with two workers plus the serial lane. Its
-PowerShell run block can also be copied into a local session to reproduce the
-same target list. The gate covers runner failures and worker isolation, synthetic
-parser fixtures, numerical scan handling, package/codec integrity, Builder update
-integrity, fake power-supply checks, process contracts, configuration and offscreen
-GUI smoke checks. It does not use the large `sample_data/` tree.
-
-The workflow has a 15-minute limit, cancels superseded runs for the same PR, and
-retains only its console log and separate lane JUnit XML reports for seven days.
-Skip reasons appear in the console (`-ra`) and XML. Failures and runs with no
-selected tests fail the job; an empty companion lane is allowed. Full-suite
-verification and live Origin/Office or hardware acceptance remain separate.
-Review hosted results before making
-it a required merge check. Use `--workers 0` to diagnose ordering problems;
-`--dist` controls the parallel distribution strategy (default `worksteal`).
+Verification is run within Codex sessions or local shells; this change installs
+no GitHub Actions workflow and consumes no Actions minutes. Choose additional
+checks for the changed feature. Full-suite verification and live Origin/Office
+or hardware acceptance remain separate. Use `--workers 0` to diagnose ordering
+problems; `--dist` controls parallel distribution (default `worksteal`).
