@@ -13,6 +13,8 @@ import json
 import math
 import random
 import statistics
+import hashlib
+from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -109,8 +111,17 @@ class IsoStressPlantConfig:
     safety_max_abs_error_mpa: float = 120.0
     cadence_gap_every_samples: int = 0
     cadence_gap_s: float = 0.0
+    measurement_delay_s: float = 0.0
+    measurement_quantum_mpa: float = 0.0
+    transformation_tau_s: float = 0.0
 
     def validated(self) -> "IsoStressPlantConfig":
+        for name, value in asdict(self).items():
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+        for name in ("measurement_delay_s", "measurement_quantum_mpa", "transformation_tau_s"):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         if self.stiffness_mpa_per_mm <= 0.0:
             raise ValueError("stiffness_mpa_per_mm must be positive")
         if self.length_mm <= 0.0:
@@ -143,6 +154,8 @@ class IsoStressPolicyConfig:
     """Hold/resume policy parameters shared by baseline and candidates."""
 
     name: str = POLICY_BASELINE
+    # An explicit controller assumption, never read from the hidden plant gain.
+    estimated_stiffness_mpa_per_mm: float = 600.0
     fast_window_s: float = 1.8
     tolerance_mpa: float = 0.4335491174
     pause_min_mpa: float = 2.0
@@ -201,6 +214,8 @@ class IsoStressPolicyConfig:
     processed_crossing_fast_veto_mpa: float = 15.0
 
     def validated(self) -> "IsoStressPolicyConfig":
+        if not math.isfinite(self.estimated_stiffness_mpa_per_mm) or self.estimated_stiffness_mpa_per_mm <= 0:
+            raise ValueError("estimated_stiffness_mpa_per_mm must be finite and positive")
         if self.name not in POLICIES:
             raise ValueError(f"unknown policy {self.name!r}")
         if self.fast_window_s <= 0.0:
@@ -625,6 +640,9 @@ def run_iso_stress_simulation(
     crossing_confirm_s = 0.0
     stop_reason = "max_elapsed"
     sample_index = 0
+    fraction = _transformation_fraction(current_ma, plant, direction)
+    measurement_queue: deque[tuple[float, float]] = deque()
+    delivered_measurement: float | None = None
 
     while elapsed_s <= plant.max_elapsed_s:
         step_dt = plant.sample_period_s
@@ -634,7 +652,13 @@ def run_iso_stress_simulation(
             and sample_index % plant.cadence_gap_every_samples == 0
         ):
             step_dt += plant.cadence_gap_s
-        fraction = _transformation_fraction(current_ma, plant, direction)
+        equilibrium_fraction = _transformation_fraction(current_ma, plant, direction)
+        if plant.transformation_tau_s > 0.0:
+            fraction += (equilibrium_fraction - fraction) * (
+                1.0 - math.exp(-step_dt / plant.transformation_tau_s)
+            )
+        else:
+            fraction = equilibrium_fraction
         free_shift = fraction * plant.transformation_contraction_mm
         if plant.motor_response_tau_s > 0.0:
             response_fraction = 1.0 - math.exp(
@@ -662,6 +686,15 @@ def run_iso_stress_simulation(
         if plant.outlier_every_samples and sample_index and sample_index % plant.outlier_every_samples == 0:
             outlier = plant.outlier_mpa if (sample_index // plant.outlier_every_samples) % 2 else -plant.outlier_mpa
         measured_stress = true_stress + noise_state + outlier
+        if plant.measurement_quantum_mpa > 0.0:
+            measured_stress = round(measured_stress / plant.measurement_quantum_mpa) * plant.measurement_quantum_mpa
+        # Pre-run history is a constant first observation; never select a future sample.
+        if delivered_measurement is None:
+            delivered_measurement = measured_stress
+        measurement_queue.append((elapsed_s + plant.measurement_delay_s, measured_stress))
+        while measurement_queue and measurement_queue[0][0] <= elapsed_s:
+            _, delivered_measurement = measurement_queue.popleft()
+        measured_stress = delivered_measurement
         measured_samples.append((elapsed_s, measured_stress - plant.target_stress_mpa))
         if abs(current_ma - fixed_current_anchor_ma) > policy.cycle_current_reset_ma:
             fixed_current_samples.clear()
@@ -1067,7 +1100,7 @@ def run_iso_stress_simulation(
         ):
             decision = "observe_without_motor"
         elif abs(motor_error) > policy.correction_deadband_mpa and motor_due:
-            desired = -motor_error / plant.stiffness_mpa_per_mm * motor_gain
+            desired = -motor_error / policy.estimated_stiffness_mpa_per_mm * motor_gain
             max_by_speed = plant.motor_effective_speed_mm_s * step_dt
             max_step = max(
                 plant.motor_min_step_mm,
@@ -1221,18 +1254,24 @@ def run_policy_matrix(
     scenarios: Iterable[str] | None = None,
     policies: Iterable[str] | None = None,
     seeds: Iterable[int] = range(12),
+    plant_overrides: dict[str, float] | None = None,
+    estimated_stiffness_mpa_per_mm: float = 600.0,
 ) -> list[IsoStressSimulationResult]:
     scenario_list = list(scenarios or scenario_names())
     policy_list = list(policies or POLICIES)
+    seed_list = tuple(seeds)
     return [
         run_iso_stress_simulation(
-            scenario_by_name(scenario_name),
-            policy_config(policy_name),
+            replace(
+                scenario_by_name(scenario_name),
+                plant=replace(scenario_by_name(scenario_name).plant, **(plant_overrides or {})),
+            ),
+            replace(policy_config(policy_name), estimated_stiffness_mpa_per_mm=estimated_stiffness_mpa_per_mm),
             seed=seed,
         )
         for scenario_name in scenario_list
         for policy_name in policy_list
-        for seed in seeds
+        for seed in seed_list
     ]
 
 
@@ -1285,7 +1324,7 @@ def aggregate_summaries(results: Iterable[IsoStressSimulationResult]) -> list[di
 def comparison_rows(aggregate_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     indexed = {(row["scenario"], row["policy"]): row for row in aggregate_rows}
     comparisons: list[dict[str, Any]] = []
-    for scenario in scenario_names():
+    for scenario in sorted({row["scenario"] for row in aggregate_rows}):
         baseline = indexed.get((scenario, POLICY_BASELINE))
         if baseline is None:
             continue
@@ -1355,6 +1394,13 @@ def write_policy_matrix_outputs(
         json.dumps(
             {
                 "model_status": "closed-loop policy-shape simulator; not a hardware digital twin",
+                "model_version": 2,
+                "configurations": [
+                    {"scenario": asdict(result.scenario), "policy": asdict(result.policy), "seed": result.seed}
+                    for result in results
+                ],
+                "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "safety_semantics": "oracle true-stress abort; not production fault handling",
                 "results": detail_rows,
                 "aggregate": aggregate_rows,
                 "comparison": comparisons,
@@ -1398,12 +1444,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", action="append", choices=scenario_names())
     parser.add_argument("--policy", action="append", choices=POLICIES)
     parser.add_argument("--seeds", type=int, default=12)
+    parser.add_argument("--measurement-delay-s", type=float, default=0.0)
+    parser.add_argument("--measurement-quantum-mpa", type=float, default=0.0)
+    parser.add_argument("--transformation-tau-s", type=float, default=0.0)
+    parser.add_argument("--plant-stiffness-mpa-per-mm", type=float)
+    parser.add_argument("--estimated-stiffness-mpa-per-mm", type=float, default=600.0)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.seeds < 1:
+        parser.error("--seeds must be positive")
+    overrides = {
+        "measurement_delay_s": args.measurement_delay_s,
+        "measurement_quantum_mpa": args.measurement_quantum_mpa,
+        "transformation_tau_s": args.transformation_tau_s,
+    }
+    if args.plant_stiffness_mpa_per_mm is not None:
+        overrides["stiffness_mpa_per_mm"] = args.plant_stiffness_mpa_per_mm
     results = run_policy_matrix(
         scenarios=args.scenario,
         policies=args.policy,
-        seeds=range(max(1, args.seeds)),
+        seeds=range(args.seeds),
+        plant_overrides=overrides,
+        estimated_stiffness_mpa_per_mm=args.estimated_stiffness_mpa_per_mm,
     )
     paths = write_policy_matrix_outputs(results, args.out)
     print(json.dumps({"runs": len(results), "outputs": {key: str(value) for key, value in paths.items()}}, indent=2))

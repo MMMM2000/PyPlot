@@ -56,6 +56,7 @@ class ForceControlPlantFamily:
     max_steps: int = 240
     settle_samples: int = 5
     target_ramp_steps: int = 0
+    feedback_dropout_every_steps: int = 0
 
     def validated(self) -> "ForceControlPlantFamily":
         positive = (
@@ -92,6 +93,9 @@ class ForceControlPlantFamily:
             raise ValueError("simulation step counts must be positive")
         if self.target_ramp_steps < 0:
             raise ValueError("target_ramp_steps must be non-negative")
+        if (not isinstance(self.feedback_dropout_every_steps, int)
+                or self.feedback_dropout_every_steps < 0):
+            raise ValueError("feedback_dropout_every_steps must be a non-negative integer")
         return self
 
     @property
@@ -119,6 +123,8 @@ class ForceControlSimulationSample:
     command_in_flight: bool
     disturbance_normalized: float
     action: ForceControlAction
+    feedback_fresh: bool = True
+    true_normalized_load: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +142,8 @@ class ForceControlSimulationMetrics:
     recovery_steps: int | None
     fault_count: int
     command_reversal_count: int
+    p95_true_normalized_error: float = 0.0
+    dropout_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +297,13 @@ def simulate_force_control_family(
             true_normalized_load + _deterministic_noise(step, family.noise_normalized),
             family.quantization_normalized,
         )
+        feedback_fresh = not (
+            family.feedback_dropout_every_steps
+            and step > 0
+            and step % family.feedback_dropout_every_steps == 0
+        )
+        if not feedback_fresh and previous_measured_normalized is not None:
+            measured_normalized = previous_measured_normalized
         command_in_flight = pending_steps > 0
         ramp_sample = step + 1
         ramp_active = (
@@ -340,7 +355,7 @@ def simulate_force_control_family(
                     requires_recovery
                     and family.disturbance_start_step <= step < disturbance_end
                 ),
-                feedback_fresh=True,
+                feedback_fresh=feedback_fresh,
                 motor_complete=not command_in_flight,
                 timestamp_s=(step + 1) * family.sample_period_s,
                 context_key=family.name,
@@ -389,6 +404,8 @@ def simulate_force_control_family(
                 command_in_flight=commands_in_flight > 0,
                 disturbance_normalized=disturbance,
                 action=decision.action,
+                feedback_fresh=feedback_fresh,
+                true_normalized_load=true_normalized_load,
             )
         )
 
@@ -400,6 +417,7 @@ def simulate_force_control_family(
         if (
             after_target_ramp
             and after_final_disturbance
+            and feedback_fresh
             and abs(normalized_error)
             <= decision.effective_deadband_g / family.load_scale_g + 1e-12
         ):
@@ -437,6 +455,11 @@ def simulate_force_control_family(
         recovery_steps=recovery_steps,
         fault_count=fault_count,
         command_reversal_count=command_reversal_count,
+        p95_true_normalized_error=_percentile_95([
+            abs(sample.target_normalized - sample.true_normalized_load)
+            for sample in samples
+        ]),
+        dropout_count=sum(not sample.feedback_fresh for sample in samples),
     )
     return ForceControlSimulationResult(family=family, metrics=metrics, samples=tuple(samples))
 
