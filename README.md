@@ -83,38 +83,59 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 
 ### Windows Verification
 
-Use the Windows runner when invoking pytest from Codex or a local PowerShell
-session. It forces headless Qt/Matplotlib defaults, stores Microwire Data Builder
-state under `artifacts/test-runs/`, and keeps tool caches inside the workspace.
-On Windows, pytest's disposable base temp stays under `artifacts/p/`, using
-8.3 aliases and an extended-length path for deep fixtures. This avoids requiring
-machine-wide temp permissions or changing Windows long-path settings. Full mode
-uses four pytest-xdist workers by default, with
-private temp, Qt settings, Matplotlib, and Builder storage for every worker.
-Tests marked `serial` run afterward in a separate single-process lane:
+Run verification locally in Codex on Windows or from PowerShell. Install the
+locked test environment first with `uv sync --locked --extra test`.
 
 ```powershell
-.\scripts\run_tests.ps1 -Mode focused tests\test_launcher.py::test_launcher_detects_pyplot_automation_flags
-.\scripts\run_tests.ps1 -Mode full
-.\scripts\run_tests.ps1 -Mode full -Workers 8
+.\scripts\run_tests.ps1 -Mode software -JunitDir artifacts\verification-reports
+.\scripts\run_tests.ps1 -Mode focused tests\test_ci_verify.py
+.\scripts\run_tests.ps1 -Mode full -JunitDir artifacts\full-verification-reports
 .\scripts\run_tests.ps1 -Mode full -Workers 0
-.\scripts\run_tests.ps1 -Mode focused -DryRun tests\test_launcher.py
 ```
 
-If local execution policy blocks `.ps1` scripts, invoke the same runner with:
+The equivalent Python entrypoint works when PowerShell script execution is
+restricted:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_tests.ps1 -Mode focused -DryRun
+uv run --locked --extra test python scripts/ci_verify.py --mode software --junit-dir artifacts/verification-reports
+uv run --locked --extra test python scripts/ci_verify.py --mode focused tests/test_ci_verify.py
 ```
 
-The underlying Python entrypoint is also available for CI-like callers:
+`software` runs a representative set with two workers plus a separate serial
+lane: runner/isolation checks, synthetic parser fixtures, numerical scan handling,
+package/codec integrity, Builder update integrity, fake power-supply checks,
+process contracts, configuration and offscreen GUI smoke checks. This selection
+uses small synthetic fixtures independently of `sample_data/` and Drive.
+`full` selects the complete tests directory and defaults to four workers.
+`focused` runs supplied targets in one process, or just one launcher smoke test
+when no targets are supplied. Use `-DryRun` / `--dry-run` to inspect the selection.
 
-```powershell
-uv run python scripts\ci_verify.py --mode focused --dry-run tests\test_launcher.py
-uv run python scripts\ci_verify.py --mode full
-```
+The runner forces offscreen Qt and Agg, keeps settings and Builder storage
+private to each run, and gives each xdist worker private temp, Qt settings,
+Matplotlib and Builder paths. Tests marked `serial` run afterward in a separate
+process. Console output includes skip reasons (`-ra`); `-JunitDir` / `--junit-dir`
+writes separate lane XML reports. Failures and runs with no selected tests return
+a failure exit code; an empty companion lane is allowed.
 
-Use `-Workers 0` (or `--workers 0` with the Python entrypoint) when diagnosing
-an order-dependent failure. Focused mode remains serial unless workers are
-requested explicitly. The parallel distribution strategy defaults to
-`worksteal` and can be changed with the Python runner's `--dist` option.
+Windows temp and pytest basetemp default to per-run folders under `artifacts/t/`;
+settings and storage stay under `artifacts/test-runs/`. The runner checks
+create/write/read/rename/delete access before testing and reports the failing
+path without falling back to a shared directory. Windows basetemp retains 8.3
+aliases where available and uses an extended-length path for deep fixtures,
+without changing machine permissions or Windows long-path settings. Libraries
+that discard that prefix may still need a shorter writable ASCII parent: use
+`-TempRoot <path>`, `--temp-root <path>`, or `PYPLOT_VERIFY_TEMP_ROOT` (CLI wins).
+The runner prints the resolved path length and warns above 60 characters as a
+conservative diagnostic. It appends its own private directory; do not override
+pytest's `--basetemp`.
+
+Use a unique `--run-id` for concurrent runs. Supplied ids must be 1-48 ASCII
+letters, digits, hyphens or underscores, starting with a letter or digit.
+Reusing an id lets pytest replace that run's disposable lane directories. Keep
+reports under ignored `artifacts/` and preserve evidence until review.
+
+Verification is run within Codex sessions or local shells; this change installs
+no GitHub Actions workflow and consumes no Actions minutes. Choose additional
+checks for the changed feature. Full-suite verification and live Origin/Office
+or hardware acceptance remain separate. Use `--workers 0` to diagnose ordering
+problems; `--dist` controls parallel distribution (default `worksteal`).
