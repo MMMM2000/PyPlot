@@ -121,6 +121,15 @@ class PyPlotPlugin:
             "Origin export is not available for this plotting script yet.",
         )
 
+    def _export_existing_plot_tabs_to_origin(self) -> bool:
+        """Export displayed artists, keeping edits made after generation."""
+        opener = getattr(self.host, "_open_origin_shared", None)
+        tabs = getattr(self, "_plot_tabs", ())
+        if not callable(opener) or not any(self.host.tab_widget.indexOf(tab) >= 0 for tab in tabs):
+            return False
+        opener()
+        return True
+
     def origin_export_tabs(self) -> Iterable[QtWidgets.QWidget] | None:
         """Return graph tabs that should be included in shared Origin export."""
 

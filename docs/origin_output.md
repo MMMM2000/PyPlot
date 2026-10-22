@@ -13,6 +13,61 @@ This document defines the expected Origin workbook + graph behavior for PyPlot a
 - Avoid invalid LabTalk assignments (no PAGE.ANTIALIAS errors).
 - Release Origin automation control after export so Origin can be closed independently of PyPlot.
 
+## Displayed graph export
+
+After plotting in PyPlot, **Open in Origin** exports the displayed artists and
+their current view. It refreshes cached graph tables first, so subsequent edits
+to data, visibility, line styles or axis limits are included. This also applies
+to FMR, PDF Plotter, Maxion Continuous, Stress Sensitivity, Temperature Sensitivity
+and VSM Temperature Scan. Their existing direct data export remains the fallback
+when no graph tabs have been generated. Workbook-only exports retain their
+separate data/smoothed/derivative sheets where supplied by a tool.
+
+Combined legends keep their entries from both axes. Right-axis title placement
+uses the actual axis range and reserves space for tick labels; no absolute data
+coordinate is used as a caption limit.
+
+The shared exporter preserves NaN gaps, scatter-only traces, common marker
+shapes and point sizes, line widths/dashes, linear/logarithmic scales, view
+limits, and hidden legends. Regularly spaced linear ticks retain their step.
+Independent subplots use independent Origin layers; coincident axes retain the
+existing twin-axis export. Upper-panel tick labels and empty captions remain
+hidden. Data, axes-relative and figure-relative text captions remain editable.
+Regular vertical histograms export their bin centers/counts as native columns
+with matching gaps. Unequal-width or stacked bars are not supported.
+Simple Matplotlib math spans are translated into Origin Greek letters and
+subscript/superscript formatting.
+
+The normal single-panel frame occupies 80% of page width and 72% of page height.
+Top power axes and right axes reserve extra caption space. Once the final
+geometry, scales and limits are applied, `legend.smartpos=1` requests Origin's
+one-shot automatic placement. Explicit `origin_legend_position` overrides still
+take precedence. The command is documented in Origin's
+[graphic object reference](https://docs.originlab.com/labtalk/ref/graphic-objs/).
+Automatic placement selects an available region; it cannot guarantee a completely
+clear legend for every densely populated graph. The resulting legend is editable.
+
+3D scatter exports use the original XYZ coordinates even after Matplotlib has
+projected the display into 2D. Named or individually colored pieces become
+separate native plots with an editable piece legend outside the cube. At most
+256 separately named/colored groups are supported. The native Origin view and
+camera differ from Matplotlib, and 3D point text is represented by the legend.
+Custom marker paths, variable per-point symbol sizes, complex mathematical
+typesetting and arbitrary non-text artists are outside this fidelity guarantee.
+Unsupported axis scale types report an export error. Annotation coordinate
+systems that cannot be represented are reported in the log.
+Filled bands and error-bar collections are omitted with a log warning; they
+are never interpreted as a scatter point at zero.
+
+Native command failures use the underlying `LT_execute` status when available;
+the SDK's `lt_exec` wrapper discards that status. Graph callback failures are
+reported as graph failures instead of silently counting the graph as successful.
+
+Regression coverage is in `tests/test_origin_plot_fidelity.py` and
+`tests/test_shared_origin_helpers.py`. Native validation must use disposable
+fixtures, isolated settings, and an exclusively owned Origin session; Python
+boundary tests alone do not establish native rendering quality.
+
 ## VSM Hysteresis
 
 - Workbook naming: sample + temperature (and sub-version label, if present).

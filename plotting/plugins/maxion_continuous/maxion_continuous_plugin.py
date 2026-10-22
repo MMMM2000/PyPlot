@@ -218,6 +218,8 @@ class MaxionContinuousPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        if self._export_existing_plot_tabs_to_origin():
+            return
         def _task() -> None:
             self._apply_settings_to_core()
             maxion_core.main(list(self._data_by_file.keys()), backend="origin")

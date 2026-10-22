@@ -12,7 +12,7 @@ import traceback
 import warnings
 import weakref
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     Any,
@@ -44,6 +44,9 @@ from matplotlib.backends import backend_qt as _backend_qt
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
+from matplotlib.markers import MarkerStyle
+from matplotlib.container import BarContainer
+from matplotlib.collections import PathCollection
 from matplotlib.patches import Ellipse, FancyArrowPatch, Patch, Rectangle
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
@@ -78,6 +81,7 @@ from plotting.shared.origin import (
     schedule_origin_release,
     release_origin,
     escape_origin_text as shared_escape_origin_text,
+    origin_lt_exec as shared_origin_lt_exec,
     set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
@@ -117,11 +121,11 @@ ORIGIN_EXPORT_COLOR_CYCLE: tuple[str, ...] = (
     "#bcbd22",
     "#17becf",
 )
-ORIGIN_EXPORT_LAYER_TOP = 20.0
+ORIGIN_EXPORT_LAYER_TOP = 12.0
 ORIGIN_EXPORT_LAYER_BOTTOM = 16.0
-ORIGIN_EXPORT_LAYER_LEFT = 17.0
-ORIGIN_EXPORT_LAYER_WIDTH = 62.0
-ORIGIN_EXPORT_LAYER_HEIGHT = 56.0
+ORIGIN_EXPORT_LAYER_LEFT = 14.0
+ORIGIN_EXPORT_LAYER_WIDTH = 80.0
+ORIGIN_EXPORT_LAYER_HEIGHT = 72.0
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -1359,6 +1363,13 @@ class _TabSeriesExportEntry:
     y_scale_factor: float = 1.0
     x_side: str = ""
     y_side: str = ""
+    linewidth: float = 1.5
+    axis_index: int = 0
+    z_values: np.ndarray | None = None
+    z_label: str = ""
+    z_unit: str = ""
+    plot_kind: str = "line"
+    column_gap: float = 20.0
 
 
 @dataclass
@@ -1382,6 +1393,11 @@ class WorksheetColumnMeta:
     plot_linestyle: str = ""
     plot_x_side: str = ""
     plot_y_side: str = ""
+    plot_linewidth: float = 1.5
+    plot_axis: int = -1
+    plot_z_column: str = ""
+    plot_kind: str = "line"
+    plot_column_gap: float = 20.0
 
 
 @dataclass
@@ -4826,7 +4842,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         mask = np.isfinite(x_num) & np.isfinite(y_num)
         if not np.any(mask):
             return np.asarray([], dtype=float), np.asarray([], dtype=float)
-        return x_num[mask], y_num[mask]
+        # Keep missing rows as paired gaps. Dropping them invents a line segment
+        # across an interruption when Origin connects consecutive valid rows.
+        return np.where(mask, x_num, np.nan), np.where(mask, y_num, np.nan)
 
     def _descriptor_axes(self, descriptor: TabDescriptor) -> list[Any]:
         axes_list: list[Any] = []
@@ -4894,6 +4912,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         include_hidden: bool = False,
     ) -> list[_TabSeriesExportEntry]:
         entries: list[_TabSeriesExportEntry] = []
+        export_axes = self._descriptor_axes(descriptor)
+        axis_indices = {id(axis): index for index, axis in enumerate(export_axes)}
         default_x, default_x_unit = self._label_parts(descriptor.x_label)
         default_y, default_y_unit = self._label_parts(descriptor.y_label)
 
@@ -4950,13 +4970,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_scale_factor=y_factor,
                         x_side=self._axis_side_name(line_axes, axis_name="x"),
                         y_side=self._axis_side_name(line_axes, axis_name="y"),
+                        linewidth=float(line_obj.get_linewidth()) if line_obj is not None else 1.5,
+                        axis_index=axis_indices.get(id(line_axes), 0),
                     )
                 )
-        if entries:
-            return entries
-
         line_counter = 0
-        seen_lines: set[int] = set()
+        seen_lines: set[int] = {
+            id(state.line) for state in descriptor.lines.values()
+            if getattr(state, "line", None) is not None
+        }
         collection_counter = 0
         seen_collections: set[int] = set()
         for axes in self._descriptor_axes(descriptor):
@@ -5015,9 +5037,37 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_scale_factor=y_factor,
                         x_side=self._axis_side_name(axes, axis_name="x"),
                         y_side=self._axis_side_name(axes, axis_name="y"),
+                        linewidth=float(line.get_linewidth()),
+                        axis_index=axis_indices.get(id(axes), 0),
                     )
                 )
+            for container in axes.containers:
+                if not isinstance(container, BarContainer) or container.orientation != "vertical":
+                    continue
+                bars = [bar for bar in container.patches if include_hidden or bar.get_visible()]
+                if not bars:
+                    continue
+                centers = np.asarray([bar.get_x() + bar.get_width() / 2 for bar in bars])
+                heights = np.asarray([bar.get_height() for bar in bars])
+                widths = np.asarray([bar.get_width() for bar in bars])
+                if not np.allclose(widths, widths[0]) or any(bar.get_y() != 0 for bar in bars):
+                    continue  # Unequal-width and stacked columns need separate geometry.
+                spacing = float(np.median(np.diff(centers))) if len(centers) > 1 else widths[0]
+                label = str(container.get_label() or "Counts")
+                if label.startswith("_"):
+                    label = "Counts"
+                entries.append(_TabSeriesExportEntry(
+                    label=label, x_values=centers, y_values=heights,
+                    x_label=x_label or default_x or "X", x_unit=x_unit or default_x_unit,
+                    y_label=y_label or default_y or "Count", y_unit=y_unit or default_y_unit,
+                    color=_normalize_export_color(bars[0].get_facecolor()),
+                    marker="None", linestyle="None", x_scale_factor=x_factor, y_scale_factor=y_factor,
+                    axis_index=axis_indices.get(id(axes), 0), plot_kind="column",
+                    column_gap=max(0.0, 100 * (spacing / widths[0] - 1)) if widths[0] > 0 else 0.0,
+                ))
             for collection in axis_collections:
+                if not isinstance(collection, PathCollection):
+                    continue  # Error bars and filled bands are not scatter points.
                 marker = id(collection)
                 if marker in seen_collections:
                     continue
@@ -5038,16 +5088,36 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if not raw_label or raw_label.startswith("_"):
                     raw_label = f"Series {line_counter + collection_counter}"
                 label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
-                offsets_getter = getattr(collection, "get_offsets", None)
-                if not callable(offsets_getter):
-                    continue
+                z_values = None
                 try:
-                    offsets = np.asarray(offsets_getter(), dtype=float)
+                    if getattr(axes, "name", "") == "3d":
+                        # Path3DCollection.get_offsets() contains projected XY
+                        # after drawing. Only _offsets3d retains the data XYZ.
+                        xyz = getattr(collection, "_offsets3d", None)
+                        if xyz is None:
+                            raise ValueError("This 3D collection has no exportable XYZ coordinates.")
+                        offsets = np.column_stack([
+                            np.ma.filled(np.ma.asarray(values, dtype=float), np.nan)
+                            for values in xyz
+                        ])
+                        z_values = offsets[:, 2].copy()
+                    else:
+                        offsets_getter = getattr(collection, "get_offsets", None)
+                        if not callable(offsets_getter):
+                            continue
+                        offsets = np.ma.filled(np.ma.asarray(offsets_getter(), dtype=float), np.nan)
                 except Exception:
+                    if getattr(axes, "name", "") == "3d":
+                        raise
                     continue
                 if offsets.ndim != 2 or offsets.shape[1] < 2:
                     continue
                 x_vals, y_vals = self._paired_numeric_arrays(offsets[:, 0], offsets[:, 1])
+                if z_values is not None and x_vals.size:
+                    finite = np.isfinite(x_vals) & np.isfinite(y_vals) & np.isfinite(z_values)
+                    x_vals, y_vals, z_values = (
+                        np.where(finite, values, np.nan) for values in (x_vals, y_vals, z_values)
+                    )
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
                 collection_color = _normalize_export_color(
@@ -5067,16 +5137,58 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
                         color=collection_color,
-                        marker="o",
-                        markersize=4.0,
-                        linestyle="",
+                        marker=self._origin_collection_marker(collection),
+                        markersize=float(np.sqrt(np.median(collection.get_sizes())))
+                        if hasattr(collection, "get_sizes") and len(collection.get_sizes()) else 4.0,
+                        linestyle="None",
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                         x_side=self._axis_side_name(axes, axis_name="x"),
                         y_side=self._axis_side_name(axes, axis_name="y"),
+                        axis_index=axis_indices.get(id(axes), 0),
+                        z_values=z_values,
+                        z_label=self._label_parts(axes.get_zlabel())[0] if z_values is not None else "",
+                        z_unit=self._label_parts(axes.get_zlabel())[1] if z_values is not None else "",
                     )
                 )
+                if z_values is not None:
+                    # Preserve piece identity and the unshaded, original color
+                    # order; get_facecolor() on a drawn 3D scatter is depth sorted.
+                    colors = np.asarray(getattr(collection, "_facecolors", []))
+                    point_labels: dict[int, str] = {}
+                    for text in axes.texts:
+                        getter = getattr(text, "get_position_3d", None)
+                        if callable(getter):
+                            position = getter()
+                            for row, xyz in enumerate(zip(x_vals, y_vals, z_values)):
+                                if np.allclose(xyz, position):
+                                    point_labels[row] = text.get_text()
+                    if point_labels or len(colors) == len(x_vals) > 1:
+                        groups: dict[tuple[str, str], list[int]] = {}
+                        for row in range(len(x_vals)):
+                            color = mcolors.to_hex(colors[row % len(colors)]) if len(colors) else collection_color
+                            key = (point_labels.get(row, label), color)
+                            groups.setdefault(key, []).append(row)
+                        if len(groups) > 256:
+                            raise ValueError("3D export supports up to 256 independently colored or named point groups.")
+                        original = entries.pop()
+                        for (point_label, color), rows in groups.items():
+                            entries.append(replace(original, label=point_label, color=color,
+                                                   x_values=x_vals[rows], y_values=y_vals[rows],
+                                                   z_values=z_values[rows]))
         return entries
+
+    @staticmethod
+    def _origin_collection_marker(collection: Any) -> str:
+        paths = getattr(collection, "get_paths", lambda: [])()
+        if paths:
+            actual = paths[0]
+            for token in ("o", "s", "^", "v", "D", "d", "+", "x", "*", "_", "|", "<", ">", "h", "p"):
+                marker = MarkerStyle(token)
+                expected = marker.get_path().transformed(marker.get_transform())
+                if actual.vertices.shape == expected.vertices.shape and np.allclose(actual.vertices, expected.vertices):
+                    return token
+        return "o"
 
     @staticmethod
     def _axis_side_name(axes: Any, *, axis_name: str) -> str:
@@ -5169,7 +5281,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if str(plugin_name or "").strip().casefold() == "vsm temperature scan":
                 normalized_y_label = str(y_label).casefold()
                 if "magnetization" in normalized_y_label or "signal x" in normalized_y_label:
-                    y_label = "Magnetization [emu]"
+                    y_label = "Magnetization"
                     y_side = "left"
             token = self._safe_series_token(label, fallback=f"series_{index:02d}")
             x_name = f"{token}_x"
@@ -5198,8 +5310,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 plot_linestyle=entry.linestyle,
                 plot_x_side=entry.x_side,
                 plot_y_side=y_side,
+                plot_linewidth=entry.linewidth,
+                plot_axis=entry.axis_index,
+                plot_kind=entry.plot_kind,
+                plot_column_gap=entry.column_gap,
             )
             axis_roles.extend(["X", "Y"])
+            if entry.z_values is not None:
+                z_name = f"{token}_z_{index}"
+                used_columns.add(z_name)
+                columns[z_name] = pd.Series(entry.z_values)
+                metadata[z_name] = WorksheetColumnMeta(
+                    long_name=entry.z_label or "Z", units=entry.z_unit, comments=label,
+                )
+                metadata[y_name].plot_z_column = z_name
+                axis_roles.append("Z")
 
         frame = pd.DataFrame(columns)
         worksheet = WorksheetData(
@@ -5210,18 +5335,93 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             source=None,
             workbook_key=workbook.key,
             axis_roles="".join(axis_roles),
-            metadata=dict(descriptor.metadata or {}),
+            metadata={**dict(descriptor.metadata or {}), "origin_axes": self._origin_axes_metadata(descriptor)},
         )
         workbook.worksheets = [worksheet.key]
         return workbook, [worksheet]
+
+    def _origin_axes_metadata(self, descriptor: TabDescriptor) -> dict[str, Any]:
+        """Snapshot view state, distinguishing independent panels from twins."""
+        views: dict[str, Any] = {}
+        panel_bounds: list[tuple[float, ...]] = []
+        for index, axes in enumerate(self._descriptor_axes(descriptor)):
+            bounds = tuple(float(value) for value in axes.get_position().bounds)
+            panel = next((i for i, known in enumerate(panel_bounds) if np.allclose(bounds, known, atol=1e-4)), None)
+            if panel is None:
+                panel = len(panel_bounds)
+                panel_bounds.append(bounds)
+            legend = axes.get_legend()
+            view = {
+                "panel": panel, "bounds": list(bounds), "title": axes.get_title(),
+                "xlabel": axes.get_xlabel(), "ylabel": axes.get_ylabel(),
+                "x_ticklabels_visible": any(text.get_visible() for text in axes.get_xticklabels()),
+                "y_ticklabels_visible": any(text.get_visible() for text in axes.get_yticklabels()),
+                "xscale": axes.get_xscale(), "yscale": axes.get_yscale(),
+                "xlim": [float(value) * self._axis_value_factor(axes, axis_name="x") for value in axes.get_xlim()],
+                "ylim": [float(value) * self._axis_value_factor(axes, axis_name="y") for value in axes.get_ylim()],
+                "legend_visible": bool(legend is not None and legend.get_visible()),
+                "legend_labels": [text.get_text() for text in legend.get_texts()] if legend is not None else [],
+                "legend_fontsize": float(legend.get_texts()[0].get_fontsize())
+                if legend is not None and legend.get_texts() else 10.0,
+                "annotations": [],
+            }
+            for name in ("x", "y"):
+                ticks = np.asarray(getattr(axes, f"get_{name}ticks")(), dtype=float)
+                steps = np.diff(ticks)
+                if (view[f"{name}scale"] == "linear" and len(steps) and np.isfinite(steps).all()
+                        and steps[0] > 0 and np.allclose(steps, steps[0])):
+                    view[f"{name}step"] = float(steps[0]) * self._axis_value_factor(axes, axis_name=name)
+            for collection in axes.collections:
+                if collection.get_visible() and not isinstance(collection, PathCollection):
+                    view.setdefault("warnings", []).append(
+                        f"Unsupported collection omitted: {type(collection).__name__} (filled bands/error bars require separate export).")
+            figure = axes.figure
+            texts = list(axes.texts)
+            if index == 0:
+                texts.extend(text for text in figure.texts if text is not getattr(figure, "_suptitle", None))
+            for text in texts:
+                if not text.get_visible() or not text.get_text():
+                    continue
+                position_3d = getattr(text, "get_position_3d", None)
+                if callable(position_3d):
+                    position, coordinates = position_3d(), "data3d"
+                elif text.get_transform() == figure.transFigure:
+                    position, coordinates = text.get_position(), "figure"
+                elif text.get_transform() == axes.transAxes:
+                    position, coordinates = text.get_position(), "axes"
+                elif text.get_transform() == axes.transData:
+                    position, coordinates = text.get_position(), "data"
+                else:
+                    # Preserve unsupported annotations as a diagnostic instead
+                    # of silently pretending the export includes them.
+                    view.setdefault("warnings", []).append(f"Unsupported annotation coordinates: {text.get_text()}")
+                    continue
+                view["annotations"].append({
+                    "text": text.get_text(), "position": [float(v) for v in position],
+                    "coordinates": coordinates, "fontsize": float(text.get_fontsize()),
+                    "color": _normalize_export_color(text.get_color()),
+                    "rotation": float(text.get_rotation()),
+                    "ha": text.get_ha(), "va": text.get_va(),
+                })
+                if coordinates == "data":
+                    view["annotations"][-1]["position"] = [
+                        float(position[i]) * self._axis_value_factor(axes, axis_name=name)
+                        for i, name in enumerate(("x", "y"))
+                    ]
+            if getattr(axes, "name", "") == "3d":
+                view.update(zlim=[float(value) for value in axes.get_zlim()], dimension=3)
+            views[str(index)] = view
+        return views
 
     def _register_shared_plot_workbook_for_tab(
         self,
         tab: QtWidgets.QWidget,
         descriptor: TabDescriptor,
+        *,
+        force: bool = False,
     ) -> None:
         plugin_name = self._tab_plugin_name(descriptor)
-        if not self._plugin_uses_shared_plot_workbooks(plugin_name):
+        if not force and not self._plugin_uses_shared_plot_workbooks(plugin_name):
             return
         built = self._build_shared_plot_workbook(tab, descriptor)
         if built is None:
@@ -5292,6 +5492,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         plugin_name = getattr(self, "_current_plotter_name", None)
         plugin_token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
         self._prune_shared_plot_workbooks()
+        export_tabs = self._origin_export_tabs_for_plugin(plugin_token)
+        for tab, descriptor in list(self._tab_descriptors.items()):
+            if self.tab_widget.indexOf(tab) < 0 or (export_tabs is not None and tab not in export_tabs):
+                continue
+            if plugin_token and self._tab_plugin_name(descriptor) != plugin_token:
+                continue
+            self._register_shared_plot_workbook_for_tab(tab, descriptor, force=True)
         workbooks = self._shared_plot_workbooks_for_plugin(plugin_token)
         if not workbooks:
             tab = self.tab_widget.currentWidget()
@@ -5783,14 +5990,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _origin_lt_exec(executor: Any, command: str) -> bool:
-        if not callable(executor):
-            return False
-        try:
-            result = executor(command)
-        except Exception:
-            return False
-        # originpro lt_exec may return bool/int or None; only explicit False/0 is failure.
-        return bool(result) if result is not None else True
+        return shared_origin_lt_exec(executor, command)
 
     @staticmethod
     def _activate_origin_layer(layer: Any) -> None:
@@ -6009,6 +6209,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self,
         layer: Any,
         worksheet: WorksheetData | None = None,
+        *,
+        view: dict[str, Any] | None = None,
     ) -> None:
         self._activate_origin_layer(layer)
         label_getter = getattr(layer, "label", None)
@@ -6023,6 +6225,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if legend is not None:
                 break
         if legend is None:
+            return
+        if view is not None and not view.get("legend_visible", True):
+            legend.set_int("show", 0)
+            return
+        if (view or {}).get("dimension") == 3:
+            legend.set_float("fsize", 10.0)
+            legend.set_int("show", 1)
+            self._origin_lt_exec(layer.lt_exec, f'label -p 0 5 -n Legend "{shared_escape_origin_text(legend.text)}";')
             return
         set_float = getattr(legend, "set_float", None)
         if callable(set_float):
@@ -6090,6 +6300,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 *commands,
             ):
                 self._origin_lt_exec(lt_exec, command)
+            if not legend_position and not (view or {}).get("dimension") == 3:
+                # This property is a one-shot placement request. It must run on
+                # the populated legend after axes, rescale and layout changes.
+                if not self._origin_lt_exec(lt_exec, "legend.smartpos=1;"):
+                    self._append_log("Origin smart legend positioning failed; using the initial corner position.", level="warning")
 
     def _configure_origin_layer_axes(
         self,
@@ -6348,7 +6563,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             size = float(meta.plot_markersize or 0.0)
         except Exception:
             size = 0.0
-        return max(6.0, min(size * 1.4, 10.0)) if size > 0 else 6.0
+        return size if math.isfinite(size) and size > 0 else 4.0
 
     @staticmethod
     def _apply_origin_plot_style(
@@ -6357,9 +6572,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         color: str | None = None,
         show_symbols: bool = False,
         symbol_size: float = 4.0,
+        marker: str = "o",
+        linestyle: str = "-",
+        line_width: float = 1.5,
     ) -> None:
         if not color:
             return
+        # Origin's documented built-in symbol IDs and LabTalk line styles.
+        shapes = {"s": 1, "o": 2, ".": 2, ",": 2, "^": 3, "v": 4,
+                  "D": 5, "d": 5, "+": 6, "P": 6, "x": 7, "X": 7,
+                  "*": 8, "_": 9, "|": 10, "<": 15, ">": 16,
+                  "h": 17, "H": 17, "p": 19}
+        shape = shapes.get(marker, 2) if show_symbols else 0
+        line_style = {"--": 1, "dashed": 1, ":": 2, "dotted": 2, "-.": 3, "dashdot": 3}.get(linestyle, 0)
+        connect = str(linestyle).strip().lower() not in {"none", "null"} and line_width > 0
         set_cmd = getattr(plot_obj, "set_cmd", None)
         if callable(set_cmd):
             try:
@@ -6376,9 +6602,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     f"-cser {origin_color}",
                     f"-csfr {origin_color}",
                     f"-cf {origin_color}",
+                    f"-w {max(0.0, float(line_width)) * 500:g}",
+                    f"-d {line_style}",
+                    f"-l {1 if connect else 0}",
                 ]
                 if show_symbols:
-                    commands.extend(["-k 2", "-kf 0", f"-z {float(symbol_size):g}"])
+                    commands.extend([f"-k {shape}", "-kf 0", f"-z {float(symbol_size):g}"])
                 else:
                     commands.append("-z 0")
                 for command in commands:
@@ -6395,8 +6624,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             ("symbol_color", color),
             ("symbol_edge_color", color),
             ("symbol_fill_color", color),
-            ("line_width", 1.5),
-            ("symbol_shape", 2 if show_symbols else 0),
+            ("symbol_kind", shape),
             ("symbol_size", resolved_symbol_size),
             ("symbol_interior", 1 if show_symbols else 0),
         ):
@@ -6415,7 +6643,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 ("edgecolor", color),
                 ("fillcolor", color),
                 ("symbol_color", color),
-                ("shape", 2 if show_symbols else 0),
+                ("shape", shape),
                 ("size", resolved_symbol_size),
                 ("interior", 1 if show_symbols else 0),
             ):
@@ -6653,6 +6881,142 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     self._origin_lt_exec(lt_exec, f"layer.y.from={(primary_y_from * slope) + intercept:.12g};")
                     self._origin_lt_exec(lt_exec, f"layer.y.to={(primary_y_to * slope) + intercept:.12g};")
 
+    def _apply_origin_view(self, layer: Any, view: dict[str, Any]) -> None:
+        """Apply explicit view limits after rescaling, including log axes."""
+        for name in ("x", "y", "z"):
+            limits = view.get(f"{name}lim")
+            if limits is None:
+                continue
+            scale = str(view.get(f"{name}scale", "linear"))
+            if scale not in {"linear", "log"}:
+                raise ValueError(f"Origin export does not support {scale!r} {name.upper()} scales.")
+            lower, upper = (float(value) for value in limits)
+            if not all(math.isfinite(value) for value in (lower, upper)):
+                raise ValueError(f"Nonfinite {name.upper()} limits in Origin export.")
+            axis = layer.axis(name)
+            axis.scale = "log10" if scale == "log" else "linear"
+            step = view.get(f"{name}step")
+            if step is not None and scale == "linear":
+                axis.set_limits(lower, upper, float(step))
+            else:
+                axis.set_limits(lower, upper)
+
+    def _restore_origin_annotations(self, layer: Any, view: dict[str, Any]) -> None:
+        for warning in view.get("warnings", []):
+            self._append_log(f"Origin export: {warning}", level="warning")
+        for index, annotation in enumerate(view.get("annotations", [])):
+            coordinates = annotation.get("coordinates")
+            if coordinates == "data3d":
+                continue  # 3D point labels are attached to their native data plots.
+            x, y = annotation["position"]
+            if coordinates in {"axes", "figure"}:
+                if coordinates == "figure":
+                    left, bottom, width, height = view["bounds"]
+                    x, y = (x - left) / width, (y - bottom) / height
+                position = []
+                for name, fraction in (("x", x), ("y", y)):
+                    lo, hi = view[f"{name}lim"]
+                    if view.get(f"{name}scale") == "log":
+                        value = 10 ** (math.log10(lo) + float(fraction) * (math.log10(hi) - math.log10(lo)))
+                    else:
+                        value = lo + float(fraction) * (hi - lo)
+                    position.append(value)
+                x, y = position
+            label = layer.add_label(shared_escape_origin_text(str(annotation["text"])), float(x), float(y))
+            label.name = f"py_annotation_{index + 1}"
+            label.set_int("attach", 2)  # Attach to axes scales, not page/frame.
+            label.set_float("fsize", float(annotation.get("fontsize", 10)))
+            label.set_float("rotate", float(annotation.get("rotation", 0)))
+            # The SDK's add_label replaces zero coordinates with the axis
+            # midpoint and positions the top-left corner, not the text anchor.
+            label.set_float("x1", float(x))
+            label.set_float("y1", float(y))
+            horizontal = {"left": 0, "center": .5, "right": 1}.get(annotation.get("ha"), 0)
+            vertical = {"top": 0, "center": .5, "bottom": 1, "baseline": 1}.get(annotation.get("va"), 1)
+            label.set_float("left", label.get_float("left") - horizontal * label.get_float("width"))
+            label.set_float("top", label.get_float("top") - vertical * label.get_float("height"))
+            color = annotation.get("color")
+            if color and callable(getattr(layer, "lt_exec", None)):
+                self._origin_lt_exec(layer.lt_exec, f'{label.name}.color=color("{color}");')
+
+    def _plot_origin_xyz_worksheet(
+        self, origin_any: Any, sheet: Any, workbook: WorkbookData,
+        worksheet: WorksheetData, pairs: list[tuple[int, int]], graph_callback: Any,
+    ) -> bool:
+        columns = list(worksheet.dataframe.columns)
+        if any(not worksheet.columns[columns[y]].plot_z_column for _, y in pairs):
+            raise ValueError("Cannot mix XY and XYZ plots in one Origin graph.")
+        graph = None
+        for template in ("gl3d", "3d"):
+            try:
+                graph = origin_any.new_graph(template=template)
+            except Exception:
+                continue
+            if graph is not None:
+                break
+        if graph is None:
+            raise RuntimeError("Origin could not create a native XYZ scatter graph.")
+        layer = graph[0]
+        graph.activate()
+        views = worksheet.metadata.get("origin_axes", {})
+        first_meta = worksheet.columns[columns[pairs[0][1]]]
+        view = views.get(str(first_meta.plot_axis), {})
+        if len({worksheet.columns[columns[y]].plot_axis for _, y in pairs}) > 1:
+            raise ValueError("Export each independent 3D panel separately.")
+        point_labels = {a["text"] for a in view.get("annotations", []) if a.get("coordinates") == "data3d"}
+        for index, (x, y) in enumerate(pairs):
+            meta = worksheet.columns[columns[y]]
+            z = columns.index(meta.plot_z_column)
+            plot = layer.add_plot(sheet, colx=x, coly=y, colz=z, type=240)
+            if plot is None:
+                raise RuntimeError(f"Origin could not plot XYZ series {meta.comments!r}.")
+            self._apply_origin_plot_label(plot, worksheet, y)
+            self._apply_origin_plot_style(
+                plot, color=meta.plot_color or ORIGIN_EXPORT_COLOR_CYCLE[index % len(ORIGIN_EXPORT_COLOR_CYCLE)],
+                show_symbols=True, symbol_size=self._origin_plot_marker_size(worksheet, y),
+                marker=meta.plot_marker or "o", linestyle="None", line_width=0,
+            )
+        layer.rescale()
+        self._apply_origin_view(layer, view)
+        # OpenGL axis captions come directly from XYZ column label rows. The
+        # SDK's 2D axis.title setter creates stray overlay labels in this template.
+        self._set_origin_layer_frame(layer, left=12, top=16, width=78, height=72)
+        graph.lname = workbook.name
+        self._set_origin_xyz_title(layer, workbook.name)
+        legend_view = dict(view)
+        if point_labels:
+            # Native 3D custom data labels can expand literal names as XY
+            # formats. Keep piece names in an ordinary, editable legend.
+            legend_view["legend_visible"] = True
+            legend = layer.label("Legend")
+            if legend is not None:
+                legend.text = "\n".join(
+                    f"\\l({i + 1}) {shared_escape_origin_text(worksheet.columns[columns[y]].comments)}"
+                    for i, (_x, y) in enumerate(pairs)
+                )
+        self._style_origin_legend_for_export(layer, worksheet, view=legend_view)
+        if callable(graph_callback):
+            graph_callback(origin_any, graph, workbook, worksheet)
+        return True
+
+    def _set_origin_xyz_title(self, layer: Any, text: str) -> None:
+        """Place a 3D graph's overlay title using physical page coordinates."""
+        safe_text = shared_escape_origin_text(text)
+        labels = []
+        for name, percent in (("py_xyz_title", 0), ("py_xyz_ref", 100)):
+            if not self._origin_lt_exec(layer.lt_exec, f'label -p 20 {percent} -n {name} "{safe_text}";'):
+                raise RuntimeError("Origin could not create the 3D page title.")
+            label = layer.label(name)
+            if label is None:
+                raise RuntimeError("Origin did not return the 3D page title.")
+            label.set_float("fsize", 12)
+            labels.append(label)
+        title, reference = labels
+        top = title.get_float("top")
+        frame_height = reference.get_float("top") - top
+        title.set_float("top", top - frame_height * (layer.get_float("top") - 4) / layer.get_float("height"))
+        reference.remove()
+
     def _plot_origin_worksheet(
         self,
         origin_any: Any,
@@ -6667,6 +7031,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         pairs = self._origin_plot_pairs(frame, roles)
         if not pairs:
             return False
+        if any(getattr(worksheet.columns.get(str(frame.columns[y])), "plot_z_column", "") for _, y in pairs):
+            return self._plot_origin_xyz_worksheet(origin_any, sheet, workbook, worksheet, pairs, graph_callback)
 
         graph_obj = None
         graph_template_used = "<unresolved>"
@@ -6707,6 +7073,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return False
 
         columns = list(frame.columns)
+        axis_views = worksheet.metadata.get("origin_axes", {})
+        independent_panels = len({view.get("panel", 0) for view in axis_views.values()}) > 1
         pair_groups: list[dict[str, Any]] = []
         for x_index, y_index in pairs:
             if not (0 <= x_index < len(columns) and 0 <= y_index < len(columns)):
@@ -6715,11 +7083,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             y_title = self._origin_axis_title(worksheet, columns[y_index]) or "Y"
             meta = worksheet.columns.get(columns[y_index])
             x_side = str(getattr(meta, "plot_x_side", "") or "").strip().lower()
+            axis_index = int(getattr(meta, "plot_axis", -1))
             group = next(
                 (
                     item
                     for item in pair_groups
                     if item.get("x_title") == x_title and item.get("y_title") == y_title
+                    and item.get("axis_index") == axis_index
                 ),
                 None,
             )
@@ -6730,6 +7100,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         "y_title": y_title,
                         "pairs": [(x_index, y_index)],
                         "x_sides": {x_side} if x_side else set(),
+                        "axis_index": axis_index,
                     }
                 )
             else:
@@ -6744,9 +7115,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         for index, group in enumerate(pair_groups):
             target_layer = layer
             if index > 0:
-                extra_layer = self._origin_add_topx_righty_layer(origin_any, graph)
-                if extra_layer is not None:
-                    target_layer = extra_layer
+                extra_layer = graph.add_layer() if independent_panels else self._origin_add_topx_righty_layer(origin_any, graph)
+                if extra_layer is None:
+                    raise RuntimeError("Origin could not create the required graph layer.")
+                target_layer = extra_layer
             group_x_title = str(group.get("x_title") or "X")
             x_sides = cast(set[str], group.get("x_sides") or set())
             show_top_x = index > 0 and (
@@ -6762,20 +7134,31 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     show_top_x,
                 )
             )
-        layer_axis_links = self._origin_layer_axis_links(frame, worksheet, columns, layer_groups)
+        layer_axis_links = {} if independent_panels else self._origin_layer_axis_links(frame, worksheet, columns, layer_groups)
         plotted_any = False
         seen_plot_labels: set[str] = set()
         primary_group_labels: set[str] = set()
         color_by_label: dict[str, str] = {}
         next_color_index = 0
         duplicate_overlay_plots: list[Any] = []
+        legend_plots: list[tuple[int, int, str]] = []
+        plot_counts: dict[int, int] = {}
         for group_index, (target_layer, _x_title, _y_title, group_pairs, _show_top_x) in enumerate(layer_groups):
+            if independent_panels:
+                seen_plot_labels.clear()
             add_plot = getattr(target_layer, "add_plot", None)
             if not callable(add_plot):
                 continue
             for x_index, y_index in group_pairs:
                 show_symbols = self._origin_plot_marker_active(worksheet, y_index)
-                plot_type = "y" if show_symbols else "l"
+                style_meta = worksheet.columns.get(columns[y_index])
+                linestyle = str(getattr(style_meta, "plot_linestyle", "") or "-")
+                line_width = float(getattr(style_meta, "plot_linewidth", 1.5))
+                has_line = linestyle.strip().lower() not in {"none", "null"} and line_width > 0
+                plot_type = ("y" if has_line else "s") if show_symbols else "l"
+                is_column = getattr(style_meta, "plot_kind", "line") == "column"
+                if is_column:
+                    plot_type = 203
                 plot_obj = None
                 try:
                     plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type=plot_type)
@@ -6789,6 +7172,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if plot_obj is None:
                     continue
                 plotted_any = True
+                native_layer_index = next(i + 1 for i, group in enumerate(layer_groups) if group[0] is target_layer)
+                plot_counts[native_layer_index] = plot_counts.get(native_layer_index, 0) + 1
+                legend_plots.append((native_layer_index, plot_counts[native_layer_index], self._origin_plot_label(worksheet, y_index)))
                 label = self._origin_plot_label(worksheet, y_index)
                 normalized = label.strip().casefold()
                 duplicate_label = bool(normalized and normalized in seen_plot_labels)
@@ -6814,9 +7200,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     color=color,
                     show_symbols=show_symbols,
                     symbol_size=self._origin_plot_marker_size(worksheet, y_index),
+                    marker=str(getattr(style_meta, "plot_marker", "o") or "o"),
+                    linestyle=linestyle,
+                    line_width=line_width,
                 )
+                if is_column:
+                    plot_obj.set_cmd(f'-pfb color("{color}")',
+                                     f'-vg {float(style_meta.plot_column_gap):.12g}')
                 if (
-                    group_index > 0
+                    group_index > 0 and not independent_panels
                     and _y_title == y_title
                     and normalized
                     and normalized in primary_group_labels
@@ -6874,8 +7266,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             # implicitly switch axis visibility/labels to both sides (showAxes=3),
             # which causes duplicate/interleaved tick labels on dual-axis graphs.
 
-        # Avoid LabTalk legend reconstruction here: some Origin builds emit
-        # LEGEND.SMARTPOS errors for legend commands despite plotting correctly.
+        # Final legend placement follows view restoration and layout below.
 
         # Explicitly rescale layers after all curves are added so primary and
         # secondary axes use proper data ranges on export.
@@ -6897,12 +7288,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             origin_layer_width_float = ORIGIN_EXPORT_LAYER_WIDTH
         if not math.isfinite(origin_layer_width_float) or origin_layer_width_float <= 0:
             origin_layer_width_float = ORIGIN_EXPORT_LAYER_WIDTH
+        top_band = bool(metadata.get("show_power_top_axis")) or any(item[4] for item in layer_groups)
+        if len(layer_groups) > 1 and not independent_panels:
+            origin_layer_width_float = min(origin_layer_width_float, 70.0)
         for target_layer, _group_x_title, _group_y_title, _group_pairs, show_top_x in layer_groups:
             self._set_origin_layer_frame(
                 target_layer,
-                top=ORIGIN_EXPORT_LAYER_TOP,
+                top=22.0 if top_band else ORIGIN_EXPORT_LAYER_TOP,
                 width=origin_layer_width_float,
-                height=ORIGIN_EXPORT_LAYER_HEIGHT,
+                height=62.0 if top_band else ORIGIN_EXPORT_LAYER_HEIGHT,
             )
         # Re-apply axis titles after rescale/hide passes to keep axis captions
         # deterministic across Origin templates and layer refreshes.
@@ -6930,12 +7324,55 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 secondary_axes_only=True,
                 show_top_x=show_top_x,
             )
+        for group_index, (target_layer, group_x_title, group_y_title, _pairs, _top_x) in enumerate(layer_groups):
+            view = axis_views.get(str(pair_groups[group_index]["axis_index"]), {})
+            if view:
+                self._apply_origin_view(target_layer, view)
+            if not independent_panels:
+                if group_index == 0:
+                    self._set_origin_axis_title(target_layer, "x", group_x_title)
+                    self._set_origin_axis_title(target_layer, "y", group_y_title)
+                else:
+                    self._set_origin_axis_title(target_layer, "y2", group_y_title)
+                    if _top_x:
+                        self._set_origin_axis_title(target_layer, "x2", group_x_title)
+            if independent_panels:
+                left, bottom, width, height = view["bounds"]
+                self._set_origin_layer_frame(target_layer, left=left * 100, top=(1 - bottom - height) * 100,
+                                             width=width * 100, height=height * 100)
+                self._configure_origin_layer_axes(target_layer, secondary_axes_only=False)
+                self._set_origin_axis_title(target_layer, "x", view.get("xlabel", group_x_title))
+                self._set_origin_axis_title(target_layer, "y", view.get("ylabel", group_y_title))
+                self._set_origin_axis_title(target_layer, "x2", "")
+                self._set_origin_axis_title(target_layer, "y2", "")
+                self._origin_lt_exec(target_layer.lt_exec,
+                    f'layer.x.showLabels={1 if view.get("x_ticklabels_visible", True) else 0}; '
+                    f'layer.y.showLabels={1 if view.get("y_ticklabels_visible", True) else 0}; yl.rotate=90;')
+                x_lower, x_upper = view["xlim"]
+                y_lower, y_upper = view["ylim"]
+                if view.get("xscale") == "log":
+                    x_center = math.sqrt(x_lower * x_upper)
+                else:
+                    x_center = (x_lower + x_upper) / 2
+                y_caption = y_lower - .22 * (y_upper - y_lower)
+                self._origin_lt_exec(target_layer.lt_exec, f"xb.x={x_center:.12g}; xb.y={y_caption:.12g};")
+            self._restore_origin_annotations(target_layer, view)
         self._apply_origin_power_top_axis(layer, frame, worksheet, columns, layer_groups[0][3])
         # Re-assert title after rescale/legend updates so template-side smart
         # positioning cannot leave it in data coordinates.
         self._set_origin_graph_title(origin_any, graph, layer, graph_title)
-        for target_layer, _group_x_title, _group_y_title, _group_pairs, _show_top_x in layer_groups:
-            self._style_origin_legend_for_export(target_layer, worksheet)
+        for group_index, (target_layer, _group_x_title, _group_y_title, _group_pairs, _show_top_x) in enumerate(layer_groups):
+            view = axis_views.get(str(pair_groups[group_index]["axis_index"]))
+            if view and view.get("legend_labels"):
+                text = self._origin_legend_text(view["legend_labels"], legend_plots, group_index + 1)
+                if text:
+                    legend = target_layer.label("Legend")
+                    if legend is not None:
+                        legend.text = text
+            self._style_origin_legend_for_export(target_layer, worksheet, view=view)
+        if independent_panels:
+            for target_layer, _x_title, _y_title, _pairs, _top_x in layer_groups:
+                self._center_origin_panel_x_caption(target_layer)
         if len(layer_groups) > 1:
             self._append_log(
                 f"Origin dual-axis layer snapshot ({graph_title}) primary: "
@@ -6951,10 +7388,35 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 graph_callback(origin_any, graph, workbook, worksheet)
             except Exception as exc:
                 self._append_log(
-                    f"Origin graph callback failed for {graph_title}: {exc}",
+                    f"Origin graph callback failed for {graph_title}: {traceback.format_exc()}",
                     level="error",
                 )
+                raise RuntimeError(f"Origin graph callback failed for {graph_title}: {exc}") from exc
         return True
+
+    @staticmethod
+    def _origin_legend_text(labels: list[str], plots: list[tuple[int, int, str]], own_layer: int) -> str:
+        rows = []
+        for label in labels:
+            matches = [entry for entry in plots if entry[2] == label]
+            if not matches:
+                continue
+            layer_index, plot_index, _ = next((entry for entry in matches if entry[0] == own_layer), matches[0])
+            rows.append(f"\\l({layer_index}.{plot_index}) %({layer_index}.{plot_index})")
+        return "\n".join(rows)
+
+    def _center_origin_panel_x_caption(self, layer: Any) -> None:
+        """Use physical coordinates after Origin has laid out linked panels."""
+        self._activate_origin_layer(layer)
+        caption = next((label for token in ("xb", "XB", "Xb") if (label := layer.label(token)) is not None), None)
+        if caption is None or not caption.text:
+            return
+        if not self._origin_lt_exec(layer.lt_exec, 'label -p 50 100 -n py_axis_anchor ".";'):
+            return
+        anchor = layer.label("py_axis_anchor")
+        if anchor is not None:
+            caption.set_float("left", anchor.get_float("left") - caption.get_float("width") / 2)
+            anchor.remove()
 
     def _origin_axis_roles(self, frame: pd.DataFrame) -> str:
         if frame is None or frame.empty:

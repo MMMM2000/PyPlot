@@ -227,7 +227,20 @@ def escape_origin_text(text: str) -> str:
 def _origin_display_text(text: str) -> str:
     """Normalize text for broad Origin font/template compatibility."""
 
-    value = str(text or "").translate(_ORIGIN_SUBSCRIPT_TRANSLATION)
+    def math_span(match: re.Match[str]) -> str:
+        value = match.group(1)
+        greek = {"Delta": "Δ", "delta": "δ", "alpha": "α", "beta": "β", "gamma": "γ",
+                 "epsilon": "ε", "varepsilon": "ε", "sigma": "σ", "theta": "θ", "mu": "μ",
+                 "omega": "ω", "Omega": "Ω", "pi": "π", "chi": "χ", "rho": "ρ"}
+        value = re.sub(r"\\([A-Za-z]+)", lambda token: greek.get(token[1], token[1]), value)
+        value = re.sub(r"([_^])(?:\{([^{}]*)\}|([A-Za-z0-9+-]))",
+                       lambda token: "\\" + ("+" if token[1] == "^" else "-") + "(" + (token[2] or token[3]) + ")", value)
+        return value
+
+    # Translate only explicit math spans: underscores in source filenames and
+    # sample labels are ordinary text. Origin keeps these captions editable.
+    value = re.sub(r"\$([^$]+)\$", math_span, str(text or ""))
+    value = value.translate(_ORIGIN_SUBSCRIPT_TRANSLATION)
     value = value.translate(_ORIGIN_SUPERSCRIPT_TRANSLATION)
     value = unicodedata.normalize("NFKC", value)
     return (
@@ -248,7 +261,11 @@ def origin_lt_exec(executor: Any, command: str) -> bool:
     if not callable(executor):
         return False
     try:
-        result = executor(command)
+        # originpro.BaseObject.lt_exec discards LT_execute's failure status.
+        # Use the same native receiver when it is available.
+        receiver = getattr(getattr(executor, "__self__", None), "obj", None)
+        native_execute = getattr(receiver, "LT_execute", None)
+        result = native_execute(command) if callable(native_execute) else executor(command)
     except Exception:
         return False
     if result is False:
@@ -309,6 +326,20 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     values = (x_from, x_to, y_from, y_to)
     if not all(math.isfinite(value) for value in values):
         return None
+    logarithmic = []
+    for axis in ("x", "y"):
+        try:
+            logarithmic.append(int(get_float(f"{axis}.type")) in {2, 8, 9})
+        except Exception:
+            logarithmic.append(False)
+    if logarithmic[0] and min(x_from, x_to) > 0:
+        x_from, x_to = math.log(x_from), math.log(x_to)
+    else:
+        logarithmic[0] = False
+    if logarithmic[1] and min(y_from, y_to) > 0:
+        y_from, y_to = math.log(y_from), math.log(y_to)
+    else:
+        logarithmic[1] = False
     x_span = x_to - x_from
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
@@ -316,7 +347,15 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     # Keep the title above the top-axis label band while staying inside the
     # larger report-export OLE frame. Word's EMF preview clips labels that sit
     # too close to the page boundary, so this deliberately leaves headroom.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.24))
+    headroom = 0.24
+    try:
+        top, height = float(get_float("top")), float(get_float("height"))
+        if math.isfinite(top) and math.isfinite(height) and height > 0:
+            headroom = min(headroom, max(0.04, (top - 4.0) / height))
+    except Exception:
+        pass
+    x, y = (x_from + x_to) / 2.0, y_to + y_span * headroom
+    return (math.exp(x) if logarithmic[0] else x, math.exp(y) if logarithmic[1] else y)
 
 
 def _origin_title_font_size(text: str, default: float) -> float:
@@ -606,15 +645,6 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     if not callable(set_float) or not callable(layer_get_float):
         return
     _set_origin_label_font_size(axis_label)
-    label_get_float = getattr(axis_label, "get_float", None)
-    existing_label_x: float | None = None
-    if callable(label_get_float):
-        try:
-            candidate = float(label_get_float("x"))
-        except Exception:
-            candidate = math.nan
-        if math.isfinite(candidate):
-            existing_label_x = candidate
     try:
         x_from = float(layer_get_float("x.from"))
         x_to = float(layer_get_float("x.to"))
@@ -630,7 +660,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         return
 
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
-    offset = x_span * (0.12 if key == "y2" else 0.03)
+    offset = x_span * (0.18 if key == "y2" else 0.03)
     target_x = x_to + offset
     if key == "y":
         target_y = (y_from + y_to) / 2.0
@@ -639,8 +669,6 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         except Exception:
             pass
         return
-    if key == "y2" and existing_label_x is not None and existing_label_x > 130.0:
-        target_x = 130.0
     target_y = (y_from + y_to) / 2.0
 
     try:

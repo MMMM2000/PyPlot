@@ -7,7 +7,38 @@ from plotting.shared.origin import (
     origin_title_xy,
     set_origin_axis_title,
     set_origin_graph_title,
+    origin_lt_exec,
 )
+
+
+def test_title_position_respects_log_scales_and_page_headroom() -> None:
+    class Layer:
+        def get_float(self, name):
+            return {"x.from": 1, "x.to": 100, "y.from": 1, "y.to": 1000,
+                    "x.type": 2, "y.type": 2, "top": 12, "height": 72}[name]
+
+    x, y = origin_title_xy(Layer())
+    assert abs(x - 10) < 1e-9
+    assert 2000 < y < 2300
+
+
+def test_labtalk_failure_is_not_hidden_by_sdk_none_return() -> None:
+    class Native:
+        def LT_execute(self, command):
+            return 0
+
+    class Wrapper:
+        obj = Native()
+
+        def lt_exec(self, command):
+            self.obj.LT_execute(command)  # originpro discards its native status.
+
+    assert origin_lt_exec(Wrapper().lt_exec, "legend.smartpos=1;") is False
+
+
+def test_matplotlib_axis_math_is_translated_to_origin_text() -> None:
+    assert escape_origin_text(r"$\Delta h^{3/2}$") == "Δ h\\+(3/2)"
+    assert escape_origin_text(r"$\ln(dp/dh)$") == "ln(dp/dh)"
 
 
 class _Label:
@@ -118,12 +149,14 @@ def test_set_origin_axis_title_falls_back_to_ltalk_when_axis_missing() -> None:
     assert "layer.x.color = color(black);" in layer.commands
 
 
-def test_set_origin_axis_title_clamps_right_label_position() -> None:
+def test_set_origin_axis_title_uses_the_axis_range_for_right_label_position() -> None:
     layer = _Layer()
+    original_get_float = layer.get_float
+    layer.get_float = lambda key: {"x.from": 20.0, "x.to": 150.0}.get(key, original_get_float(key))
     layer._yr.set_float("x", 173.0)
     set_origin_axis_title(layer, "y2", "Magnetization (50 Oe) [emu]")
     assert layer.axis("y2").label.text == "Magnetization (50 Oe) [emu]"
-    assert layer._yr.get_float("x") == 130.0
+    assert 150.0 < layer._yr.get_float("x") <= 180.0
     assert "layer.y2.color = color(black);" in layer.commands
 
 

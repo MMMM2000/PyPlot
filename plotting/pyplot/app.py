@@ -4,13 +4,14 @@ import ast
 import math
 import sys
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import json
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 import logging
 import time
+import textwrap
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -2143,6 +2144,7 @@ class PyPlotWorkbench(PyPlotWindow):
                     "index": index_values,
                     "metadata": metadata_payload,
                     "source": self._portable_path(worksheet.source, base_path),
+                    "plot_metadata": dict(worksheet.metadata),
                 }
                 worksheets_payload.append(worksheet_payload)
             if not worksheets_payload:
@@ -2221,6 +2223,8 @@ class PyPlotWorkbench(PyPlotWindow):
                             )
                             if isinstance(meta_dict, dict):
                                 columns_meta[column] = WorksheetColumnMeta(
+                                    **{item.name: meta_dict[item.name] for item in fields(WorksheetColumnMeta)
+                                       if item.name in meta_dict and item.name not in {"long_name", "units", "comments", "formula"}},
                                     long_name=str(meta_dict.get("long_name", "")),
                                     units=str(meta_dict.get("units", "")),
                                     comments=str(meta_dict.get("comments", "")),
@@ -2236,6 +2240,7 @@ class PyPlotWorkbench(PyPlotWindow):
                             columns=columns_meta,
                             source=self._resolve_portable_path(sheet_entry.get("source"), project_dir),
                             workbook_key=workbook_key,
+                            metadata=dict(sheet_entry.get("plot_metadata") or {}),
                         )
                         worksheet_objects.append(worksheet)
                 if worksheet_objects:
@@ -4406,6 +4411,42 @@ class PyPlotWorkbench(PyPlotWindow):
     def _fit_figure_to_content(self, figure: Any) -> None:
         if figure is None:
             return
+        # Tight layout allocates margins but cannot wrap a title wider than a
+        # whole single-column figure. Fit captions before solving the margins.
+        try:
+            renderer = figure.canvas.get_renderer()
+            figure.draw(renderer)
+            for axes in figure.axes:
+                captions = [(axes.title, figure.bbox.width * .82),
+                            (axes.xaxis.label, figure.bbox.width * .80),
+                            (axes.yaxis.label, figure.bbox.height * .70)]
+                if getattr(axes, "name", "") == "3d":
+                    captions.append((axes.zaxis.label, figure.bbox.height * .70))
+                for caption, available in captions:
+                    if figure.bbox.width < 200 or figure.bbox.height < 150:
+                        continue  # Wait until a newly created Qt canvas has a usable size.
+                    current = caption.get_text()
+                    original = getattr(caption, "_mw_full_caption", current)
+                    if current != getattr(caption, "_mw_wrapped_caption", current):
+                        original = current
+                    if not original or "$" in original:
+                        continue
+                    caption.set_text(original)
+                    bounds = caption.get_window_extent(renderer)
+                    if caption in (axes.title, axes.xaxis.label):
+                        center = (bounds.x0 + bounds.x1) / 2
+                        available = min(available, 2 * min(center - 8, figure.bbox.width - center - 8))
+                        available = max(available, figure.bbox.width * .4)
+                    length = max(bounds.width, bounds.height)
+                    if length > available:
+                        count = max(8, int(len(original) * available / length))
+                        wrapped = "\n".join(textwrap.fill(line, width=count, break_long_words=True,
+                                                        break_on_hyphens=False) for line in original.splitlines())
+                        caption.set_text(wrapped)
+                        caption._mw_full_caption = original
+                        caption._mw_wrapped_caption = wrapped
+        except (AttributeError, RuntimeError, ValueError):
+            pass
         constrained_layout = False
         get_constrained_layout = getattr(figure, "get_constrained_layout", None)
         if callable(get_constrained_layout):
@@ -4417,7 +4458,7 @@ class PyPlotWorkbench(PyPlotWindow):
             set_pads = getattr(figure, "set_constrained_layout_pads", None)
             if callable(set_pads):
                 try:
-                    set_pads(w_pad=0.04, h_pad=0.04, wspace=0.02, hspace=0.02)
+                    set_pads(w_pad=0.08, h_pad=0.08, wspace=0.02, hspace=0.02)
                 except Exception:
                     pass
         tight_layout = getattr(figure, "tight_layout", None)

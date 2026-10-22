@@ -373,6 +373,8 @@ class FmrPlugin(PyPlotPlugin):
         self._plot_tabs.append(tab)
 
     def open_origin(self) -> None:  # type: ignore[override]
+        if self._export_existing_plot_tabs_to_origin():
+            return
         if not self._dataset:
             self.load_data()
         exported_holder = {"count": 0}

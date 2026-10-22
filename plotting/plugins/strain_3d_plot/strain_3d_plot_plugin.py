@@ -218,6 +218,10 @@ class Strain3DPlotPlugin(PyPlotPlugin):
         self._log(f"Generated {len(self._plot_tabs)} strain scatter plot(s).")
         self.update_ui()
 
+    def graph_option_defaults(self) -> dict[str, float]:
+        return {"figure_width": 7.2, "figure_height": 6.0,
+                "title_font": 14, "label_font": 11, "tick_font": 9}
+
     def update_ui(self) -> None:  # type: ignore[override]
         has_input = self._selected_input is not None
         has_plots = bool(self._plot_tabs)

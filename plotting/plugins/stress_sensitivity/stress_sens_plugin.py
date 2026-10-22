@@ -500,6 +500,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        if self._export_existing_plot_tabs_to_origin():
+            return
         self._apply_settings_to_core()
 
         def _task() -> None:
