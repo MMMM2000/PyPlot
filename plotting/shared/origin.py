@@ -275,6 +275,63 @@ def origin_lt_exec(executor: Any, command: str) -> bool:
     return True
 
 
+def finish_origin_graph(layer: Any, *, sample_labels: list[str] | None = None) -> None:
+    """Finish dedicated categorical exporters without losing their semantics."""
+    activate_origin_layer(layer)
+    if not origin_lt_exec(layer.lt_exec, "layer -u 1; layer 80 72 14 12;"):
+        raise RuntimeError("Origin could not set the graph page frame.")
+    if sample_labels is not None:
+        set_origin_categorical_axis(layer, sample_labels)
+    getter = getattr(layer, "label", None)
+    if callable(getter):
+        for token in ("Legend", "legend"):
+            legend = getter(token)
+            if legend is not None:
+                legend.set_float("fsize", 10)
+                break
+    if not origin_lt_exec(layer.lt_exec, "legend.smartpos=1;"):
+        raise RuntimeError("Origin could not position the graph legend.")
+
+
+def set_origin_categorical_axis(layer: Any, labels: list[str]) -> None:
+    """Put sample captions below the final frame using real scale coordinates."""
+    activate_origin_layer(layer)
+    layer.axis("x").set_limits(0.5, len(labels) + 0.5, 1.0)
+    if not origin_lt_exec(layer.lt_exec, "layer.x.showAxes=1; layer.x.showLabels=0;"):
+        raise RuntimeError("Origin could not configure sample captions.")
+    old_caption = layer.label("py_xlabel")
+    if old_caption is not None:
+        layer.remove_label(old_caption)
+    bottom, top = layer.get_float("y.from"), layer.get_float("y.to")
+    y = bottom - .04 * (top - bottom)
+    for index, text in enumerate(labels, start=1):
+        name = f"py_xtick{index}"
+        old_label = layer.label(name)
+        if old_label is not None:
+            layer.remove_label(old_label)
+        label = layer.add_label(_origin_display_text(text), float(index), y)
+        if label is None:
+            raise RuntimeError("Origin could not add a sample caption.")
+        label.name = name
+        label.set_int("attach", 2)
+        label.set_float("fsize", 11)
+        # add_label substitutes axis midpoints for zero and uses the top-left
+        # corner. Reassert the position and center the physical text extent.
+        label.set_float("x1", float(index))
+        label.set_float("y1", y)
+        label.set_float("left", label.get_float("left") - label.get_float("width") / 2)
+    set_origin_axis_title(layer, "x", "")
+    caption = layer.add_label("Sample")
+    if caption is None:
+        raise RuntimeError("Origin could not add the sample axis title.")
+    caption.name = "py_xlabel"
+    caption.set_int("attach", 2)
+    caption.set_float("fsize", 14)
+    caption.set_float("x1", (len(labels) + 1) / 2)
+    caption.set_float("y1", bottom - .13 * (top - bottom))
+    caption.set_float("left", caption.get_float("left") - caption.get_float("width") / 2)
+
+
 def activate_origin_layer(layer: Any) -> None:
     """Best-effort activation of the layer hosting graph labels/axes."""
 
@@ -688,6 +745,8 @@ __all__ = [
     "hide_origin_workbook",
     "escape_origin_text",
     "origin_lt_exec",
+    "finish_origin_graph",
+    "set_origin_categorical_axis",
     "activate_origin_layer",
     "origin_safe_token",
     "origin_title_xy",

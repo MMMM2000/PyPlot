@@ -18,12 +18,18 @@ This document defines the expected Origin workbook + graph behavior for PyPlot a
 After plotting in PyPlot, **Open in Origin** exports the displayed artists and
 their current view. It refreshes cached graph tables first, so subsequent edits
 to data, visibility, line styles or axis limits are included. This also applies
-to FMR, PDF Plotter, Maxion Continuous, Stress Sensitivity, Temperature Sensitivity
-and VSM Temperature Scan. Their existing direct data export remains the fallback
+to FMR, PDF Plotter, Maxion Continuous and VSM Temperature Scan.
+Their existing direct data export remains the fallback
 when no graph tabs have been generated. Workbook-only exports retain their
 separate data/smoothed/derivative sheets where supplied by a tool.
 
-Combined legends keep their entries from both axes. Right-axis title placement
+Stress Sensitivity and Temperature Sensitivity retain their dedicated exporters
+to preserve categorical sample captions, proxy legends and alternating point
+colors. These exporters use the enlarged frame and final smart legend placement.
+
+Combined legends keep their entries from both axes, including edited captions.
+Saved workbooks retain their explicit XY/XYZ column roles. Split heating/cooling
+traces export each segment once with its own style. Right-axis title placement
 uses the actual axis range and reserves space for tick labels; no absolute data
 coordinate is used as a caption limit.
 
@@ -31,7 +37,8 @@ The shared exporter preserves NaN gaps, scatter-only traces, common marker
 shapes and point sizes, line widths/dashes, linear/logarithmic scales, view
 limits, and hidden legends. Regularly spaced linear ticks retain their step.
 Independent subplots use independent Origin layers; coincident axes retain the
-existing twin-axis export. Upper-panel tick labels and empty captions remain
+existing twin-axis export, including right axes within independent panels.
+Upper-panel tick labels and empty captions remain
 hidden. Data, axes-relative and figure-relative text captions remain editable.
 Regular vertical histograms export their bin centers/counts as native columns
 with matching gaps. Unequal-width or stacked bars are not supported.

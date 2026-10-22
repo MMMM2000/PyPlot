@@ -77,6 +77,7 @@ from plotting.shared.utils import (
 )
 from plotting.shared.origin import (
     _ensure_origin_sdk_on_path,
+    _origin_display_text as shared_origin_display_text,
     origin_session,
     schedule_origin_release,
     release_origin,
@@ -4901,6 +4902,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 y_label = str(axes.get_ylabel() or "")
             except Exception:
                 y_label = ""
+            # twiny/twinx can keep the visible caption on a sibling while
+            # plotting on an axes whose corresponding axis is hidden.
+            for name, label in (("x", x_label), ("y", y_label)):
+                if label:
+                    continue
+                try:
+                    siblings = getattr(axes, f"get_shared_{name}_axes")().get_siblings(axes)
+                    inherited = next((str(getattr(sibling, f"get_{name}label")() or "")
+                                      for sibling in siblings if getattr(sibling, f"get_{name}label")()), "")
+                except (AttributeError, RuntimeError):
+                    inherited = ""
+                if name == "x":
+                    x_label = inherited
+                else:
+                    y_label = inherited
         x_name, x_unit = self._label_parts(x_label)
         y_name, y_unit = self._label_parts(y_label)
         return x_name, x_unit, y_name, y_unit
@@ -4910,6 +4926,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         descriptor: TabDescriptor,
         *,
         include_hidden: bool = False,
+        split_styled_segments: bool = False,
     ) -> list[_TabSeriesExportEntry]:
         entries: list[_TabSeriesExportEntry] = []
         export_axes = self._descriptor_axes(descriptor)
@@ -4918,7 +4935,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         default_y, default_y_unit = self._label_parts(descriptor.y_label)
 
         if isinstance(descriptor.lines, dict) and descriptor.lines:
-            for index, state in enumerate(descriptor.lines.values(), start=1):
+            tracked_states = []
+            for state in descriptor.lines.values():
+                if split_styled_segments and state.extra_lines:
+                    tracked_states.extend(replace(state, line=line, full_x=None, full_y=None, extra_lines=[])
+                                          for line in state.iter_lines())
+                else:
+                    tracked_states.append(state)
+            for index, state in enumerate(tracked_states, start=1):
                 raw_label = (state.label or f"Series {index}").strip() or f"Series {index}"
                 label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
                 line_obj = getattr(state, "line", None)
@@ -4976,8 +5000,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 )
         line_counter = 0
         seen_lines: set[int] = {
-            id(state.line) for state in descriptor.lines.values()
-            if getattr(state, "line", None) is not None
+            id(line) for state in descriptor.lines.values() for line in state.iter_lines()
+            if line is not None
         }
         collection_counter = 0
         seen_collections: set[int] = set()
@@ -5161,16 +5185,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         if callable(getter):
                             position = getter()
                             for row, xyz in enumerate(zip(x_vals, y_vals, z_values)):
-                                if np.allclose(xyz, position):
+                                if row not in point_labels and np.allclose(xyz, position, rtol=1e-12, atol=1e-12):
                                     point_labels[row] = text.get_text()
+                                    break
                     if point_labels or len(colors) == len(x_vals) > 1:
                         groups: dict[tuple[str, str], list[int]] = {}
                         for row in range(len(x_vals)):
                             color = mcolors.to_hex(colors[row % len(colors)]) if len(colors) else collection_color
                             key = (point_labels.get(row, label), color)
                             groups.setdefault(key, []).append(row)
-                        if len(groups) > 256:
-                            raise ValueError("3D export supports up to 256 independently colored or named point groups.")
                         original = entries.pop()
                         for (point_label, color), rows in groups.items():
                             entries.append(replace(original, label=point_label, color=color,
@@ -5254,9 +5277,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         descriptor: TabDescriptor,
     ) -> tuple[WorkbookData, list[WorksheetData]] | None:
         plugin_name = self._tab_plugin_name(descriptor)
-        entries = self._tab_series_entries(descriptor, include_hidden=False)
+        entries = self._tab_series_entries(descriptor, include_hidden=False, split_styled_segments=True)
         if not entries:
-            entries = self._tab_series_entries(descriptor, include_hidden=True)
+            entries = self._tab_series_entries(descriptor, include_hidden=True, split_styled_segments=True)
         if not entries:
             return None
 
@@ -5361,6 +5384,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 "ylim": [float(value) * self._axis_value_factor(axes, axis_name="y") for value in axes.get_ylim()],
                 "legend_visible": bool(legend is not None and legend.get_visible()),
                 "legend_labels": [text.get_text() for text in legend.get_texts()] if legend is not None else [],
+                "legend_entries": [
+                    {"source_label": self._normalize_series_label_for_export(handle.get_label(), descriptor=descriptor),
+                     "label": text.get_text()}
+                    for handle, text in zip(getattr(legend, "legend_handles", []), legend.get_texts())
+                ] if legend is not None else [],
                 "legend_fontsize": float(legend.get_texts()[0].get_fontsize())
                 if legend is not None and legend.get_texts() else 10.0,
                 "annotations": [],
@@ -6922,7 +6950,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         value = lo + float(fraction) * (hi - lo)
                     position.append(value)
                 x, y = position
-            label = layer.add_label(shared_escape_origin_text(str(annotation["text"])), float(x), float(y))
+            label = layer.add_label(shared_origin_display_text(str(annotation["text"])), float(x), float(y))
             label.name = f"py_annotation_{index + 1}"
             label.set_int("attach", 2)  # Attach to axes scales, not page/frame.
             label.set_float("fsize", float(annotation.get("fontsize", 10)))
@@ -6943,6 +6971,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self, origin_any: Any, sheet: Any, workbook: WorkbookData,
         worksheet: WorksheetData, pairs: list[tuple[int, int]], graph_callback: Any,
     ) -> bool:
+        if len(pairs) > 256:
+            raise ValueError("3D Origin export supports up to 256 independently colored or named point groups.")
         columns = list(worksheet.dataframe.columns)
         if any(not worksheet.columns[columns[y]].plot_z_column for _, y in pairs):
             raise ValueError("Cannot mix XY and XYZ plots in one Origin graph.")
@@ -6991,7 +7021,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             legend = layer.label("Legend")
             if legend is not None:
                 legend.text = "\n".join(
-                    f"\\l({i + 1}) {shared_escape_origin_text(worksheet.columns[columns[y]].comments)}"
+                    f"\\l({i + 1}) {shared_origin_display_text(worksheet.columns[columns[y]].comments)}"
                     for i, (_x, y) in enumerate(pairs)
                 )
         self._style_origin_legend_for_export(layer, worksheet, view=legend_view)
@@ -7324,6 +7354,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 secondary_axes_only=True,
                 show_top_x=show_top_x,
             )
+        restored_panels: set[int] = set()
         for group_index, (target_layer, group_x_title, group_y_title, _pairs, _top_x) in enumerate(layer_groups):
             view = axis_views.get(str(pair_groups[group_index]["axis_index"]), {})
             if view:
@@ -7337,17 +7368,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     if _top_x:
                         self._set_origin_axis_title(target_layer, "x2", group_x_title)
             if independent_panels:
+                panel = int(view.get("panel", 0))
+                secondary = panel in restored_panels
+                restored_panels.add(panel)
+                show_top_x = secondary and any(side in {"top", "both"} for side in pair_groups[group_index]["x_sides"])
                 left, bottom, width, height = view["bounds"]
                 self._set_origin_layer_frame(target_layer, left=left * 100, top=(1 - bottom - height) * 100,
                                              width=width * 100, height=height * 100)
-                self._configure_origin_layer_axes(target_layer, secondary_axes_only=False)
-                self._set_origin_axis_title(target_layer, "x", view.get("xlabel", group_x_title))
-                self._set_origin_axis_title(target_layer, "y", view.get("ylabel", group_y_title))
-                self._set_origin_axis_title(target_layer, "x2", "")
-                self._set_origin_axis_title(target_layer, "y2", "")
+                self._configure_origin_layer_axes(target_layer, secondary_axes_only=secondary, show_top_x=show_top_x)
+                self._set_origin_axis_title(target_layer, "x", "" if secondary else view.get("xlabel", group_x_title))
+                self._set_origin_axis_title(target_layer, "y", "" if secondary else view.get("ylabel", group_y_title))
+                self._set_origin_axis_title(target_layer, "x2", group_x_title if show_top_x else "")
+                self._set_origin_axis_title(target_layer, "y2", view.get("ylabel", group_y_title) if secondary else "")
+                x_labels = (2 if show_top_x else 0 if secondary else 1) if view.get("x_ticklabels_visible", True) else 0
+                y_labels = (2 if secondary else 1) if view.get("y_ticklabels_visible", True) else 0
                 self._origin_lt_exec(target_layer.lt_exec,
-                    f'layer.x.showLabels={1 if view.get("x_ticklabels_visible", True) else 0}; '
-                    f'layer.y.showLabels={1 if view.get("y_ticklabels_visible", True) else 0}; yl.rotate=90;')
+                    f'layer.x.showLabels={x_labels}; layer.y.showLabels={y_labels}; yl.rotate=90;')
                 x_lower, x_upper = view["xlim"]
                 y_lower, y_upper = view["ylim"]
                 if view.get("xscale") == "log":
@@ -7364,9 +7400,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         for group_index, (target_layer, _group_x_title, _group_y_title, _group_pairs, _show_top_x) in enumerate(layer_groups):
             view = axis_views.get(str(pair_groups[group_index]["axis_index"]))
             if view and view.get("legend_labels"):
-                text = self._origin_legend_text(view["legend_labels"], legend_plots, group_index + 1)
+                text = self._origin_legend_text(view["legend_labels"], legend_plots, group_index + 1,
+                                                entries=view.get("legend_entries"))
                 if text:
                     legend = target_layer.label("Legend")
+                    if legend is None:
+                        legend = target_layer.add_label(text)
+                        if legend is not None:
+                            legend.name = "Legend"
                     if legend is not None:
                         legend.text = text
             self._style_origin_legend_for_export(target_layer, worksheet, view=view)
@@ -7395,14 +7436,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return True
 
     @staticmethod
-    def _origin_legend_text(labels: list[str], plots: list[tuple[int, int, str]], own_layer: int) -> str:
+    def _origin_legend_text(labels: list[str], plots: list[tuple[int, int, str]], own_layer: int,
+                            *, entries: list[dict[str, str]] | None = None) -> str:
         rows = []
-        for label in labels:
-            matches = [entry for entry in plots if entry[2] == label]
+        used_plots: set[tuple[int, int]] = set()
+        for entry in entries or [{"source_label": label, "label": label} for label in labels]:
+            label = entry["label"]
+            matches = [plot for plot in plots if plot[2] == entry["source_label"]]
             if not matches:
                 continue
-            layer_index, plot_index, _ = next((entry for entry in matches if entry[0] == own_layer), matches[0])
-            rows.append(f"\\l({layer_index}.{plot_index}) %({layer_index}.{plot_index})")
+            available = [plot for plot in matches if plot[:2] not in used_plots] or matches
+            layer_index, plot_index, _ = next((plot for plot in available if plot[0] == own_layer), available[0])
+            used_plots.add((layer_index, plot_index))
+            caption = shared_origin_display_text(label) if entries else f"%({layer_index}.{plot_index})"
+            rows.append(f"\\l({layer_index}.{plot_index}) {caption}")
         return "\n".join(rows)
 
     def _center_origin_panel_x_caption(self, layer: Any) -> None:

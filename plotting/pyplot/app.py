@@ -2145,6 +2145,7 @@ class PyPlotWorkbench(PyPlotWindow):
                     "metadata": metadata_payload,
                     "source": self._portable_path(worksheet.source, base_path),
                     "plot_metadata": dict(worksheet.metadata),
+                    "axis_roles": worksheet.axis_roles,
                 }
                 worksheets_payload.append(worksheet_payload)
             if not worksheets_payload:
@@ -2241,6 +2242,7 @@ class PyPlotWorkbench(PyPlotWindow):
                             source=self._resolve_portable_path(sheet_entry.get("source"), project_dir),
                             workbook_key=workbook_key,
                             metadata=dict(sheet_entry.get("plot_metadata") or {}),
+                            axis_roles=str(sheet_entry.get("axis_roles") or ""),
                         )
                         worksheet_objects.append(worksheet)
                 if worksheet_objects:
@@ -4408,7 +4410,7 @@ class PyPlotWorkbench(PyPlotWindow):
     def _export_current_graph_pdf(self) -> None:
         self._save_graph_for_current_tab(preferred_suffix=".pdf")
 
-    def _fit_figure_to_content(self, figure: Any) -> None:
+    def _fit_figure_to_content(self, figure: Any, *, _pass: int = 0) -> None:
         if figure is None:
             return
         # Tight layout allocates margins but cannot wrap a title wider than a
@@ -4506,6 +4508,21 @@ class PyPlotWorkbench(PyPlotWindow):
         canvas = getattr(figure, "canvas", None)
         if canvas is None:
             return
+        # Margin solving can move a centered caption toward one page edge.
+        # Measure again in the resulting geometry before accepting the wrap.
+        if _pass < 2:
+            try:
+                renderer = canvas.get_renderer()
+                figure.draw(renderer)
+                captions = [caption for axes in figure.axes
+                            for caption in (axes.title, axes.xaxis.label, axes.yaxis.label)]
+                if any(caption.get_text() and not figure.bbox.contains(*point)
+                       for caption in captions
+                       for point in caption.get_window_extent(renderer).get_points()):
+                    self._fit_figure_to_content(figure, _pass=_pass + 1)
+                    return
+            except (AttributeError, RuntimeError, ValueError):
+                pass
         try:
             canvas.draw_idle()
         except Exception:

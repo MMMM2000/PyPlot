@@ -28,6 +28,7 @@ from plotting.shared.origin import (
     hide_origin_workbook,
     set_origin_axis_title,
     set_origin_graph_title,
+    finish_origin_graph,
 )
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
@@ -1094,8 +1095,8 @@ def plot_variable_origin(
             pass
         try:
             p.color = color
-            p.symbol_shape = 2
-            p.symbol_size = RAW_MARKER_SIZE
+            p.symbol_kind = 2
+            p.symbol_size = max(RAW_MARKER_SIZE ** .5, 2.0)
             p.symbol_edge_color = color
             p.symbol_fill_color = color
             p.line_width = 0
@@ -1134,7 +1135,7 @@ def plot_variable_origin(
             pass
         try:
             p.color = color
-            p.symbol_shape = 2
+            p.symbol_kind = 1
             p.symbol_size = MEAN_MSIZE
             p.symbol_edge_color = color
             p.symbol_fill_color = color
@@ -1160,7 +1161,7 @@ def plot_variable_origin(
         try:
             p.color = CONT_SYMBOL_COLOR
             p.line_width = 0
-            p.symbol_shape = 2
+            p.symbol_kind = 2
             p.symbol_size = marker_size
             p.symbol_edge_color = CONT_SYMBOL_COLOR
             p.symbol_fill_color = CONT_SYMBOL_COLOR
@@ -1193,176 +1194,7 @@ def plot_variable_origin(
     except Exception:
         pass
 
-    try:
-        x_axis = gl.axis('x')
-    except Exception:
-        x_axis = None
-    try:
-        y_axis = gl.axis('y')
-    except Exception:
-        y_axis = None
-
-    axis = context.axis
-    tick_level = axis.tick_level
-    label_bottom = axis.label_bottom
-
-    try:
-        if x_axis is not None:
-            x_axis.set_limits(0.5, len(samples) + 0.5, 1.0)
-    except Exception:
-        pass
-    try:
-        if y_axis is not None:
-            y_axis.set_limits(axis.axis_bottom, axis.plot_top)
-    except Exception:
-        pass
-
-    try:
-        if x_axis is not None:
-            x_axis.title = ''
-    except Exception:
-        pass
-    try:
-        if y_axis is not None:
-            y_axis.title = TS_LABELS[var]
-    except Exception:
-        pass
-
-    try:
-        gl.set_int('legend.box', 1)
-        gl.set_int('legend.update', 1)
-    except Exception:
-        pass
-    try:
-        legend = gl.label('Legend')
-    except Exception:
-        legend = None
-    if legend is not None:
-        try:
-            set_float = getattr(legend, 'set_float', None)
-            set_int = getattr(legend, 'set_int', None)
-            if callable(set_float):
-                x_from = float(gl.get_float('x.from'))
-                x_to = float(gl.get_float('x.to'))
-                y_from = float(gl.get_float('y.from'))
-                y_to = float(gl.get_float('y.to'))
-                x_span = x_to - x_from
-                y_span = y_to - y_from
-                set_float('x', x_from + (x_span * 0.84))
-                set_float('y', y_from + (y_span * 0.34))
-            if callable(set_int):
-                try:
-                    set_int('horzalign', 1)
-                except Exception:
-                    pass
-                try:
-                    set_int('fontheight', 10)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    try:
-        gl.set_int('x.top', 0)
-        gl.set_int('y.right', 0)
-        gl.set_int('x.top.label.show', 0)
-        gl.set_int('y.right.label.show', 0)
-        gl.set_int('x.top.ticklabels', 0)
-        gl.set_int('y.right.ticklabels', 0)
-    except Exception:
-        pass
-
-    for idx in range(1, len(samples) + 1):
-        try:
-            gl.remove_label(f'py_xtick{idx}')
-        except Exception:
-            pass
-    try:
-        gl.set_int('x.label.show', 0)
-    except Exception:
-        pass
-    try:
-        gl.set_int('x.ticklabels', 0)
-    except Exception:
-        pass
-    for attr in ('x.bottom.ticklabels', 'x.major.ticklabels'):
-        try:
-            gl.set_int(attr, 0)
-        except Exception:
-            continue
-    for cmd in ("layer.x.showlabels=0;", "axis -ws x 0;", "layer.xaxis.showTickLabels=0;"):
-        try:
-            op.lt_exec(cmd)
-        except Exception:
-            continue
-
-    manual_labels_added = False
-    title_center = (len(samples) + 1) / 2.0
-    sample_idx_map = context.sample_idx
-    for idx, sample in enumerate(samples, start=1):
-        text = display_samples[idx - 1]
-        raw_pos = context.sample_label_positions.get(sample, float(sample_idx_map.get(sample, idx)))
-        try:
-            x_pos = float(round(raw_pos, 6))
-        except Exception:
-            x_pos = float(raw_pos)
-        try:
-            label = gl.add_label(text, float(x_pos), tick_level)
-        except Exception:
-            label = None
-        if label is None:
-            continue
-        try:
-            label.name = f'py_xtick{idx}'
-            label.set_int('attach', 0)
-            try:
-                label.set_int('horzalign', 1)
-            except Exception:
-                pass
-            try:
-                label.set_int('vertalign', 0)
-            except Exception:
-                pass
-            try:
-                label.set_int('fontweight', 700)
-            except Exception:
-                pass
-            try:
-                label.set_int('fontheight', min(max(TICK_SIZE, 12), 14))
-            except Exception:
-                pass
-        except Exception:
-            pass
-        manual_labels_added = True
-    if manual_labels_added and y_axis is not None:
-        try:
-            y_axis.set_limits(label_bottom, axis.plot_top)
-        except Exception:
-            pass
-
-    try:
-        gl.remove_label('py_xlabel')
-    except Exception:
-        pass
-    try:
-        axis_label = gl.add_label(
-            'Sample',
-            float(title_center),
-            float(axis.label_bottom - max(axis.label_extra, 0.3)),
-        )
-    except Exception:
-        axis_label = None
-    if axis_label is not None:
-        try:
-            axis_label.name = 'py_xlabel'
-            axis_label.set_int('attach', 0)
-            axis_label.set_int('horzalign', 1)
-            axis_label.set_int('vertalign', 0)
-            axis_label.set_int('fontweight', 700)
-            axis_label.set_int('fontheight', max(AXIS_LABEL_SIZE, 18))
-        except Exception:
-            pass
-
+    gl.axis("y").set_limits(context.axis.axis_bottom, context.axis.plot_top)
     max_deltas = max(len(context.delta_labels), len(samples))
     for idx in range(1, max_deltas + 1):
         try:
@@ -1378,7 +1210,11 @@ def plot_variable_origin(
             continue
         try:
             label.name = f'py_delta{idx}'
-            label.set_int('attach', 0)
+            label.set_int('attach', 2)
+            label.set_float('fsize', 10)
+            label.set_float('x1', float(x_pos))
+            label.set_float('y1', float(y_pos))
+            label.set_float('left', label.get_float('left') - label.get_float('width') / 2)
             try:
                 label.set_int('horzalign', 1)
             except Exception:
@@ -1406,10 +1242,8 @@ def plot_variable_origin(
         set_origin_axis_title(gl, 'y', TS_LABELS[var])
     except Exception:
         pass
-    try:
-        set_origin_graph_title(op, gp, gl, context.title)
-    except Exception:
-        pass
+    finish_origin_graph(gl, sample_labels=[str(text) for text in display_samples])
+    set_origin_graph_title(op, gp, gl, context.title)
 
     try:
         hide_origin_workbook(op, book, gp)

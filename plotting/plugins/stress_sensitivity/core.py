@@ -25,6 +25,7 @@ from plotting.shared.origin import (
     schedule_origin_release,
     set_origin_axis_title,
     set_origin_graph_title,
+    finish_origin_graph,
 )
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
@@ -702,7 +703,8 @@ def plot_samples_origin(
     p = cast(Any, gl.add_plot(w, coly=idx_raw_odd_y, colx=idx_raw_odd_x, type='s'))
     try:
         p.color = RAW_ALT_COLORS[1]
-        p.symbol_size = RAW_MARKER_SIZE
+        p.symbol_kind = 2
+        p.symbol_size = max(RAW_MARKER_SIZE ** .5, 2.0)
         p.legend = "raw marked end"
         p.lname = "raw marked end"
     except Exception:
@@ -710,7 +712,8 @@ def plot_samples_origin(
     p = cast(Any, gl.add_plot(w, coly=idx_raw_even_y, colx=idx_raw_even_x, type='s'))
     try:
         p.color = RAW_ALT_COLORS[0]
-        p.symbol_size = RAW_MARKER_SIZE
+        p.symbol_kind = 2
+        p.symbol_size = max(RAW_MARKER_SIZE ** .5, 2.0)
         p.legend = "raw unmarked end"
         p.lname = "raw unmarked end"
     except Exception:
@@ -725,7 +728,7 @@ def plot_samples_origin(
         p = cast(Any, gl.add_plot(w, coly=idx_y, colx=idx_x, type='y'))
         try:
             p.color = color
-            p.symbol_shape = 2
+            p.symbol_kind = 1
             p.symbol_size = LEGEND_MARKER_SIZE
             p.legend = "mean marked end" if plot_idx == 1 else "mean unmarked end"
             p.lname = "mean marked end" if plot_idx == 1 else "mean unmarked end"
@@ -761,124 +764,28 @@ def plot_samples_origin(
     try:
         legend = gl.label('Legend')
         legend_lines = [
-            "\\c(1) raw marked end",
-            "\\c(2) raw unmarked end",
-            "\\c(3) mean marked end",
-            "\\c(4) mean unmarked end",
+            "\\l(1) raw even loads",
+            "\\l(2) raw odd loads",
         ]
+        seen_mean_colors = set()
+        for index, (_x_key, _y_key, color) in enumerate(mean_column_pairs, start=3):
+            if color not in seen_mean_colors:
+                suffix = next((f" {'marked' if end == 'a' else 'unmarked'} end"
+                               for end, value in MEAN_COLORS.items() if color == value), "")
+                legend_lines.append(f"\\l({index}) mean{suffix}")
+                seen_mean_colors.add(color)
         if INCLUDE_DEPENDENCE and cont_column_pairs:
-            legend_lines.append("\\c(5) dependence")
+            legend_lines.append(f"\\l({3 + len(mean_column_pairs)}) dependence")
         legend.text = "\n".join(legend_lines)
         op.lt_exec('legend.update=0;')
     except Exception:
         pass
 
-    try:
-        x_axis = gl.axis('x')
-    except Exception:
-        x_axis = None
-    try:
-        y_axis = gl.axis('y')
-    except Exception:
-        y_axis = None
-
-    try:
-        if x_axis is not None:
-            x_axis.set_limits(0.5, len(samples) + 0.5, 1.0)
-            x_axis.title = ''
-    except Exception:
-        pass
-    try:
-        if y_axis is not None:
-            y_axis.title = LABELS.get(var, "")
-    except Exception:
-        pass
-    for attr in (
-        'x.top', 'y.right',
-        'x.top.label.show', 'y.right.label.show',
-        'x.top.ticklabels', 'y.right.ticklabels',
-        'x.label.show', 'x.ticklabels',
-        'x.bottom.ticklabels', 'x.major.ticklabels',
-    ):
-        try:
-            gl.set_int(attr, 0)
-        except Exception:
-            continue
-    # avoid LT errors; rely on set_int calls above
-
-    for idx in range(1, len(samples) + 1):
-        try:
-            gl.remove_label(f'py_xtick{idx}')
-        except Exception:
-            pass
-    for name in ('py_xlabel', 'py_title'):
-        try:
-            gl.remove_label(name)
-        except Exception:
-            pass
-
-    try:
-        bottom = getattr(y_axis, 'from_', None)
-        top = getattr(y_axis, 'to', None)
-    except Exception:
-        bottom = None
-        top = None
-    y_range = (top - bottom) if (top is not None and bottom is not None) else 1.0
-    label_y = float(bottom - 0.12 * y_range) if bottom is not None else 0.0
-    title_y = float((top if top is not None else 0.0) + 0.12 * y_range)
-    title_center = (len(samples) + 1) / 2.0
-
-    for idx, sample in enumerate(samples, start=1):
-        label = label_map.get(sample, sample)
-        try:
-            lbl = gl.add_label(label, float(idx), label_y)
-        except Exception:
-            lbl = None
-        if lbl is None:
-            continue
-        try:
-            lbl.name = f'py_xtick{idx}'
-            lbl.set_int('attach', 0)
-            lbl.set_int('horzalign', 1)
-            lbl.set_int('vertalign', 2)
-            lbl.set_int('fontweight', 700)
-        except Exception:
-            pass
-
-    if y_axis is not None and bottom is not None and top is not None:
-        safe_range = y_range if y_range else 1.0
-        try:
-            y_axis.set_limits(bottom - 0.15 * safe_range, top + 0.12 * safe_range)
-        except Exception:
-            pass
-
-    try:
-        axis_label = gl.add_label(
-            'Sample',
-            float(title_center),
-            float(label_y - 0.06 * y_range),
-        )
-    except Exception:
-        axis_label = None
-    if axis_label is not None:
-        try:
-            axis_label.name = 'py_xlabel'
-            axis_label.set_int('attach', 0)
-            axis_label.set_int('horzalign', 1)
-            axis_label.set_int('vertalign', 2)
-            axis_label.set_int('fontweight', 700)
-        except Exception:
-            pass
-
-    try:
-        set_origin_axis_title(gl, 'y', LABELS.get(var, ""))
-    except Exception:
-        pass
-    try:
-        set_origin_graph_title(op, gp, gl, title_str)
-    except Exception:
-        pass
-
+    bottom, top = gl.get_float("y.from"), gl.get_float("y.to")
+    span = top - bottom
+    if span > 0:
+        gl.axis("y").set_limits(bottom - .1 * span, top + .1 * span)
+    set_origin_axis_title(gl, "y", LABELS.get(var, ""))
     # Delta labels mirroring Matplotlib
     for idx, sample in enumerate(samples, start=1):
         delta_val = delta_map.get(sample)
@@ -891,14 +798,17 @@ def plot_samples_origin(
         if lbl is None:
             continue
         try:
-            lbl.set_int('attach', 0)
-            lbl.set_int('horzalign', 1)
-            lbl.set_int('vertalign', 0 if delta_val >= 0 else 1)
-            lbl.set_int('fontweight', 700)
-            lbl.set_int('fontheight', 14)
+            lbl.set_int('attach', 2)
+            lbl.set_float('fsize', 10)
+            lbl.set_float('x1', float(idx))
+            lbl.set_float('y1', float(delta_val))
+            lbl.set_float('left', lbl.get_float('left') - lbl.get_float('width') / 2)
+            lbl.set_float('top', lbl.get_float('top') - lbl.get_float('height') - 4)
         except Exception:
             pass
 
+    finish_origin_graph(gl, sample_labels=[str(label_map.get(sample, sample)) for sample in samples])
+    set_origin_graph_title(op, gp, gl, title_str)
     try:
         hide_origin_workbook(op, book, gp)
     except Exception:

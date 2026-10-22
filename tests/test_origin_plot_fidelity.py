@@ -145,6 +145,25 @@ def test_tracked_primary_lines_do_not_drop_other_panels_or_raw_scatter(workbench
     assert {m.comments for m in metas} == {"Processed", "Raw", "Second load"}
 
 
+def test_split_vsm_trace_exports_each_segment_once_with_its_style(workbench):
+    fig = Figure()
+    FigureCanvasAgg(fig)
+    ax = fig.subplots()
+    first, = ax.plot([1, 2], [10, 20], label="0 degrees", ls="-")
+    second, = ax.plot([2, 1], [30, 40], label="_direction_segment", ls="--")
+    state = GraphLineState(("angle", 0), "0 degrees", first, [1, 2, 2, 1], [10, 20, 30, 40],
+                           full_x=[1, 2, 2, 1], full_y=[10, 20, 30, 40], extra_lines=[second])
+    descriptor = TabDescriptor("synthetic", "VSM", "Synthetic", "Field", "Signal", fig.canvas,
+                               ax, {state.key: state}, {"plugin": "Synthetic"})
+    _, sheets = workbench._build_shared_plot_workbook(QtWidgets.QWidget(), descriptor)
+    frame = sheets[0].dataframe
+    metas = [meta for meta in sheets[0].columns.values() if meta.plot_axis >= 0]
+    assert [(meta.comments, meta.plot_linestyle) for meta in metas] == [("0 degrees", "-"), ("0 degrees", "--")]
+    assert frame.iloc[:, 1].dropna().tolist() == [10, 20]
+    assert frame.iloc[:, 3].dropna().tolist() == [30, 40]
+    assert [len(xs) for _, xs, _ in workbench._tab_series_data(descriptor)] == [4]
+
+
 def test_three_dimensional_pieces_keep_their_labels_and_colors(workbench):
     fig = Figure()
     FigureCanvasAgg(fig)
@@ -156,6 +175,31 @@ def test_three_dimensional_pieces_keep_their_labels_and_colors(workbench):
     sheet = worksheet(workbench, fig, ax)
     ymeta = [m for m in sheet.columns.values() if m.plot_z_column]
     assert [(m.comments, m.plot_color) for m in ymeta] == [("Piece A", "#ff0000"), ("Piece B", "#0000ff")]
+
+
+def test_coincident_xyz_pieces_keep_separate_identity(workbench):
+    fig = Figure()
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter([1, 1], [20, 20], [100, 100], c=["red", "blue"])
+    ax.text(1, 20, 100, "Piece A")
+    ax.text(1, 20, 100, "Piece B")
+    sheet = worksheet(workbench, fig, ax)
+    metas = [meta for meta in sheet.columns.values() if meta.plot_z_column]
+    assert [(meta.comments, meta.plot_color) for meta in metas] == [("Piece A", "#ff0000"), ("Piece B", "#0000ff")]
+
+
+def test_origin_group_limit_does_not_break_ordinary_xyz_data_access(workbench):
+    fig = Figure()
+    ax = fig.add_subplot(111, projection="3d")
+    coordinates = np.arange(257)
+    ax.scatter(coordinates, coordinates, coordinates)
+    for value in coordinates:
+        ax.text(value, value, value, f"Piece {value}")
+    sheet = worksheet(workbench, fig, ax)
+    assert len([meta for meta in sheet.columns.values() if meta.plot_z_column]) == 257
+    pairs = workbench._origin_plot_pairs(sheet.dataframe, sheet.axis_roles)
+    with pytest.raises(ValueError, match="256"):
+        workbench._plot_origin_xyz_worksheet(None, None, WorkbookData("limit", "Limit"), sheet, pairs, None)
 
 
 def test_text_annotation_keeps_its_coordinate_system(workbench):
@@ -210,6 +254,92 @@ def test_twin_legend_keeps_labels_from_both_axes(workbench):
     assert sheet.metadata["origin_axes"]["0"]["legend_labels"] == ["50 Oe", "10000 Oe"]
     text = workbench._origin_legend_text(["50 Oe", "10000 Oe"], [(1, 1, "50 Oe"), (2, 1, "10000 Oe")], 1)
     assert text == "\\l(1.1) %(1.1)\n\\l(2.1) %(2.1)"
+
+
+def test_renamed_legend_caption_keeps_its_source_handle(workbench):
+    fig = Figure()
+    ax = fig.subplots()
+    line, = ax.plot([1, 2], [3, 4], label="Raw")
+    ax.legend([line], ["Displayed caption"])
+    sheet = worksheet(workbench, fig, ax)
+    view = sheet.metadata["origin_axes"]["0"]
+    assert view["legend_entries"] == [{"source_label": "Raw", "label": "Displayed caption"}]
+    text = workbench._origin_legend_text(view["legend_labels"], [(1, 1, "Raw")], 1, entries=view["legend_entries"])
+    assert text == "\\l(1.1) Displayed caption"
+
+
+def test_renamed_duplicate_legend_captions_use_distinct_native_symbols(workbench):
+    entries = [{"source_label": "Raw", "label": "Before"}, {"source_label": "Raw", "label": "After"}]
+    assert workbench._origin_legend_text(["Before", "After"], [(1, 1, "Raw"), (1, 2, "Raw")], 1,
+                                         entries=entries) == "\\l(1.1) Before\n\\l(1.2) After"
+
+
+def test_independent_panels_keep_a_right_axis_within_one_panel(workbench, monkeypatch):
+    from types import SimpleNamespace
+
+    fig = Figure()
+    FigureCanvasAgg(fig)
+    first, second = fig.subplots(2, 1)
+    twin = first.twinx()
+    for ax, label, values in ((first, "Primary units", [1, 2]), (second, "Lower units", [3, 4]),
+                               (twin, "Right units", [100, 200])):
+        ax.plot([1, 2], values, label=label)
+        ax.set_ylabel(label)
+    sheet = worksheet(workbench, fig, first)
+
+    class Layer:
+        config = None
+
+        def __init__(self):
+            self.titles = {}
+
+        def add_plot(self, *args, **kwargs):
+            return SimpleNamespace()
+
+        def set_int(self, *args):
+            pass
+
+        def rescale(self):
+            pass
+
+        def lt_exec(self, *args):
+            return True
+
+        def label(self, *args):
+            return None
+
+    class Graph:
+        def __init__(self):
+            self.layers = [Layer()]
+
+        def __getitem__(self, index):
+            return self.layers[index]
+
+        def activate(self):
+            pass
+
+        def add_layer(self, *args, **kwargs):
+            self.layers.append(Layer())
+            return self.layers[-1]
+
+    graph = Graph()
+    monkeypatch.setattr(workbench, "_origin_graph_templates", lambda origin: ["line"])
+    for name in ("_apply_origin_plot_style", "_apply_origin_plot_label", "_apply_origin_layer_axis_links",
+                 "_set_origin_layer_frame", "_apply_origin_view", "_restore_origin_annotations",
+                 "_apply_origin_power_top_axis", "_set_origin_graph_title", "_style_origin_legend_for_export",
+                 "_center_origin_panel_x_caption", "_append_log"):
+        monkeypatch.setattr(workbench, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(workbench, "_origin_layer_axis_snapshot", lambda *args: {})
+    commands = []
+    monkeypatch.setattr(workbench, "_origin_lt_exec", lambda executor, command: commands.append(command) or True)
+    monkeypatch.setattr(workbench, "_configure_origin_layer_axes", lambda layer, *, secondary_axes_only, **kwargs: setattr(layer, "config", secondary_axes_only))
+    monkeypatch.setattr(workbench, "_set_origin_axis_title", lambda layer, axis, text: layer.titles.update({axis: text}))
+    assert workbench._plot_origin_worksheet(SimpleNamespace(new_graph=lambda **kwargs: graph), object(),
+        WorkbookData("panels", "Mixed panels"), sheet, roles=sheet.axis_roles)
+    assert [layer.config for layer in graph.layers] == [False, False, True]
+    assert graph.layers[2].titles["y2"] == "Right units"
+    assert graph.layers[2].titles["y"] == ""
+    assert "layer.x.showLabels=0; layer.y.showLabels=2; yl.rotate=90;" in commands
 
 
 def test_vsm_temperature_export_does_not_duplicate_unit_in_long_name(workbench):
@@ -356,6 +486,31 @@ def test_saved_project_keeps_export_styles_and_view_metadata(workbench, tmp_path
         restored.close()
 
 
+@pytest.mark.parametrize("dimension, expected_roles", [(2, "XYXY"), (3, "XYZ")])
+def test_saved_project_keeps_native_column_pairing(workbench, tmp_path, dimension, expected_roles):
+    fig = Figure()
+    ax = fig.add_subplot(111, projection="3d" if dimension == 3 else None)
+    if dimension == 3:
+        ax.scatter([1, 2], [30, 40], [100, 120])
+    else:
+        ax.plot([1, 2], [10, 20])
+        ax.plot([3, 4], [30, 40])
+    sheet = worksheet(workbench, fig, ax)
+    workbook = WorkbookData("pairing-book", "Paired data", [sheet.key])
+    workbench._register_imported_workbook(workbook, [sheet])
+    project = tmp_path / "column-pairing.pypj"
+    workbench._write_project_file(project)
+    restored = PyPlotWorkbench(plotters={})
+    try:
+        restored._apply_project_payload(json.loads(project.read_text(encoding="utf-8")), project_dir=tmp_path)
+        loaded = restored._worksheets[sheet.key]
+        assert loaded.axis_roles == expected_roles
+        assert restored._origin_plot_pairs(loaded.dataframe, loaded.axis_roles) == workbench._origin_plot_pairs(sheet.dataframe, sheet.axis_roles)
+    finally:
+        restored._project_dirty = False
+        restored.close()
+
+
 def test_long_captions_fit_a_single_column_figure(workbench):
     fig = Figure(figsize=(85 / 25.4, 2.6))
     FigureCanvasAgg(fig)
@@ -375,8 +530,6 @@ def test_long_captions_fit_a_single_column_figure(workbench):
 
 
 @pytest.mark.parametrize("module_name,class_name", [
-    ("temperature_sensitivity.temp_sens_plugin", "TemperatureSensitivityPlugin"),
-    ("stress_sensitivity.stress_sens_plugin", "StressSensitivityPlugin"),
     ("vsm_temperature_scan.vsm_temp_scan_plugin", "VSMTemperatureScanPlugin"),
     ("fmr.fmr_plugin", "FmrPlugin"),
     ("pdf_plotter.pdf_plotter_plugin", "PdfPlotterPlugin"),
@@ -395,6 +548,28 @@ def test_custom_plugins_export_the_displayed_graph_before_recomputing(workbench,
     monkeypatch.setattr(plugin, "run_origin_export", lambda **kwargs: pytest.fail("Recomputed instead of exporting the visible graph"))
     plugin.open_origin()
     assert called == [True]
+
+
+@pytest.mark.parametrize("module_name,class_name,core_name", [
+    ("temperature_sensitivity.temp_sens_plugin", "TemperatureSensitivityPlugin", "temp_sens_core"),
+    ("stress_sensitivity.stress_sens_plugin", "StressSensitivityPlugin", "sens_core"),
+])
+def test_categorical_sensitivity_tools_keep_their_native_sample_exporter(workbench, monkeypatch, module_name, class_name, core_name):
+    from importlib import import_module
+
+    module = import_module("plotting.plugins." + module_name)
+    plugin = getattr(module, class_name)(workbench, "Synthetic")
+    tab = QtWidgets.QWidget()
+    workbench.tab_widget.addTab(tab, "Sample categories")
+    plugin._plot_tabs = [tab]
+    plugin._loaded_files = ["synthetic-input.txt"]
+    called = []
+    monkeypatch.setattr(plugin, "_apply_settings_to_core", lambda: None)
+    monkeypatch.setattr(workbench, "_open_origin_shared", lambda: pytest.fail("Categorical/proxy semantics would be lost"))
+    monkeypatch.setattr(getattr(module, core_name), "main", lambda files, **kwargs: called.append((files, kwargs)))
+    monkeypatch.setattr(plugin, "run_origin_export", lambda **kwargs: kwargs["task"]())
+    plugin.open_origin()
+    assert called == [(["synthetic-input.txt"], {"backend": "origin"})]
 
 
 def test_origin_button_refreshes_cached_data_styles_and_view(workbench, monkeypatch):
