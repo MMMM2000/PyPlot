@@ -6,29 +6,29 @@ import pytest
 
 from plotting.plugins.vsm_isotherms import core as module
 
-DATA_DIR = Path("sample_data/VSM_data/vsm_isotherms/Ni50Fe23Ga27 5-4 no glass")
 
 
-def test_load_parses_header_metadata_for_legacy_filename() -> None:
+def test_load_parses_header_metadata_for_legacy_filename(vsm_data_dir: Path) -> None:
     processor = module.VSMIsothermProcessor()
-    path = DATA_DIR / "202611020910-VIR-03.VSM-VIR-DATA"
+    path = vsm_data_dir / "legacy-VIR-03.VSM-VIR-DATA"
 
     entries = processor.load([path])
 
     assert len(entries) == 1
     entry = entries[0]
-    assert entry.sample.startswith("Ni50Fe27Ga23")
+    assert entry.sample == "Synthetic alloy"
     assert entry.angle == 0.0
     assert entry.temperature == pytest.approx(140.0, abs=1.0)
     assert list(entry.dataframe.columns) == ["field", "signal"]
-    assert len(entry.dataframe.index) >= 50
+    assert len(entry.dataframe.index) == 101
+    assert entry.dataframe.iloc[-1].tolist() == pytest.approx([10000.0, 1.4])
 
 
-def test_group_by_sample_and_angle_keeps_zero_and_ninety_separate() -> None:
+def test_group_by_sample_and_angle_keeps_zero_and_ninety_separate(vsm_data_dir: Path) -> None:
     processor = module.VSMIsothermProcessor()
     paths = [
-        DATA_DIR / "202611020910-VIR-05.VSM-VIR-DATA",
-        DATA_DIR / "202611021730-VIR-a090-T100-00.VSM-VIR-Data",
+        vsm_data_dir / "synthetic-a000-T150.VSM-VIR-Data",
+        vsm_data_dir / "synthetic-a090-T100.VSM-VIR-Data",
     ]
 
     entries = processor.load(paths)
@@ -38,9 +38,9 @@ def test_group_by_sample_and_angle_keeps_zero_and_ninety_separate() -> None:
     assert angles == [0, 90]
 
 
-def test_group_by_sample_and_angle_collapses_duplicate_temperature_runs() -> None:
+def test_group_by_sample_and_angle_collapses_duplicate_temperature_runs(vsm_data_dir: Path) -> None:
     processor = module.VSMIsothermProcessor()
-    paths = sorted(DATA_DIR.glob("*.VSM-VIR-DATA")) + sorted(DATA_DIR.glob("*.VSM-VIR-Data"))
+    paths = sorted(vsm_data_dir.glob("*.VSM-VIR-DATA")) + sorted(vsm_data_dir.glob("*.VSM-VIR-Data"))
 
     entries = processor.load(paths)
     grouped = processor.group_by_sample_angle(entries)
@@ -53,8 +53,8 @@ def test_group_by_sample_and_angle_collapses_duplicate_temperature_runs() -> Non
 
     assert len(zero_150) == 1
     assert len(ninety_150) == 1
-    assert len(zero_150[0].dataframe.index) >= 80
-    assert len(ninety_150[0].dataframe.index) >= 80
+    assert len(zero_150[0].dataframe.index) == 101
+    assert len(ninety_150[0].dataframe.index) == 101
 
 
 def test_load_ignores_non_vir_extensions(tmp_path: Path) -> None:
@@ -82,9 +82,9 @@ Time_since_start Applied_Field_For_Plot_ Signal_X_direction
     assert entries[0].path == vir_path
 
 
-def test_compute_entropy_returns_temperature_curve() -> None:
+def test_compute_entropy_returns_temperature_curve(vsm_data_dir: Path) -> None:
     processor = module.VSMIsothermProcessor()
-    paths = sorted(DATA_DIR.glob("*a090-T*.VSM-VIR-Data"))[:10]
+    paths = sorted(vsm_data_dir.glob("*a090-T*.VSM-VIR-Data"))[:10]
     entries = processor.load(paths)
     grouped = processor.group_by_sample_angle(entries)
     angle_group = next(values for (_, angle), values in grouped.items() if round(angle) == 90)
@@ -99,9 +99,9 @@ def test_compute_entropy_returns_temperature_curve() -> None:
     assert len(entropy.frame.index) >= 2
 
 
-def test_compute_entropy_accepts_custom_field_levels() -> None:
+def test_compute_entropy_accepts_custom_field_levels(vsm_data_dir: Path) -> None:
     processor = module.VSMIsothermProcessor()
-    paths = sorted(DATA_DIR.glob("*a090-T*.VSM-VIR-Data"))[:10]
+    paths = sorted(vsm_data_dir.glob("*a090-T*.VSM-VIR-Data"))[:10]
     entries = processor.load(paths)
     grouped = processor.group_by_sample_angle(entries)
     angle_group = next(values for (_, angle), values in grouped.items() if round(angle) == 90)
@@ -113,6 +113,10 @@ def test_compute_entropy_accepts_custom_field_levels() -> None:
     )
 
     assert entropy is not None
+    assert entropy.max_delta_field == pytest.approx(10000.0)
+    # M=T*H/1e6 gives -integral(dM/dT dH) = -H^2/2e6.
+    assert entropy.frame["dS_5000Oe"].tolist() == pytest.approx([-12.5] * 4)
+    assert entropy.frame["dS_10000Oe"].tolist() == pytest.approx([-50.0] * 4)
     columns = list(entropy.frame.columns)
     assert "temperature" in columns
     assert "dS_2000Oe" in columns

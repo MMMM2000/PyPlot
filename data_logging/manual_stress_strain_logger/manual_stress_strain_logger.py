@@ -112,10 +112,8 @@ UNLOADING_COLORS = ("#d62728", "#ff7f0e", "#8c564b", "#e377c2")
 HOLD_COLORS = ("#7f7f7f",)
 BUILDER_PROJECT_KIND = "MicrowireDataBuilder"
 PROJECT_DIAMETER_KEYS = ("d (µm)", "d (μm)", "d (um)", "diameter")
-ANNEALING_FALLBACK_DIRS = (
-    "sample_data/database_builder/current annealing data",
-    "sample_data/current_annealing",
-)
+# Resolve recorded/project-relative sources; research data is not bundled.
+ANNEALING_FALLBACK_DIRS: tuple[str, ...] = ()
 ANNEALING_HIGH_CURRENT_THRESHOLD_MA = 500.0
 SUPERSCRIPT_MAP = str.maketrans({
     "-": "⁻",

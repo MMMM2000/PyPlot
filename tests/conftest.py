@@ -125,3 +125,34 @@ def qapp_args() -> list[str]:
     if platform:
         return ["-platform", platform]
     return []
+
+
+@pytest.fixture(scope="session")
+def sample_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from synthetic_data import write_mini_dma_run
+
+    return write_mini_dma_run(tmp_path_factory.mktemp("synthetic-tma") / "Ni50Fe27Ga23 12_2 synthetic")
+
+
+@pytest.fixture(scope="session")
+def builder_review_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from synthetic_data import write_review_run
+
+    return write_review_run(tmp_path_factory.mktemp("synthetic-review") / "Ni50Fe27Ga23 12_2 synthetic")
+
+
+@pytest.fixture(scope="session")
+def vsm_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from synthetic_data import write_vsm_isotherms
+
+    return write_vsm_isotherms(tmp_path_factory.mktemp("synthetic-vsm"))
+
+
+@pytest.fixture(scope="session")
+def signal_data_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from synthetic_data import write_signal_inputs, write_pdf
+
+    root = write_signal_inputs(tmp_path_factory.mktemp("synthetic-signals"))
+    write_pdf(root / "pdf_data" / "four_columns.pdf")
+    write_pdf(root / "pdf_data" / "six_columns.pdf", six_columns=True)
+    return root

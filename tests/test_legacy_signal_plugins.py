@@ -28,21 +28,22 @@ def test_builtin_pyplot_registry_has_no_embedded_widget_plugins() -> None:
 @pytest.mark.parametrize(
     ("plugin_name", "source_dir", "min_plots"),
     [
-        ("Temperature Dependence", Path("sample_data/temperature_dependence"), 1),
-        ("Temperature Sensitivity", Path("sample_data/temperature_dependence"), 1),
-        ("Stress Dependence", Path("sample_data/stress_dependence"), 1),
-        ("Stress Sensitivity", Path("sample_data/stress_dependence"), 1),
+        ("Temperature Dependence", Path("temperature_dependence"), 1),
+        ("Temperature Sensitivity", Path("temperature_dependence"), 1),
+        ("Stress Dependence", Path("stress_dependence"), 1),
+        ("Stress Sensitivity", Path("stress_dependence"), 1),
     ],
 )
 def test_legacy_signal_plugins_smoke_load_and_generate(
     plugin_name: str,
     source_dir: Path,
     min_plots: int,
+    signal_data_root: Path,
 ) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter=plugin_name)
     try:
-        resolved_dir = source_dir.resolve()
+        resolved_dir = (signal_data_root / source_dir).resolve()
         window._select_directories = (  # type: ignore[assignment]
             lambda _parent=None, *, title, start_dir: [str(resolved_dir)]
         )
@@ -88,11 +89,11 @@ def test_strain_3d_plot_is_native_pyplot_plugin() -> None:
     assert not issubclass(plugin_cls, EmbeddedWidgetPlugin)
 
 
-def test_maxion_continuous_smoke_load_and_generate() -> None:
+def test_maxion_continuous_smoke_load_and_generate(signal_data_root: Path) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="Maxion Continuous")
     try:
-        source = Path("sample_data/Maxion/1 final 2 coils.txt").resolve()
+        source = (signal_data_root / "Maxion" / "1 synthetic 2 coils.txt").resolve()
         window._commit_selected_paths([source])  # noqa: SLF001
         plugin = window._current_plugin  # noqa: SLF001
         assert plugin is not None
@@ -128,11 +129,11 @@ def test_hsw_distribution_smoke_load_and_generate(tmp_path: Path) -> None:
         app.processEvents()
 
 
-def test_pdf_plotter_smoke_load_and_generate() -> None:
+def test_pdf_plotter_smoke_load_and_generate(signal_data_root: Path) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="PDF Plotter")
     try:
-        source = Path("sample_data/pdf_data/sample1.pdf").resolve()
+        source = (signal_data_root / "pdf_data" / "four_columns.pdf").resolve()
         window._commit_selected_paths([source])  # noqa: SLF001
         plugin = window._current_plugin  # noqa: SLF001
         assert plugin is not None

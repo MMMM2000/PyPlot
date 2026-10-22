@@ -1,0 +1,2 @@
+# Preserve the recovery manifest bytes and its recorded SHA-256 across checkouts.
+docs/sample-data-inventory.csv text eol=lf

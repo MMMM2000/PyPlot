@@ -38,10 +38,12 @@ def _iter_toolbar_sections(widget: QtWidgets.QWidget | None) -> list[str]:
     return sections
 
 
-def test_load_and_plot_hysteresis_loop() -> None:
-    path = Path("sample_data/hysteresis_loops/FeSiBP 159_9 s1 200C.dat")
+def test_load_and_plot_hysteresis_loop(tmp_path: Path) -> None:
+    path = tmp_path / "Synthetic 200C.dat"
+    path.write_text("100 0.1\n0 0.02\n-100 -0.1\n0 -0.02\n100 0.1\n", encoding="utf-8")
     x, y = core.load_loop(path)
-    assert len(x) == len(y) and len(x) > 0
+    assert x.tolist() == pytest.approx([100, 0, -100, 0, 100])
+    assert y.tolist() == pytest.approx([0.1, 0.02, -0.1, -0.02, 0.1])
     fig = core.plot_loops([path], mode="Combined", show=False)
     assert hasattr(fig, "axes") and len(fig.axes) == 1
 

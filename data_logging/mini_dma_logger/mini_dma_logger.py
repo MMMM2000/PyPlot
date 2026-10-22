@@ -965,10 +965,8 @@ PROJECT_ROW_CURRENT_KEYS = (
 )
 PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "Wire")
 PROJECT_ROW_SPECIMEN_KEYS = ("Specimen", "Sample", "Piece", "Sample name")
-ANNEALING_FALLBACK_DIRS = (
-    "sample_data/database_builder/current annealing data",
-    "sample_data/current_annealing",
-)
+# Resolve recorded/project-relative sources; research data is not bundled.
+ANNEALING_FALLBACK_DIRS: tuple[str, ...] = ()
 
 
 def _default_download_dir() -> str:

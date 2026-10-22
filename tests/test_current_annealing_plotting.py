@@ -351,22 +351,26 @@ def test_summarize_transition_currents_rejects_wrong_signed_cooling_kink() -> No
     assert anneal_core.format_transition_summary(summary) == "As 35 mA, Af 43 mA"
 
 
-def test_summarize_transition_currents_detects_real_local_heating_drop() -> None:
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "sample_data"
-        / "database_builder"
-        / "current annealing data"
-        / "Ni50Fe27Ga23 10_4 s2a 80mA.txt"
-    )
+def test_summarize_transition_currents_detects_local_heating_drop(tmp_path: Path) -> None:
+    # A local drop at 23-26 mA, with the global resistance maximum at 80 mA.
+    # Cooling reverses the drop at 5-7 mA. Values are invented, not a fitted run.
+    up = np.linspace(1.0, 80.0, 400)
+    down = up[::-1]
+    up_r = 100.0 + 0.12 * up - 12.0 * np.clip(1.0 - np.abs(up - 26.0) / 3.0, 0, 1)
+    down_r = 80.0 + 10.0 * np.clip((7.0 - down) / 2.0, 0, 1)
+    current = np.r_[up, down]
+    resistance = np.r_[up_r, down_r]
+    path = tmp_path / "synthetic_local_drop_80mA.txt"
+    np.savetxt(path, np.c_[current / 1000, current / 1000 * resistance, resistance])
     df = anneal_core.load_file(path)
 
     summary = anneal_core.summarize_transition_currents(df)
 
-    assert summary.as_current_mA == pytest.approx(22.8, abs=0.6)
-    assert summary.af_current_mA == pytest.approx(25.7, abs=0.6)
-    assert summary.ms_current_mA == pytest.approx(6.7, abs=0.8)
-    assert summary.mf_current_mA == pytest.approx(4.7, abs=0.8)
+    assert summary.as_current_mA == pytest.approx(23.0, abs=0.6)
+    # The detector smooths the sampled corners; allow one mA around the model.
+    assert summary.af_current_mA == pytest.approx(26.0, abs=1.0)
+    assert summary.ms_current_mA == pytest.approx(7.0, abs=0.8)
+    assert summary.mf_current_mA == pytest.approx(5.0, abs=0.8)
     assert summary.ms_current_mA < summary.af_current_mA
     assert summary.mf_current_mA < summary.af_current_mA
 class _LoadOnlyHost:

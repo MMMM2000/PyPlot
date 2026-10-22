@@ -891,15 +891,15 @@ def test_available_plotters_wrapped_as_external_plugins() -> None:
         window.close()
 
 
-def test_temperature_plugin_registers_group_workbooks() -> None:
+def test_temperature_plugin_registers_group_workbooks(signal_data_root: Path) -> None:
     _ensure_app()
     window = PyPlotWorkbench(plotters={})
     try:
         plugin = temp_sens_plugin.TemperatureSensitivityPlugin(window, "Temperature Sensitivity")
-        sample_dir = Path("sample_data/temperature_dependence")
+        sample_dir = signal_data_root / "temperature_dependence"
         files = [
-            sample_dir / "Fe77Mo4B18Cu1 2_1 77mA 25C.txt",
-            sample_dir / "Fe77Mo4B18Cu1 2_1 77mA 100C.txt",
+            sample_dir / "Synthetic 2_1 77mA 25C.txt",
+            sample_dir / "Synthetic 2_1 77mA 100C.txt",
         ]
         plugin._data = temp_sens_core.load_data([str(path) for path in files])
         plugin._register_workbooks(files)

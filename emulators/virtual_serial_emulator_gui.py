@@ -164,6 +164,7 @@ from pathlib import Path as _Path
 import re as _re
 
 ROOT_DIR = _Path(__file__).resolve().parents[1]
+EXAMPLE_DATA_ROOT = _Path(os.environ.get("PYPLOT_EXAMPLE_DATA_ROOT", str(ROOT_DIR / "artifacts" / "example-inputs")))
 
 
 def _stress_path(load_g: float, direction: str) -> _Path:
@@ -172,21 +173,25 @@ def _stress_path(load_g: float, direction: str) -> _Path:
     else:
         load_s = str(load_g).replace(".", ",")
     tail = f"{load_s}{direction.lower()}"
-    base = ROOT_DIR / "sample_data" / "stress_dependence" / "FeSiB 85_10 s2-2a 47mA"
+    base = EXAMPLE_DATA_ROOT / "stress_dependence" / "FeSiB 85_10 s2-2a 47mA"
     return base / f"FeSiB 85_10 s2-2a 47mA {tail}.txt"
 
 
 def _temp_path(temp_sel: str) -> _Path:
-    base = ROOT_DIR / "sample_data" / "temperature_dependence"
+    base = EXAMPLE_DATA_ROOT / "temperature_dependence"
     temp_sel = temp_sel.strip()
     return base / f"Fe77Mo4B18Cu1 4_3 77mA {temp_sel}.txt"
 
 
 def _maxion_path() -> _Path:
-    return ROOT_DIR / "sample_data" / "Maxion" / "1 final 2 coils.txt"
+    return EXAMPLE_DATA_ROOT / "Maxion" / "1 final 2 coils.txt"
 
 
 def _read_lines(path: _Path) -> list[str]:
+    if not path.is_file():
+        # Deterministic simulator-only fallback; never a measured trace.
+        width = 6 if path.parent.name == "Maxion" else 4
+        return [";".join(f"{column + 1 + row / 100:.3f}" for column in range(width)) for row in range(60)]
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         return [ln.strip() for ln in f if ln.strip()]
 
@@ -285,7 +290,7 @@ class DataLoggerEmuThread(BaseEmuThread):
 
 # ---- Current Annealing Logger mode (HMP4030 subset)
 def _ca_default_sample() -> _Path:
-    return ROOT_DIR / "sample_data" / "current_annealing" / "Ni51Fe26Ga21 1_2 s2 1000mA.txt"
+    return EXAMPLE_DATA_ROOT / "current_annealing" / "synthetic.txt"
 
 
 def _load_ca_samples(path: _Path) -> list[tuple[float, float, float]]:
