@@ -119,6 +119,7 @@ def test_trace_audit_reads_only_synthetic_copies(tmp_path):
     from scripts.mini_dma_simulator_trace_audit import read_run, sha256
     (tmp_path / "metadata.json").write_text(json.dumps({
         "initial_length_mm": 10, "wire_diameter_mm": .1,
+        "source_control": {"commit": "synthetic"},
     }))
     with (tmp_path / "measurement.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
@@ -131,6 +132,7 @@ def test_trace_audit_reads_only_synthetic_copies(tmp_path):
     before = {p.name: sha256(p) for p in tmp_path.iterdir()}
     data, record = read_run(tmp_path)
     assert data.shape == (30, 5)
+    assert record["source_revision"]["commit"] == "synthetic"
     assert record["measurement_interval_s"]["median"] == 1
     assert record["raw_scale_interval_s"]["median"] == pytest.approx(.2)
     assert record["stress_conversion_abs_residual_mpa"]["max"] == 0
