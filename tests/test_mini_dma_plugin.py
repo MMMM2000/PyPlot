@@ -18,7 +18,6 @@ from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin, TmaPlugin
 from plotting.pyplot.window import PyPlotWindow
 
 
-SAMPLE_RUN = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
 _APP_REF: QtWidgets.QApplication | None = None
 
 
@@ -237,13 +236,13 @@ def _write_minimal_mini_dma_run(run_path: Path, *, sample_name: str | None = Non
     return run_path
 
 
-def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_load_run_accepts_folder_and_metadata_sample_name(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     assert run.measurement_path.name == "measurement.csv"
-    assert run.sample_name == "Ni50Fe27Ga23 12_2 test"
-    assert run.wire_diameter_mm == pytest.approx(0.0191)
-    assert len(run.frame) > 3000
+    assert run.sample_name == "Ni50Fe27Ga23 12_2 synthetic"
+    assert run.wire_diameter_mm == pytest.approx(0.02)
+    assert len(run.frame) == 45
     assert "current_mA" in run.frame.columns
 
 
@@ -279,8 +278,8 @@ def test_iter_measurement_paths_skips_sidecar_and_invalid_measurements(tmp_path:
     assert (automation_run / "measurement.csv").resolve() not in paths
 
 
-def test_current_sweep_groups_by_target_mpa() -> None:
-    run = core.load_run(SAMPLE_RUN / "measurement.csv")
+def test_current_sweep_groups_by_target_mpa(sample_run: Path) -> None:
+    run = core.load_run(sample_run / "measurement.csv")
     groups = core.current_sweep_groups(run.frame)
 
     targets = [target for target, _group in groups]
@@ -404,8 +403,8 @@ def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path:
         plt.close(fig)
 
 
-def test_make_figures_create_one_line_per_target() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_make_figures_create_one_line_per_target(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     strain_fig = core.make_strain_current_figure(run)
     resistance_fig = core.make_resistance_current_figure(run)
@@ -416,10 +415,10 @@ def test_make_figures_create_one_line_per_target() -> None:
         assert len(resistance_ax.lines) == 9
         assert all(line.get_marker() == "o" for line in strain_ax.lines)
         assert all(line.get_marker() == "o" for line in resistance_ax.lines)
-        assert strain_ax.get_xlabel() == "Current [mA] (80 mA = 279 A/mm², d = 19.1 µm)"
-        assert strain_ax.get_ylabel() == "Strain [%] (l₀ = 58.3 mm)"
+        assert strain_ax.get_xlabel() == "Current [mA] (80 mA = 255 A/mm², d = 20 µm)"
+        assert strain_ax.get_ylabel() == "Strain [%] (l₀ = 60 mm)"
         assert resistance_ax.get_ylabel() == "Resistance [Ohm]"
-        assert strain_ax.lines[0].get_label() == "50 MPa / 1.46 g"
+        assert strain_ax.lines[0].get_label() == "50 MPa / 1.6 g"
         assert strain_ax.get_legend().get_title().get_text() == "Stress / load"
     finally:
         plt.close(strain_fig)
@@ -428,7 +427,7 @@ def test_make_figures_create_one_line_per_target() -> None:
 
 def test_mini_dma_axis_labels_survive_origin_export_label_splitting() -> None:
     x_label = "Current [mA] (80 mA = 279 A/mm², d = 19.1 µm)"
-    y_label = "Strain [%] (l₀ = 52.8 mm)"
+    y_label = "Strain [%] (l₀ = 50 mm)"
 
     assert PyPlotWindow._label_parts(x_label) == (x_label, "")
     assert PyPlotWindow._label_parts(y_label) == (y_label, "")
@@ -462,8 +461,8 @@ def test_origin_line_symbol_style_uses_mini_dma_markers() -> None:
     assert plot.symbol_size == pytest.approx(6.0)
 
 
-def test_resistance_current_figure_can_show_power_top_axis() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_resistance_current_figure_can_show_power_top_axis(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     fig = core.make_resistance_current_figure(run, show_power_top_axis=True)
     try:
@@ -476,8 +475,8 @@ def test_resistance_current_figure_can_show_power_top_axis() -> None:
         plt.close(fig)
 
 
-def test_strain_current_figure_can_show_power_top_axis() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_strain_current_figure_can_show_power_top_axis(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     fig = core.make_strain_current_figure(run, show_power_top_axis=True)
     try:
@@ -490,8 +489,8 @@ def test_strain_current_figure_can_show_power_top_axis() -> None:
         plt.close(fig)
 
 
-def test_strain_current_figure_can_show_absolute_power_top_axis() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_strain_current_figure_can_show_absolute_power_top_axis(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     fig = core.make_strain_current_figure(
         run,
@@ -613,8 +612,8 @@ def test_power_axis_label_and_scale_uses_initial_length_for_mw_per_cm() -> None:
     assert core.power_axis_label_and_scale(run) == ("Power/cm [mW/cm]", pytest.approx(0.4))
 
 
-def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_strain_current_figure_can_use_each_trace_minimum_as_l0(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     fig = core.make_strain_current_figure(run, zero_minimum_strain=True)
     try:
@@ -636,8 +635,8 @@ def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
         plt.close(fig)
 
 
-def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_strain_current_figure_can_use_global_minimum_as_shared_l0(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     fig = core.make_strain_current_figure(
         run,
@@ -645,7 +644,7 @@ def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
     )
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain [%] (l₀ = 52.8 mm)"
+        assert ax.get_ylabel() == "Strain [%] (l₀ = 50 mm)"
         minima = [min(line.get_ydata()) for line in ax.lines]
         assert min(minima) == pytest.approx(0.0)
         assert any(value > 0.0 for value in minima)
@@ -678,8 +677,8 @@ def test_transition_strain_interpolation_does_not_extrapolate() -> None:
     assert values == {}
 
 
-def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_build_plot_frame_pairs_current_with_requested_y_column(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
     frame = core.build_plot_frame(run, y_column="strain_pct")
 
     assert "50_MPa_current_mA" in frame.columns
@@ -688,33 +687,34 @@ def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     assert "450_MPa_strain_pct" in frame.columns
 
 
-def test_power_axis_points_use_current_and_resistance() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_power_axis_points_use_current_and_resistance(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     currents, resistances = core.power_axis_points(run)
 
     assert len(currents) == len(resistances)
-    assert len(currents) > 1000
+    assert len(currents) == 45
     assert min(currents) >= 0.0
     assert min(resistances) > 0.0
 
 
-def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -> None:
-    run = core.load_run(SAMPLE_RUN)
+def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0(sample_run: Path) -> None:
+    run = core.load_run(sample_run)
 
     summary = core.summarize_current_sweep(run)
 
     assert len(summary.targets) == 9
     first = summary.targets[0]
     assert first.stress_mpa == pytest.approx(50.0)
-    assert first.load_g == pytest.approx(1.46, abs=0.01)
-    assert first.l0_mm == pytest.approx(52.8, abs=0.1)
-    assert first.max_current_mA == pytest.approx(79.9, abs=0.2)
-    assert first.max_strain_pct >= first.strain_at_max_current_pct >= 0.0
-    assert first.current_at_max_strain_mA == pytest.approx(3.7, abs=0.1)
+    assert first.load_g == pytest.approx(1.6018, abs=0.001)
+    assert first.l0_mm == pytest.approx(50.0)
+    assert first.max_current_mA == pytest.approx(80.0)
+    assert first.max_strain_pct == pytest.approx(6.0)
+    assert first.strain_at_max_current_pct == pytest.approx(4.0)
+    assert first.current_at_max_strain_mA == pytest.approx(20.0)
     lines = core.format_current_sweep_strain_summary(summary)
-    assert lines[0].startswith("50 MPa / 1.46 g:")
-    assert "10.81% @ 4 mA" in lines[0]
+    assert lines[0].startswith("50 MPa / 1.6 g:")
+    assert "6% @ 20 mA" in lines[0]
     assert core.format_current_sweep_break_summary(summary) == ""
 
 

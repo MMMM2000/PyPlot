@@ -24,6 +24,13 @@ from plotting.shared.origin import origin_session
 from plotting.shared.utils import ensure_app_theme
 
 ARTIFACTS_ROOT = ROOT / "artifacts" / "origin-plugin-verify"
+DATA_ROOT: Path | None = None
+
+
+def _data_root() -> Path:
+    if DATA_ROOT is None:
+        raise ValueError("Select a disposable input directory with --data-root.")
+    return DATA_ROOT
 
 
 @dataclass
@@ -375,7 +382,7 @@ def _setup_generated_strain_3d(window: PyPlotWorkbench, temp_dir: Path) -> PyPlo
 
 
 def _setup_hysteresis_loops(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = sorted((ROOT / "sample_data" / "hysteresis_loops").glob("*.dat"))[:2]
+    files = sorted((_data_root() / "hysteresis_loops").glob("*.dat"))[:2]
     if not files:
         raise RuntimeError("No hysteresis loop sample files found.")
     plugin = _setup_selected_paths(window, files)
@@ -387,65 +394,65 @@ def _setup_hysteresis_loops(window: PyPlotWorkbench) -> PyPlotPlugin:
 
 
 def _setup_current_annealing(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = sorted((ROOT / "sample_data" / "current_annealing").glob("*.txt"))[:1]
+    files = sorted((_data_root() / "current_annealing").glob("*.txt"))[:1]
     if not files:
         raise RuntimeError("No current annealing sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_shape_memory(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = sorted((ROOT / "sample_data" / "manual_stress-strain").glob("*.txt"))[:2]
+    files = sorted((_data_root() / "manual_stress-strain").glob("*.txt"))[:2]
     if len(files) < 2:
         raise RuntimeError("Not enough shape-memory sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_vsm_hysteresis(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = _first_files(ROOT / "sample_data" / "VSM_data" / "vsm_hyst_loops", "*.VSM-HYS-DATA", 4)
+    files = _first_files(_data_root() / "VSM_data" / "vsm_hyst_loops", "*.VSM-HYS-DATA", 4)
     if not files:
         raise RuntimeError("No VSM hysteresis sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_vsm_temp_scan(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = _first_files(ROOT / "sample_data" / "VSM_data" / "vsm_temperature_scan", "*.VSM-TSCN-DATA", 4)
+    files = _first_files(_data_root() / "VSM_data" / "vsm_temperature_scan", "*.VSM-TSCN-DATA", 4)
     if not files:
         raise RuntimeError("No VSM temperature-scan sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_vsm_isotherms(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = _first_files(ROOT / "sample_data" / "VSM_data" / "vsm_isotherms", "*.VSM-VIR-DATA", 4)
+    files = _first_files(_data_root() / "VSM_data" / "vsm_isotherms", "*.VSM-VIR-DATA", 4)
     if not files:
         raise RuntimeError("No VSM isotherm sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_dma(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = sorted((ROOT / "sample_data" / "DMA").glob("*.txt"))[:1]
+    files = sorted((_data_root() / "DMA").glob("*.txt"))[:1]
     if not files:
         raise RuntimeError("No DMA sample files found.")
     return _setup_selected_paths(window, files)
 
 
 def _setup_fmr(window: PyPlotWorkbench) -> PyPlotPlugin:
-    files = sorted((ROOT / "sample_data" / "FMR").glob("*.csv"))[:1]
+    files = sorted((_data_root() / "FMR").glob("*.csv"))[:1]
     if not files:
         raise RuntimeError("No FMR sample files found.")
     return _setup_selected_paths(window, files)
 
 
 PLUGIN_SPECS: list[tuple[str, str, Callable[[PyPlotWorkbench, Path], PyPlotPlugin]]] = [
-    ("Temperature Dependence", "shared", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "temperature_dependence")),
-    ("Temperature Sensitivity", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "temperature_dependence")),
-    ("Stress Dependence", "shared", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
-    ("Stress Sensitivity", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
+    ("Temperature Dependence", "shared", lambda w, t: _setup_folder_import(w, _data_root() / "temperature_dependence")),
+    ("Temperature Sensitivity", "custom", lambda w, t: _setup_folder_import(w, _data_root() / "temperature_dependence")),
+    ("Stress Dependence", "shared", lambda w, t: _setup_folder_import(w, _data_root() / "stress_dependence")),
+    ("Stress Sensitivity", "custom", lambda w, t: _setup_folder_import(w, _data_root() / "stress_dependence")),
     ("Shape Memory Stress/Strain", "shared", lambda w, t: _setup_shape_memory(w)),
     ("Hysteresis Loops", "shared", lambda w, t: _setup_hysteresis_loops(w)),
     ("Hsw Distribution", "shared", lambda w, t: _setup_generated_hsw_distribution(w, t)),
     ("Hsw Load Compare", "shared", lambda w, t: _setup_generated_hsw_load_compare(w, t)),
-    ("Maxion Continuous", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "Maxion" / "1 final 2 coils.txt"])),
-    ("PDF Plotter", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "pdf_data" / "sample1.pdf"])),
+    ("Maxion Continuous", "custom", lambda w, t: _setup_selected_paths(w, [_data_root() / "Maxion" / "1 final 2 coils.txt"])),
+    ("PDF Plotter", "custom", lambda w, t: _setup_selected_paths(w, [_data_root() / "pdf_data" / "sample1.pdf"])),
     ("Strain 3D Plot", "shared", lambda w, t: _setup_generated_strain_3d(w, t)),
     ("Current Annealing", "shared", lambda w, t: _setup_current_annealing(w)),
     ("VSM Hysteresis Loops", "shared", lambda w, t: _setup_vsm_hysteresis(w)),
@@ -460,7 +467,12 @@ def verify_plugins(
     output_root: Path = ARTIFACTS_ROOT,
     *,
     plugin_filter: set[str] | None = None,
+    data_root: Path,
 ) -> list[PluginVerificationResult]:
+    global DATA_ROOT
+    DATA_ROOT = data_root.resolve()
+    if not DATA_ROOT.is_dir():
+        raise ValueError("--data-root must be an existing disposable input directory")
     app = _ensure_app()
     output_root.mkdir(parents=True, exist_ok=True)
     results: list[PluginVerificationResult] = []
@@ -546,6 +558,7 @@ def verify_plugins(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify Origin export screenshots for PyPlot plugins.")
+    parser.add_argument("--data-root", type=Path, required=True, help="Selected disposable input directory; see docs/sample-data-policy.md.")
     parser.add_argument(
         "--plugin",
         action="append",
@@ -564,7 +577,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     plugin_filter = set(args.plugins or []) or None
-    results = verify_plugins(args.output_dir, plugin_filter=plugin_filter)
+    results = verify_plugins(args.output_dir, plugin_filter=plugin_filter, data_root=args.data_root)
     failures = 0
     for item in results:
         status = "OK" if not item.errors else "ERROR"

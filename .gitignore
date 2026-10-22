@@ -5,6 +5,10 @@ __pycache__/
 # macOS metadata
 .DS_Store
 
+# Virtual serial pairs are created locally by the emulator.
+/ttyV0
+/ttyV1
+
 # VS Code settings
 .vscode/*
 !.vscode/tasks.json
@@ -54,3 +58,6 @@ pytest-cache-files-*/
 
 # Local per-worktree scratch notes
 .worktree-notes/
+
+# Research inputs are external; controlled validation copies belong in artifacts/.
+/sample_data/

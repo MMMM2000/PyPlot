@@ -343,9 +343,8 @@ def select_files_or_folder(
 ) -> list[str]:
     """Return a list of files with extension ``ext`` chosen by the user.
 
-    Remembers the last input directory and defaults to the repository's
-    ``sample_data`` folder or the user's ``Downloads`` directory if it does not
-    exist.
+    Remembers the last input directory and defaults to the user's ``Downloads``
+    directory.
     """
 
     settings = _settings()

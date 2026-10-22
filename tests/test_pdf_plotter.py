@@ -1,5 +1,6 @@
 import os
 import math
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +19,8 @@ from plotting.plugins.pdf_plotter.core import (
 )
 
 
-def test_plot_creates_top_level_window():
-    data = load_pdf_data(["sample_data/pdf_data/sample1.pdf"])
+def test_plot_creates_top_level_window(signal_data_root: Path):
+    data = load_pdf_data([signal_data_root / "pdf_data" / "four_columns.pdf"])
     lines_by_file = collect_lines_by_file(
         data,
         x_name="Force (N)",
@@ -39,9 +40,9 @@ def test_plot_creates_top_level_window():
     assert isinstance(fig, Figure)
     assert fig.axes
 
-def test_parse_handles_six_column_format():
-    rows = parse_pdf_to_rows('sample_data/pdf_data/189_2_c2 1000hz.pdf')
-    assert rows, 'Expected rows from six-column pdf sample'
+def test_parse_handles_six_column_format(signal_data_root: Path):
+    rows = parse_pdf_to_rows(signal_data_root / "pdf_data" / "six_columns.pdf")
+    assert rows == [(1.0, 3.0, 7.0, 0.0), (2.0, 5.0, 17.0, 0.1), (3.0, 7.0, 27.0, 0.2), (4.0, 9.0, 37.0, 0.3)]
     t1, t2, force, strain = rows[0]
     assert all(isinstance(value, float) for value in (t1, t2, force, strain))
     # Force column is distinct from the derived T2-T1 column

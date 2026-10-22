@@ -2259,8 +2259,8 @@ def test_mini_dma_section_process_reports_gated_skip_reason(tmp_path: Path) -> N
     assert all("newest active run is unfinished" in row["skip_reason"] for row in reportability)
 
 
-def _sample_mini_dma_record() -> MiniDmaRecord:
-    run_path = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
+def _sample_mini_dma_record(builder_review_run: Path) -> MiniDmaRecord:
+    run_path = builder_review_run
     return MiniDmaRecord(
         path=run_path,
         sample="Ni50Fe27Ga23 12_2",
@@ -2392,25 +2392,25 @@ def _write_iso_strain_mini_dma_run(tmp_path: Path) -> Path:
     return run_path
 
 
-def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
+def test_mini_dma_transition_review_entries_use_expected_stress_targets(builder_review_run: Path) -> None:
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
     )
 
     assert len(entries) >= 9
     labels = {entry.target_label for entry in entries}
-    assert "50 MPa / 1.46 g" in labels
-    assert "350 MPa / 10.23 g" in labels
+    assert "50 MPa / 1.6 g" in labels
+    assert "350 MPa / 11.21 g" in labels
     statuses = {entry.status for entry in entries}
     assert "accepted" in statuses
     assert statuses & {"partial", "rejected"}
 
 
-def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
+def test_mini_dma_transition_review_dialog_loads_selected_run_lazily(builder_review_run: Path) -> None:
     _ensure_qapp()
     dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
     )
     try:
@@ -2418,7 +2418,7 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
         assert not dialog._entries_by_run  # noqa: SLF001
         run_key = dialog._runs[0].key  # noqa: SLF001
         entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
-            [_sample_mini_dma_record()],
+            [_sample_mini_dma_record(builder_review_run)],
             logging.getLogger("test"),
         )
         dialog._handle_load_finished(  # noqa: SLF001
@@ -2452,7 +2452,7 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_transition_review_actions_persist_target_status() -> None:
+def test_mini_dma_transition_review_actions_persist_target_status(builder_review_run: Path) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
 
@@ -2460,7 +2460,7 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         stored[record_id] = dict(payload)
 
     dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
         review_provider=lambda: stored,
         review_setter=_set_review,
@@ -2468,7 +2468,7 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
     try:
         run_key = dialog._runs[0].key  # noqa: SLF001
         entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
-            [_sample_mini_dma_record()],
+            [_sample_mini_dma_record(builder_review_run)],
             logging.getLogger("test"),
         )
         dialog._handle_load_finished(  # noqa: SLF001
@@ -2507,6 +2507,7 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
 
 def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_filters(
     monkeypatch: pytest.MonkeyPatch,
+    builder_review_run: Path,
 ) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
@@ -2515,7 +2516,7 @@ def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_fil
         stored[record_id] = dict(payload)
 
     dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
         review_provider=lambda: stored,
         review_setter=_set_review,
@@ -2523,7 +2524,7 @@ def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_fil
     try:
         run_key = dialog._runs[0].key  # noqa: SLF001
         entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
-            [_sample_mini_dma_record()],
+            [_sample_mini_dma_record(builder_review_run)],
             logging.getLogger("test"),
         )
         dialog._handle_load_finished(  # noqa: SLF001
@@ -2553,9 +2554,9 @@ def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_fil
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_transition_review_counts_unloaded_saved_reviews() -> None:
+def test_mini_dma_transition_review_counts_unloaded_saved_reviews(builder_review_run: Path) -> None:
     _ensure_qapp()
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2594,10 +2595,11 @@ def test_mini_dma_transition_review_counts_unloaded_saved_reviews() -> None:
 
 def test_mini_dma_transition_review_next_unreviewed_loads_unloaded_run(
     monkeypatch: pytest.MonkeyPatch,
+    builder_review_run: Path,
 ) -> None:
     _ensure_qapp()
     dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
     )
     try:
@@ -2617,14 +2619,14 @@ def test_mini_dma_transition_review_next_unreviewed_loads_unloaded_run(
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_transition_review_click_places_manual_target_values() -> None:
+def test_mini_dma_transition_review_click_places_manual_target_values(builder_review_run: Path) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
 
     def _set_review(record_id: str, payload: dict[str, object]) -> None:
         stored[record_id] = dict(payload)
 
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2673,14 +2675,14 @@ def test_mini_dma_transition_review_click_places_manual_target_values() -> None:
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_transition_review_manual_override_keeps_auto_values() -> None:
+def test_mini_dma_transition_review_manual_override_keeps_auto_values(builder_review_run: Path) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
 
     def _set_review(record_id: str, payload: dict[str, object]) -> None:
         stored[record_id] = dict(payload)
 
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2729,6 +2731,7 @@ def test_mini_dma_transition_review_manual_override_keeps_auto_values() -> None:
 
 def test_mini_dma_transition_review_drag_marker_persists_on_release(
     monkeypatch: pytest.MonkeyPatch,
+    builder_review_run: Path,
 ) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
@@ -2736,7 +2739,7 @@ def test_mini_dma_transition_review_drag_marker_persists_on_release(
     def _set_review(record_id: str, payload: dict[str, object]) -> None:
         stored[record_id] = dict(payload)
 
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2798,14 +2801,14 @@ def test_mini_dma_transition_review_drag_marker_persists_on_release(
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_transition_review_clear_selected_suppresses_only_that_label() -> None:
+def test_mini_dma_transition_review_clear_selected_suppresses_only_that_label(builder_review_run: Path) -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
 
     def _set_review(record_id: str, payload: dict[str, object]) -> None:
         stored[record_id] = dict(payload)
 
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2943,9 +2946,9 @@ def test_tma_source_check_rejects_unsupported_run_modes(tmp_path: Path) -> None:
     assert availability[str(current_sweep)] is True
     assert availability[str(iso_current)] is False
 
-def test_dma_transitions_view_lists_run_target_rows() -> None:
+def test_dma_transitions_view_lists_run_target_rows(builder_review_run: Path) -> None:
     _ensure_qapp()
-    record = _sample_mini_dma_record()
+    record = _sample_mini_dma_record(builder_review_run)
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
@@ -2999,7 +3002,7 @@ def test_dma_transitions_view_uses_cached_review_rows_without_raw_reload(
 ) -> None:
     _ensure_qapp()
     record = MiniDmaRecord(
-        path=Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 cached_run"),
+        path=Path("synthetic-missing/Ni50Fe27Ga23 12_2 cached_run"),
         sample="Ni50Fe27Ga23 12_2",
         data=pd.DataFrame(),
         key=("Ni50Fe27Ga23", 12, 2, None),
@@ -3210,7 +3213,7 @@ def test_mini_dma_reviewed_transition_records_preserve_cached_strain(
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
         record = MiniDmaRecord(
-            path=Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 cached_run"),
+            path=Path("synthetic-missing/Ni50Fe27Ga23 12_2 cached_run"),
             sample="Ni50Fe27Ga23 12_2",
             data=pd.DataFrame(),
             key=("Ni50Fe27Ga23", 12, 2),
@@ -3705,10 +3708,10 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         QtWidgets.QApplication.processEvents()
 
 
-def test_mini_dma_preview_items_render_real_thumbnail() -> None:
+def test_mini_dma_preview_items_render_real_thumbnail(builder_review_run: Path) -> None:
     _ensure_qapp()
     items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
-        [_sample_mini_dma_record()],
+        [_sample_mini_dma_record(builder_review_run)],
         logging.getLogger("test"),
         width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
         height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
@@ -3917,11 +3920,11 @@ def test_mini_dma_section_process_accepts_iso_current_without_sweep_summary_erro
     assert not caplog.records
 
 
-def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixmap() -> None:
+def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixmap(builder_review_run: Path) -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
-        record = _sample_mini_dma_record()
+        record = _sample_mini_dma_record(builder_review_run)
         second = MiniDmaRecord(
             path=record.path,
             sample=record.sample,
@@ -3962,11 +3965,12 @@ def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixm
 
 def test_mini_dma_section_defers_visible_preview_render(
     monkeypatch: pytest.MonkeyPatch,
+    builder_review_run: Path,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
-        record = _sample_mini_dma_record()
+        record = _sample_mini_dma_record(builder_review_run)
         section._record_groups = {record.sample: [record]}  # noqa: SLF001
         row = pd.Series(
             {
@@ -4007,11 +4011,12 @@ def test_mini_dma_section_defers_visible_preview_render(
 
 def test_mini_dma_lazy_project_preview_uses_placeholder_without_loading_source(
     monkeypatch: pytest.MonkeyPatch,
+    builder_review_run: Path,
 ) -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
-        record = _sample_mini_dma_record()
+        record = _sample_mini_dma_record(builder_review_run)
         section._record_groups = {record.sample: [record]}  # noqa: SLF001
         section._project_previews_deferred = True  # noqa: SLF001
         monkeypatch.setattr(
@@ -7275,14 +7280,19 @@ def test_safe_plot_stem_removes_path_separators() -> None:
 
 def test_build_database_integration(tmp_path: Path) -> None:
     pytest.importorskip("openpyxl")
-    base = Path("sample_data/database_builder")
+    from synthetic_data import write_fabrication_root
+
+    base = tmp_path / "synthetic-builder"
+    fabrication_root = write_fabrication_root(base / "microwire data", integration=True)
     anneal_files = [
         base / "current annealing data" / "Ni55Fe18Ga27 4_1 s1 1000mA.txt",
         base / "current annealing data" / "Ni55Fe18Ga27 4_1 s2 100mA.txt",
     ]
-    composition_file = base / "microwire data" / "Ni55Fe18Ga27" / "Ni55Fe18Ga27.xlsx"
-    piece_dir = base / "microwire data" / "Ni55Fe18Ga27" / "4.Ni55Fe18Ga27 26112024 0850"
-    piece_file = sorted(piece_dir.glob("*.xlsx"))[0]
+    anneal_files[0].parent.mkdir()
+    for path in anneal_files:
+        path.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n", encoding="utf-8")
+    composition_file = fabrication_root / "Ni55Fe18Ga27" / "Ni55Fe18Ga27.xlsx"
+    piece_file = fabrication_root / "Ni55Fe18Ga27" / "4.Ni55Fe18Ga27 02012000 0304" / "4.Ni55Fe18Ga27.xlsx"
 
     config = BuilderConfig(
         fabrication_files=[composition_file, piece_file],
@@ -7305,7 +7315,7 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert pd.isna(row[core.STRAIN_COLUMN])
     assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
     assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
-    assert row["Production datetime"] == "2024-11-26 08:50:00"
+    assert row["Production datetime"] == "2000-01-02 03:04:00"
     assert "csv" in result.exports
     assert Path(result.exports["csv"]).exists()
 
@@ -10920,11 +10930,11 @@ def test_annealing_transition_review_common_actions_are_subsecond() -> None:
         assert median_ms < 1000.0, f"{action} median was {median_ms:.1f} ms"
 
 
-def test_builder_review_smoothness_benchmark_runs_headless() -> None:
+def test_builder_review_smoothness_benchmark_runs_headless(builder_review_run: Path) -> None:
     _ensure_qapp()
     from scripts.benchmark_builder_review_smoothness import run_benchmark
 
-    results = run_benchmark(iterations=1, record_count=6)
+    results = run_benchmark(iterations=1, record_count=6, run_path=builder_review_run)
 
     assert "current_annealing" in results
     assert "mini_dma" in results

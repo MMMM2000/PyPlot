@@ -36189,7 +36189,7 @@ class AssemblySection(QtWidgets.QWidget):
                 "Importing workbooks requires openpyxl.",
             )
             return
-        start_dir = _dialog_start_directory("sample_data")
+        start_dir = _dialog_start_directory()
         path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Import workbook as source",

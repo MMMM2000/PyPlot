@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -17,16 +16,9 @@ from microwire_data_builder.ui import VIDEO_END_LENGTH_COLUMN
 
 
 def _sample_builder_root(tmp_path: Path) -> Path:
-    source_root = (
-        Path(__file__).resolve().parents[1]
-        / "sample_data"
-        / "database_builder"
-        / "microwire data"
-    )
-    target_root = tmp_path / "microwire data"
-    shutil.copytree(source_root / "Ni50Fe27Ga23", target_root / "Ni50Fe27Ga23")
-    shutil.copytree(source_root / "Ni54Fe23Ga15", target_root / "Ni54Fe23Ga15")
-    return target_root
+    from synthetic_data import write_fabrication_root
+
+    return write_fabrication_root(tmp_path / "microwire data")
 
 
 def _build_section(
