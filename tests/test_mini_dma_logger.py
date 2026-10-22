@@ -10585,10 +10585,10 @@ def test_superseded_fabrication_worker_is_retained_and_stale_result_ignored(
         _close_test_window(window)
 
 
-def test_fabrication_worker_indexes_real_builder_workbooks(qtbot) -> None:
-    root = Path("sample_data/database_builder/microwire data/Ni50Fe27Ga23")
-    if not root.exists():
-        pytest.skip("sample fabrication data is unavailable")
+def test_fabrication_worker_indexes_synthetic_builder_workbooks(qtbot, tmp_path: Path) -> None:
+    from synthetic_data import write_fabrication_root
+
+    root = write_fabrication_root(tmp_path / "fabrication") / "Ni50Fe27Ga23"
     worker = mini_dma_mod.FabricationSuggestionWorker(root, composition="Ni50Fe27Ga23")
     result: dict[str, object] = {}
 

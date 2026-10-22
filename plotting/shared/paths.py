@@ -18,10 +18,9 @@ def download_dir() -> str:
 
 
 def sample_dir() -> str:
-    """Return the sample data directory if it exists."""
+    """Return the default input directory (historical API name)."""
 
-    sample = Path(__file__).resolve().parents[1] / "sample_data"
-    return str(sample) if sample.exists() else download_dir()
+    return download_dir()
 
 
 def _settings() -> QtCore.QSettings:

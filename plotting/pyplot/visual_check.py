@@ -66,11 +66,8 @@ def _restore_settings(
 
 
 def _default_shape_memory_inputs() -> list[Path]:
-    base = Path("sample_data/manual_stress-strain")
-    return [
-        (base / "Ni50Fe27Ga23 5_4 50mA.txt").resolve(),
-        (base / "Ni50Fe27Ga23 5_4 87mA.txt").resolve(),
-    ]
+    # Scientific visual acceptance requires explicitly selected disposable inputs.
+    return []
 
 
 def _collect_shape_memory_tabs(window: PyPlotWorkbench) -> list[tuple[QtWidgets.QWidget, Any]]:

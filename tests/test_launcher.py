@@ -1457,7 +1457,7 @@ def test_launcher_detects_pyplot_automation_flags() -> None:
             "--pyplot-plugin",
             "Hysteresis Loops",
             "--pyplot-import",
-            "sample_data/hysteresis_loops",
+            "synthetic-inputs/hysteresis_loops",
             "--pyplot-plot",
         ]
     )

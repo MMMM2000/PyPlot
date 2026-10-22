@@ -88,8 +88,7 @@ def _measure(
     }
 
 
-def _mini_dma_record() -> MiniDmaRecord:
-    run_path = REPO_ROOT / "sample_data" / "mini dma" / "Ni50Fe27Ga23 12_2 test_run32"
+def _mini_dma_record(run_path: Path) -> MiniDmaRecord:
     return MiniDmaRecord(
         path=run_path,
         sample="Ni50Fe27Ga23 12_2",
@@ -99,14 +98,14 @@ def _mini_dma_record() -> MiniDmaRecord:
     )
 
 
-def _mini_dma_dialog() -> tuple[
+def _mini_dma_dialog(run_path: Path) -> tuple[
     QtWidgets.QApplication,
     builder_ui._MiniDmaTransitionReviewDialog,  # type: ignore[name-defined]
     dict[str, dict[str, object]],
 ]:
     app = _ensure_app()
     logger = logging.getLogger("builder_review_smoothness")
-    record = _mini_dma_record()
+    record = _mini_dma_record(run_path)
     stored: dict[str, dict[str, object]] = {}
 
     def _set_review(record_id: str, payload: dict[str, object]) -> None:
@@ -138,7 +137,7 @@ def _close(dialog: QtWidgets.QDialog, app: QtWidgets.QApplication) -> None:
     app.processEvents()
 
 
-def _run_mini_dma_benchmark(iterations: int) -> dict[str, object]:
+def _run_mini_dma_benchmark(iterations: int, run_path: Path) -> dict[str, object]:
     results: dict[str, object] = {"actions": {}}
     for label, callback_factory in (
         (
@@ -164,7 +163,7 @@ def _run_mini_dma_benchmark(iterations: int) -> dict[str, object]:
             lambda dialog: lambda _index: dialog._select_next_unreviewed(),  # noqa: SLF001
         ),
     ):
-        app, dialog, _stored = _mini_dma_dialog()
+        app, dialog, _stored = _mini_dma_dialog(run_path)
         try:
             results["actions"][label] = _measure(label, iterations, callback_factory(dialog), app)  # type: ignore[index]
         finally:
@@ -172,14 +171,16 @@ def _run_mini_dma_benchmark(iterations: int) -> dict[str, object]:
     return results
 
 
-def run_benchmark(iterations: int, record_count: int) -> dict[str, object]:
+def run_benchmark(iterations: int, record_count: int, *, run_path: Path) -> dict[str, object]:
+    if not all((run_path / name).is_file() for name in ("measurement.csv", "metadata.json")):
+        raise ValueError("--mini-dma-run must contain a disposable measurement.csv and metadata.json")
     iterations = max(1, int(iterations))
     record_count = max(int(record_count), iterations + 5)
     return {
         "iterations": iterations,
         "record_count": record_count,
         "current_annealing": run_current_annealing_benchmark(iterations, record_count),
-        "mini_dma": _run_mini_dma_benchmark(iterations),
+        "mini_dma": _run_mini_dma_benchmark(iterations, run_path),
         "interpretation": {
             "pyqtgraph": (
                 "Synthetic review actions are measured directly here; use p95/max action "
@@ -191,6 +192,7 @@ def run_benchmark(iterations: int, record_count: int) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mini-dma-run", type=Path, required=True, help="Selected disposable TMA run directory.")
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument("--record-count", type=int, default=80)
     parser.add_argument(
@@ -199,7 +201,7 @@ def main() -> int:
         default=Path("artifacts/builder_review_smoothness/timings.json"),
     )
     args = parser.parse_args()
-    results = run_benchmark(args.iterations, args.record_count)
+    results = run_benchmark(args.iterations, args.record_count, run_path=args.mini_dma_run)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, indent=2, sort_keys=True), encoding="utf-8")
     print(args.out)

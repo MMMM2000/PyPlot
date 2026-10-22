@@ -12,10 +12,10 @@ from plotting.pyplot.app import PyPlotWorkbench
 
 
 def test_parse_dma_txt_reads_sample_iso_stress_data() -> None:
-    sample = Path("sample_data/DMA/Ni50Fe27Ga23 11_1 s1.txt")
+    sample = Path(__file__).parent / "fixtures" / "dma_iso_stress" / "minimal_iso_stress.txt"
     parsed = parse_dma_txt(sample)
 
-    assert parsed, "expected at least one IsoStress dataset"
+    assert parsed == {40: ([25.0, 35.0, 45.0, 55.0], [0.5, 0.6, 0.7, 0.8])}
     for stress, (temps, strains) in parsed.items():
         assert isinstance(stress, int)
         assert temps
