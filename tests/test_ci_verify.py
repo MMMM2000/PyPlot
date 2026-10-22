@@ -54,7 +54,7 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
     assert "PYPLOT_TEST_TEMP_ISOLATED=1" in result.stdout
     if os.name == "nt":
         expected_temp = REPO_ROOT / "artifacts" / "t" / "unit"
-        expected_basetemp = Path("C:/tmp/pyt/unit")
+        expected_basetemp = REPO_ROOT / "artifacts" / "p" / "unit"
         env_lines = {
             key: value
             for line in result.stdout.splitlines()
@@ -64,7 +64,7 @@ def test_ci_verify_dry_run_uses_isolated_windows_defaults(tmp_path: Path) -> Non
         assert Path(env_lines["TEMP"]).resolve() == expected_temp.resolve()
         assert Path(env_lines["TMP"]).resolve() == expected_temp.resolve()
         assert "--basetemp" in result.stdout
-        assert Path(env_lines["pytest_basetemp"]).resolve() == expected_basetemp.resolve()
+        assert Path(env_lines["pytest_basetemp"]).samefile(expected_basetemp)
     assert "--basetemp" in result.stdout
     assert "-p no:cacheprovider" in result.stdout
     assert (
@@ -126,3 +126,29 @@ def test_ci_verify_workers_zero_keeps_one_lane(tmp_path: Path) -> None:
     assert result.stdout.count("lane=") == 1
     assert "lane=serial" in result.stdout
     assert "-n " not in result.stdout
+
+
+def test_ci_verify_basetemp_is_workspace_scoped_and_run_isolated(tmp_path: Path) -> None:
+    from scripts.ci_verify import _basetemp_for_run
+
+    first = _basetemp_for_run('run-first', tmp_path/'first')
+    second = _basetemp_for_run('run-second', tmp_path/'second')
+    assert first != second
+    if os.name == 'nt':
+        assert first.resolve().is_relative_to((REPO_ROOT/'artifacts').resolve())
+        assert second.resolve().is_relative_to((REPO_ROOT/'artifacts').resolve())
+    else:
+        assert first == tmp_path/'first'/'pytest-basetemp'
+        assert second == tmp_path/'second'/'pytest-basetemp'
+
+
+def test_ci_verify_supports_deep_fixture_paths_without_machine_settings(tmp_path: Path) -> None:
+    from scripts.ci_verify import build_parser, prepare_environment
+
+    args = build_parser().parse_args(['--artifacts-dir', str(tmp_path/'artifacts'),
+                                      '--run-id', 'long-path-regression'])
+    _env, base = prepare_environment(args)
+    payload = base/('a'*80)/('b'*80)/('c'*80)/'payload.bin'
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_bytes(b'isolated fixture')
+    assert payload.read_bytes() == b'isolated fixture'
