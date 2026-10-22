@@ -11,6 +11,12 @@
 - Never test against the user's real `.pypj`, `.pydpj`, or persistent app-data stores. Use disposable copies, synthetic data, and isolated storage roots.
 - Put temporary tests, screenshots, caches, and diagnostics under ignored `artifacts/` paths.
 
+## Builder Database Corrections
+
+- Never rewrite `.pydpj` ZIP members directly. Correct tables on a disposable copy with the normal Builder writer or `scripts/update_builder_tables.py`; descriptors must be generated from the saved bytes.
+- Before promoting a shared database, verify every package entry and check Builder opening plus the logger table import in isolated storage. Preserve intentional corrections and deferred measurement payloads.
+- Publish with `scripts/publish_builder_project.py`, an explicit expected old-file SHA-256 and a new backup path. Keep its receipt and backup; never bypass stale-target, save-lock or integrity checks. Manifest recovery is explicit and copy-only, never an automatic import fallback.
+
 ## Environment
 
 - Use `uv` with the Python version required by `pyproject.toml`. When dependencies change, keep `pyproject.toml`, `uv.lock`, and compatibility requirement exports aligned.
