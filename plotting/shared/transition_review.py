@@ -251,6 +251,13 @@ def validate_review(payload: Mapping[str, Any]) -> dict[str, Any]:
             cleaned["strain_at_transition_pct"] = (
                 {} if status == "no_transition" else strain_values
             )
+            from plotting.plugins.mini_dma.cycle_strain import clean_cycle_strain_metrics
+
+            cycle_strain = clean_cycle_strain_metrics(raw.get("cycle_strain"))
+            if cycle_strain:
+                cleaned["cycle_strain"] = cycle_strain
+            else:
+                cleaned.pop("cycle_strain", None)
         raw_reference = raw.get("strain_reference")
         if isinstance(raw_reference, Mapping):
             reference: dict[str, Any] = {}

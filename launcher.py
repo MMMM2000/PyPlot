@@ -2175,6 +2175,14 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA load (g)",
     "TMA strain (%)",
     "TMA strain peak current (mA)",
+    "TMA heating strain (%)",
+    "TMA cooling strain (%)",
+    "TMA residual strain (%)",
+    "TMA strain reference length (mm)",
+    "TMA strain reference",
+    "TMA cooling endpoint current (mA)",
+    "TMA cooling duration (s)",
+    "TMA cooling recorded",
     "TMA As",
     "TMA Af",
     "TMA Ms",
@@ -2273,6 +2281,14 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA load (g)": "TMA load (g)",
     "TMA strain (%)": "TMA strain (%)",
     "TMA strain peak current (mA)": "TMA strain peak current (mA)",
+    "TMA heating strain (%)": "TMA heating strain (%)",
+    "TMA cooling strain (%)": "TMA cooling strain (%)",
+    "TMA residual strain (%)": "TMA residual strain (%)",
+    "TMA strain reference length (mm)": "TMA strain reference length (mm)",
+    "TMA strain reference": "TMA strain reference",
+    "TMA cooling endpoint current (mA)": "TMA cooling endpoint current (mA)",
+    "TMA cooling duration (s)": "TMA cooling duration (s)",
+    "TMA cooling recorded": "TMA cooling recorded",
     "TMA As": "TMA As (mA)",
     "TMA Af": "TMA Af (mA)",
     "TMA Ms": "TMA Ms (mA)",
@@ -2380,7 +2396,7 @@ def _tma_target_identity(target_label: object) -> tuple[object, ...]:
         load_value: object = None
         if isinstance(load, (int, float)) and math.isfinite(float(load)):
             load_value = round(float(load), 6)
-        return ("stress_load", prefix, round(float(stress), 6), load_value)
+        return ("stress_load", prefix, round(float(stress), 6), load_value, _tma_sweep_index(target_label))
     return ("label", prefix, str(target_label or "").strip().casefold())
 
 
@@ -2389,8 +2405,17 @@ def _tma_target_stress_identity(target_label: object) -> tuple[object, ...] | No
     prefix = _tma_target_prefix(target_label)
     stress = parsed.get("TMA stress (MPa)")
     if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
-        return ("stress", prefix, round(float(stress), 6))
+        return ("stress", prefix, round(float(stress), 6), _tma_sweep_index(target_label))
     return None
+
+
+def _tma_sweep_index(target_label: object) -> int | None:
+    match = re.search(r"\bsweep\s+(\d+)\s*/\s*\d+", str(target_label), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _tma_unsuffixed_target(target_label: str) -> str:
+    return re.sub(r"\s*\N{MIDDLE DOT}?\s*sweep\s+\d+\s*/\s*\d+\s*$", "", target_label, flags=re.IGNORECASE).strip()
 
 
 def _parse_tma_transition_line(line: object) -> tuple[str, dict[str, float]]:
@@ -2501,8 +2526,12 @@ def _mini_dma_records_from_sections(sections: Mapping[str, object]) -> list[obje
 
 
 def _tma_source_identity(value: object) -> str:
-    text = str(value or "").strip().replace("\\", "/")
-    return text.casefold()
+    text = re.sub(r"/+", "/", str(value or "").strip().replace("\\", "/"))
+    if text.startswith("/?/"):
+        text = text[3:]
+        if text.casefold().startswith("unc/"):
+            text = "/" + text[4:]
+    return text.rstrip("/").casefold()
 
 
 def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple[object, ...]:
@@ -2530,6 +2559,36 @@ def _tma_record_strain_summary_lines(record: object) -> tuple[object, ...]:
     except Exception:
         return saved
     return recalculated or saved
+
+
+def _tma_cycle_export_values(metrics: object) -> dict[str, object]:
+    from plotting.plugins.mini_dma.cycle_strain import clean_cycle_strain_metrics
+
+    cleaned = clean_cycle_strain_metrics(metrics)
+    mapping = {
+        "heating_strain_pct": "TMA heating strain (%)",
+        "cooling_strain_pct": "TMA cooling strain (%)",
+        "residual_strain_pct": "TMA residual strain (%)",
+        "reference_length_mm": "TMA strain reference length (mm)",
+        "reference_method": "TMA strain reference",
+        "cooling_end_current_mA": "TMA cooling endpoint current (mA)",
+        "cooling_duration_s": "TMA cooling duration (s)",
+        "cooling_recorded": "TMA cooling recorded",
+    }
+    return {column: cleaned[field] for field, column in mapping.items() if field in cleaned}
+
+
+def _tma_record_strain_entries(record: object) -> list[tuple[str, dict[str, object]]]:
+    from microwire_data_builder.core import mini_dma_cycle_strain_rows
+
+    derived = mini_dma_cycle_strain_rows(record)
+    if derived:
+        return [(str(item["target_label"]), {
+            "TMA strain (%)": item["max_strain_pct"],
+            "TMA strain peak current (mA)": item["current_at_max_strain_mA"],
+            **_tma_cycle_export_values(item["cycle_strain"]),
+        }) for item in derived]
+    return [_parse_tma_strain_line(line) for line in _tma_record_strain_summary_lines(record)]
 
 
 def _normalise_transition_review_status(value: object) -> str:
@@ -2757,10 +2816,17 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
     record_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
     strain_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
     strain_by_stress: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
-    record_strain_by_target: dict[tuple[str, tuple[object, ...]], dict[str, float]] = {}
+    record_strain_by_target: dict[tuple[str, tuple[object, ...]], dict[str, object]] = {}
     record_strain_rows: list[dict[str, object]] = []
     transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
     reviews = _mini_dma_review_records_from_sections(sections)
+    record_entries = [(record, _tma_record_strain_entries(record)) for record in _mini_dma_records_from_sections(sections)]
+    target_aliases: dict[tuple[str, tuple[object, ...]], str] = {}
+    for record, entries in record_entries:
+        source_key = _tma_source_identity(getattr(record, "path", ""))
+        for target, _values in entries:
+            # Legacy unsuffixed decisions refer to the final sweep; 1st: stays separate.
+            target_aliases[(source_key, _tma_target_identity(_tma_unsuffixed_target(target)))] = target
     excluded_record_targets: set[tuple[str, tuple[object, ...]]] = set()
     excluded_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
     excluded_sample_stresses: set[tuple[str, str, tuple[object, ...]]] = set()
@@ -2771,12 +2837,17 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             path = record_id.rsplit("::", 1)[0]
         return _tma_source_identity(path)
 
+    def review_target_label(record_id: str, review: Mapping[str, object]) -> str:
+        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        source = review_source_key(record_id, review)
+        return target_aliases.get((source, _tma_target_identity(target)), target)
+
     # Collect withheld targets before any fallback: skipping only the review row lets
     # cached strain rows reintroduce that target, or lend its values to a sibling.
     for record_id, review in reviews.items():
         if _transition_review_allows_export(review):
             continue
-        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        target = review_target_label(record_id, review)
         if not target:
             continue
         target_key = _tma_target_identity(target)
@@ -2786,9 +2857,13 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         composition, microwire = _sample_to_tma_identity(review.get("sample"))
         if composition and microwire:
             excluded_sample_targets.add((composition, microwire, target_key))
+            excluded_sample_targets.add((composition, microwire, _tma_target_identity(_tma_unsuffixed_target(target))))
             stress_key = _tma_target_stress_identity(target)
             if stress_key is not None:
                 excluded_sample_stresses.add((composition, microwire, stress_key))
+            legacy_stress_key = _tma_target_stress_identity(_tma_unsuffixed_target(target))
+            if legacy_stress_key is not None:
+                excluded_sample_stresses.add((composition, microwire, legacy_stress_key))
 
     for compact_row in compact_rows:
         composition = str(compact_row.get("Composition") or "").strip()
@@ -2822,7 +2897,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 if sample_target not in excluded_sample_targets:
                     transition_by_target[sample_target] = values
 
-    for record in _mini_dma_records_from_sections(sections):
+    for record, entries in record_entries:
         composition, microwire = _sample_to_tma_identity(getattr(record, "sample", ""))
         if not composition or not microwire:
             continue
@@ -2830,12 +2905,12 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         run_label = str(getattr(record, "label", "") or "").strip()
         if not run_label:
             run_label = Path(str(getattr(record, "path", "") or "")).name
-        for raw_line in _tma_record_strain_summary_lines(record):
-            target, strain_values = _parse_tma_strain_line(raw_line)
+        for target, strain_values in entries:
             if not target or not strain_values:
                 continue
             target_key = _tma_target_identity(target)
             record_sample_targets.add((composition, microwire, target_key))
+            record_sample_targets.add((composition, microwire, _tma_target_identity(_tma_unsuffixed_target(target))))
             if (source_key, target_key) in excluded_record_targets:
                 continue
             if source_key:
@@ -2856,7 +2931,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         status = _normalise_tma_status(review.get("status"))
         if not _transition_review_allows_export(review):
             continue
-        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        target = review_target_label(record_id, review)
         if not target:
             continue
         composition, microwire = _sample_to_tma_identity(review.get("sample"))
@@ -2894,6 +2969,17 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 strain_values = strain_by_stress.get((composition, microwire, stress_key))
         if strain_values:
             row.update(strain_values)
+        # Fresh raw/embedded derivation takes precedence over a saved derived value.
+        for column, value in _tma_cycle_export_values(review.get("cycle_strain")).items():
+            if column not in row:
+                row[column] = value
+        saved_cycle = review.get("cycle_strain")
+        if isinstance(saved_cycle, Mapping) and saved_cycle.get("cooling_review_override") is False:
+            # A freshly derived return ramp cannot undo the reviewer's decision.
+            for column in ("TMA cooling strain (%)", "TMA residual strain (%)",
+                           "TMA cooling endpoint current (mA)", "TMA cooling duration (s)"):
+                row[column] = None
+            row["TMA cooling recorded"] = False
         values = _coerce_tma_values(review.get("manual_values_mA"))
         if not values:
             values = _coerce_tma_values(review.get("values"))

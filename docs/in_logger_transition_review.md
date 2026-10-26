@@ -63,6 +63,64 @@ The content fingerprint is the durable identity. Paths are useful provenance but
 
 The expanded TMA workbook export includes `TMA strain at As/Af/Ms/Mf (%)` beside the reviewed transition currents. These are point strains on each target's per-target `L0` reference, distinct from the existing peak-strain column.
 
+## Heating, cooling and residual strain
+
+The TMA editor also displays **Heating strain**, **Cooling strain** and
+**Residual strain**. These are signed changes over the measured branches, not
+transformation-only amplitudes between picked As/Af or Ms/Mf markers. Negative
+means contraction; positive means extension.
+
+For the paired sweep, `Lref` is its minimum calibrated length (the same reference
+as the per-target strain plot). Heating strain is `100*(Lhot-Lstart)/Lref`,
+cooling strain is `100*(Lend-Lhot)/Lref`, and residual strain is
+`100*(Lend-Lstart)/Lref`. Both legs use the same reference, so heating plus cooling
+equals residual strain. The high-current hold belongs to heating and the last
+point of that hold is the shared turnaround. Recorded zero-current endpoints are
+retained. When physical length calibration is unavailable, differences of the
+recorded strain are used and the reference is explicitly labelled
+`recorded_strain_pct`; no physical reference length is invented.
+
+Cooling and residual strain stay unavailable when there is no sustained recorded
+cooling ramp, including an abrupt drop at termination. The cooling endpoint is
+the last measured point, **not a claim of room-temperature recovery or permanent
+deformation**. The Analysis export includes its current, cooling duration and
+reference information. First overheating and subsequent sweeps at the same
+stress remain separate. The three values and their endpoint/reference metadata
+travel in the portable review sidecar and Builder review, independently of the
+chosen transition currents. A reviewed no-transition outcome can still have
+measured strain changes. Excluded or unresolved review targets remain withheld.
+
+Marking a cooling branch as absent also clears cooling and residual strain in
+the saved review and export. Manually enabling an undetected short branch allows
+transition review, but does not manufacture strain endpoints; automatic strain
+metrics still require a sustained recorded ramp.
+
+## Working through a review queue
+
+1. Use a current checkout of PyPlot and a writable, locally available measurement
+   folder. Finish or stop acquisition before starting the review session.
+2. Open **Review transitions...** in the CA or TMA logger. The arrow menu selects
+   an older run or a parent-folder queue. CA also supports selecting a legacy
+   standalone `.txt`, `.dat` or `.csv` measurement file. Parent-folder queues
+   inspect the chosen folder and its direct children, not every nested folder.
+3. Work through each CA cycle or TMA stress/sweep. Choose **Auto**, **Manual** or
+   **Not observed** for each applicable phase point. Manual values may be picked
+   on the graph or typed. Use **Not observed** deliberately; a missing automatic
+   estimate is not itself evidence of no transition.
+4. Save, or use **Save and next** in the queue. Keep `transition_review.json`
+   with the measurement folder; legacy CA files use a uniquely named sidecar.
+   If saving fails, the editor retains the choices, reports the error and does
+   not advance. Correct folder access or availability and retry.
+5. Rescan the measurement source in Builder and save the Builder project. New
+   matching reviews import without re-picking the currents. A different existing
+   project decision is preserved as a conflict that must be resolved explicitly.
+
+This workflow is suitable for the person who measured the wire to record her own
+review decisions. It does not require sharing or editing a `.pydpj` file during
+the logger review itself. Keep a common current software version across the
+logger and Builder machines; a local software test does not establish another
+computer's installed revision or Drive write access.
+
 ## Retrospective review
 
 The initial historical campaign is intentionally limited to Prague measurement roots. Do not inventory or write Košice data in this pass; Košice can be handled later as a separately reviewed campaign.

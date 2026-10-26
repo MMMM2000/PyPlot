@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 import json
 import math
 import re
@@ -10,6 +11,8 @@ from typing import Collection, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+
+from .cycle_strain import cycle_strain_metrics, split_sweep_branches
 
 from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.transition_analysis import (
@@ -102,6 +105,11 @@ class CurrentSweepTargetSummary:
     af_current_mA: float | None = None
     ms_current_mA: float | None = None
     mf_current_mA: float | None = None
+    target_label: str = ""
+    sweep_index: int = 1
+    sweep_count: int = 1
+    first_overheating: bool = False
+    cycle_strain: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +277,7 @@ def current_sweep_groups(
     frame: pd.DataFrame,
     *,
     phases: Collection[str] | None = None,
+    include_zero_current: bool = False,
 ) -> list[tuple[float, pd.DataFrame]]:
     phase_filter = PLOT_PHASES if phases is None else set(phases)
     filtered = frame[frame["automation_phase"].isin(phase_filter)].copy()
@@ -285,7 +294,10 @@ def current_sweep_groups(
         target_value = float(target)
         for subgroup in _split_current_target_group(group):
             usable = subgroup.sort_values("elapsed_s", kind="stable").copy()
-            usable = usable[usable["current_mA"].abs() > 0.0]
+            if int((usable["current_mA"].abs() > 0.0).sum()) < MIN_POINTS_PER_TARGET:
+                continue
+            if not include_zero_current:
+                usable = usable[usable["current_mA"].abs() > 0.0]
             usable = _drop_consecutive_duplicate_rows(
                 usable,
                 subset=["current_mA", "strain_pct", "resistance_ohm"],
@@ -560,11 +572,8 @@ def interpolate_transition_strain_pct(
     ).dropna()
     if frame.empty:
         return {}
-    max_position = int(frame["current_mA"].to_numpy(dtype=float).argmax())
-    legs = {
-        "heating": frame.iloc[: max_position + 1],
-        "cooling": frame.iloc[max_position:],
-    }
+    heating, cooling, _recorded, _reason = split_sweep_branches(frame)
+    legs = {"heating": heating, "cooling": cooling}
     result: dict[str, float] = {}
     for label, raw_current in transition_currents_mA.items():
         if label not in {"As", "Af", "Ms", "Mf"}:
@@ -616,7 +625,14 @@ def summarize_current_sweep(
     voltage_limit_v: float | None = None,
 ) -> CurrentSweepSummary:
     target_summaries: list[CurrentSweepTargetSummary] = []
-    for target, group in current_sweep_groups(run.frame, phases=SUMMARY_PHASES):
+    groups = current_sweep_groups(run.frame, phases=SUMMARY_PHASES, include_zero_current=True)
+    counts = Counter(target for target, _group in groups)
+    indices: Counter[float] = Counter()
+    for target, group in groups:
+        indices[target] += 1
+        label = _format_plot_target_label(run, target, group)
+        if counts[target] > 1:
+            label += f" \N{MIDDLE DOT} sweep {indices[target]}/{counts[target]}"
         strain = _strain_from_trace_minimum_length(run, group)
         current = pd.to_numeric(group["current_mA"], errors="coerce")
         max_current_mA: float | None = None
@@ -642,6 +658,11 @@ def summarize_current_sweep(
                 max_strain_pct=max_strain_pct,
                 strain_at_max_current_pct=strain_at_max_current,
                 current_at_max_strain_mA=current_at_max_strain_mA,
+                target_label=label,
+                sweep_index=indices[target],
+                sweep_count=counts[target],
+                first_overheating=_is_first_overheating_group(run, target, group),
+                cycle_strain=cycle_strain_metrics(group, _length_trace_mm(run, group)),
                 **_transition_currents_for_group(strain, group),
             )
         )
@@ -660,7 +681,7 @@ def format_current_sweep_strain_summary(summary: CurrentSweepSummary) -> list[st
             current = target.max_current_mA
         if strain is None or current is None:
             continue
-        label = _format_target_summary_label(target.stress_mpa, target.load_g)
+        label = target.target_label or _format_target_summary_label(target.stress_mpa, target.load_g)
         lines.append(
             f"{label}: {_format_compact_number(strain, max_decimals=2)}% "
             f"@ {_format_compact_number(current, max_decimals=0)} mA"
@@ -689,7 +710,7 @@ def format_current_sweep_transition_summary(summary: CurrentSweepSummary) -> lis
         )
         if not all(value is not None for _label, value in values):
             continue
-        label = _format_target_summary_label(target.stress_mpa, target.load_g)
+        label = target.target_label or _format_target_summary_label(target.stress_mpa, target.load_g)
         parts = [
             f"{name} {_format_compact_number(float(value), max_decimals=0)} mA"
             for name, value in values
