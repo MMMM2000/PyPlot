@@ -1068,6 +1068,128 @@ def test_tma_target_export_includes_strain_only_record_payloads() -> None:
     assert all(row["TMA As"] is None or row["TMA As"] != row["TMA As"] for row in rows)
 
 
+@pytest.mark.parametrize("source_field", ["record_id", "record_path"])
+@pytest.mark.parametrize("normal_reviewed", [False, True])
+def test_tma_export_excludes_target_without_dropping_sibling_runs(
+    tmp_path: Path, source_field: str, normal_reviewed: bool,
+) -> None:
+    target = "50 MPa / 1 g"
+    excluded_path = tmp_path / "excluded-run"
+    normal_path = tmp_path / "normal-run"
+    records = [
+        MiniDmaRecord(
+            path=excluded_path, sample="Ni50Fe27Ga23 12-2", data=pd.DataFrame(),
+            label="excluded-run",
+            strain_summary=(
+                f"{target}: 5% @ 20 mA",
+                "100 MPa / 2 g: 3% @ 25 mA",
+                "1st: 50 MPa / 1 g: 6% @ 30 mA",
+            ),
+        ),
+        MiniDmaRecord(
+            path=normal_path, sample="Ni50Fe27Ga23 12-2", data=pd.DataFrame(),
+            label="normal-run", strain_summary=(f"{target}: 2% @ 22 mA",),
+        ),
+    ]
+    review_id = f"{excluded_path}::{target}" if source_field == "record_id" else "opaque-review-id"
+    review = {
+        "status": "excluded", "analysis_included": False,
+        "sample": "Ni50Fe27Ga23 12-2", "run_label": "excluded-run",
+        "target_label": target, "values": {"As": 11.0, "Af": 20.0},
+    }
+    if source_field == "record_path":
+        review["record_path"] = str(excluded_path)
+    reviews = {review_id: review}
+    if normal_reviewed:
+        reviews[f"{normal_path}::{target}"] = {
+            "status": "accepted", "sample": "Ni50Fe27Ga23 12-2",
+            "run_label": "normal-run", "target_label": target,
+            "values": {"As": 14.0, "Af": 22.0},
+        }
+    frame = launcher_module._expanded_tma_export_frame_from_sections({
+        "assemble": {"rows": [{
+            "Composition": "Ni50Fe27Ga23", "Microwire": "12/2",
+            "TMA strain by stress/load": [f"{target}: 5% @ 20 mA"],
+            "TMA transition currents by stress/load": [f"{target}: As 11 mA, Af 20 mA"],
+        }]},
+        "mini_dma": {
+            "payloads": {"mini_dma_records": safe_codec.encode_envelope(records)},
+            "extra": {"mini_dma_transition_reviews": {"records": reviews}},
+        },
+    })
+    assert set(zip(frame["TMA run"], frame["TMA target"])) == {
+        ("excluded-run", "100 MPa / 2 g"),
+        ("excluded-run", "1st: 50 MPa / 1 g"),
+        ("normal-run", target),
+    }
+    normal = frame.loc[frame["TMA run"] == "normal-run"].iloc[0]
+    assert normal["TMA strain (%)"] == 2.0
+    # A sample-level summary cannot lend the excluded run's transitions to a sibling.
+    if normal_reviewed:
+        assert normal["TMA As"] == 14.0
+    else:
+        assert pd.isna(normal["TMA As"])
+
+    # The user-facing Analysis workbook must retain the same run/target boundary.
+    workbook_path = tmp_path / "analysis.xlsx"
+    launcher_module._write_assemble_workbook(
+        output_path=workbook_path,
+        frame=pd.DataFrame([{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]),
+        preset="public", tma_frame=frame,
+    )
+    openpyxl = pytest.importorskip("openpyxl")
+    with workbook_path.open("rb") as stream:
+        workbook = openpyxl.load_workbook(stream, data_only=True)
+        values = list(workbook["Analysis"].values)
+        exported = [dict(zip(values[0], row)) for row in values[1:]]
+        assert len(exported) == 3
+        assert {(row["TMA run"], row["TMA target"]) for row in exported} == set(
+            zip(frame["TMA run"], frame["TMA target"])
+        )
+        assert not any(row["TMA strain (%)"] == 5.0 for row in exported)
+        workbook.close()
+
+
+def test_tma_export_exclusion_blocks_compact_fallback_without_payload() -> None:
+    target = "50 MPa / 1 g"
+    frame = launcher_module._expanded_tma_export_frame_from_sections({
+        "assemble": {"rows": [{
+            "Composition": "Ni50Fe27Ga23", "Microwire": "12/2",
+            "TMA graphs": ["excluded-run"],
+            "TMA strain by stress/load": [f"{target}: 5% @ 20 mA"],
+            "TMA transition currents by stress/load": [f"{target}: As 11 mA, Af 20 mA"],
+        }]},
+        "mini_dma": {"extra": {"mini_dma_transition_reviews": {"records": {
+            "excluded-run::" + target: {
+                "status": "excluded", "sample": "Ni50Fe27Ga23 12-2",
+                "target_label": target, "run_label": "excluded-run",
+            },
+        }}}},
+    })
+    assert frame.empty
+
+
+def test_tma_export_accepted_sibling_does_not_borrow_excluded_strain() -> None:
+    target = "50 MPa / 1 g"
+    reviews = {
+        f"{run}::{target}": {
+            "status": status, "sample": "Ni50Fe27Ga23 12-2",
+            "target_label": target, "run_label": run, "values": {"As": 12.0},
+        }
+        for run, status in [("excluded-run", "excluded"), ("normal-run", "accepted")]
+    }
+    frame = launcher_module._expanded_tma_export_frame_from_sections({
+        "assemble": {"rows": [{
+            "Composition": "Ni50Fe27Ga23", "Microwire": "12/2",
+            "TMA strain by stress/load": [f"{target}: 5% @ 20 mA"],
+        }]},
+        "mini_dma": {"extra": {"mini_dma_transition_reviews": {"records": reviews}}},
+    })
+    assert list(frame["TMA run"]) == ["normal-run"]
+    assert frame.iloc[0]["TMA As"] == 12.0
+    assert pd.isna(frame.iloc[0]["TMA strain (%)"])
+
+
 def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
