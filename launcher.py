@@ -2536,6 +2536,18 @@ def _normalise_transition_review_status(value: object) -> str:
     return str(value or "").strip().replace("-", "_").replace(" ", "_").casefold()
 
 
+def _transition_review_allows_export(review: Mapping[str, object]) -> bool:
+    status = _normalise_transition_review_status(review.get("status"))
+    if status not in _TRANSITION_REVIEW_FINAL_STATUSES | {"accepted"}:
+        return False
+    if review.get("portable_conflict") or review.get("superseded_by_cycle_ids"):
+        return False
+    if review.get("analysis_included") is False:
+        return False
+    # CA/VSM no-transition decisions intentionally have numeric included=False.
+    return status == "no_transition" or review.get("included") is not False
+
+
 def _section_extra_mapping(sections: Mapping[str, object], section_name: str) -> Mapping[str, object]:
     section = sections.get(section_name)
     if not isinstance(section, Mapping):
@@ -2621,11 +2633,10 @@ def _compact_transition_value(row: Mapping[str, object], *columns: str) -> objec
 
 def _expanded_annealing_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    for _record_id, review in _review_records_from_section_extra(sections, "annealing").items():
+    review_records = _review_records_from_section_extra(sections, "annealing")
+    for _record_id, review in review_records.items():
         status = _normalise_transition_review_status(review.get("status"))
-        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
-            continue
-        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+        if not _transition_review_allows_export(review):
             continue
         composition, microwire = _transition_sample_identity_from_review(review)
         row: dict[str, object] = {
@@ -2648,11 +2659,11 @@ def _expanded_annealing_transition_frame_from_sections(sections: Mapping[str, ob
                     row[f"Annealing {label}"] = values[label]
         rows.append(row)
 
-    if not rows:
+    if not review_records:
         for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
             status_text = _compact_transition_status_text(compact_row, "Current annealing transition status")
             status = _normalise_transition_review_status(status_text)
-            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            if status and not _transition_review_allows_export({"status": status}):
                 continue
             has_values = any(
                 not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (mA)", label))
@@ -2685,9 +2696,7 @@ def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object])
     review_records.update(_review_records_from_section_extra(sections, "transition_temps"))
     for _record_id, review in review_records.items():
         status = _normalise_transition_review_status(review.get("status"))
-        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
-            continue
-        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+        if not _transition_review_allows_export(review):
             continue
         composition, microwire = _transition_sample_identity_from_review(review, sample_key="group_key")
         row: dict[str, object] = {
@@ -2709,11 +2718,11 @@ def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object])
                     row[f"VSM {label}"] = values[label]
         rows.append(row)
 
-    if not rows:
+    if not review_records:
         for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
             status_text = _compact_transition_status_text(compact_row, "VSM transition temp status")
             status = _normalise_transition_review_status(status_text)
-            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            if status and not _transition_review_allows_export({"status": status}):
                 continue
             has_values = any(
                 not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (°C)", f"{label} (C)", label))
@@ -2751,10 +2760,44 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
     record_strain_by_target: dict[tuple[str, tuple[object, ...]], dict[str, float]] = {}
     record_strain_rows: list[dict[str, object]] = []
     transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    reviews = _mini_dma_review_records_from_sections(sections)
+    excluded_record_targets: set[tuple[str, tuple[object, ...]]] = set()
+    excluded_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
+    excluded_sample_stresses: set[tuple[str, str, tuple[object, ...]]] = set()
+
+    def review_source_key(record_id: str, review: Mapping[str, object]) -> str:
+        path = str(review.get("record_path") or "").strip()
+        if not path and "::" in record_id:
+            path = record_id.rsplit("::", 1)[0]
+        return _tma_source_identity(path)
+
+    # Collect withheld targets before any fallback: skipping only the review row lets
+    # cached strain rows reintroduce that target, or lend its values to a sibling.
+    for record_id, review in reviews.items():
+        if _transition_review_allows_export(review):
+            continue
+        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        if not target:
+            continue
+        target_key = _tma_target_identity(target)
+        source_key = review_source_key(record_id, review)
+        if source_key:
+            excluded_record_targets.add((source_key, target_key))
+        composition, microwire = _sample_to_tma_identity(review.get("sample"))
+        if composition and microwire:
+            excluded_sample_targets.add((composition, microwire, target_key))
+            stress_key = _tma_target_stress_identity(target)
+            if stress_key is not None:
+                excluded_sample_stresses.add((composition, microwire, stress_key))
 
     for compact_row in compact_rows:
         composition = str(compact_row.get("Composition") or "").strip()
         microwire = str(compact_row.get("Microwire") or "").strip()
+        compact_status = _compact_transition_status_text(
+            compact_row, "TMA transition status", "Mini DMA transition status",
+        )
+        if compact_status and not _transition_review_allows_export({"status": compact_status}):
+            continue
         for raw_line in _compact_tma_export_lines(
             compact_row,
             "TMA strain by stress/load",
@@ -2762,9 +2805,11 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         ):
             target, values = _parse_tma_strain_line(raw_line)
             if target and values:
-                strain_by_target[(composition, microwire, _tma_target_identity(target))] = values
+                sample_target = (composition, microwire, _tma_target_identity(target))
+                if sample_target not in excluded_sample_targets:
+                    strain_by_target[sample_target] = values
                 stress_key = _tma_target_stress_identity(target)
-                if stress_key is not None:
+                if stress_key is not None and (composition, microwire, stress_key) not in excluded_sample_stresses:
                     strain_by_stress[(composition, microwire, stress_key)] = values
         for raw_line in _compact_tma_export_lines(
             compact_row,
@@ -2773,7 +2818,9 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         ):
             target, values = _parse_tma_transition_line(raw_line)
             if target and values:
-                transition_by_target[(composition, microwire, _tma_target_identity(target))] = values
+                sample_target = (composition, microwire, _tma_target_identity(target))
+                if sample_target not in excluded_sample_targets:
+                    transition_by_target[sample_target] = values
 
     for record in _mini_dma_records_from_sections(sections):
         composition, microwire = _sample_to_tma_identity(getattr(record, "sample", ""))
@@ -2789,6 +2836,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 continue
             target_key = _tma_target_identity(target)
             record_sample_targets.add((composition, microwire, target_key))
+            if (source_key, target_key) in excluded_record_targets:
+                continue
             if source_key:
                 record_strain_by_target[(source_key, target_key)] = strain_values
             record_strain_rows.append(
@@ -2803,9 +2852,9 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 }
             )
 
-    for record_id, review in _mini_dma_review_records_from_sections(sections).items():
+    for record_id, review in reviews.items():
         status = _normalise_tma_status(review.get("status"))
-        if status == "excluded":
+        if not _transition_review_allows_export(review):
             continue
         target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
         if not target:
@@ -2826,9 +2875,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                     microwire = microwire or str(compact_row.get("Microwire") or "").strip()
                     break
         run_label = str(review.get("run_label") or "").strip()
-        source_key = ""
-        if "::" in record_id:
-            source_key = _tma_source_identity(record_id.rsplit("::", 1)[0])
+        source_key = review_source_key(record_id, review)
         row: dict[str, object] = {
             "Composition": composition,
             "Microwire": microwire,
@@ -2836,6 +2883,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             **_parse_tma_target_label(target),
         }
         target_key = _tma_target_identity(target)
+        if (source_key, target_key) in excluded_record_targets:
+            continue
         strain_values = record_strain_by_target.get((source_key, target_key)) if source_key else None
         if not strain_values:
             strain_values = strain_by_target.get((composition, microwire, target_key))
