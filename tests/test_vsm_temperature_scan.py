@@ -4,6 +4,7 @@ import contextlib
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from plotting.plugins.vsm_temperature_scan import core as module
 
 
@@ -121,6 +122,42 @@ def test_parse_file_appends_orientation_from_filename(tmp_path: Path) -> None:
 
     _frame, sample = processor._parse_file(path)
     assert sample == "Ni50Fe27Ga23 5-4 no glass 2 (90°)"
+
+
+@pytest.mark.parametrize("raw_end", ["@@END Data.", "@@end data", ""])
+def test_parse_file_keeps_raw_scan_separate_from_manipulated_footer(
+    tmp_path: Path, raw_end: str
+) -> None:
+    processor = module.VSMTemperatureScanProcessor()
+    path = tmp_path / "temperature_scan.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "@@Data",
+                "New Section: Section 0:",
+                "0 50 1.0 25",
+                "1 50 0.8 100",
+                "New Section: Section 1:",
+                "2 50 0.7 100",
+                "3 50 0.9 25",
+                raw_end,
+                "@@Final Manipulated Data",
+                "New Section: Section 0:",
+                "0 50 99 25",
+                "1 50 88 100",
+                "@@END Data.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    frame, _sample = processor._parse_file(path)
+
+    assert frame["temperature"].tolist() == [25.0, 100.0, 100.0, 25.0]
+    assert frame["signal"].tolist() == [1.0, 0.8, 0.7, 0.9]
+    assert frame["section_index"].tolist() == [0, 0, 1, 1]
 
 
 def test_axis_label_uses_kilooe_for_high_fields() -> None:

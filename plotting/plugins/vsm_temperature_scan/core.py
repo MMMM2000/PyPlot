@@ -193,6 +193,10 @@ class VSMTemperatureScanProcessor:
                     if line.startswith("@@End of Header."):
                         header_finished = True
                     continue
+                # EasyVSM exports may append a second, manipulated copy of the
+                # scan. Its repeated section numbers do not describe new ramps.
+                if line.casefold().startswith(("@@end data", "@@final manipulated data")):
+                    break
                 if not line or line.startswith("@@Data") or line.startswith("New Section"):
                     if line.startswith("New Section"):
                         try:
