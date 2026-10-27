@@ -6,7 +6,7 @@ Current annealing and TMA loggers offer transition review immediately after a ru
 
 The TMA Dashboard header also has a permanent `Review transitions...` split button. Its main action opens the latest completed run; the arrow menu selects one older run or starts a queue from a selected parent folder. The queue includes only that folder and its direct child run folders containing `measurement.csv`. The logger refuses to review while acquisition is active. The automatic post-run prompt remains available after successful recipe completion.
 
-The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder, a legacy standalone measurement file, or a parent-folder queue. The queue includes only that folder and its direct child run folders containing `measurement.txt`. The logger also refuses to review while acquisition is active.
+The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder, a legacy standalone measurement file, or a parent-folder queue. The parent queue includes that folder and its direct children, supporting TXT/CSV runs and legacy TXT/DAT/CSV measurements. **Review runs including subfolders...** explicitly includes nested groups. Administrative folders and run logs are excluded. The logger also refuses to review while acquisition is active. See [collection review and folder migration](current-annealing-review-folders.md) for the supported layouts.
 
 This keeps the fast experimental workflow Martin wants while preserving Builder as the place for cross-sample overview, conflict review, column selection, and public database export.
 
@@ -37,7 +37,7 @@ A multi-run queue loads one run at a time, shows `run N/total`, changes the acti
 
 ## Portable sidecar
 
-New current-annealing runs and TMA runs use one `transition_review.json` in the run folder. Legacy flat current-annealing files remain supported through a uniquely named `<measurement>.transition-review.json` beside the data file. A shared schema should contain:
+Current-annealing `measurement.txt` runs and TMA runs use one `transition_review.json` in the run folder. Current-annealing CSV and legacy files retain a uniquely named `<measurement-stem>.transition-review.json` beside the data file. A shared schema should contain:
 
 - schema version and experiment family (`current_annealing` or `tma`);
 - normalized sample identity plus the original source label;
