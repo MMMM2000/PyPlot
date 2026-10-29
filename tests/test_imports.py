@@ -15,6 +15,8 @@ def test_packages_importable():
     assert importlib.import_module('data_logging.data_logger')
     assert importlib.import_module('data_logging.current_annealing_logger')
     assert importlib.import_module('data_logging.mini_dma_logger')
+    assert importlib.import_module('data_logging.tma_logger')
+    assert importlib.import_module('data_logging.tma_logger.tma_logger')
     assert importlib.import_module('data_logging.manual_stress_strain_logger')
     assert importlib.import_module('plotting.plugins.temperature_dependence')
     assert importlib.import_module('plotting.plugins.temperature_dependence.core')

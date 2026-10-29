@@ -1,0 +1,1 @@
+Changed the Prague TMA G&G scale polling interval from 250 ms to 200 ms, matching the scale's measured response cadence and providing reliable acquisition near 5 Hz without changing Košice timing or the TMA control-loop period.
