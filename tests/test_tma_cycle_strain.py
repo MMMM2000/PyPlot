@@ -91,6 +91,34 @@ def test_high_current_hold_ends_at_shared_turnaround():
     assert at_turn["Ms"] == pytest.approx(-1.0)
 
 
+@pytest.mark.parametrize("return_kind, expected", [("ramp", True), ("shutoff", False), ("few_steps", False)])
+def test_long_noisy_holds_do_not_hide_a_return_ramp_or_invent_one(return_kind, expected):
+    rng = np.random.default_rng(42)
+    heat = np.linspace(0.0, 50.0, 51)
+    hot_hold = 50.0 + rng.normal(0.0, 0.15, 200)
+    if return_kind == "ramp":
+        returning = np.linspace(49.0, 0.0, 50)
+    elif return_kind == "few_steps":
+        returning = np.repeat([35.0, 15.0, 0.0], 80) + rng.normal(0.0, 0.15, 240)
+    else:
+        returning = np.array([0.0])
+    low_hold = rng.normal(0.0, 0.15, 400)
+    current = np.concatenate([heat, hot_hold, returning, low_hold])
+    frame = pd.DataFrame({
+        "elapsed_s": np.arange(len(current), dtype=float),
+        "current_mA": current,
+        "strain_pct": np.linspace(4.0, 1.0, len(current)),
+    })
+    result = cycle_strain_metrics(frame)
+    assert result["cooling_recorded"] is expected
+    if expected:
+        assert result["cooling_strain_pct"] is not None
+        assert result["residual_strain_pct"] == pytest.approx(-3.0)
+    else:
+        assert result["cooling_strain_pct"] is None
+        assert result["residual_strain_pct"] is None
+
+
 def test_uncalibrated_recorded_strain_has_explicit_unknown_length():
     result = cycle_strain_metrics(cycle_frame())
     assert result["reference_method"] == "recorded_strain_pct"

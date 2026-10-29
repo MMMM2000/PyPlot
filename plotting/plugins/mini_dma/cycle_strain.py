@@ -35,8 +35,29 @@ def split_sweep_branches(group: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
         len(descending) >= 6 and falling_steps >= 4 and tested_steps > 0
         and falling_steps / tested_steps >= 0.55 and drop >= max(1.0, span * 0.05)
     )
+    trend_recovered = False
+    if not recorded and len(descending) >= 31 and drop >= max(1.0, span * 0.05):
+        # Dense measured-current noise in a long hold can outnumber genuine
+        # falling ramp steps. Diagnose the trend without changing measured
+        # endpoints or the shared turnaround. A single abrupt shutoff must
+        # still fail, even when its adjacent holds contain noisy samples.
+        trend = descending.rolling(31, center=True, min_periods=1).median()
+        trend_differences = trend.diff().dropna()
+        trend_steps = trend_differences[trend_differences.abs() > tolerance]
+        trend_drop = float(trend.iloc[0] - trend.iloc[-1])
+        trend_falling = int((trend_steps < -tolerance).sum())
+        largest_fall = float((-trend_differences).max()) if len(trend_differences) else 0.0
+        recorded = bool(
+            trend_drop >= max(1.0, span * 0.05)
+            and trend_falling >= 4 and len(trend_steps) > 0
+            and trend_falling / len(trend_steps) >= 0.55
+            and largest_fall <= trend_drop * 0.3
+        )
+        if recorded:
+            falling_steps = trend_falling
+            trend_recovered = True
     reason = (
-        f"Sustained cooling ramp detected: {falling_steps} falling-current steps and {drop:.3g} mA total decrease."
+        f"Sustained cooling ramp detected{' from the measured-current median trend' if trend_recovered else ''}: {falling_steps} falling-current steps and {drop:.3g} mA total decrease."
         if recorded else
         "No sustained cooling ramp was recorded; short or abrupt current drops are treated as heating termination or wire failure."
     )
