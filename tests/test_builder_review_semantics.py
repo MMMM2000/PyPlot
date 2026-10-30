@@ -15,6 +15,22 @@ from plotting.shared import transition_review_adapters as adapter_module
 LABELS = ["As", "Af", "Ms", "Mf"]
 
 
+@pytest.mark.parametrize("status", ["accepted_auto", "manual_adjusted", "no_transition", "excluded", "needs_attention"])
+def test_ca_summary_respects_saved_values_and_clears_without_refitting(monkeypatch, status):
+    record = SimpleNamespace()
+    monkeypatch.setattr(builder_ui, "_transition_record_id_for_annealing_record", lambda _record: "ca:synthetic")
+    monkeypatch.setattr(builder_ui, "_auto_transition_values_for_annealing_record",
+                        lambda _record: pytest.fail("A saved review must not be refitted"))
+    review = {"status": status, "final_values_mA": {"As1": 30., "Af1": 31., "Ms1": 28.},
+              "auto_values_mA": {"As1": 35., "Ms1": 28., "Mf1": 19.},
+              "cleared_labels": ["Ms1", "Mf1"]}
+    section = SimpleNamespace(_annealing_section=SimpleNamespace(
+        transition_reviews_snapshot=lambda: {"ca:synthetic": review}))
+    actual = builder_ui.CurrentDensitySection._phase_values_for_annealing_record(section, record)
+    assert actual == ({"As1": 30., "Af1": 31.} if status in {"accepted_auto", "manual_adjusted"} else {})
+    assert review["final_values_mA"]["Ms1"] == 28.
+
+
 @pytest.mark.parametrize("changed_sidecar", [False, "values", "identity", "included"])
 def test_owner_resolved_ca_choice_survives_only_the_same_portable_decision(changed_sidecar):
     portable = {"status": "no_transition", "final_values_mA": {},

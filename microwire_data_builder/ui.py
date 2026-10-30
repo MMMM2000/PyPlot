@@ -20291,25 +20291,32 @@ class CurrentDensitySection(QtWidgets.QWidget):
         return frame.loc[:, desired_order]
 
     def _phase_values_for_annealing_record(self, record: MeasurementRecord) -> Dict[str, float]:
-        values = _auto_transition_values_for_annealing_record(record)
         record_id = _transition_record_id_for_annealing_record(record)
         snapshot_provider = getattr(self._annealing_section, "transition_reviews_snapshot", None)
         raw_reviews = snapshot_provider() if callable(snapshot_provider) else getattr(self._annealing_section, "_transition_reviews", {})
         payload = raw_reviews.get(record_id, {}) if isinstance(raw_reviews, dict) else {}
         if isinstance(payload, dict):
             status = str(payload.get("status") or "").strip()
-            if status in {
+            if payload.get("included") is False or payload.get("analysis_included") is False or status in {
                 TRANSITION_REVIEW_STATUS_NO_TRANSITION,
                 TRANSITION_REVIEW_STATUS_EXCLUDED,
+                TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
             }:
                 return {}
             final_values = _clean_transition_values(payload.get("final_values_mA"))
             manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+            if status in {TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED}:
+                values = final_values or manual_values or _clean_transition_values(payload.get("auto_values_mA"))
+            else:
+                values = _auto_transition_values_for_annealing_record(record)
             if final_values:
                 values.update(final_values)
             if manual_values:
                 values.update(manual_values)
-        return values
+            for label in payload.get("cleared_labels", ()) or ():
+                values.pop(label, None)
+            return values
+        return _auto_transition_values_for_annealing_record(record)
 
     def _current_density_row(
         self,
