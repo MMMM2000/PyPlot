@@ -2745,9 +2745,7 @@ def _prepare_tma_review(
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different TMA run content.")
     plots: dict[str, ReviewPlot] = {}
-    groups = tma_core.current_sweep_groups(
-        run.frame, phases=tma_core.SUMMARY_PHASES, include_zero_current=True,
-    )
+    groups = tma_core.current_sweep_summary_groups(run.frame)
     sweep_counts: dict[str, int] = {}
     for target, _group in groups:
         stress_key = f"{float(target):.9g}"

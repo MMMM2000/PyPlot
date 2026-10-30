@@ -15,6 +15,43 @@ from plotting.shared import transition_review_adapters as adapter_module
 LABELS = ["As", "Af", "Ms", "Mf"]
 
 
+@pytest.mark.parametrize("changed_sidecar", [False, "values", "identity", "included"])
+def test_owner_resolved_ca_choice_survives_only_the_same_portable_decision(changed_sidecar):
+    portable = {"status": "no_transition", "final_values_mA": {},
+                "cleared_labels": ["As1", "Af1", "Ms1", "Mf1"],
+                "content_identity": "sha256:" + "1" * 64}
+    existing = {"status": "manual_adjusted", "included": True, "analysis_included": True,
+                "final_values_mA": {"As1": 30.0, "Af1": 31.0}, "cleared_labels": ["Ms1", "Mf1"],
+                "portable_resolution": {"reviewer": "Reviewer", "reviewed_at": "2026-01-01T00:00:00Z",
+                                        "sidecar_review": deepcopy(portable)}}
+    incoming = deepcopy(portable)
+    if changed_sidecar == "values":
+        incoming.update(status="manual_adjusted", final_values_mA={"As1": 35.0})
+    elif changed_sidecar == "identity":
+        incoming['content_identity']='sha256:' + '2' * 64
+    elif changed_sidecar == "included":
+        incoming['analysis_included']=False
+    before = deepcopy((existing, incoming))
+    merged = builder_ui._merge_portable_annealing_review(existing, incoming)
+    if changed_sidecar:
+        assert merged["status"] == "needs_attention"
+        assert merged["portable_conflict"] == "project_and_sidecar_differ"
+    else:
+        assert merged["status"] == "manual_adjusted"
+        assert merged["final_values_mA"] == {"As1": 30.0, "Af1": 31.0}
+        assert merged["cleared_labels"] == ["Ms1", "Mf1"]
+        assert merged["portable_resolution"] == existing["portable_resolution"]
+    assert (existing, incoming) == before
+
+
+def test_ca_project_normalizer_retains_owner_resolution_provenance():
+    payload = {"status": "manual_adjusted", "final_values_mA": {"As1": 30.0},
+               "portable_resolution": {"reviewer": "Reviewer", "reviewed_at": "2026-01-01T00:00:00Z",
+                                       "sidecar_review": {"status": "no_transition"}}}
+    clean = builder_ui.AnnealingSection._clean_transition_review_payload(None, "ca:synthetic", payload)
+    assert clean["portable_resolution"] == payload["portable_resolution"]
+
+
 def _tma_import(tmp_path, monkeypatch, existing, target, *, auto_status="rejected"):
     run_dir = tmp_path / "synthetic_tma"
     run_dir.mkdir()

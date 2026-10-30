@@ -8,10 +8,19 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from .sweep_episodes import metrics_for_episode
+
 
 def split_sweep_branches(group: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, bool, str]:
     """Keep the high-current hold on heating; require a sustained return ramp."""
     empty = group.iloc[0:0].copy()
+    if "current_set_mA" in group:
+        values = cycle_strain_metrics(group)
+        turn = values.get("turn_position")
+        if turn is None:
+            return empty, empty, False, str(values.get("status", "Unqualified current episode"))
+        return (group.iloc[:turn + 1].copy(), group.iloc[turn:].copy(),
+                bool(values["cooling_recorded"]), str(values["cooling_reason"]))
     if group.empty or "current_mA" not in group:
         return empty, empty, False, "No usable current sweep was recorded."
     current = pd.to_numeric(group["current_mA"], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -71,6 +80,31 @@ def cycle_strain_metrics(group: pd.DataFrame, length_mm: pd.Series | None = None
     sweep, matching the existing TMA strain plot. Without that calibration,
     report differences of recorded strain and leave physical lengths unknown.
     """
+    qualification = group.attrs.get("tma_episode_qualification", {})
+    if qualification.get("selected") is False:
+        return {"version": 2, "method": "recipe_contiguous_commanded_turnaround_endpoint_difference",
+                "status": qualification["status"], "reference_method": "unavailable",
+                "reference_length_mm": None, "heating_recorded": False,
+                "cooling_recorded": False, "cooling_complete": False,
+                "heating_strain_pct": None, "cooling_strain_pct": None, "residual_strain_pct": None,
+                "max_current_mA": None, "max_strain_pct": None}
+    if "current_set_mA" in group:
+        metrics = metrics_for_episode(group, length_mm=length_mm)
+        metrics["reference_method"] = {
+            "recorded_logger_strain_pct_differences": "recorded_strain_pct",
+            "per_episode_minimum_calibrated_length": "per_target_minimum_length",
+            "invalid_length_trace": "invalid_length_trace",
+        }.get(metrics["reference_basis"], "unavailable")
+        metrics["cooling_reason"] = metrics["status"].replace("_", " ")
+        endpoints = metrics.get("endpoints", {})
+        for name, source in (("start", "start"), ("turnaround", "turnaround"), ("cooling_end", "end")):
+            point = endpoints.get(source, {})
+            available = name != "cooling_end" or metrics["cooling_recorded"]
+            for quantity, key in (("current_mA", "current_measured_mA"), ("length_mm", "length_mm"), ("elapsed_s", "elapsed_s")):
+                metrics[f"{name}_{quantity}"] = point.get(key) if available else None
+        end, hot = metrics.get("cooling_end_elapsed_s"), metrics.get("turnaround_elapsed_s")
+        metrics["cooling_duration_s"] = end - hot if end is not None and hot is not None and end >= hot else None
+        return metrics
     heating, cooling, cooling_recorded, reason = split_sweep_branches(group)
     metrics: dict[str, object] = {
         "version": 1, "method": "signed_endpoint_difference",
@@ -134,7 +168,7 @@ def apply_cooling_review_override(metrics: Mapping[str, object], override: objec
     """Respect a reviewer's absent-cooling decision without inventing endpoints."""
     result = dict(metrics)
     if override is False:
-        result.update(cooling_review_override=False, cooling_recorded=False,
+        result.update(cooling_review_override=False, cooling_recorded=False, cooling_complete=False,
                       cooling_reason="Reviewer marked the cooling branch as absent.")
         for key in ("cooling_strain_pct", "residual_strain_pct", "cooling_duration_s",
                     "cooling_end_current_mA", "cooling_end_length_mm", "cooling_end_elapsed_s"):
@@ -144,16 +178,19 @@ def apply_cooling_review_override(metrics: Mapping[str, object], override: objec
 
 def clean_cycle_strain_metrics(value: object) -> dict[str, object]:
     """Keep versioned, finite derived values in portable JSON records."""
-    if not isinstance(value, Mapping) or value.get("version") != 1:
+    if not isinstance(value, Mapping) or type(value.get("version")) is not int or value.get("version") not in {1, 2}:
         return {}
-    cleaned: dict[str, object] = {"version": 1}
-    for key in ("method", "reference_method", "cooling_reason", "endpoint"):
+    cleaned: dict[str, object] = {"version": value["version"]}
+    for key in ("method", "reference_method", "cooling_reason", "endpoint", "status", "cooling_return_method", "branch_qualification"):
         if isinstance(value.get(key), str):
             cleaned[key] = value[key]
-    for key in ("heating_recorded", "cooling_recorded", "cooling_review_override"):
+    for key in ("heating_recorded", "cooling_recorded", "cooling_review_override", "cooling_complete"):
         if isinstance(value.get(key), bool):
             cleaned[key] = value[key]
     fields = ["reference_length_mm", "heating_strain_pct", "cooling_strain_pct", "residual_strain_pct", "cooling_duration_s"]
+    fields += ["max_current_mA", "max_strain_pct", "max_recorded_set_current_mA", "max_recorded_measured_current_mA",
+               "partial_cooling_strain_pct", "partial_residual_strain_pct", "cooling_median_recorded_decrement_mA",
+               "cooling_endpoint_above_cold_start_mA"]
     fields += [f"{endpoint}_{quantity}" for endpoint in ("start", "turnaround", "cooling_end") for quantity in ("current_mA", "length_mm", "elapsed_s")]
     for key in fields:
         item = value.get(key)

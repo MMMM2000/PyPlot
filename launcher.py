@@ -2175,6 +2175,7 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA load (g)",
     "TMA strain (%)",
     "TMA strain peak current (mA)",
+    "TMA max current (mA)",
     "TMA heating strain (%)",
     "TMA cooling strain (%)",
     "TMA residual strain (%)",
@@ -2191,6 +2192,8 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA strain at Af (%)",
     "TMA strain at Ms (%)",
     "TMA strain at Mf (%)",
+    "TMA break current (mA)",
+    "TMA break stress (MPa)",
 ]
 ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Composition",
@@ -2281,6 +2284,7 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA load (g)": "TMA load (g)",
     "TMA strain (%)": "TMA strain (%)",
     "TMA strain peak current (mA)": "TMA strain peak current (mA)",
+    "TMA max current (mA)": "TMA max current (mA)",
     "TMA heating strain (%)": "TMA heating strain (%)",
     "TMA cooling strain (%)": "TMA cooling strain (%)",
     "TMA residual strain (%)": "TMA residual strain (%)",
@@ -2297,6 +2301,8 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA strain at Af (%)": "TMA strain at Af (%)",
     "TMA strain at Ms (%)": "TMA strain at Ms (%)",
     "TMA strain at Mf (%)": "TMA strain at Mf (%)",
+    "TMA break current (mA)": "TMA break current (mA)",
+    "TMA break stress (MPa)": "TMA break stress (MPa)",
 }
 ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP = {
     "TMA As (mA)": "TMA J_As (A/mm^2)",
@@ -2566,6 +2572,7 @@ def _tma_cycle_export_values(metrics: object) -> dict[str, object]:
 
     cleaned = clean_cycle_strain_metrics(metrics)
     mapping = {
+        "max_current_mA": "TMA max current (mA)",
         "heating_strain_pct": "TMA heating strain (%)",
         "cooling_strain_pct": "TMA cooling strain (%)",
         "residual_strain_pct": "TMA residual strain (%)",
@@ -2586,6 +2593,7 @@ def _tma_record_strain_entries(record: object) -> list[tuple[str, dict[str, obje
         return [(str(item["target_label"]), {
             "TMA strain (%)": item["max_strain_pct"],
             "TMA strain peak current (mA)": item["current_at_max_strain_mA"],
+            "TMA max current (mA)": item["max_current_mA"],
             **_tma_cycle_export_values(item["cycle_strain"]),
         }) for item in derived]
     return [_parse_tma_strain_line(line) for line in _tma_record_strain_summary_lines(record)]
@@ -2807,10 +2815,69 @@ def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object])
     return pd.DataFrame(rows, columns=VSM_TRANSITION_EXPORT_COLUMNS)
 
 
+def _append_accepted_tma_break_events(
+    rows: list[dict[str, object]],
+    review_rows: Mapping[tuple[object, ...], dict[str, object]],
+    sections: Mapping[str, object],
+) -> None:
+    """Append saved, qualified event observations without accepting transitions."""
+    section = sections.get("mini_dma")
+    extra = section.get("extra") if isinstance(section, Mapping) else None
+    register = extra.get("accepted_break_events") if isinstance(extra, Mapping) else None
+    if not isinstance(register, Mapping) or register.get("version") != 1:
+        return
+    events = register.get("events")
+    if not isinstance(events, list):
+        return
+    excluded_ids = register.get("excluded_event_ids")
+    excluded = set(str(value) for value in excluded_ids) if isinstance(excluded_ids, list) else set()
+    seen: set[str] = set()
+    annotated: set[int] = set()
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("include_for_export") is not True:
+            continue
+        event_id = str(event.get("event_id") or "")
+        if not event_id or event_id in seen or event_id in excluded:
+            continue
+        seen.add(event_id)
+        composition = str(event.get("composition") or "").strip()
+        wire = str(event.get("microwire") or "").strip()
+        source = _tma_source_identity(event.get("source_path"))
+        if not composition or not wire or not source:
+            continue
+        review_id = str(event.get("review_id") or "")
+        review_source, separator, target = review_id.rpartition("::")
+        row = None
+        if separator and _tma_source_identity(review_source) == source:
+            row = review_rows.get((source, _tma_target_identity(target)))
+        if (row is None or id(row) in annotated
+                or (row.get("Composition"), row.get("Microwire")) != (composition, wire)):
+            target = str(event.get("target_label") or "")
+            row = {
+                "Composition": composition, "Microwire": wire,
+                "TMA run": Path(str(event["source_path"])).name,
+                **_parse_tma_target_label(target),
+            }
+            rows.append(row)
+        annotated.add(id(row))
+        # The stored event classification distinguishes electrical wire loss
+        # from mechanical/slack observations; never infer this from a number.
+        for key, column in (
+            ("current_mA", "TMA break current (mA)"),
+            ("stress_mpa", "TMA break stress (MPa)"),
+        ):
+            value = event.get(key) if event.get("electrical_break") is True else None
+            row[column] = (
+                float(value) if isinstance(value, (int, float))
+                and not isinstance(value, bool) and math.isfinite(value) else None
+            )
+
+
 def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
     assemble_frame = _assemble_export_frame_from_sections(sections)
     compact_rows = assemble_frame.to_dict(orient="records")
     rows: list[dict[str, object]] = []
+    review_rows: dict[tuple[object, ...], dict[str, object]] = {}
     reviewed_targets: set[tuple[str, str, tuple[object, ...]]] = set()
     emitted_record_targets: set[tuple[str, tuple[object, ...]]] = set()
     record_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
@@ -3001,6 +3068,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 if label in transition_strain:
                     row[f"TMA strain at {label} (%)"] = transition_strain[label]
         rows.append(row)
+        review_rows[(source_key, target_key)] = row
+        review_rows[(source_key, _tma_target_identity(record_id.rsplit("::", 1)[-1]))] = row
         reviewed_targets.add((composition, microwire, target_key))
         if source_key:
             emitted_record_targets.add((source_key, target_key))
@@ -3063,6 +3132,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 record_row[f"TMA {label}"] = transition_values[label]
         rows.append(record_row)
 
+    _append_accepted_tma_break_events(rows, review_rows, sections)
     return pd.DataFrame(rows, columns=TMA_TARGET_EXPORT_COLUMNS)
 
 

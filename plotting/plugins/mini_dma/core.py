@@ -13,6 +13,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from .cycle_strain import cycle_strain_metrics, split_sweep_branches
+from .sweep_episodes import RAW, current_episodes, select_current_episode
 
 from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.transition_analysis import (
@@ -306,6 +307,29 @@ def current_sweep_groups(
                 continue
             groups.append((target_value, usable.reset_index(drop=True)))
     return groups
+
+
+def current_sweep_summary_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]]:
+    """Bind stable review targets to contiguous recipe episodes for metrics.
+
+    Keep existing target/sweep identities so a numerical correction never moves
+    an accepted review onto another target. Native holds are not deduplicated.
+    Legacy traces without commanded current retain their measured-current path.
+    """
+    timeline = frame.copy()
+    timeline[RAW] = np.arange(len(timeline))
+    groups = current_sweep_groups(timeline, phases=SUMMARY_PHASES, include_zero_current=True)
+    if "current_set_mA" not in timeline:
+        return groups
+    episodes = current_episodes(timeline)
+    result = []
+    for target, original in groups:
+        group, qualification = select_current_episode(timeline, original, episodes=episodes)
+        if group is None:
+            group = original.copy()
+        group.attrs["tma_episode_qualification"] = qualification
+        result.append((target, group))
+    return result
 
 
 def _split_current_target_group(group: pd.DataFrame) -> list[pd.DataFrame]:
@@ -625,7 +649,7 @@ def summarize_current_sweep(
     voltage_limit_v: float | None = None,
 ) -> CurrentSweepSummary:
     target_summaries: list[CurrentSweepTargetSummary] = []
-    groups = current_sweep_groups(run.frame, phases=SUMMARY_PHASES, include_zero_current=True)
+    groups = current_sweep_summary_groups(run.frame)
     counts = Counter(target for target, _group in groups)
     indices: Counter[float] = Counter()
     for target, group in groups:
@@ -641,6 +665,11 @@ def summarize_current_sweep(
             max_index = current.idxmax(skipna=True)
             max_current_mA = float(current.loc[max_index])
             strain_at_max_current = float(strain.loc[max_index])
+        if "current_set_mA" in group:
+            command = pd.to_numeric(group["current_set_mA"], errors="coerce")
+            max_current_mA = float(command.max()) if np.isfinite(command).all() else None
+            if max_current_mA is not None:
+                strain_at_max_current = float(strain.loc[command.idxmax()])
         max_strain_pct: float | None = None
         current_at_max_strain_mA: float | None = None
         if strain.notna().any():
@@ -648,6 +677,14 @@ def summarize_current_sweep(
             max_strain_pct = float(strain.loc[max_strain_index])
             if current.notna().any() and max_strain_index in current.index:
                 current_at_max_strain_mA = float(current.loc[max_strain_index])
+        cycle_metrics = cycle_strain_metrics(group, _length_trace_mm(run, group))
+        if cycle_metrics.get("version") == 2:
+            max_strain_pct = cycle_metrics.get("max_strain_pct")
+            max_current_mA = cycle_metrics.get("max_current_mA")
+            if max_strain_pct is None:
+                current_at_max_strain_mA = None
+        if group.attrs.get("tma_episode_qualification", {}).get("selected") is False:
+            max_strain_pct = max_current_mA = strain_at_max_current = current_at_max_strain_mA = None
         l0_mm = _group_l0_mm(run, group)
         target_summaries.append(
             CurrentSweepTargetSummary(
@@ -662,7 +699,7 @@ def summarize_current_sweep(
                 sweep_index=indices[target],
                 sweep_count=counts[target],
                 first_overheating=_is_first_overheating_group(run, target, group),
-                cycle_strain=cycle_strain_metrics(group, _length_trace_mm(run, group)),
+                cycle_strain=cycle_metrics,
                 **_transition_currents_for_group(strain, group),
             )
         )

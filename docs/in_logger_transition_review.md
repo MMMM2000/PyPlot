@@ -140,3 +140,34 @@ Historical Current Annealing reviews that contain manual final values but were s
 For runs that were never reviewed in Builder, load the legacy file or new run folder in the Current Annealing PyPlot plugin and use `Review loaded transitions...`. Saving creates `transition_review.json` inside a new-style run folder or `<stem>.transition-review.json` beside a legacy flat file. The stored values are transition currents in mA; converting them to transition temperatures requires a separate calibrated current-to-temperature relationship.
 
 VSM can use the same schema later, but it does not block the CA/TMA path.
+
+## TMA recipe boundaries and current summaries
+
+Derived TMA strains use a contiguous current-sweep episode at the stated target.
+Setup and load ramps close the episode before filtering, so a point labelled with
+the next target before loading cannot cancel the subsequent heating contraction.
+The final commanded maximum and its hold define the hot turnaround. Heating is
+hot minus start, cooling is recorded return minus hot, and residual is return
+minus start under load. These are full-branch changes, not isolated transformation
+strain or unloaded permanent deformation.
+
+A sustained return must end at or below the cold-start current within one typical
+recorded downward step to report cooling and residual strain. Partial endpoint
+differences remain in the derived record. Multiple cycles at one target retain
+their observed total range and maximum applied current, with the three branch
+changes unavailable until an individual cycle is selected. Saved target/review
+identities and explicit absent-cooling decisions are preserved.
+
+`TMA max current (mA)` is the highest logged applied setpoint reached, including
+an interrupted sweep's actual maximum. It is separate from the legacy current at
+maximum strain and from measured-current readback noise. Builder computes these
+values from embedded measurements and verified portable length calibration, not
+from a potentially changed file at the saved source path. Legacy measured-only
+traces keep their existing branch analysis and have no applied-current value.
+
+Saved accepted break observations provide the applied current at the logged
+electrical-loss event and its nominal stress target. The fluctuating measured
+stress is not used as the break stress. An observation joins a transition row
+only by its exact source and reviewed target; otherwise it remains an event-only
+row. Mechanical-loss observations have no electrical break values. Neither an
+event nor its numbers accept an excluded transition or resolve a sample identity.
