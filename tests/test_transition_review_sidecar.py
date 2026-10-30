@@ -410,6 +410,41 @@ def test_review_dialog_accept_auto_writes_the_review_sidecar(tmp_path, qtbot) ->
     }
 
 
+@pytest.mark.parametrize("queue_mode", [False, True])
+def test_failed_review_save_keeps_choices_and_does_not_advance(tmp_path, qtbot, monkeypatch, queue_mode):
+    from PyQt6 import QtWidgets
+    from plotting.shared import transition_review_dialog as dialogs
+
+    frame = pd.DataFrame({"I_mA": [1.0, 2.0], "R_ohm": [10.0, 9.0]})
+    payload = _review(frame)
+    sidecar = tmp_path / "transition_review.json"
+    dialog = dialogs.PortableTransitionReviewDialog(payload, {
+        "graph": dialogs.ReviewPlot(frame["I_mA"], frame["R_ohm"], "test run", "Resistance"),
+    }, sidecar)
+    qtbot.addWidget(dialog)
+    dialog._queue_mode = queue_mode
+    advanced, warnings = [], []
+    dialog.advanceRequested.connect(lambda: advanced.append(True))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *_args: warnings.append(_args[-1]))
+    original_writer = dialogs.atomic_write_review
+    def fail_write(*_args):
+        raise PermissionError("Synthetic unwritable review folder")
+    monkeypatch.setattr(dialogs, "atomic_write_review", fail_write)
+    revision = dialog.payload["review_revision"]
+    values = dict(dialog.payload["targets"][0]["final_values"])
+    dialog._save_and_accept()
+    assert warnings and "choices remain" in warnings[0]
+    assert not advanced and not sidecar.exists()
+    assert dialog.result() != QtWidgets.QDialog.DialogCode.Accepted
+    assert dialog.payload["review_revision"] == revision
+    assert dialog.payload["targets"][0]["final_values"] == values
+    assert dialog.save_button.isEnabled()
+    monkeypatch.setattr(dialogs, "atomic_write_review", original_writer)
+    dialog._save_and_accept()
+    assert load_review(sidecar)["review_revision"] == revision + 1
+    assert bool(advanced) is queue_mode
+
+
 def test_review_dialog_marks_complete_run_for_archive_without_moving_it(
     tmp_path, qtbot
 ) -> None:

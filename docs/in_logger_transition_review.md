@@ -6,7 +6,7 @@ Current annealing and TMA loggers offer transition review immediately after a ru
 
 The TMA Dashboard header also has a permanent `Review transitions...` split button. Its main action opens the latest completed run; the arrow menu selects one older run or starts a queue from a selected parent folder. The queue includes only that folder and its direct child run folders containing `measurement.csv`. The logger refuses to review while acquisition is active. The automatic post-run prompt remains available after successful recipe completion.
 
-The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder, a legacy standalone measurement file, or a parent-folder queue. The queue includes only that folder and its direct child run folders containing `measurement.txt`. The logger also refuses to review while acquisition is active.
+The Current Annealing Dashboard header has the same `Review transitions...` split button beside `Configure plots`. Its main action opens the latest completed measurement; the arrow menu selects another run folder, a legacy standalone measurement file, or a parent-folder queue. The parent queue includes that folder and its direct children, supporting TXT/CSV runs and legacy TXT/DAT/CSV measurements. **Review runs including subfolders...** explicitly includes nested groups. Administrative folders and run logs are excluded. The logger also refuses to review while acquisition is active. See [collection review and folder migration](current-annealing-review-folders.md) for the supported layouts.
 
 This keeps the fast experimental workflow Martin wants while preserving Builder as the place for cross-sample overview, conflict review, column selection, and public database export.
 
@@ -37,7 +37,7 @@ A multi-run queue loads one run at a time, shows `run N/total`, changes the acti
 
 ## Portable sidecar
 
-New current-annealing runs and TMA runs use one `transition_review.json` in the run folder. Legacy flat current-annealing files remain supported through a uniquely named `<measurement>.transition-review.json` beside the data file. A shared schema should contain:
+Current-annealing `measurement.txt` runs and TMA runs use one `transition_review.json` in the run folder. Current-annealing CSV and legacy files retain a uniquely named `<measurement-stem>.transition-review.json` beside the data file. A shared schema should contain:
 
 - schema version and experiment family (`current_annealing` or `tma`);
 - normalized sample identity plus the original source label;
@@ -63,6 +63,64 @@ The content fingerprint is the durable identity. Paths are useful provenance but
 
 The expanded TMA workbook export includes `TMA strain at As/Af/Ms/Mf (%)` beside the reviewed transition currents. These are point strains on each target's per-target `L0` reference, distinct from the existing peak-strain column.
 
+## Heating, cooling and residual strain
+
+The TMA editor also displays **Heating strain**, **Cooling strain** and
+**Residual strain**. These are signed changes over the measured branches, not
+transformation-only amplitudes between picked As/Af or Ms/Mf markers. Negative
+means contraction; positive means extension.
+
+For the paired sweep, `Lref` is its minimum calibrated length (the same reference
+as the per-target strain plot). Heating strain is `100*(Lhot-Lstart)/Lref`,
+cooling strain is `100*(Lend-Lhot)/Lref`, and residual strain is
+`100*(Lend-Lstart)/Lref`. Both legs use the same reference, so heating plus cooling
+equals residual strain. The high-current hold belongs to heating and the last
+point of that hold is the shared turnaround. Recorded zero-current endpoints are
+retained. When physical length calibration is unavailable, differences of the
+recorded strain are used and the reference is explicitly labelled
+`recorded_strain_pct`; no physical reference length is invented.
+
+Cooling and residual strain stay unavailable when there is no sustained recorded
+cooling ramp, including an abrupt drop at termination. The cooling endpoint is
+the last measured point, **not a claim of room-temperature recovery or permanent
+deformation**. The Analysis export includes its current, cooling duration and
+reference information. First overheating and subsequent sweeps at the same
+stress remain separate. The three values and their endpoint/reference metadata
+travel in the portable review sidecar and Builder review, independently of the
+chosen transition currents. A reviewed no-transition outcome can still have
+measured strain changes. Excluded or unresolved review targets remain withheld.
+
+Marking a cooling branch as absent also clears cooling and residual strain in
+the saved review and export. Manually enabling an undetected short branch allows
+transition review, but does not manufacture strain endpoints; automatic strain
+metrics still require a sustained recorded ramp.
+
+## Working through a review queue
+
+1. Use a current checkout of PyPlot and a writable, locally available measurement
+   folder. Finish or stop acquisition before starting the review session.
+2. Open **Review transitions...** in the CA or TMA logger. The arrow menu selects
+   an older run or a parent-folder queue. CA also supports selecting a legacy
+   standalone `.txt`, `.dat` or `.csv` measurement file. Parent-folder queues
+   inspect the chosen folder and its direct children, not every nested folder.
+3. Work through each CA cycle or TMA stress/sweep. Choose **Auto**, **Manual** or
+   **Not observed** for each applicable phase point. Manual values may be picked
+   on the graph or typed. Use **Not observed** deliberately; a missing automatic
+   estimate is not itself evidence of no transition.
+4. Save, or use **Save and next** in the queue. Keep `transition_review.json`
+   with the measurement folder; legacy CA files use a uniquely named sidecar.
+   If saving fails, the editor retains the choices, reports the error and does
+   not advance. Correct folder access or availability and retry.
+5. Rescan the measurement source in Builder and save the Builder project. New
+   matching reviews import without re-picking the currents. A different existing
+   project decision is preserved as a conflict that must be resolved explicitly.
+
+This workflow is suitable for the person who measured the wire to record her own
+review decisions. It does not require sharing or editing a `.pydpj` file during
+the logger review itself. Keep a common current software version across the
+logger and Builder machines; a local software test does not establish another
+computer's installed revision or Drive write access.
+
 ## Retrospective review
 
 The initial historical campaign is intentionally limited to Prague measurement roots. Do not inventory or write Košice data in this pass; Košice can be handled later as a separately reviewed campaign.
@@ -82,3 +140,34 @@ Historical Current Annealing reviews that contain manual final values but were s
 For runs that were never reviewed in Builder, load the legacy file or new run folder in the Current Annealing PyPlot plugin and use `Review loaded transitions...`. Saving creates `transition_review.json` inside a new-style run folder or `<stem>.transition-review.json` beside a legacy flat file. The stored values are transition currents in mA; converting them to transition temperatures requires a separate calibrated current-to-temperature relationship.
 
 VSM can use the same schema later, but it does not block the CA/TMA path.
+
+## TMA recipe boundaries and current summaries
+
+Derived TMA strains use a contiguous current-sweep episode at the stated target.
+Setup and load ramps close the episode before filtering, so a point labelled with
+the next target before loading cannot cancel the subsequent heating contraction.
+The final commanded maximum and its hold define the hot turnaround. Heating is
+hot minus start, cooling is recorded return minus hot, and residual is return
+minus start under load. These are full-branch changes, not isolated transformation
+strain or unloaded permanent deformation.
+
+A sustained return must end at or below the cold-start current within one typical
+recorded downward step to report cooling and residual strain. Partial endpoint
+differences remain in the derived record. Multiple cycles at one target retain
+their observed total range and maximum applied current, with the three branch
+changes unavailable until an individual cycle is selected. Saved target/review
+identities and explicit absent-cooling decisions are preserved.
+
+`TMA max current (mA)` is the highest logged applied setpoint reached, including
+an interrupted sweep's actual maximum. It is separate from the legacy current at
+maximum strain and from measured-current readback noise. Builder computes these
+values from embedded measurements and verified portable length calibration, not
+from a potentially changed file at the saved source path. Legacy measured-only
+traces keep their existing branch analysis and have no applied-current value.
+
+Saved accepted break observations provide the applied current at the logged
+electrical-loss event and its nominal stress target. The fluctuating measured
+stress is not used as the break stress. An observation joins a transition row
+only by its exact source and reviewed target; otherwise it remains an event-only
+row. Mechanical-loss observations have no electrical break values. Neither an
+event nor its numbers accept an excluded transition or resolve a sample identity.

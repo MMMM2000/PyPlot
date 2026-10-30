@@ -1388,16 +1388,16 @@ def _mini_dma_core_module() -> Any:
     return module
 
 
-def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
-    """Return current TMA peak-strain summary, falling back to cached text."""
-    cached = tuple(str(line) for line in getattr(record, "strain_summary", ()) or ())
+def mini_dma_record_run(record: MiniDmaRecord) -> Any:
+    """Use saved measurements; read a source only when no data are embedded."""
     module = _mini_dma_core_module()
     if module is None:
-        return cached
+        return None
 
     run = None
     path_value = getattr(record, "path", None)
-    if isinstance(path_value, (str, Path)):
+    data = getattr(record, "data", None)
+    if (not isinstance(data, pd.DataFrame) or data.empty) and isinstance(path_value, (str, Path)):
         try:
             path = Path(path_value)
             if path.exists():
@@ -1408,7 +1408,7 @@ def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
     if run is None:
         data = getattr(record, "data", None)
         if not isinstance(data, pd.DataFrame) or data.empty:
-            return cached
+            return None
         sample_name = str(getattr(record, "sample", "") or getattr(record, "label", "") or "TMA")
         path = Path(path_value) if isinstance(path_value, (str, Path)) else Path(sample_name)
         try:
@@ -1417,10 +1417,57 @@ def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
                 measurement_path=path / module.MEASUREMENT_FILE,
                 frame=data.copy(),
                 sample_name=sample_name,
-                initial_length_mm=mini_dma_record_initial_length_mm(record),
+                initial_length_mm=verified_mini_dma_initial_length_mm(record),
             )
         except Exception:
-            return cached
+            return None
+    return run
+
+
+def mini_dma_cycle_strain_rows(record: MiniDmaRecord) -> Tuple[Dict[str, Any], ...]:
+    """Return derived cycle rows without parsing rounded display strings."""
+    module = _mini_dma_core_module()
+    run = mini_dma_record_run(record)
+    if module is None or run is None:
+        return ()
+    try:
+        if not module.supports_transition_review(run):
+            return ()
+        targets = module.summarize_current_sweep(run).targets
+        # Cached display text binds nominal load/first-overheating metadata to
+        # the same saved target order, never supplies cached numerical strains.
+        labels = [str(line).rpartition(":")[0].strip() for line in record.strain_summary]
+        valid_labels = len(labels) == len(targets) and len(set(labels)) == len(labels)
+        for label, target in zip(labels, targets):
+            match = re.search(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*MPa\b", label, re.IGNORECASE)
+            sweep = re.search(r"\bsweep\s+(\d+)\s*/\s*\d+", label, re.IGNORECASE)
+            valid_labels = valid_labels and bool(match) and math.isclose(float(match[1]), target.stress_mpa, abs_tol=1e-8)
+            valid_labels = valid_labels and (sweep is None or int(sweep[1]) == target.sweep_index)
+        if not valid_labels:
+            labels = [target.target_label for target in targets]
+        else:
+            labels = [f"1st: {label}" if target.first_overheating and not label.casefold().startswith("1st:") else label
+                      for label, target in zip(labels, targets)]
+        return tuple({
+            "target_label": label,
+            "sweep_index": target.sweep_index, "sweep_count": target.sweep_count,
+            "first_overheating": label.casefold().startswith("1st:"),
+            "max_strain_pct": target.max_strain_pct,
+            "max_current_mA": target.max_current_mA if "current_set_mA" in run.frame else None,
+            "current_at_max_strain_mA": target.current_at_max_strain_mA,
+            "cycle_strain": dict(target.cycle_strain or {}),
+        } for label, target in zip(labels, targets))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return ()
+
+
+def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
+    """Return current TMA peak-strain summary, falling back to cached text."""
+    cached = tuple(str(line) for line in getattr(record, "strain_summary", ()) or ())
+    module = _mini_dma_core_module()
+    run = mini_dma_record_run(record)
+    if module is None or run is None:
+        return cached
 
     try:
         if module.is_iso_current_run(run):

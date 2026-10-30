@@ -136,7 +136,9 @@ def tma_review_draft(
             "load_g": None if item.load_g is None else float(item.load_g),
             "sweep_index": sweep_index,
             "sweep_count": sweep_count,
+            "first_overheating": bool(getattr(item, "first_overheating", False)),
         }
+        target["cycle_strain"] = dict(getattr(item, "cycle_strain", None) or {})
         targets.append(target)
     if not targets:
         raise ValueError(f"No reviewable TMA targets found: {run_path}")

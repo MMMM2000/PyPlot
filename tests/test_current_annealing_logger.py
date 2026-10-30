@@ -754,6 +754,7 @@ def test_current_annealing_transition_button_opens_latest_completed_measurement(
     ] == [
         "Choose run folder...",
         "Review runs in parent folder...",
+        "Review runs including subfolders...",
         "Choose legacy measurement file...",
     ]
 
@@ -763,10 +764,11 @@ def test_current_annealing_transition_button_opens_latest_completed_measurement(
     window.close()
 
 
+@pytest.mark.parametrize("filename", ["measurement.txt", "measurement.csv"])
 def test_current_annealing_transition_button_can_choose_run_folder(
-    tmp_path, qtbot, monkeypatch
+    tmp_path, qtbot, monkeypatch, filename
 ) -> None:
-    measurement = tmp_path / "run" / "measurement.txt"
+    measurement = tmp_path / "run" / filename
     measurement.parent.mkdir()
     measurement.write_text("Time (s)\tCurrent (mA)\n", encoding="utf-8")
 
@@ -3957,8 +3959,9 @@ def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pyte
     assert calls == ["acquire", "release"]
 
 
+@pytest.mark.parametrize("recursive", [False, True])
 def test_current_annealing_parent_folder_queue_is_bounded_to_direct_runs(
-    tmp_path, qtbot, monkeypatch
+    tmp_path, qtbot, monkeypatch, recursive
 ) -> None:
     from plotting.shared import transition_review_dialog
 
@@ -3983,7 +3986,8 @@ def test_current_annealing_parent_folder_queue_is_bounded_to_direct_runs(
         lambda parent, paths, **kwargs: queued.extend(paths) or len(paths),
     )
 
-    window._choose_transition_parent_folder()
+    actions = window.ui.pushButton_review_transitions.menu().actions()
+    actions[2 if recursive else 1].trigger()
 
-    assert queued == [direct]
+    assert queued == ([nested, direct] if recursive else [direct])
     window.close()

@@ -6982,6 +6982,20 @@ def _merge_portable_annealing_review(
 ) -> Dict[str, Any]:
     if not existing or str(existing.get("status") or "") in {"", TRANSITION_REVIEW_STATUS_UNREVIEWED}:
         return dict(portable)
+    resolution = existing.get("portable_resolution")
+    baseline = resolution.get("sidecar_review") if isinstance(resolution, Mapping) else None
+    if (isinstance(baseline, Mapping) and resolution.get("reviewer") and resolution.get("reviewed_at")
+            and isinstance(baseline.get("content_identity"), str) and baseline.get("content_identity")
+            and baseline.get("content_identity") == portable.get("content_identity")
+            and all(baseline.get(key) == portable.get(key) for key in ("included", "analysis_included"))
+            and _review_semantics(baseline) == _review_semantics(portable)):
+        # An owner can deliberately keep project values/clears. Re-reading that
+        # unchanged sidecar is not a new conflict; changed data or choices are.
+        merged = dict(existing)
+        for key in ("content_identity", "portable_sidecar_path", "portable_review_revision"):
+            if portable.get(key) not in (None, ""):
+                merged[key] = portable[key]
+        return merged
     refreshed = _refresh_unchanged_portable_conflict(existing, portable, _review_semantics, "content_identity")
     if refreshed is not None:
         return refreshed
@@ -8674,6 +8688,7 @@ def _mini_dma_transition_review_entries(
             groups = mini_dma_core.current_sweep_groups(
                 run.frame,
                 phases=mini_dma_core.SUMMARY_PHASES,
+                include_zero_current=True,
             )
             summary = mini_dma_core.summarize_current_sweep(run)
         except Exception:
@@ -8850,6 +8865,7 @@ def _apply_saved_tma_review_payload(
             "strain_at_transition_pct": _clean_mini_dma_transition_values(
                 target.get("strain_at_transition_pct")
             ),
+            "cycle_strain": dict(target.get("cycle_strain") or {}),
             "cleared_labels": sorted(_mini_dma_cleared_transition_labels(target)),
             "portable_sidecar_path": str(review_path),
             "portable_review_revision": portable_payload.get("review_revision", 1),
@@ -8988,6 +9004,7 @@ def _import_portable_tma_reviews(
                 "strain_at_transition_pct": _clean_mini_dma_transition_values(
                     target.get("strain_at_transition_pct")
                 ),
+                "cycle_strain": dict(target.get("cycle_strain") or {}),
                 "cleared_labels": sorted(_mini_dma_cleared_transition_labels(target)),
                 "portable_sidecar_path": str(review_path),
                 "portable_review_revision": portable_payload.get("review_revision", 1),
@@ -9026,6 +9043,7 @@ def _import_portable_tma_reviews(
                             "measurement_fingerprint",
                             "strain_at_transition_pct",
                             "strain_reference",
+                            "cycle_strain",
                         }
                     }
                 )
@@ -15788,7 +15806,7 @@ class AnnealingSection(MiniDatabaseSection):
             value = payload.get(key)
             if value not in (None, ""):
                 entry[key] = value
-        for key in ("project_review", "portable_review"):
+        for key in ("project_review", "portable_review", "portable_resolution"):
             value = payload.get(key)
             if isinstance(value, Mapping):
                 entry[key] = dict(value)
@@ -27407,6 +27425,11 @@ class MiniDmaSection(MiniDatabaseSection):
         )
         if transition_strain:
             entry["strain_at_transition_pct"] = transition_strain
+        from plotting.plugins.mini_dma.cycle_strain import clean_cycle_strain_metrics
+
+        cycle_strain = clean_cycle_strain_metrics(payload.get("cycle_strain"))
+        if cycle_strain:
+            entry["cycle_strain"] = cycle_strain
         strain_reference = payload.get("strain_reference")
         if isinstance(strain_reference, Mapping):
             method = str(strain_reference.get("method") or "").strip()

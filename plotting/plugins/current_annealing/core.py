@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from .burnthrough import trim_burnthrough_glitch
+from plotting.shared.current_annealing_files import resolve_measurement_path
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.utils import save_figure, show_plots, schedule_origin_release
 from plotting.shared.origin import (
@@ -135,28 +136,6 @@ def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
     return 1000.0 if raw_max <= 1.2 else 1.0
 
 
-def resolve_measurement_path(path: str | Path) -> Path:
-    """Resolve either a legacy data file or a logger run folder."""
-
-    source = Path(path)
-    if source.is_dir():
-        metadata_path = source / "metadata.json"
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except Exception:
-            metadata = None
-        if isinstance(metadata, dict) and metadata.get("data_file"):
-            measurement = source / str(metadata["data_file"])
-            if measurement.is_file():
-                return measurement
-        for name in ("measurement.csv", "measurement.txt"):
-            measurement = source / name
-            if measurement.is_file():
-                return measurement
-        raise ValueError(f"{source}: run folder has no measurement.csv or measurement.txt")
-    return source
-
-
 def measurement_display_name(path: str | Path) -> str:
     """Return the human run name for files from either storage layout."""
 
@@ -216,7 +195,7 @@ def load_file(path: str | Path) -> pd.DataFrame:
                 frame['R_Ohm'] = trimmed_resistances
             return frame[[column for column in ('I_mA', 'R_Ohm', 'V_V') if column in frame]]
 
-    if source.name.casefold() == "measurement.csv":
+    if source.suffix.casefold() == ".csv":
         session_frame = pd.read_csv(source)
         required = {"measured_current_mA", "resistance_ohm"}
         if required.issubset(session_frame.columns):

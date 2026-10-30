@@ -66,6 +66,7 @@ class ReviewPlot:
     cooling_series: tuple[pd.Series, pd.Series] | None = None
     cooling_recorded: bool | None = None
     cooling_reason: str = ""
+    cycle_strain: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,14 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self.derived_strain_label.setWordWrap(True)
         self.derived_strain_label.setStyleSheet("color: #9ca3af;")
         values_layout.addWidget(self.derived_strain_label)
+        self.cycle_strain_label = QtWidgets.QLabel()
+        self.cycle_strain_label.setWordWrap(True)
+        self.cycle_strain_label.setToolTip(
+            "Signed endpoint changes using one reference for both branches. "
+            "Negative means contraction. Residual strain is at the recorded cooling "
+            "endpoint; it does not establish room-temperature or permanent deformation."
+        )
+        values_layout.addWidget(self.cycle_strain_label)
         self.cooling_branch_row = QtWidgets.QWidget()
         cooling_branch_layout = QtWidgets.QVBoxLayout(self.cooling_branch_row)
         cooling_branch_layout.setContentsMargins(0, 0, 0, 0)
@@ -777,6 +786,7 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._restyle_transition_markers()
 
     def _update_derived_strain_label(self) -> None:
+        self._update_cycle_strain_label()
         label = self._selected_label()
         if not label or self._target_index < 0:
             self.derived_strain_label.clear()
@@ -796,6 +806,24 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             f"{label} strain: {float(strain):.6g}%{suffix}"
         )
         self.derived_strain_label.show()
+
+    def _update_cycle_strain_label(self) -> None:
+        target = self._targets()[self._target_index] if self._target_index >= 0 else {}
+        plot = self.plots.get(str(target.get("target_key") or ""))
+        metrics = plot.cycle_strain if plot is not None else None
+        if metrics:
+            from plotting.plugins.mini_dma.cycle_strain import apply_cooling_review_override
+
+            metrics = apply_cooling_review_override(metrics, target.get("cooling_branch_override"))
+        self.cycle_strain_label.setVisible(bool(metrics))
+        if not metrics:
+            self.cycle_strain_label.clear()
+            return
+        parts = []
+        for name, key in (("Heating strain", "heating_strain_pct"), ("Cooling strain", "cooling_strain_pct"), ("Residual strain", "residual_strain_pct")):
+            value = metrics.get(key)
+            parts.append(f"{name}: {value:+.3g}%" if isinstance(value, (int, float)) else f"{name}: unavailable")
+        self.cycle_strain_label.setText("\n".join(parts) + "\nAt recorded endpoints; not necessarily room temperature.")
 
     def _manual_text_changed(self, text: str) -> None:
         if self._loading:
@@ -1124,6 +1152,12 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
             )
             if plot.strain_reference:
                 target["strain_reference"] = dict(plot.strain_reference)
+            if plot.cycle_strain:
+                from plotting.plugins.mini_dma.cycle_strain import apply_cooling_review_override
+
+                target["cycle_strain"] = apply_cooling_review_override(
+                    plot.cycle_strain, target.get("cooling_branch_override")
+                )
         self._update_derived_strain_label()
 
     def _target_changed(self, row: int) -> None:
@@ -1571,14 +1605,17 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         self._set_manual_plot_value(float(event.xdata))
 
     def _write_review(self) -> None:
-        self.payload['review_revision'] = int(
+        updated = copy.deepcopy(self.payload)
+        updated['review_revision'] = int(
             self.payload.get('review_revision', 0) or 0
         ) + 1
-        self.payload['updated_utc'] = utc_now_text()
+        updated['updated_utc'] = utc_now_text()
         if self._save_callback is not None:
-            self._save_callback(copy.deepcopy(self.payload))
+            self._save_callback(updated)
         else:
-            atomic_write_review(self.sidecar_path, self.payload)
+            atomic_write_review(self.sidecar_path, updated)
+        self.payload['review_revision'] = updated['review_revision']
+        self.payload['updated_utc'] = updated['updated_utc']
         self._persisted_review_units = _review_units_from_payload(self.payload)
 
     def _save_and_accept(self) -> None:
@@ -1591,7 +1628,14 @@ class PortableTransitionReviewDialog(QtWidgets.QDialog):
         )
         if not ready:
             return
-        self._write_review()
+        try:
+            self._write_review()
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Review save failed",
+                f"The review could not be saved completely. Your choices remain in this editor.\n\n{exc}",
+            )
+            return
         if self._queue_mode:
             self.advanceRequested.emit()
             return
@@ -2665,48 +2709,8 @@ def review_current_annealing_file(
 def _split_tma_review_branches(
     group: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool, str]:
-    """Split one sweep and reject short/sudden current drops as cooling."""
-
-    if group.empty:
-        empty = group.iloc[0:0].copy()
-        return empty, empty, False, "No usable current sweep was recorded."
-    current = pd.to_numeric(group["current_mA"], errors="coerce")
-    if not current.notna().any():
-        empty = group.iloc[0:0].copy()
-        return empty, empty, False, "No usable current values were recorded."
-    peak_position = int(current.fillna(-math.inf).to_numpy().argmax())
-    heating = group.iloc[: peak_position + 1].copy()
-    cooling = group.iloc[peak_position:].copy()
-    cooling_current = pd.to_numeric(cooling["current_mA"], errors="coerce").dropna()
-    span = float(current.max() - current.min())
-    tolerance = max(0.02, span * 0.001)
-    differences = cooling_current.diff().dropna()
-    falling_steps = int((differences < -tolerance).sum())
-    tested_steps = int((differences.abs() > tolerance).sum())
-    drop = (
-        float(cooling_current.iloc[0] - cooling_current.iloc[-1])
-        if len(cooling_current.index) >= 2
-        else 0.0
-    )
-    minimum_drop = max(1.0, span * 0.05)
-    recorded = bool(
-        len(cooling_current.index) >= 6
-        and falling_steps >= 4
-        and tested_steps > 0
-        and falling_steps / tested_steps >= 0.55
-        and drop >= minimum_drop
-    )
-    if recorded:
-        reason = (
-            f"Sustained cooling ramp detected: {falling_steps} falling-current "
-            f"steps and {drop:.3g} mA total decrease."
-        )
-    else:
-        reason = (
-            "No sustained cooling ramp was recorded; short or abrupt current "
-            "drops are treated as heating termination or wire failure."
-        )
-    return heating, cooling, recorded, reason
+    """Use the same measured branch boundaries as cycle strain calculations."""
+    return tma_core.split_sweep_branches(group)
 
 def _prepare_tma_review(
     run_path: Path,
@@ -2741,7 +2745,7 @@ def _prepare_tma_review(
     if payload["measurement_fingerprint"] != draft["measurement_fingerprint"]:
         raise ValueError("Existing transition review belongs to different TMA run content.")
     plots: dict[str, ReviewPlot] = {}
-    groups = tma_core.current_sweep_groups(run.frame)
+    groups = tma_core.current_sweep_summary_groups(run.frame)
     sweep_counts: dict[str, int] = {}
     for target, _group in groups:
         stress_key = f"{float(target):.9g}"
@@ -2787,6 +2791,7 @@ def _prepare_tma_review(
             ),
             cooling_recorded=cooling_recorded,
             cooling_reason=cooling_reason,
+            cycle_strain=tma_core.cycle_strain_metrics(group, tma_core._length_trace_mm(run, group)),
         )
     return PreparedTransitionReview(payload, plots, sidecar)
 
