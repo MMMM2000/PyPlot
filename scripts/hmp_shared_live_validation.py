@@ -188,6 +188,7 @@ def _run_mini_dma_client(
     client = BrokerJsonClient(host=host, port=port)
     current_lease_id: str | None = None
     motor_lease_id: str | None = None
+    motor_initial_output_on: bool | None = None
     started_s = time.monotonic()
     dwell_s = 1.0
     step_mA = max(0.2, float(ramp_rate_mA_s) * dwell_s)
@@ -210,6 +211,7 @@ def _run_mini_dma_client(
             "output_on": client.output_state(channel=motor_channel),
             "readback": client.measure_channel(channel=motor_channel),
         }
+        motor_initial_output_on = bool(motor_before.get("output_on"))
         result["motor_before"] = motor_before
         if not bool(motor_before.get("output_on")):
             client.configure_channel(
@@ -259,6 +261,12 @@ def _run_mini_dma_client(
                 client.set_output(channel=current_channel, lease_id=current_lease_id, output_on=False)
                 client.release(channel=current_channel, lease_id=current_lease_id)
             if motor_lease_id:
+                if motor_initial_output_on is not None:
+                    client.set_output(
+                        channel=motor_channel,
+                        lease_id=motor_lease_id,
+                        output_on=motor_initial_output_on,
+                    )
                 motor_after = {
                     "output_on": client.output_state(channel=motor_channel),
                     "readback": client.measure_channel(channel=motor_channel),

@@ -105,6 +105,7 @@ class MiniDmaBenchPlan:
     hardware: MiniDmaHardwareConfig
     guardrails: MiniDmaBenchGuardrails
     bench_lock: MiniDmaBenchLockConfig
+    allow_missing_prior_tma_history: bool
     runs: tuple[MiniDmaBenchRun, ...]
 
 
@@ -387,6 +388,9 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         hardware=hardware,
         guardrails=guardrails,
         bench_lock=bench_lock,
+        allow_missing_prior_tma_history=bool(
+            payload.get("allow_missing_prior_tma_history", False)
+        ),
         runs=tuple(runs),
     )
 
@@ -430,6 +434,13 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
 
 
 def _ensure_measurement_logging_session(window: Any) -> None:
+    # Process-isolated TMA starts the authoritative logging session in the
+    # child after hardware ownership transfers. Opening a UI-owned session
+    # here makes the isolated start reject it as a conflicting manual session.
+    if bool(getattr(window, "_control_process_enabled", False)) and not bool(
+        getattr(window, "_controller_process_mode", False)
+    ):
+        return
     if bool(getattr(window, "_session_active", False)):
         return
     start_session = getattr(window, "_start_session", None)
@@ -571,6 +582,28 @@ def _wait_for_tma_history_scan(
     app.processEvents()
 
 
+def _recipe_needs_tma_history_scan(window: Any) -> bool:
+    mode_combo = getattr(window, "combo_recipe_mode", None)
+    current_data = getattr(mode_combo, "currentData", None)
+    if not callable(current_data):
+        return True
+    recipe_mode = str(current_data() or "")
+    is_constant_current = getattr(window, "_is_constant_current_strain_sweep_mode", None)
+    constant_current_mode = bool(
+        callable(is_constant_current) and is_constant_current(recipe_mode)
+    )
+    checkbox_name = (
+        "check_constant_current_first_overheating"
+        if constant_current_mode
+        else "check_current_sweep_first_overheating"
+    )
+    checkbox = getattr(window, checkbox_name, None)
+    is_checked = getattr(checkbox, "isChecked", None)
+    if not callable(is_checked):
+        return True
+    return not bool(is_checked())
+
+
 def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
     _set_text_if_present(window, "edit_name_composition", sample.composition)
     _set_text_if_present(window, "edit_name_wire", sample.microwire)
@@ -624,6 +657,62 @@ def _session_stop_metadata(window: Any) -> dict[str, Any] | None:
     except Exception:
         return None
     return dict(metadata) if isinstance(metadata, Mapping) else None
+
+
+def _persisted_stop_metadata(metadata_path: str | None) -> dict[str, Any] | None:
+    payload = _persisted_session_metadata(metadata_path)
+    stop = payload.get("stop") if isinstance(payload, Mapping) else None
+    return dict(stop) if isinstance(stop, Mapping) else None
+
+
+def _persisted_session_metadata(metadata_path: str | None) -> dict[str, Any] | None:
+    if metadata_path is None:
+        return None
+    try:
+        payload = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _validated_terminal_status(status: str, metadata_path: str | None) -> str:
+    if status != "completed":
+        return status
+    if metadata_path is None:
+        return "not_started"
+    metadata = _persisted_session_metadata(metadata_path)
+    if metadata is None:
+        # Lightweight test/fake windows may expose the future path without
+        # creating a real session. Production sessions always create metadata
+        # before recipe control becomes active.
+        return "completed" if not Path(metadata_path).exists() else "incomplete"
+    if str(metadata.get("session_state") or "") != "finished":
+        return "incomplete"
+    stop = metadata.get("stop")
+    if not isinstance(stop, Mapping):
+        return "incomplete"
+    reason = str(stop.get("reason") or "")
+    category = str(stop.get("category") or "")
+    return "completed" if reason == "recipe_completed" or category == "normal" else "stopped"
+
+
+def _persisted_terminal_outcome(metadata_path: str | None) -> str | None:
+    """Return the authoritative terminal outcome once session metadata is final."""
+    if metadata_path is None:
+        return None
+    metadata = _persisted_session_metadata(metadata_path)
+    if metadata is None or str(metadata.get("session_state") or "") != "finished":
+        return None
+    stop = metadata.get("stop")
+    if not isinstance(stop, Mapping):
+        return "incomplete"
+    reason = str(stop.get("reason") or "")
+    category = str(stop.get("category") or "")
+    if reason == "wire_break_or_contact_loss":
+        return "wire_break"
+    if reason == "recipe_completed" or category == "normal":
+        return "completed"
+    return "stopped"
 
 
 def _task_text(window: Any) -> str:
@@ -850,6 +939,7 @@ def _execute_run(
     guardrails: MiniDmaBenchGuardrails,
     sleep_fn: Callable[[float], None],
     total_deadline_s: float | None,
+    allow_missing_prior_tma_history: bool = False,
 ) -> dict[str, Any]:
     start_s = time.monotonic()
     deadline_s = start_s + run.max_run_duration_s
@@ -857,27 +947,60 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
+    needs_history_scan = _recipe_needs_tma_history_scan(window)
+    if needs_history_scan:
+        _wait_for_tma_history_scan(
+            window,
+            app=app,
+            sleep_fn=sleep_fn,
+        )
+        if allow_missing_prior_tma_history:
+            authorize = getattr(
+                window,
+                "authorize_missing_prior_tma_history_once",
+                None,
+            )
+            if not callable(authorize):
+                raise MiniDmaBenchAutomationError(
+                    "This TMA logger cannot apply the armed plan's explicit missing-history decision."
+                )
+            authorize()
     _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
     _prefer_next_output_run(window)
     _ensure_measurement_logging_session(window)
+    if not needs_history_scan:
+        # The armed bench wrapper has already evaluated the same
+        # first-overheating/history gate after loading the recipe.  Tell the
+        # isolated-start path not to repeat it after sample identity updates
+        # have scheduled a fresh background history scan.
+        window._controller_process_prior_run_preflight_complete = True
     window._start_auto_ramp()
     app.processEvents()
     if not _window_active(window):
+        metadata_path = _metadata_path(window)
         return {
             "name": run.name,
             "recipe_path": str(run.recipe_path),
             "repeat_index": run.repeat_index,
-            "status": "completed" if _metadata_path(window) is not None else "not_started",
+            "status": _validated_terminal_status("completed", metadata_path),
             "elapsed_s": max(0.0, time.monotonic() - start_s),
-            "metadata_path": _metadata_path(window),
+            "metadata_path": metadata_path,
             "startup_log_tail": _window_log_tail(window),
         }
 
+    metadata_path = _metadata_path(window)
     status = "completed"
     guard_events: list[dict[str, Any]] = []
     while _window_active(window):
         app.processEvents()
+        active_metadata_path = _metadata_path(window)
+        if active_metadata_path is not None:
+            metadata_path = active_metadata_path
+        persisted_outcome = _persisted_terminal_outcome(metadata_path)
+        if persisted_outcome is not None:
+            status = persisted_outcome
+            break
         guard_event = _check_guardrails(window, guardrails)
         if guard_event is not None:
             guard_events.append(guard_event)
@@ -929,8 +1052,11 @@ def _execute_run(
             break
         sleep_fn(0.05)
     app.processEvents()
-    metadata_path = _metadata_path(window)
+    active_metadata_path = _metadata_path(window)
+    if active_metadata_path is not None:
+        metadata_path = active_metadata_path
     run_dir = _run_dir_from_metadata_path(metadata_path)
+    status = _validated_terminal_status(status, metadata_path)
     return {
         "name": run.name,
         "recipe_path": str(run.recipe_path),
@@ -939,7 +1065,8 @@ def _execute_run(
         "elapsed_s": max(0.0, time.monotonic() - start_s),
         "metadata_path": metadata_path,
         "guard_events": guard_events,
-        "stop_metadata": _session_stop_metadata(window),
+        "stop_metadata": _session_stop_metadata(window)
+        or _persisted_stop_metadata(metadata_path),
         "task_text": _task_text(window),
         "control_trace_stop": _last_control_trace_stop(run_dir),
     }
@@ -1030,6 +1157,7 @@ def run_mini_dma_bench_plan(
 
     run_summaries: list[dict[str, Any]] = []
     total_start_s = time.monotonic()
+    active_stage = "initializing"
 
     def _execute_summary(state: str) -> dict[str, Any]:
         return {
@@ -1048,12 +1176,18 @@ def run_mini_dma_bench_plan(
             },
             "planned_run_count": len(plan.runs),
             "run_count": len(run_summaries),
+            "active_stage": active_stage,
             "elapsed_s": max(0.0, time.monotonic() - total_start_s),
             "runs": list(run_summaries),
         }
 
     def _write_execute_summary(state: str = "running") -> None:
         _write_summary(plan.summary_path, _execute_summary(state))
+
+    def _set_active_stage(stage: str) -> None:
+        nonlocal active_stage
+        active_stage = stage
+        _write_execute_summary()
 
     _write_execute_summary()
     total_deadline_s = None
@@ -1073,6 +1207,7 @@ def run_mini_dma_bench_plan(
         bench_lock_context = nullcontext()
 
     with bench_lock_context:
+        _set_active_stage("creating_qapplication")
         app = app_factory(qt_args) if app_factory is not None else _ensure_qapplication(qt_args)
         factory = window_factory or MainWindow
         restore_warning = _suppress_modal_warnings()
@@ -1101,21 +1236,21 @@ def run_mini_dma_bench_plan(
                     )
                     _write_execute_summary()
                     continue
+                _set_active_stage(f"{run.name}:creating_window")
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _set_active_stage(f"{run.name}:waiting_for_serial_scan")
                     _wait_for_serial_port_scan(
                         window,
                         plan.hardware,
                         app=app,
                         sleep_fn=sleep_fn,
                     )
+                    _set_active_stage(f"{run.name}:applying_hardware_config")
                     _apply_hardware_config(window, plan.hardware)
+                    _set_active_stage(f"{run.name}:applying_sample_identity")
                     _apply_sample_identity(window, plan.sample_identity)
-                    _wait_for_tma_history_scan(
-                        window,
-                        app=app,
-                        sleep_fn=sleep_fn,
-                    )
+                    _set_active_stage(f"{run.name}:executing_recipe")
                     run_summary = _execute_run(
                         run,
                         app=app,
@@ -1124,6 +1259,9 @@ def run_mini_dma_bench_plan(
                         guardrails=plan.guardrails,
                         sleep_fn=sleep_fn,
                         total_deadline_s=total_deadline_s,
+                        allow_missing_prior_tma_history=(
+                            plan.allow_missing_prior_tma_history
+                        ),
                     )
                     run_summaries.append(_attach_control_trace_replay(run_summary))
                     if (
@@ -1131,6 +1269,7 @@ def run_mini_dma_bench_plan(
                         and plan.guardrails.wire_break_stops_plan
                     ):
                         stop_after_wire_break = True
+                    active_stage = f"{run.name}:finished"
                     _write_execute_summary()
                 finally:
                     close = getattr(window, "close", None)

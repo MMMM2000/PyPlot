@@ -1506,8 +1506,8 @@ def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QA
         ),
         (
             "TMA Logger",
-            "data_logging.mini_dma_logger.mini_dma_logger",
-            "mini_dma",
+            "data_logging.tma_logger.tma_logger",
+            "tma",
         ),
     ],
 )
@@ -2348,8 +2348,8 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
     [
         (
             "TMA Logger",
-            "data_logging.mini_dma_logger.mini_dma_logger",
-            "mini_dma",
+            "data_logging.tma_logger.tma_logger",
+            "tma",
         ),
         (
             "Current Annealing Logger",

@@ -593,6 +593,8 @@ def _plateau_target_stress(part: pd.DataFrame) -> float | None:
 def _plateau_plot_context(
     df: pd.DataFrame,
     metadata: dict[str, Any],
+    *,
+    include_first_overheating: bool = True,
 ) -> _PlateauPlotContext | None:
     df = _plot_rows(df)
     if df.empty:
@@ -601,14 +603,22 @@ def _plateau_plot_context(
     grouped_parts: list[tuple[str, pd.DataFrame]] = []
     if not plateau.empty and plateau.notna().any():
         # Normal stress-ladder rows have numbered plateaus. First overheating is
-        # deliberately unindexed, so this keeps conditioning out of comparison
-        # panels without truncating the first normal 1 mA stress ramp.
+        # deliberately unindexed. Keep that current loop in current-response
+        # panels, but let stress-strain callers explicitly exclude it because it
+        # is conditioning rather than a normal stress-ladder measurement.
+        if include_first_overheating:
+            phase = df.get("automation_phase", pd.Series("", index=df.index)).astype(str)
+            first_overheating = df.loc[
+                plateau.isna() & phase.isin({"current", "current_hold"})
+            ].copy()
+            if not first_overheating.empty:
+                grouped_parts.append(("First overheating", first_overheating))
         normal = df.loc[plateau.notna()].copy()
         normal["_plot_plateau_index"] = plateau.loc[plateau.notna()].to_numpy()
-        grouped_parts = [
+        grouped_parts.extend(
             (str(label), part.drop(columns="_plot_plateau_index"))
             for label, part in normal.groupby("_plot_plateau_index", sort=True)
-        ]
+        )
     else:
         # Older result files can predate numeric plateau indices. Preserve a
         # useful fallback rather than returning an empty plot.
@@ -655,16 +665,32 @@ def _current_direction_parts(part: pd.DataFrame) -> list[tuple[str, pd.DataFrame
     current = _series(ordered, control_name)
     if current.empty or not current.notna().any():
         return [("increasing", ordered)]
-    maximum = float(current.max())
-    peak = np.isclose(current.to_numpy(dtype=float), maximum, atol=max(0.05, abs(maximum) * 0.002))
-    peak_positions = np.flatnonzero(peak)
-    if not len(peak_positions):
+    values = current.to_numpy(dtype=float)
+    tolerance = max(0.05, float(np.nanmax(np.abs(values))) * 0.002)
+    deltas = np.diff(values)
+    significant = np.flatnonzero(np.abs(deltas) > tolerance)
+    if not len(significant):
         return [("increasing", ordered)]
-    split = int(peak_positions[-1]) + 1
-    parts = [("increasing", ordered.iloc[:split])]
-    if split < len(ordered):
-        parts.append(("decreasing", ordered.iloc[split:]))
-    return [(direction, rows) for direction, rows in parts if len(rows) >= 2]
+
+    direction = "increasing" if deltas[int(significant[0])] > 0.0 else "decreasing"
+    start = 0
+    parts: list[tuple[str, pd.DataFrame]] = []
+    for delta_index in significant[1:]:
+        candidate = "increasing" if deltas[int(delta_index)] > 0.0 else "decreasing"
+        if candidate == direction:
+            continue
+        # Include the turning-point sample in both adjoining legs so each line
+        # remains visually connected without inventing an intermediate value.
+        split = int(delta_index) + 1
+        rows = ordered.iloc[start:split]
+        if len(rows) >= 2:
+            parts.append((direction, rows))
+        start = max(0, split - 1)
+        direction = candidate
+    rows = ordered.iloc[start:]
+    if len(rows) >= 2:
+        parts.append((direction, rows))
+    return parts or [("increasing", ordered)]
 
 
 _DIRECTION_STYLE = {
@@ -701,7 +727,17 @@ def _plot_grouped_current_response(
             )
 
 
-def _direction_legend_handles() -> list[Line2D]:
+def _current_directions(context: _PlateauPlotContext) -> list[str]:
+    present = {
+        direction
+        for group in context.groups
+        for direction, _rows in _current_direction_parts(group.rows)
+    }
+    return [direction for direction in _DIRECTION_STYLE if direction in present]
+
+
+def _direction_legend_handles(directions: list[str] | None = None) -> list[Line2D]:
+    selected = directions or list(_DIRECTION_STYLE)
     return [
         Line2D(
             [0],
@@ -713,7 +749,8 @@ def _direction_legend_handles() -> list[Line2D]:
             markersize=4.0,
             label=style["label"],
         )
-        for style in _DIRECTION_STYLE.values()
+        for direction in selected
+        if (style := _DIRECTION_STYLE.get(direction)) is not None
     ]
 
 
@@ -905,7 +942,11 @@ def _plot_strain_stress(
         ax.plot(x, y, color="#7c3aed", lw=1.2)
         _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
         return
-    context = _plateau_plot_context(df, metadata or {})
+    context = _plateau_plot_context(
+        df,
+        metadata or {},
+        include_first_overheating=False,
+    )
     if context is None:
         x, y = _clean_xy(df, "strain_pct", "stress_mpa")
         x, y = _decimate(x, y)
@@ -995,7 +1036,7 @@ def _plot_strain_stress(
     ]
     if current_handles:
         ax.legend(
-            handles=[*current_handles, *_direction_legend_handles()],
+            handles=[*current_handles, *_direction_legend_handles(_current_directions(context))],
             fontsize=6.4,
             ncol=2,
             loc="best",
@@ -1063,7 +1104,7 @@ def _plot_phone_summary(
         ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold", loc="left")
         if context is not None:
             fig.legend(
-                handles=_direction_legend_handles(),
+                handles=_direction_legend_handles(_current_directions(context)),
                 fontsize=7.5,
                 loc="center right",
                 bbox_to_anchor=(0.64, 0.825),
@@ -1108,7 +1149,7 @@ def _plot_detail_summary(
         comparison_axes = [axes[0, 1], axes[1, 1]] if resistance_shown else axes[0, 1]
         _add_plateau_colorbar(fig, comparison_axes, context)
         fig.legend(
-            handles=_direction_legend_handles(),
+            handles=_direction_legend_handles(_current_directions(context)),
             fontsize=7.5,
             loc="upper right",
             bbox_to_anchor=(0.90, 0.915),

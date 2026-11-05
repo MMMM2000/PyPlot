@@ -89,6 +89,9 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 output_on=bool(request["output_on"]),
             )
             return {"ok": True}
+        if action == "emergency_all_outputs_off":
+            broker.emergency_all_outputs_off(intent=str(request.get("intent") or ""))
+            return {"ok": True}
         if action == "output_state":
             return {"ok": True, "output_on": broker.output_state(channel=int(request["channel"]))}
         if action == "measure_channel":
@@ -234,6 +237,12 @@ class BrokerJsonClient:
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
         self.request("set_output", channel=channel, lease_id=lease_id, output_on=output_on)
+
+    def emergency_all_outputs_off(self) -> None:
+        self.request(
+            "emergency_all_outputs_off",
+            intent="emergency_stop_all",
+        )
 
     def output_state(self, *, channel: int) -> bool | None:
         value = self.request("output_state", channel=channel).get("output_on")
