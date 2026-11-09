@@ -141,6 +141,11 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         module="data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
         resource_tag="ac_susceptibility",
     ),
+    "microscope": ExperimentProcessSpec(
+        display_name="Microscope Diameter",
+        module="data_logging.microscope_logger.microscope_logger",
+        resource_tag="microscope",
+    ),
 }
 
 
@@ -8119,6 +8124,11 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "TMA Logger",
         "data_logging.mini_dma_logger.mini_dma_logger",
         "mini_dma",
+    ),
+    "Microscope Diameter": _experiment_process_launcher(
+        "Microscope Diameter",
+        "data_logging.microscope_logger.microscope_logger",
+        "microscope",
     ),
     "Shared HMP PSU Setup": _lazy(
         "data_logging.shared_power_supply.setup_ui", "main"
