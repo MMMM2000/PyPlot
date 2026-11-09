@@ -7,35 +7,46 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 import threading
 import time
+
+import numpy as np
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices, QVideoSink
 
 from plotting.shared.theme import ensure_app_theme
 from .measurements import Calibration, make_calibration, measure_line, save_session
-from .samples import load_project_samples, load_fabrication_samples
+from .samples import load_project_samples, load_fabrication_samples, list_fabrication_compositions
+from .edges import parallel_width, refine_parallel_edges
+from .sources_config import read_tma_source_defaults
 
 
 class ImageView(QtWidgets.QGraphicsView):
     line_drawn = QtCore.pyqtSignal(object, object)
+    guides_drawn = QtCore.pyqtSignal(object, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setScene(QtWidgets.QGraphicsScene(self))
         self.image_item = self.scene().addPixmap(QtGui.QPixmap())
         self.pending = None
+        self.tool = "line"
+        self.guide_points = []
         self.measure_enabled = False
         self.lines = []
         self.setMinimumSize(400, 300)
         self.setBackgroundBrush(QtGui.QColor("#24282d"))
         self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
 
-    def set_image(self, image, *, fit=False):
-        self.image_item.setPixmap(QtGui.QPixmap.fromImage(image))
+    def set_image(self, image, *, fit=False, preview=False):
+        displayed = image.scaled(1600, 1600, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                 QtCore.Qt.TransformationMode.FastTransformation) if preview and image.width() > 1600 else image
+        self.image_item.setPixmap(QtGui.QPixmap.fromImage(displayed))
+        self.image_item.setScale(image.width() / displayed.width())
         self.scene().setSceneRect(0, 0, image.width(), image.height())
         if fit:
             self.fit_image()
@@ -54,6 +65,7 @@ class ImageView(QtWidgets.QGraphicsView):
 
     def clear_lines(self):
         self.pending = None
+        self.guide_points.clear()
         for item in self.lines:
             self.scene().removeItem(item)
         self.lines.clear()
@@ -71,11 +83,18 @@ class ImageView(QtWidgets.QGraphicsView):
     def mousePressEvent(self, event):
         if not self.measure_enabled or event.button() != QtCore.Qt.MouseButton.LeftButton:
             self.pending = None
+            self.guide_points.clear()
             return super().mousePressEvent(event)
         point = self.mapToScene(event.position().toPoint())
         if not self.image_item.boundingRect().contains(point):
             return
         value = (point.x(), point.y())
+        if self.tool != "line":
+            self.guide_points.append(value)
+            if len(self.guide_points) == 3:
+                points, self.guide_points = self.guide_points, []
+                self.guides_drawn.emit(*points)
+            return
         if self.pending is None:
             self.pending = value
             self.setToolTip("Click the opposite edge. Right-click cancels the first point.")
@@ -88,16 +107,23 @@ class CatalogTask(QtCore.QObject):
     loaded = QtCore.pyqtSignal(str, str, object)
     failed = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
+    folders_loaded = QtCore.pyqtSignal(str, object)
 
-    def __init__(self, kind, path):
+    def __init__(self, kind, path, composition=None):
         super().__init__()
         self.kind, self.path = kind, path
+        self.composition = composition
         self.cancelled = threading.Event()
 
     def run(self):
         try:
+            if self.kind == "fabrication" and not self.composition:
+                folders = list_fabrication_compositions(self.path, cancel_callback=self.cancelled.is_set)
+                if not self.cancelled.is_set():
+                    self.folders_loaded.emit(str(self.path.resolve()), folders)
+                return
             loader = load_project_samples if self.kind == "project" else load_fabrication_samples
-            choices = loader(self.path, cancel_callback=self.cancelled.is_set) if self.kind == "fabrication" else loader(self.path)
+            choices = loader(self.path, composition=self.composition, cancel_callback=self.cancelled.is_set) if self.kind == "fabrication" else loader(self.path)
             if not self.cancelled.is_set():
                 self.loaded.emit(self.kind, str(self.path.resolve()), choices)
         except Exception as exc:
@@ -108,11 +134,20 @@ class CatalogTask(QtCore.QObject):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, *, enumerate_cameras=True, settings=None):
+    def __init__(self, *, enumerate_cameras=True, settings=None, use_tma_defaults=None):
         super().__init__()
         self.setWindowTitle("Microscope Diameter — PyPlot")
         self.resize(1280, 860)
         self.settings = settings or QtCore.QSettings("microwire", "microscope_logger")
+        self.use_tma_defaults = (settings is None and enumerate_cameras) if use_tma_defaults is None else use_tma_defaults
+        self.control_server = None
+        self.active_session = None
+        self.autosave_error = ""
+        self.frames_received = 0
+        self.autosave_timer = QtCore.QTimer(self)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.setInterval(750)
+        self.autosave_timer.timeout.connect(self._autosave)
         self.camera = None
         self.session = None
         self.sink = None
@@ -130,12 +165,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_evidence = None
         self.source_file = None
         self.records = []
+        self.restored_sample = None
         self.calibration = None
         self.last_line = None
         self.profiles = {}
         self.catalogs = {}
         self.catalog_tasks = []
+        self.fabrication_compositions = []
+        self.fabrication_loaded_root = None
         self.last_display = 0.0
+        self.last_conversion = 0.0
         self.dirty = False
         self._build_ui()
         self._load_settings()
@@ -163,6 +202,19 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Camera", self.camera_combo)
         self.format_combo = QtWidgets.QComboBox()
         form.addRow("Resolution", self.format_combo)
+        self.output_path = QtWidgets.QLineEdit()
+        output_row = QtWidgets.QWidget()
+        output_layout = QtWidgets.QHBoxLayout(output_row)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.addWidget(self.output_path)
+        output_browse = QtWidgets.QPushButton("…")
+        output_browse.setMaximumWidth(32)
+        output_browse.clicked.connect(self.choose_output)
+        output_layout.addWidget(output_browse)
+        form.addRow("Output folder", output_row)
+        self.auto_save = QtWidgets.QCheckBox("Auto-save captures and measurements")
+        self.auto_save.setChecked(True)
+        form.addRow(self.auto_save)
         self.refresh_button = QtWidgets.QPushButton("Refresh cameras")
         self.refresh_button.clicked.connect(self.refresh_cameras)
         form.addRow(self.refresh_button)
@@ -201,6 +253,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wire_combo = QtWidgets.QComboBox()
         self.wire_combo.setEditable(True)
         self.composition_combo.currentTextChanged.connect(self._composition_changed)
+        self.composition_combo.activated.connect(self._maybe_load_fabrication)
+        self.composition_combo.lineEdit().editingFinished.connect(self._maybe_load_fabrication)
         self.wire_combo.currentTextChanged.connect(self._mark_dirty)
         form.addRow("Composition", self.composition_combo)
         form.addRow("Microwire / piece", self.wire_combo)
@@ -215,7 +269,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.objective_combo.setEditable(True)
         self.objective_combo.addItems(["4×", "10×", "40×"])
         self.objective_combo.currentTextChanged.connect(self._context_changed)
-        form.addRow("Objective", self.objective_combo)
+        self.objective_combo.setToolTip("Manual selection: update this when physically changing the objective.")
+        form.addRow("Objective (manual)", self.objective_combo)
         self.zoom_spin = QtWidgets.QDoubleSpinBox()
         self.zoom_spin.setRange(1, 20)
         self.zoom_spin.setDecimals(2)
@@ -226,7 +281,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scale_status.setWordWrap(True)
         form.addRow(self.scale_status)
         self.action_combo = QtWidgets.QComboBox()
-        self.action_combo.addItems(["Measure width", "Draw reference length"])
+        self.action_combo.addItems(["Measure width", "Draw reference length", "Parallel edges (3 clicks)", "Auto edges from guides (3 clicks)"])
+        self.action_combo.currentIndexChanged.connect(self._tool_changed)
         form.addRow("Two-click tool", self.action_combo)
         self.kind_combo = QtWidgets.QComboBox()
         for label, value in (("Apparent width", "apparent"), ("Outer diameter", "outer"),
@@ -247,7 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clear_scale_button = QtWidgets.QPushButton("Use pixels only")
         self.clear_scale_button.clicked.connect(self.clear_calibration)
         form.addRow(self.clear_scale_button)
-        help_label = QtWidgets.QLabel("Capture or open an image. Click opposite edges perpendicular to the wire. Wheel zooms the view; acquisition zoom above describes the microscope setting.")
+        help_label = QtWidgets.QLabel("Width: click opposite edges. Parallel/auto: click two points along one edge, then one point on the opposite edge. Review automatic overlays. Wheel zoom changes only the view.")
         help_label.setWordWrap(True)
         form.addRow(help_label)
         controls.addWidget(calibration_box)
@@ -263,6 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         right = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.view = ImageView()
         self.view.line_drawn.connect(self.line_drawn)
+        self.view.guides_drawn.connect(self.guides_drawn)
         right.addWidget(self.view)
         bottom = QtWidgets.QWidget()
         bottom_layout = QtWidgets.QVBoxLayout(bottom)
@@ -288,8 +345,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Choose a camera and start preview, or open an image.")
 
     def _load_settings(self):
-        self.project_path.setText(self.settings.value("project_path", "", type=str))
-        self.fabrication_path.setText(self.settings.value("fabrication_path", "", type=str))
+        defaults = read_tma_source_defaults(self.settings) if self.use_tma_defaults else {
+            key: self.settings.value(key, "", type=str)
+            for key in ("project_path", "fabrication_path", "output_directory")}
+        self.project_path.setText(defaults["project_path"])
+        self.fabrication_path.setText(defaults["fabrication_path"])
+        self.output_path.setText(defaults["output_directory"])
+        self.auto_save.setChecked(self.settings.value("auto_save", True, type=bool))
         try:
             self.profiles = json.loads(self.settings.value("calibration_profiles", "{}", type=str))
             if not isinstance(self.profiles, dict):
@@ -344,6 +406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image = QtGui.QImage()
         self.dirty = False
         self.last_frame = None
+        self.frames_received = 0
         self.source_file = None
         self.camera = QCamera(device, self)
         self.camera.setCameraFormat(fmt)
@@ -364,14 +427,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_frame(self, frame, generation=None):
         if self.camera is None or (generation is not None and generation != self.preview_generation):
             return
+        if not frame.isValid():
+            return
+        self.frames_received += 1
+        now = time.monotonic()
+        # Drop excess callbacks before decoding so preview cannot build a queue
+        # of full-resolution image copies behind GUI or command events.
+        if now - self.last_conversion < 0.1:
+            return
+        self.last_conversion = now
         image = frame.toImage()
         if image.isNull():
             return
         self.last_frame = image.copy()
         self.capture_button.setEnabled(True)
-        now = time.monotonic()
-        if now - self.last_display >= 1 / 15:
-            self.view.set_image(image, fit=not self.preview_fitted)
+        if now - self.last_display >= 0.1:
+            self.view.set_image(self.last_frame, fit=not self.preview_fitted, preview=True)
             self.preview_fitted = True
             self.last_display = now
         self.statusBar().showMessage(f"Live · {image.width()} × {image.height()} · capture a frame to measure")
@@ -407,6 +478,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pixel_format=fmt.pixelFormat().name, max_fps=fmt.maxFrameRate())
         self.stop_preview()
         self.set_image(image, camera_id=self.frame_camera_id)
+        self._autosave()
 
     def choose_image(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open microscope image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)")
@@ -438,6 +510,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image = image.copy()
         self.frame_camera_id = camera_id
         self.source_file = None
+        self.active_session = None
         self.source_file_hash = None
         self.last_frame = None
         self.captured_utc = datetime.now(timezone.utc).isoformat()
@@ -488,6 +561,50 @@ class MainWindow(QtWidgets.QMainWindow):
     def _mark_dirty(self, *_args):
         if not self.image.isNull():
             self.dirty = True
+            if hasattr(self, "auto_save") and self.auto_save.isChecked() and self.output_path.text().strip():
+                self.autosave_timer.start()
+
+    def _tool_changed(self):
+        if hasattr(self, "view"):
+            self.view.tool = "line" if self.action_combo.currentIndex() < 2 else "guides"
+            self.view.pending = None
+            self.view.guide_points.clear()
+
+    def choose_output(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose microscope output folder", self.output_path.text())
+        if path:
+            self.output_path.setText(path)
+            self.settings.setValue("output_directory", path)
+
+    def _gray_image(self):
+        image = self.image.convertToFormat(QtGui.QImage.Format.Format_Grayscale8)
+        data = image.constBits().asstring(image.sizeInBytes())
+        return np.frombuffer(data, dtype=np.uint8).reshape(image.height(), image.bytesPerLine())[:, :image.width()].copy()
+
+    def guides_drawn(self, a, b, c, *, automatic=None, samples=15):
+        if self.image.isNull() or self.camera is not None:
+            raise ValueError("Capture or open a still image before measuring")
+        automatic = self.action_combo.currentIndex() == 3 if automatic is None else automatic
+        try:
+            result = refine_parallel_edges(self._gray_image(), a, b, c, samples=samples) if automatic else parallel_width(a, b, c)
+            record = measure_line(result["width_start"], result["width_end"], calibration=self.calibration,
+                                  kind=self.kind_combo.currentData(), **self._context())
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return None
+        record.update(method="automatic_parallel_edges" if automatic else "parallel_edges",
+                      guides=dict(a=list(a), b=list(b), c=list(c)),
+                      analysis=result, sample=self._sample(), calibration_evidence=self.calibration_evidence,
+                      measured_utc=datetime.now(timezone.utc).isoformat(), review_status="Unreviewed")
+        self.records.append(record)
+        for edge in (result["edge1"], result["edge2"]):
+            self.view.add_line(edge[0], edge[1], "", "#ffc857")
+        self.view.add_line(result["width_start"], result["width_end"], str(len(self.records)))
+        self._refresh_table()
+        self._mark_dirty()
+        flags = "; ".join(result.get("quality_flags", []))
+        self.statusBar().showMessage(f"{'Automatic fit' if automatic else 'Parallel width'}: {record['width_px']:.2f} px. " + (flags or "Review both boundary guides."))
+        return record
 
     def clear_calibration(self):
         self.profiles.pop(self._profile_key(), None)
@@ -501,6 +618,8 @@ class MainWindow(QtWidgets.QMainWindow):
             result = asdict(matches[0])
             result["matching_sources"] = [asdict(choice) for choice in matches]
             return result
+        if self.restored_sample and self.restored_sample.get("composition") == composition and self.restored_sample.get("microwire") == wire:
+            return copy.deepcopy(self.restored_sample)
         return dict(composition=composition, microwire=wire, source_kind="manual")
 
     def line_drawn(self, start, end):
@@ -518,10 +637,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Reference line: {record['width_px']:.2f} px. Enter its known length, then calibrate.")
             return
         record["sample"] = self._sample()
+        record["method"] = "manual_line"
+        record["review_status"] = "Unreviewed"
+        record["measured_utc"] = datetime.now(timezone.utc).isoformat()
         record["calibration_evidence"] = self.calibration_evidence
         self.records.append(record)
         self.view.add_line(start, end, str(len(self.records)))
-        self.dirty = True
+        self._mark_dirty()
         self._refresh_table()
 
     def calibrate(self):
@@ -564,7 +686,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.profiles[self._profile_key()] = dict(calibration=asdict(self.calibration), evidence=self.calibration_evidence)
         self._context_changed()
         self.action_combo.setCurrentIndex(0)
-        self.dirty = True
+        self._mark_dirty()
         self.statusBar().showMessage("Scale saved for new measurements. Existing rows retain their original calibration.")
 
     def _refresh_table(self):
@@ -590,7 +712,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.clear_lines()
         self.last_line = None
         self._refresh_table()
-        self.dirty = True
+        self._mark_dirty()
 
     def _browse_catalog(self, kind):
         if kind == "project":
@@ -601,7 +723,7 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.project_path if kind == "project" else self.fabrication_path).setText(path)
             self._load_catalog(kind)
 
-    def _load_catalog(self, kind):
+    def _load_catalog(self, kind, composition=None):
         field = self.project_path if kind == "project" else self.fabrication_path
         path = field.text().strip()
         if not path:
@@ -609,22 +731,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.catalog_tasks:
             self.sample_status.setText("A source is still loading. Please wait.")
             return
-        self.catalogs.pop(kind, None)
+        if kind == "project":
+            self.catalogs.pop(kind, None)
         self._refresh_samples()
-        task = CatalogTask(kind, Path(path))
-        task.loaded.connect(self._catalog_received)
+        composition = composition or self.composition_combo.currentText().strip() if kind == "fabrication" else None
+        task = CatalogTask(kind, Path(path), composition=composition)
+        task.loaded.connect(lambda k, p, choices: self._catalog_received(k, p, choices, composition))
+        task.folders_loaded.connect(self._fabrication_folders_loaded)
         task.failed.connect(self.sample_status.setText)
         task.finished.connect(lambda: self.catalog_tasks.remove(task) if task in self.catalog_tasks else None)
         self.catalog_tasks.append(task)
         self.sample_status.setText("Reading sample identities…")
         threading.Thread(target=task.run, daemon=True).start()
 
-    def _catalog_received(self, kind, path, choices):
+    def _catalog_received(self, kind, path, choices, composition=None):
         field = self.project_path if kind == "project" else self.fabrication_path
         if str(Path(field.text().strip()).resolve()) != path:
             self.sample_status.setText("Source path changed while loading. Press Load to read the new path.")
             return
+        if kind == "fabrication":
+            self.fabrication_loaded_root = path
+            if composition:
+                choices = [choice for choice in self.catalogs.get(kind, [])
+                           if choice.composition != composition] + choices
         self._catalog_loaded(kind, choices)
+
+    def _fabrication_folders_loaded(self, path, names):
+        if str(Path(self.fabrication_path.text().strip()).resolve()) != path:
+            return
+        self.fabrication_loaded_root = path
+        self.fabrication_compositions = names
+        self._refresh_samples()
+        self.sample_status.setText("Select a composition, then load its production samples.")
+
+    def _maybe_load_fabrication(self, *_args):
+        if self.catalog_tasks or not self.fabrication_loaded_root:
+            return
+        if str(Path(self.fabrication_path.text().strip()).resolve()) == self.fabrication_loaded_root:
+            self._load_catalog("fabrication")
 
     def _catalog_loaded(self, kind, choices):
         self.catalogs[kind] = choices
@@ -636,7 +780,8 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_wire = self.wire_combo.currentText()
         self.composition_combo.blockSignals(True)
         self.composition_combo.clear()
-        values = sorted({choice.composition for choices in self.catalogs.values() for choice in choices})
+        values = sorted({choice.composition for choices in self.catalogs.values() for choice in choices}
+                        | set(self.fabrication_compositions))
         self.composition_combo.addItems(values)
         if previous:
             self.composition_combo.setCurrentText(previous)
@@ -655,13 +800,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.image.isNull():
             self.statusBar().showMessage("Capture or open an image first.")
             return
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Save a new measurement session")
-        if directory:
-            try:
-                path = self.export_session(Path(directory))
-                self.statusBar().showMessage(f"Saved {path}")
-            except (ValueError, OSError) as exc:
-                self.statusBar().showMessage(f"Could not save: {exc}")
+        if not self.output_path.text().strip():
+            self.choose_output()
+        self._autosave(force=True)
 
     def _image_png(self):
         if self.image.isNull():
@@ -674,7 +815,7 @@ class MainWindow(QtWidgets.QMainWindow):
         buffer.close()
         return bytes(data)
 
-    def export_session(self, directory):
+    def _export_payload(self):
         data = self._image_png()
         metadata = dict(self._context(), sample=self._sample(), notes=self.notes.toPlainText(),
                         calibration=asdict(self.calibration) if self.calibration else None,
@@ -695,20 +836,280 @@ class MainWindow(QtWidgets.QMainWindow):
                     raise ValueError("Calibration reference image has changed; restore it before exporting")
                 references[digest] = reference
                 evidence["image_file"] = f"reference_{digest}.png"
+        return data, records, metadata, references
+
+    def export_session(self, directory):
+        data, records, metadata, references = self._export_payload()
         path = save_session(directory, data, records, metadata, reference_images=references)
         self.dirty = False
         return path
+
+    def _autosave(self, *, force=False):
+        self.autosave_timer.stop()
+        if self.image.isNull() or (not force and not self.auto_save.isChecked()):
+            return None
+        raw = self.output_path.text().strip()
+        if not raw:
+            if force:
+                self.statusBar().showMessage("Choose an output folder first.")
+            return None
+        try:
+            directory = Path(raw).expanduser()
+            if not directory.is_absolute():
+                raise ValueError("Choose an absolute output folder path")
+            if self.active_session is None or self.active_session.parent.resolve() != directory.resolve():
+                self.active_session = self.export_session(directory)
+                path = self.active_session
+            else:
+                from .session_revisions import update_session
+                _, records, metadata, references = self._export_payload()
+                path = update_session(self.active_session, records, metadata, reference_images=references)
+                self.dirty = False
+            self.autosave_error = ""
+            self.statusBar().showMessage(f"Saved {path}")
+            return path
+        except (OSError, ValueError, KeyError) as exc:
+            self.autosave_error = str(exc)
+            self.dirty = True
+            self.statusBar().showMessage(f"Auto-save failed: {exc}. Image and measurements remain in memory.")
+            return None
+
+    def start_control(self, runtime_dir=None):
+        if self.control_server is not None and self.control_server.running:
+            return True
+        from .control import ControlServer
+        self.control_server = ControlServer(self.handle_command, runtime_dir=runtime_dir, parent=self)
+        return self.control_server.start()
+
+    def command_status(self):
+        return dict(ok=True, preview_active=self.camera is not None, frames_received=self.frames_received,
+                    image_size=[self.image.width(), self.image.height()], sample=self._sample(),
+                    objective=self.objective_combo.currentText(), objective_manual=True,
+                    calibration_status="Calibrated" if self.calibration else "Uncalibrated",
+                    measurements=self.records, output_directory=self.output_path.text(),
+                    active_session=str(self.active_session) if self.active_session else None,
+                    autosave_error=self.autosave_error, sources_loading=bool(self.catalog_tasks),
+                    project_path=self.project_path.text(), fabrication_path=self.fabrication_path.text(),
+                    camera_names=[self.camera_combo.itemText(i) for i in range(1, self.camera_combo.count())],
+                    selected_camera=self.camera_combo.currentText(), selected_format=self.format_combo.currentText(),
+                    catalog_counts={kind: len(choices) for kind, choices in self.catalogs.items()},
+                    source_status=self.sample_status.text())
+
+    def restore_session(self, directory):
+        from .measurements import _validated_record
+        from .session_revisions import _read_base, _read_latest
+        directory = Path(directory).resolve(strict=True)
+        base, base_bytes, dimensions, _ = _read_base(directory)
+        pointer = _read_latest(directory, base, hashlib.sha256(base_bytes).hexdigest())
+        manifest = directory / "session.json"
+        if pointer:
+            manifest = (directory / json.loads(pointer)["manifest"]).resolve()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        records = [_validated_record(record, dimensions) for record in payload["measurements"]]
+        metadata = payload["metadata"]
+        raw = (directory / "image.png").read_bytes()
+        if hashlib.sha256(raw).hexdigest() != base["image"]["sha256"]:
+            raise ValueError("Capture original image has changed")
+        image = QtGui.QImage.fromData(raw)
+        if image.isNull():
+            raise ValueError("Could not decode original capture")
+        for evidence in [metadata.get("calibration_evidence"),
+                         *[record.get("calibration_evidence") for record in records]]:
+            if evidence:
+                digest = evidence["image_sha256"]
+                if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                    raise ValueError("Invalid calibration image hash")
+                path = directory / f"reference_{digest}.png"
+                if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                    raise ValueError("Calibration reference image has changed")
+                evidence["image_path"] = str(path)
+        if not self._confirm_replace():
+            return False
+        self.stop_preview()
+        self.set_image(image, camera_id=metadata.get("camera_id", ""))
+        self.objective_combo.setCurrentText(str(metadata.get("objective", "4x")).replace("x", "×"))
+        self.zoom_spin.setValue(float(metadata.get("zoom", 1)))
+        self.records = records
+        sample = metadata.get("sample", {})
+        self.restored_sample = copy.deepcopy(sample)
+        self.composition_combo.setCurrentText(sample.get("composition", ""))
+        self.wire_combo.setCurrentText(sample.get("microwire", ""))
+        self.notes.setPlainText(metadata.get("notes", ""))
+        self.source_file = metadata.get("source_file")
+        self.source_file_hash = metadata.get("source_file_sha256")
+        self.captured_utc = metadata.get("captured_utc")
+        self.loaded_utc = metadata.get("loaded_utc")
+        self.frame_format = metadata.get("camera_format")
+        self.calibration_evidence = metadata.get("calibration_evidence")
+        self.calibration = Calibration(**metadata["calibration"]) if metadata.get("calibration") else None
+        self.scale_status.setText("Uncalibrated · pixel measurements" if self.calibration is None
+                                  else f"Calibrated · {self.calibration.um_per_pixel:.6g} µm/pixel")
+        for index, record in enumerate(records, 1):
+            for edge in (record.get("analysis") or {}).get("edge1", []), (record.get("analysis") or {}).get("edge2", []):
+                if edge:
+                    self.view.add_line(edge[0], edge[1], "", "#ffc857")
+            self.view.add_line(record["start"], record["end"], str(index))
+        self._refresh_table()
+        self.active_session = directory
+        self.autosave_timer.stop()
+        self.dirty = False
+        return True
+
+    def handle_command(self, command):
+        action = command.get("action")
+        if action in {"measure", "parallel", "auto"} and "kind" in command:
+            index = self.kind_combo.findData(command["kind"])
+            if index < 0:
+                raise ValueError("Unknown boundary kind")
+            self.kind_combo.setCurrentIndex(index)
+        if action == "status":
+            return self.command_status()
+        if action == "configure":
+            allowed = {"action", "objective", "zoom", "composition", "microwire", "output_directory",
+                       "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind"}
+            if set(command) - allowed:
+                raise ValueError("Unknown configuration field")
+            if self.camera is not None and any(k in command for k in ("camera_name", "width", "height")):
+                raise ValueError("Stop preview before changing camera or mode")
+            if "objective" in command and not str(command["objective"]).strip():
+                raise ValueError("An objective label is required")
+            if "zoom" in command:
+                value = float(command["zoom"])
+                if not math.isfinite(value) or not self.zoom_spin.minimum() <= value <= self.zoom_spin.maximum():
+                    raise ValueError("Acquisition zoom is outside the supported input range")
+            if "auto_save" in command and not isinstance(command["auto_save"], bool):
+                raise ValueError("auto_save must be true or false")
+            if command.get("output_directory") and not Path(str(command["output_directory"])).expanduser().is_absolute():
+                raise ValueError("Choose an absolute output folder path")
+            if "kind" in command and self.kind_combo.findData(command["kind"]) < 0:
+                raise ValueError("Unknown boundary kind")
+            camera_index = self.camera_combo.currentIndex()
+            if "camera_name" in command:
+                camera_index = self.camera_combo.findText(str(command["camera_name"]))
+                if camera_index < 0:
+                    raise ValueError("Camera not found")
+            if "width" in command or "height" in command:
+                device = self.camera_combo.itemData(camera_index)
+                if device is None or not any(
+                    fmt.resolution().width() == int(command.get("width", 0)) and
+                    fmt.resolution().height() == int(command.get("height", 0)) for fmt in device.videoFormats()):
+                    raise ValueError("Requested camera mode unavailable")
+            for key, widget in (("project_path", self.project_path), ("fabrication_path", self.fabrication_path),
+                                ("output_directory", self.output_path)):
+                if key in command:
+                    widget.setText(str(command[key]))
+            if "objective" in command:
+                self.objective_combo.setCurrentText(str(command["objective"]).replace("x", "×"))
+            if "zoom" in command:
+                self.zoom_spin.setValue(float(command["zoom"]))
+            if "composition" in command:
+                self.composition_combo.setCurrentText(str(command["composition"]))
+            if "microwire" in command:
+                self.wire_combo.setCurrentText(str(command["microwire"]))
+            if "auto_save" in command:
+                self.auto_save.setChecked(bool(command["auto_save"]))
+            if "kind" in command:
+                index = self.kind_combo.findData(command["kind"])
+                if index < 0:
+                    raise ValueError("Unknown boundary kind")
+                self.kind_combo.setCurrentIndex(index)
+            if "camera_name" in command:
+                index = self.camera_combo.findText(str(command["camera_name"]))
+                if index < 0:
+                    raise ValueError("Camera not found")
+                self.camera_combo.setCurrentIndex(index)
+            if "width" in command or "height" in command:
+                matches = [i for i in range(self.format_combo.count())
+                           if self.format_combo.itemData(i).resolution().width() == int(command.get("width", 0))
+                           and self.format_combo.itemData(i).resolution().height() == int(command.get("height", 0))]
+                if not matches:
+                    raise ValueError("Requested camera mode unavailable")
+                self.format_combo.setCurrentIndex(matches[0])
+        elif action == "start":
+            if self.camera is None:
+                if command.get("discard") is True:
+                    self.dirty = False
+                if self.dirty and self.auto_save.isChecked():
+                    self._autosave()
+                if self.dirty:
+                    raise ValueError("Save the current image before starting another preview")
+                self.toggle_preview()
+                if self.camera is None:
+                    raise ValueError(self.statusBar().currentMessage())
+        elif action == "stop":
+            self.stop_preview()
+        elif action == "capture":
+            if self.camera is None or self.last_frame is None:
+                raise ValueError("No live camera frame is ready")
+            self.capture_frame()
+        elif action == "measure":
+            self.action_combo.setCurrentIndex(0)
+            previous = len(self.records)
+            self.line_drawn(tuple(command["start"]), tuple(command["end"]))
+            if len(self.records) == previous:
+                raise ValueError(self.statusBar().currentMessage() or "No still image is ready")
+            self._autosave()
+        elif action in {"parallel", "auto"}:
+            result = self.guides_drawn(command["a"], command["b"], command["c"], automatic=action == "auto", samples=command.get("samples", 15))
+            if result is None:
+                raise ValueError(self.statusBar().currentMessage())
+            self._autosave()
+        elif action == "save":
+            if command.get("output_directory"):
+                self.output_path.setText(str(command["output_directory"]))
+            if self._autosave(force=True) is None:
+                raise ValueError(self.autosave_error or "Could not save current image")
+        elif action == "load_image":
+            if self.dirty and command.get("discard") is not True:
+                raise ValueError("Save the current image before replacing it")
+            previous_dirty = self.dirty
+            self.dirty = False
+            if not self.load_image(Path(command["path"])):
+                self.dirty = previous_dirty
+                raise ValueError(self.statusBar().currentMessage())
+        elif action == "load_sources":
+            if command.get("cancel"):
+                for task in self.catalog_tasks:
+                    task.cancelled.set()
+                self.sample_status.setText("Loading cancellation requested.")
+                return self.command_status()
+            kind = command.get("kind", "project")
+            if kind not in {"project", "fabrication"}:
+                raise ValueError("Unknown source kind")
+            self._load_catalog(kind, composition=command.get("composition"))
+        elif action == "restore_session":
+            if self.dirty:
+                self._autosave()
+            if self.dirty:
+                raise ValueError("Save the current image before restoring another capture")
+            if not self.restore_session(command["path"]):
+                raise ValueError("Session restore cancelled")
+        elif action == "close":
+            self.stop_preview()
+            if self.dirty:
+                self._autosave()
+            if self.dirty:
+                raise ValueError("Save the current image before closing")
+            QtCore.QTimer.singleShot(100, self.close)
+        else:
+            raise ValueError("Unknown microscope command")
+        return self.command_status()
 
     def closeEvent(self, event):
         if not self._confirm_replace():
             event.ignore()
             return
         self.stop_preview()
+        self.autosave_timer.stop()
+        if self.control_server is not None:
+            self.control_server.close()
         for task in self.catalog_tasks:
             task.cancelled.set()
         self.settings.setValue("project_path", self.project_path.text())
         self.settings.setValue("fabrication_path", self.fabrication_path.text())
         self.settings.setValue("calibration_profiles", json.dumps(self.profiles))
+        self.settings.setValue("output_directory", self.output_path.text())
+        self.settings.setValue("auto_save", self.auto_save.isChecked())
         super().closeEvent(event)
 
 
@@ -725,16 +1126,24 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--demo", action="store_true", help="Open a synthetic image without camera access")
+    parser.add_argument("--runtime-dir", type=Path, help="Private local CLI discovery directory")
+    parser.add_argument("--no-control", action="store_true", help="Disable local CLI control")
     args, qt_args = parser.parse_known_args(argv)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0], *qt_args])
     ensure_app_theme(app)
     window = MainWindow(enumerate_cameras=not args.demo)
     if args.demo:
+        window.auto_save.setChecked(False)
         window.set_image(demo_image())
         window.dirty = False
     elif args.image:
         window.load_image(args.image)
     window.show()
+    if not args.no_control:
+        try:
+            window.start_control(args.runtime_dir)
+        except Exception as exc:
+            window.statusBar().showMessage(f"Local command control unavailable: {exc}")
     return app.exec()
 
 

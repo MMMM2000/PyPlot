@@ -224,3 +224,33 @@ def test_failed_reference_write_is_not_published_as_a_completed_session(tmp_path
     assert len(folders) == 1
     assert folders[0].name.startswith(".microscope_pending_")
     assert (folders[0] / "image.png").read_bytes() == png_bytes()
+
+
+def test_transient_windows_publish_lock_keeps_the_complete_original(tmp_path, monkeypatch):
+    from data_logging.microscope_logger import measurements
+    original_rename = type(tmp_path).rename
+    calls = []
+    def locked_once(path, target):
+        calls.append(path)
+        if len(calls) == 1:
+            error = PermissionError("Synthetic Windows sharing lock")
+            error.winerror = 5
+            raise error
+        return original_rename(path, target)
+    monkeypatch.setattr(type(tmp_path), "rename", locked_once)
+    monkeypatch.setattr(measurements.time, "sleep", lambda delay: None)
+    session = save_session(tmp_path, png_bytes(), [], CONTEXT)
+    assert len(calls) == 2
+    assert (session / "image.png").read_bytes() == png_bytes()
+
+
+def test_publish_never_replaces_an_existing_destination(tmp_path):
+    from data_logging.microscope_logger.measurements import _publish_directory
+    pending, destination = tmp_path / "pending", tmp_path / "existing"
+    pending.mkdir()
+    destination.mkdir()
+    (destination / "preserve.txt").write_text("user work")
+    with pytest.raises(FileExistsError):
+        _publish_directory(pending, destination)
+    assert pending.exists()
+    assert (destination / "preserve.txt").read_text() == "user work"

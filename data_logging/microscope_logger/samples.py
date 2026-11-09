@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Callable, Mapping
@@ -52,20 +53,85 @@ def _sort_key(choice: SampleChoice) -> tuple[object, ...]:
     )
 
 
+def _composition_token(value: str) -> str:
+    """Match TMA's composition-folder tokens without broad punctuation folding."""
+    return str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _check_cancel(cancel_callback: Callable[[], bool] | None) -> None:
+    if cancel_callback is not None and cancel_callback():
+        from microwire_data_builder.core import BuildCancelledError
+        raise BuildCancelledError()
+
+
+def list_fabrication_compositions(
+    root: str | Path, *, cancel_callback: Callable[[], bool] | None = None,
+) -> list[str]:
+    """List immediate composition-folder suggestions without reading workbooks."""
+    _check_cancel(cancel_callback)
+    target = Path(root).expanduser().resolve(strict=True)
+    if not target.is_dir():
+        raise ValueError("Select a fabrication folder.")
+    values = []
+    for child in target.iterdir():
+        _check_cancel(cancel_callback)
+        if child.is_dir() and not child.name.startswith((".", "~")) and child.name.strip():
+            values.append(child.name.strip())
+    return sorted(values, key=str.casefold)
+
+
+def _fabrication_composition_folder(
+    root: Path, composition: str, cancel_callback: Callable[[], bool] | None,
+) -> Path:
+    key = _composition_token(composition)
+    if not key:
+        raise ValueError("Select a composition before loading its fabrication workbooks.")
+    _check_cancel(cancel_callback)
+    if _composition_token(root.name) == key:
+        return root
+    matches = []
+    for child in root.iterdir():
+        _check_cancel(cancel_callback)
+        if (child.is_dir() and not child.name.startswith((".", "~"))
+                and _composition_token(child.name) == key):
+            matches.append(child)
+    if not matches:
+        raise ValueError(f"No fabrication folder matched composition {composition}.")
+    if len(matches) > 1:
+        raise ValueError(f"Multiple fabrication folders matched composition {composition}; choose a specific composition folder.")
+    return matches[0]
+
+
 def load_project_samples(path: str | Path) -> list[SampleChoice]:
-    """Return sample choices from the same safe table projection used by TMA.
+    """Return sample choices through the normal Builder package reader.
 
     Duplicate samples across sections remain one dropdown choice, while every
     section/row binding is retained. Row indexes are zero-based. The SHA binds
     the identities to the exact source bytes, and a concurrent edit is rejected.
+    Packaged projects read table entries only: unrelated section state and
+    measurement payloads are not needed for sample selection.
     """
-    from microwire_data_builder.project_package import load_project_table_projection
+    from microwire_data_builder import project_package
 
     target = Path(path).expanduser().resolve(strict=True)
     if not target.is_file():
         raise ValueError("Select a Builder project file.")
     before = _sha256(target)
-    payload = load_project_table_projection(target)
+    if project_package.is_project_package(target):
+        index = project_package.inspect_project_package(target)
+        payload = index.project_header()
+        with index.open_reader() as reader:
+            for section_key, descriptor in index.sections.items():
+                table = project_package._read_json_bytes(  # noqa: SLF001
+                    reader.read_entry(descriptor["table"]), f"{section_key} table")
+                project_package._validate_tree_limits(table)  # noqa: SLF001
+                if (not isinstance(table, dict) or set(table) != {"columns", "rows", "index"}
+                        or not isinstance(table["rows"], list)):
+                    raise project_package.SafeCodecError(
+                        f"Builder package table schema is invalid: {section_key}")
+                payload["sections"][section_key] = {"rows": table["rows"]}
+    else:
+        payload = project_package.load_project_table_projection(target)
     if _sha256(target) != before:
         raise ValueError("The Builder project changed while reading samples. Reload it.")
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
@@ -107,6 +173,7 @@ def load_project_samples(path: str | Path) -> list[SampleChoice]:
 def load_fabrication_samples(
     root: str | Path,
     *,
+    composition: str | None = None,
     cancel_callback: Callable[[], bool] | None = None,
 ) -> list[SampleChoice]:
     """Read fabrication piece keys using Builder's existing workbook parser.
@@ -114,22 +181,35 @@ def load_fabrication_samples(
     Each contributing workbook is indexed separately so its exact path and SHA
     remain available even when multiple workbooks mention the same sample.
     ``source_sha256`` identifies the contributing workbook inventory; the
-    individual workbook SHA values are in ``source_rows``. The existing parser
+    individual workbook SHA values are in ``source_rows``. With ``composition``,
+    only that immediate composition folder (or matching root) is traversed, like
+    TMA's lazy loading. A missing or ambiguous match never falls back to a whole
+    production-root scan. The existing parser
     does not expose physical Excel row coordinates, so only verified piece keys
     are recorded rather than inventing row numbers.
     """
-    from microwire_data_builder.core import BuildCancelledError, build_fabrication_index
+    from microwire_data_builder.core import build_fabrication_index
 
+    _check_cancel(cancel_callback)
     target = Path(root).expanduser().resolve(strict=True)
     if not target.is_dir():
         raise ValueError("Select a fabrication folder.")
-    files = sorted((p for p in target.rglob("*.xlsx")
-                    if p.is_file() and not p.name.startswith("~$")),
-                   key=lambda p: str(p).casefold())
+    search = target if composition is None else _fabrication_composition_folder(target, composition, cancel_callback)
+    files = []
+    for directory, directories, filenames in os.walk(search):
+        _check_cancel(cancel_callback)
+        directories.sort(key=str.casefold)
+        for name in sorted(filenames, key=str.casefold):
+            _check_cancel(cancel_callback)
+            if name.lower().endswith(".xlsx") and not name.startswith("~$"):
+                path = Path(directory) / name
+                if path.is_file():
+                    files.append(path)
+    if composition is not None and not files:
+        raise ValueError(f"No fabrication Excel workbooks were found for {composition}.")
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for workbook in files:
-        if cancel_callback is not None and cancel_callback():
-            raise BuildCancelledError()
+        _check_cancel(cancel_callback)
         before = _sha256(workbook)
         index = build_fabrication_index([workbook], cancel_callback=cancel_callback)
         if _sha256(workbook) != before:
@@ -156,4 +236,4 @@ def load_fabrication_samples(
     return sorted(choices, key=_sort_key)
 
 
-__all__ = ["SampleChoice", "load_project_samples", "load_fabrication_samples"]
+__all__ = ["SampleChoice", "load_project_samples", "load_fabrication_samples", "list_fabrication_compositions"]

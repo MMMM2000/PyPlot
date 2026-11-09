@@ -14,6 +14,7 @@ import json
 import math
 from pathlib import Path
 import struct
+import time
 from typing import Any, Mapping, Sequence
 import uuid
 import zlib
@@ -188,6 +189,20 @@ def _validated_record(record: Mapping[str, Any], image_size: tuple[int, int]) ->
     return dict(record)
 
 
+def _publish_directory(pending: Path, destination: Path) -> None:
+    """Publish a newly owned directory, tolerating brief Windows sharing locks."""
+    for attempt in range(6):
+        if destination.exists():
+            raise FileExistsError(f"Refusing to replace an existing session: {destination}")
+        try:
+            pending.rename(destination)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
 def save_session(output_parent: str | Path, image_png_bytes: bytes,
                  records: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any], *,
                  reference_images: Mapping[str, bytes] | None = None) -> Path:
@@ -260,5 +275,5 @@ def save_session(output_parent: str | Path, image_png_bytes: bytes,
     with (pending / "session.json").open("x", encoding="utf-8", newline="\n") as stream:
         stream.write(json_text + "\n")
     # A failed write can leave recoverable pending files, never a completed-looking session.
-    pending.rename(directory)
+    _publish_directory(pending, directory)
     return directory
