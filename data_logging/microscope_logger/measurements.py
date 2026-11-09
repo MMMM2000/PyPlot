@@ -244,7 +244,7 @@ def save_session(output_parent: str | Path, image_png_bytes: bytes,
         payload["reference_images"] = reference_inventory
     # Validate JSON before creating anything, including arbitrary extra fields.
     json_text = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False)
-    fields = ["measurement", "composition", "microwire", "source_kind", "source_path",
+    fields = ["measurement", "composition", "microwire", "source_kind", "source_path", "brittle", "brittle_observed_utc",
               "kind", "width_px", "width_um", "calibration_status", "objective",
               "zoom", "camera_id", "start_x_px", "start_y_px", "end_x_px", "end_y_px"]
     csv_buffer = io.StringIO(newline="")
@@ -257,12 +257,14 @@ def save_session(output_parent: str | Path, image_png_bytes: bytes,
         row = {key: record.get(key) for key in fields if key in record}
         row.update({key: sample.get(key, "") for key in
                     ("composition", "microwire", "source_kind", "source_path")})
-        row.update(measurement=index, start_x_px=record["start"][0], start_y_px=record["start"][1],
+        row.update(brittle=sample.get("brittle"), brittle_observed_utc=sample.get("brittle_observed_utc"),
+                   measurement=index, start_x_px=record["start"][0], start_y_px=record["start"][1],
                    end_x_px=record["end"][0], end_y_px=record["end"][1])
         writer.writerow(row)
     parent = Path(output_parent)
     parent.mkdir(parents=True, exist_ok=True)
-    directory = parent / f"microscope_{stamp:%Y%m%dT%H%M%S%fZ}_{session_id[:8]}"
+    from .session_naming import new_session_name
+    directory = parent / new_session_name(metadata, timestamp=stamp, token=session_id)
     pending = parent / f".microscope_pending_{session_id}"
     pending.mkdir(exist_ok=False)
     with (pending / "image.png").open("xb") as stream:

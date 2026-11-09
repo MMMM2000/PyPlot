@@ -23,6 +23,7 @@ class SampleChoice:
     source_path: str
     source_sha256: str
     source_rows: tuple[dict[str, object], ...] = ()
+    brittle: bool | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -56,6 +57,17 @@ def _sort_key(choice: SampleChoice) -> tuple[object, ...]:
 def _composition_token(value: str) -> str:
     """Match TMA's composition-folder tokens without broad punctuation folding."""
     return str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def _row_brittle(row: Mapping[str, object]) -> bool | None:
+    """Read an explicit annotation; blank legacy cells do not mean false."""
+    override = row.get("_brittle_override")
+    if isinstance(override, bool):
+        return override
+    value = row.get("Brittle")
+    if isinstance(value, str) and value.strip().casefold() == "brittle":
+        return True
+    return None
 
 
 def _check_cancel(cancel_callback: Callable[[], bool] | None) -> None:
@@ -108,6 +120,8 @@ def load_project_samples(path: str | Path) -> list[SampleChoice]:
     Duplicate samples across sections remain one dropdown choice, while every
     section/row binding is retained. Row indexes are zero-based. The SHA binds
     the identities to the exact source bytes, and a concurrent edit is rejected.
+    Brittle is unknown when no explicit value exists or sections disagree; a
+    blank historical cell is not treated as an explicit non-brittle assessment.
     Packaged projects read table entries only: unrelated section state and
     measurement payloads are not needed for sample selection.
     """
@@ -135,6 +149,7 @@ def load_project_samples(path: str | Path) -> list[SampleChoice]:
     if _sha256(target) != before:
         raise ValueError("The Builder project changed while reading samples. Reload it.")
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+    brittle_values: dict[tuple[str, str], set[bool]] = {}
 
     def collect(section: str, rows: object) -> None:
         if not isinstance(rows, list):
@@ -149,7 +164,11 @@ def load_project_samples(path: str | Path) -> list[SampleChoice]:
             microwire = _wire_display(raw_wire)
             if not composition or not microwire:
                 continue
-            grouped.setdefault((composition, microwire), []).append({
+            key = (composition, microwire)
+            annotation = _row_brittle(row)
+            if annotation is not None:
+                brittle_values.setdefault(key, set()).add(annotation)
+            grouped.setdefault(key, []).append({
                 "binding_type": "project_table_row",
                 "section": section,
                 "row_index": row_index,
@@ -164,10 +183,13 @@ def load_project_samples(path: str | Path) -> list[SampleChoice]:
             if isinstance(value, Mapping):
                 collect(str(section), value.get("rows"))
     collect("", payload.get("rows"))
-    return sorted([
-        SampleChoice(composition, microwire, "project", str(target), before, tuple(rows))
-        for (composition, microwire), rows in grouped.items()
-    ], key=_sort_key)
+    choices = []
+    for (composition, microwire), rows in grouped.items():
+        values = brittle_values.get((composition, microwire), set())
+        brittle = next(iter(values)) if len(values) == 1 else None
+        choices.append(SampleChoice(composition, microwire, "project", str(target), before,
+                                    tuple(rows), brittle))
+    return sorted(choices, key=_sort_key)
 
 
 def load_fabrication_samples(

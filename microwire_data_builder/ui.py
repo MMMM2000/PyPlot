@@ -157,6 +157,8 @@ from .core import (
     MicroscopeCacheEntry,
     MICROSCOPE_IMAGE_COLUMNS,
     BRITTLE_COLUMN,
+    BRITTLE_OVERRIDE_COLUMN,
+    brittle_override_value,
     MeasurementRecord,
     VideoMetricsSummary,
     FabricationIndex,
@@ -308,6 +310,7 @@ MICROSCOPE_TABLE_COLUMNS = [
     "_core_image",
     "_glass_image",
     "_images",
+    BRITTLE_OVERRIDE_COLUMN,
 ]
 
 ANNEALING_GRAPH_WIDTH = 480
@@ -11251,6 +11254,8 @@ def _microscope_index_to_frame(
         if image_paths:
             image_paths = list(dict.fromkeys(image_paths))
 
+        brittle_override = brittle_override_value(getattr(measurements, "brittle_override", None))
+        brittle = brittle_override if brittle_override is not None else bool(getattr(measurements, "brittle", False))
         rows.append(
             {
                 "Composition": composition,
@@ -11258,7 +11263,8 @@ def _microscope_index_to_frame(
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
-                BRITTLE_COLUMN: "brittle" if getattr(measurements, "brittle", False) else None,
+                BRITTLE_COLUMN: "brittle" if brittle else None,
+                BRITTLE_OVERRIDE_COLUMN: brittle_override,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -11479,6 +11485,7 @@ def _apply_microscope_overrides(
             glass=list(measurements.glass),
             other=list(measurements.other),
             brittle=bool(getattr(measurements, "brittle", False)),
+            brittle_override=brittle_override_value(getattr(measurements, "brittle_override", None)),
         )
         token = _microwire_key_to_text(key) or ""
         override = overrides.get(token, {})
@@ -17031,9 +17038,17 @@ class MicroscopeSection(MiniDatabaseSection):
         updated = frame.copy()
         if BRITTLE_COLUMN not in updated.columns:
             updated[BRITTLE_COLUMN] = None
+        updated[BRITTLE_COLUMN] = updated[BRITTLE_COLUMN].astype(object)
         changed = False
         for idx, row in updated.iterrows():
             current = row.get(BRITTLE_COLUMN)
+            explicit = brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN))
+            if explicit is not None:
+                target = "brittle" if explicit else None
+                if (explicit and str(current).strip().lower() != "brittle") or (not explicit and current is not None):
+                    updated.at[idx, BRITTLE_COLUMN] = target
+                    changed = True
+                continue
             if str(current).strip().lower() == "brittle":
                 continue
             sources: List[Path] = []
@@ -17405,7 +17420,20 @@ class MicroscopeSection(MiniDatabaseSection):
         return extra
 
     def _protected_key_tokens(self) -> Set[str]:
-        return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
+        protected = {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
+        frame = self.data.table
+        if isinstance(frame, pd.DataFrame) and BRITTLE_OVERRIDE_COLUMN in frame:
+            for _, row in frame.iterrows():
+                if brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN)) is not None:
+                    key = str(row.get("_key") or "").strip()
+                    if not key:
+                        parts = _microwire_parts_from_label_safe(str(row.get("Microwire") or "").strip())
+                        composition = str(row.get("Composition") or "").strip()
+                        if composition and parts is not None:
+                            key = _microwire_key_to_str((composition, int(parts[0]), int(parts[1]), parts[2]))
+                    if key:
+                        protected.add(key)
+        return protected
 
     def _build_initial_table_frame(self, expected_keys: Set[MicrowireKey]) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -17477,6 +17505,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_STATUS_COLUMN: None,
                     SOURCE_LABEL_COLUMN: self._expected_key_source_labels.get(key_str),
                     BRITTLE_COLUMN: None,
+                    BRITTLE_OVERRIDE_COLUMN: None,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key_str,
@@ -17499,7 +17528,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     else []
                 )
                 frame = pd.DataFrame(existing_rows + new_rows)
-        frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = frame.reindex(columns=MICROSCOPE_TABLE_COLUMNS)
         frame = self._with_status_column(frame)
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         return frame
@@ -17556,7 +17585,15 @@ class MicroscopeSection(MiniDatabaseSection):
                 row_map[key] = target
                 ordered_keys.append(key)
             for column, value in row.items():
+                if (column == BRITTLE_OVERRIDE_COLUMN
+                        and brittle_override_value(target.get(column)) is not None
+                        and brittle_override_value(value) is None):
+                    continue
                 target[column] = value
+            explicit = brittle_override_value(target.get(BRITTLE_OVERRIDE_COLUMN))
+            if explicit is not None:
+                target[BRITTLE_OVERRIDE_COLUMN] = explicit
+                target[BRITTLE_COLUMN] = "brittle" if explicit else None
         merged = pd.DataFrame([row_map[key] for key in ordered_keys if key in row_map])
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in merged.columns:
@@ -17647,6 +17684,7 @@ class MicroscopeSection(MiniDatabaseSection):
             existing_ratio = existing_row.get("d/D")
             existing_source_label = existing_row.get(SOURCE_LABEL_COLUMN)
             existing_brittle = existing_row.get(BRITTLE_COLUMN)
+            existing_brittle_override = brittle_override_value(existing_row.get(BRITTLE_OVERRIDE_COLUMN))
             existing_core_image = existing_row.get("_core_image")
             existing_glass_image = existing_row.get("_glass_image")
             existing_images = existing_row.get("_images")
@@ -17670,20 +17708,17 @@ class MicroscopeSection(MiniDatabaseSection):
                         or self._expected_key_source_labels.get(key)
                     ),
                     BRITTLE_COLUMN: (
-                        existing_brittle
-                        if existing_brittle
-                        else (
-                            "brittle"
-                            if (
+                        ("brittle" if existing_brittle_override else None)
+                        if existing_brittle_override is not None
+                        else existing_brittle or (
+                            "brittle" if (
                                 any("brittle" in str(item).lower() for item in merged_images)
-                                or (
-                                    (payload.get("_glass_image") or existing_glass_image)
-                                    and not (payload.get("_core_image") or existing_core_image)
-                                )
-                            )
-                            else None
+                                or ((payload.get("_glass_image") or existing_glass_image)
+                                    and not (payload.get("_core_image") or existing_core_image))
+                            ) else None
                         )
                     ),
+                    BRITTLE_OVERRIDE_COLUMN: existing_brittle_override,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key,
@@ -17792,7 +17827,8 @@ class MicroscopeSection(MiniDatabaseSection):
         if image_paths:
             image_paths = list(dict.fromkeys(image_paths))
 
-        return {
+        brittle_override = brittle_override_value(getattr(measurement, "brittle_override", None))
+        result = {
             "Composition": composition,
             "Microwire": _microwire_label(draw, piece, suffix),
             MICROSCOPE_D_COLUMN: d_value,
@@ -17811,6 +17847,10 @@ class MicroscopeSection(MiniDatabaseSection):
             "_glass_image": glass_image,
             "_images": image_paths,
         }
+        if brittle_override is not None:
+            result[BRITTLE_OVERRIDE_COLUMN] = brittle_override
+            result[BRITTLE_COLUMN] = "brittle" if brittle_override else None
+        return result
 
     def _apply_partial_row(self, row: dict) -> None:
         table = self.table_view
@@ -18228,7 +18268,8 @@ class MicroscopeSection(MiniDatabaseSection):
             suffix = str(parsed[3] or "").strip().lower()
         prefix = "Other end - " if suffix == "oe" else ""
 
-        brittle = str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle"
+        explicit_brittle = brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN))
+        brittle = explicit_brittle if explicit_brittle is not None else str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle"
         core_present = self._has_image_value(row.get("_core_image"))
         glass_present = self._has_image_value(row.get("_glass_image"))
         images = row.get("_images")
@@ -18410,7 +18451,8 @@ class MicroscopeSection(MiniDatabaseSection):
     def _row_missing_images(self, row: pd.Series) -> bool:
         if self._row_is_expected_unlinked(row):
             return False
-        brittle = bool(row.get(BRITTLE_COLUMN))
+        explicit_brittle = brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN))
+        brittle = explicit_brittle if explicit_brittle is not None else bool(row.get(BRITTLE_COLUMN))
         core_present = self._has_image_value(row.get("_core_image"))
         glass_present = self._has_image_value(row.get("_glass_image"))
         extras = row.get("_images")
@@ -18613,7 +18655,7 @@ class MicroscopeSection(MiniDatabaseSection):
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
             return
-        hidden_columns = ["_key", "_images", "_core_image", "_glass_image", "Reviewed"]
+        hidden_columns = ["_key", "_images", "_core_image", "_glass_image", "Reviewed", BRITTLE_OVERRIDE_COLUMN]
         hidden_columns.extend(MICROSCOPE_IMAGE_COLUMNS)
         for column_name in hidden_columns:
             try:
@@ -19350,7 +19392,11 @@ class MicroscopeSection(MiniDatabaseSection):
             elif glass_image is not None:
                 measurements.add_placeholder("glass", glass_image)
 
-            if str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle":
+            explicit = brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN))
+            if explicit is not None:
+                measurements.brittle_override = explicit
+                measurements.brittle = explicit
+            elif str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle":
                 measurements.brittle = True
         return index
 
@@ -37064,8 +37110,12 @@ class AssemblySection(QtWidgets.QWidget):
                 D_path = self._image_path_from_row(row, "glass")
                 if D_path is not None:
                     measurements.add_placeholder("glass", D_path)
+            explicit = brittle_override_value(row.get(BRITTLE_OVERRIDE_COLUMN))
             brittle_value = str(row.get(BRITTLE_COLUMN) or "").strip().lower()
-            if brittle_value == "brittle":
+            if explicit is not None:
+                measurements.brittle_override = explicit
+                measurements.brittle = explicit
+            elif brittle_value == "brittle":
                 measurements.brittle = True
         return index
 
@@ -37079,6 +37129,9 @@ class AssemblySection(QtWidgets.QWidget):
         for key, table_measurements in table_index.items():
             payload_measurements = payload.get(key)
             if payload_measurements is None:
+                return True
+            explicit = brittle_override_value(getattr(table_measurements, "brittle_override", None))
+            if explicit is not None and brittle_override_value(getattr(payload_measurements, "brittle_override", None)) != explicit:
                 return True
             for getter in ("best_core", "best_glass"):
                 table_value = getattr(table_measurements, getter)()

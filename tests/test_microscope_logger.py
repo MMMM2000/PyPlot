@@ -147,7 +147,8 @@ def test_catalog_dropdowns_and_record_sample_snapshots(window):
     window.wire_combo.setEditText("unknown-piece")
     window.line_drawn((90, 40), (90, 80))
     assert window.records[-1]["sample"] == {
-        "composition": "Manual synthetic sample", "microwire": "unknown-piece", "source_kind": "manual"}
+        "composition": "Manual synthetic sample", "microwire": "unknown-piece", "source_kind": "manual",
+        "brittle": None, "brittle_observed_utc": None}
     assert first["sample"]["microwire"] == "12/2"
 
 

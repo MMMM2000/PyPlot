@@ -45,6 +45,7 @@ def test_project_choices_keep_all_bindings_and_source_hash(tmp_path: Path):
     assert [(r["section"], r["row_index"]) for r in choice.source_rows] == [
         ("assemble", 0), ("microscope", 0)]
     assert choice.source_rows[0]["source_microwire"] == "12_2"
+    assert choice.brittle is None
     assert path.read_bytes() == original
 
 
@@ -108,6 +109,63 @@ def test_fabrication_uses_existing_piece_parser_and_preserves_workbook(tmp_path:
     source = Path(binding["workbook"])
     assert binding["workbook_sha256"] == hashlib.sha256(originals[source]).hexdigest()
     assert all(p.read_bytes() == original for p, original in originals.items())
+    assert all(choice.brittle is None for choice in samples)
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"_brittle_override": True}, True),
+    ({"_brittle_override": False, "Brittle": "brittle"}, False),
+    ({"Brittle": "brittle"}, True),
+    ({"Brittle": " BRITTLE "}, True),
+    ({"Brittle": ""}, None),
+    ({"Brittle": None}, None),
+    ({}, None),
+    ({"_brittle_override": "false", "Brittle": "brittle"}, True),
+    ({"_brittle_override": 1}, None),
+    ({"_brittle_override": 0}, None),
+    ({"Brittle": True}, None),
+    ({"Brittle": "not brittle"}, None),
+])
+def test_project_brittle_annotation_requires_explicit_supported_value(tmp_path, fields, expected):
+    target = _project(tmp_path)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["sections"]["microscope"]["rows"][0].update(fields)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    before = target.read_bytes()
+    choice = next(sample for sample in load_project_samples(target) if sample.microwire == "12/2")
+    assert choice.brittle is expected
+    assert len(choice.source_rows) == 2
+    assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize("assemble,microscope,expected", [
+    ({"_brittle_override": False}, {"Brittle": "brittle"}, None),
+    ({"Brittle": "brittle"}, {"_brittle_override": False}, None),
+    ({"_brittle_override": True}, {"Brittle": "brittle"}, True),
+    ({"_brittle_override": False}, {"_brittle_override": False}, False),
+    ({"Brittle": ""}, {"_brittle_override": False}, False),
+])
+def test_project_brittle_conflicts_do_not_guess_across_sections(tmp_path, assemble, microscope, expected):
+    target = _project(tmp_path)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["sections"]["assemble"]["rows"][0].update(assemble)
+    payload["sections"]["microscope"]["rows"][0].update(microscope)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    choice = next(sample for sample in load_project_samples(target) if sample.microwire == "12/2")
+    assert choice.brittle is expected
+    assert [(row["section"], row["row_index"]) for row in choice.source_rows] == [
+        ("assemble", 0), ("microscope", 0)]
+
+
+def test_packaged_project_preserves_explicit_false_brittle_annotation(tmp_path):
+    from microwire_data_builder import project_package
+    source = _project(tmp_path)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["sections"]["microscope"]["rows"][0].update({"_brittle_override": False, "Brittle": None})
+    target = tmp_path / "packaged.pydpj"
+    project_package.write_project_package(target, payload)
+    choice = next(sample for sample in load_project_samples(target) if sample.microwire == "12/2")
+    assert choice.brittle is False
 
 
 def test_empty_sources_and_bad_paths_do_not_invent_samples(tmp_path: Path):

@@ -53,9 +53,89 @@ for every revision, and earlier measurement sets remain available. **Save image
 and measurements** saves immediately to the selected output folder.
 Calibrated sessions also include the reference images. JSON retains individual
 sample/source bindings, image hashes, calibration and acquisition metadata. Unknown
-physical widths remain blank in CSV and null in JSON. The app never updates the
-source project or fabrication workbooks. A future reviewed Builder import can use
-these bindings; it must use the normal Builder writer and publication checks.
+physical widths remain blank in CSV and null in JSON. Diameter values are not yet
+written back to Builder; calibration and a reviewed diameter import remain separate
+work. Fabrication workbooks are read only.
+
+## Brittle sample annotation
+
+The **Brittle** checkbox has three states: checked (**yes**), unchecked (**no**),
+and a dash (**not assessed**). Saved project annotations populate the selection
+when available. An unmarked legacy project cell is unknown, rather than evidence
+of a non-brittle specimen. The setting belongs to the selected composition and
+microwire, so switching samples does not carry another sample's observation over.
+
+The current selection is saved under `metadata.sample.brittle` in `session.json`.
+Each new measurement snapshots `sample.brittle` and `brittle_observed_utc`; CSV
+has corresponding `brittle` and `brittle_observed_utc` columns. Unknown is JSON
+`null` and a blank CSV cell. Existing measurement rows keep their earlier state;
+later changes appear in the session metadata and subsequent rows/revisions.
+Project update receipts are retained in session metadata after publication.
+
+To update `.pydpj`, select **Save Brittle to project…**. The app prepares a separate
+candidate, verifies all package entries and unrelated payloads, opens it in Builder
+with isolated storage, and checks the normal TMA table import. The review shows the
+exact sample and changes before **Save** publishes it using the guarded project
+publication script, the expected old SHA-256, and a new backup. A stale source,
+edited candidate, or active save lock causes refusal. A not-assessed state never
+changes the project. Preparing/verifying/saving runs in a worker so the interface
+and CLI remain responsive; wait for the operation before closing the app.
+
+The public Builder cell is `Brittle = "brittle"` for yes and blank for no.
+An internal boolean `_brittle_override` preserves an explicit no when opening a
+legacy glass-only image set that would otherwise infer brittleness. Only the exact
+composition/wire identity is updated, including its matching assembled summary.
+Known specimens without microscope history gain an annotation-only microscope row.
+Project writeback currently uses the Python/uv version of PyPlot; packaged frozen
+executables show an explicit unsupported-worker message before creating a candidate.
+
+## Output folders and names
+
+Choose the output folder in the app or with `configure --output-directory PATH`.
+The proposed default is `microscope_measurements` beside the Builder project.
+Each new capture gets one flat, self-contained folder:
+
+```text
+<output>/
+  Ni50Fe27Ga23__10_4__20261109T135657347713Z_a5220a09/
+    image.png
+    session.json
+    measurements.csv
+    reference_<sha256>.png           # when calibrated
+    latest.json                     # after the first revision
+    revisions/
+      <revision-id>/
+        session.json
+        measurements.csv
+  project_updates/
+    <UTC-time>-<unique-id>/
+      candidate.pydpj
+      review.json
+      verification.json
+      verification-request.json
+      verification-environment/
+      verification-stdout.txt
+      verification-stderr.txt
+      original.pydpj                # backup, created on publication
+      publication_receipt.json     # publication result
+      publication_receipt.json.stdout.txt
+      publication_receipt.json.stderr.txt
+```
+
+The folder name is `composition__wire__UTC-time_unique-suffix`. A slash in `10/4`
+becomes `10_4` for Windows; unsupported filename characters are replaced and very
+long labels shortened. Exact sample labels remain in JSON/CSV. Missing identity
+uses `Unassigned`. A new unique suffix keeps repeated captures separate. Renaming
+a selection does not rename an existing capture folder; its original manifest
+and latest revision show the historical and current selections. Existing folders
+created by earlier versions remain readable and are not moved.
+
+`image.png` is the original capture without drawn overlays. `session.json`
+contains sample identity, source bindings and hashes, acquisition settings,
+annotations, reference evidence and measurement geometry. `measurements.csv` is
+the convenient spreadsheet export. After edits, read `latest.json` to find the
+current JSON/CSV pair; earlier versions stay available. Original images and
+calibration references are stored once per capture, not copied per revision.
 
 ## Local command control
 
@@ -71,6 +151,24 @@ uv run python -m data_logging.microscope_logger.control parallel --a 800 538 --b
 uv run python -m data_logging.microscope_logger.control auto --a 800 538 --b 1800 529 --c 1300 600 --samples 15
 uv run python -m data_logging.microscope_logger.control save
 ```
+
+Sample annotation and guarded project update are also available without computer
+use:
+
+```powershell
+uv run python -m data_logging.microscope_logger.control configure --brittle yes
+uv run python -m data_logging.microscope_logger.control prepare-brittle-update
+uv run python -m data_logging.microscope_logger.control status
+# Inspect project_annotation.review; use its candidate_sha256 for publication.
+uv run python -m data_logging.microscope_logger.control publish-brittle-update --review-sha256 <reviewed-candidate-sha256>
+uv run python -m data_logging.microscope_logger.control status
+```
+
+Use `--brittle no` for an explicit negative observation or `--brittle unknown` to
+record not assessed locally. `prepare-brittle-update --workdir PATH` overrides the
+review output folder; `--expected-sha256 HASH` supplies the exact source version
+when the sample catalogue has not been loaded. Both project commands start jobs;
+poll `status` until `project_annotation.state` is `ready`, `published`, or `failed`.
 
 Coordinates above illustrate one image and must be chosen for the actual boundaries.
 Use `configure --output-directory PATH` to choose storage. `load-sources --kind

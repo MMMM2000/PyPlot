@@ -133,6 +133,24 @@ class CatalogTask(QtCore.QObject):
             self.finished.emit()
 
 
+class ProjectAnnotationTask(QtCore.QObject):
+    succeeded = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+
+    def run(self):
+        try:
+            self.succeeded.emit(self.operation())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, *, enumerate_cameras=True, settings=None, use_tma_defaults=None):
         super().__init__()
@@ -166,6 +184,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.source_file = None
         self.records = []
         self.restored_sample = None
+        self.sample_annotations = {}
+        self.annotation_task = None
+        self.annotation_review = None
+        self.annotation_job = {"state": "idle"}
+        self.project_update_receipts = []
         self.calibration = None
         self.last_line = None
         self.profiles = {}
@@ -255,9 +278,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.composition_combo.currentTextChanged.connect(self._composition_changed)
         self.composition_combo.activated.connect(self._maybe_load_fabrication)
         self.composition_combo.lineEdit().editingFinished.connect(self._maybe_load_fabrication)
-        self.wire_combo.currentTextChanged.connect(self._mark_dirty)
+        self.wire_combo.currentTextChanged.connect(self._sample_changed)
         form.addRow("Composition", self.composition_combo)
         form.addRow("Microwire / piece", self.wire_combo)
+        self.brittle_toggle = QtWidgets.QCheckBox("Brittle · not assessed")
+        self.brittle_toggle.setTristate(True)
+        self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked)
+        self.brittle_toggle.setToolTip("Checked: brittle. Unchecked: not brittle. Dash: not assessed. Recorded for this sample; project changes require Save Brittle to project.")
+        self.brittle_toggle.checkStateChanged.connect(self._brittle_changed)
+        form.addRow(self.brittle_toggle)
+        self.save_brittle_button = QtWidgets.QPushButton("Save Brittle to project…")
+        self.save_brittle_button.clicked.connect(self._review_brittle_gui)
+        form.addRow(self.save_brittle_button)
+        self.annotation_status = QtWidgets.QLabel("Project annotation has not been changed.")
+        self.annotation_status.setWordWrap(True)
+        form.addRow(self.annotation_status)
         self.sample_status = QtWidgets.QLabel("Load a source, or type a sample identity.")
         self.sample_status.setWordWrap(True)
         form.addRow(self.sample_status)
@@ -610,7 +645,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.profiles.pop(self._profile_key(), None)
         self._context_changed()
 
-    def _sample(self):
+    def _sample_identity(self):
         composition, wire = self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
         matches = [choice for kind in ("project", "fabrication") for choice in self.catalogs.get(kind, [])
                    if choice.composition == composition and choice.microwire == wire]
@@ -621,6 +656,143 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.restored_sample and self.restored_sample.get("composition") == composition and self.restored_sample.get("microwire") == wire:
             return copy.deepcopy(self.restored_sample)
         return dict(composition=composition, microwire=wire, source_kind="manual")
+
+    def _sample(self):
+        result = self._sample_identity()
+        annotation = self.sample_annotations.get(self._sample_key(), {})
+        result.update(brittle=annotation.get("brittle", result.get("brittle")),
+                      brittle_observed_utc=annotation.get("observed_utc", result.get("brittle_observed_utc")))
+        return result
+
+    def _sample_key(self):
+        return self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
+
+    def _sample_changed(self, *_args):
+        if not hasattr(self, "brittle_toggle"):
+            return
+        value = self._sample().get("brittle")
+        self.brittle_toggle.blockSignals(True)
+        self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked if value is None else
+                                         QtCore.Qt.CheckState.Checked if value else QtCore.Qt.CheckState.Unchecked)
+        self.brittle_toggle.blockSignals(False)
+        self._brittle_label(value)
+        self._mark_dirty()
+
+    def _brittle_label(self, value):
+        self.brittle_toggle.setText("Brittle · " + ("not assessed" if value is None else "yes" if value else "no"))
+
+    def _brittle_changed(self, state):
+        value = None if state == QtCore.Qt.CheckState.PartiallyChecked else state == QtCore.Qt.CheckState.Checked
+        self.sample_annotations[self._sample_key()] = dict(brittle=value, observed_utc=datetime.now(timezone.utc).isoformat())
+        self._brittle_label(value)
+        self._mark_dirty()
+
+    def _annotation_operation(self, operation, state, callback):
+        if self.annotation_task is not None:
+            raise ValueError("A project annotation operation is already running")
+        task = ProjectAnnotationTask(operation)
+        thread = QtCore.QThread(self)
+        task.moveToThread(thread)
+        self.annotation_task = (thread, task)
+        self.annotation_job = {"state": state}
+        self.save_brittle_button.setEnabled(False)
+        self.annotation_status.setText("Checking project and preparing annotation…" if state == "preparing" else "Saving verified project annotation…")
+        thread.started.connect(task.run)
+        task.succeeded.connect(callback)
+        task.failed.connect(self._annotation_failed)
+        task.finished.connect(thread.quit)
+        task.finished.connect(task.deleteLater)
+        thread.finished.connect(self._annotation_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _annotation_finished(self):
+        self.annotation_task = None
+        self.save_brittle_button.setEnabled(True)
+        if getattr(self, "_annotation_gui_review", False):
+            self._annotation_gui_review = False
+            QtCore.QTimer.singleShot(0, self._confirm_brittle_publication)
+
+    def _annotation_failed(self, message):
+        self.annotation_job = dict(state="failed", error=message)
+        self.annotation_status.setText(f"Project annotation failed: {message}")
+
+    def prepare_brittle_update(self, *, workdir=None, expected_sha256=None, gui=False):
+        if self.annotation_task is not None:
+            raise ValueError("A project annotation operation is already running")
+        from .project_annotations import prepare_brittle_update
+        sample = self._sample()
+        if type(sample.get("brittle")) is not bool:
+            raise ValueError("Set Brittle to yes or no; not assessed does not modify the project")
+        if not all(self._sample_key()):
+            raise ValueError("Select a composition and microwire first")
+        source = Path(self.project_path.text().strip()).expanduser().resolve()
+        bindings = [sample, *sample.get("matching_sources", [])]
+        digest = expected_sha256 or next((item.get("source_sha256") for item in bindings
+            if item.get("source_kind") == "project" and Path(item.get("source_path", "")).resolve() == source), None)
+        if not digest:
+            raise ValueError("Load this project sample first, or supply its expected SHA-256")
+        root = Path(workdir) if workdir else Path(self.output_path.text()) / "project_updates"
+        if not root.is_absolute():
+            raise ValueError("Choose an absolute output folder for project review files")
+        self.annotation_review = None
+        operation = lambda: prepare_brittle_update(source, root, composition=sample["composition"],
+            microwire=sample["microwire"], brittle=sample["brittle"], expected_sha256=digest)
+        self._annotation_operation(operation, "preparing", lambda review: self._brittle_prepared(review, gui))
+
+    def _brittle_prepared(self, review, gui=False):
+        self.annotation_review = review
+        self.annotation_job = dict(state="ready", review=review.to_dict())
+        self.annotation_status.setText("Verified annotation is ready to save to the project.")
+        if gui:
+            # Show the exact prepared change before the final publication action.
+            self._annotation_gui_review = True
+
+    def _review_brittle_gui(self):
+        try:
+            self.prepare_brittle_update(gui=True)
+        except (OSError, ValueError) as exc:
+            self._annotation_failed(str(exc))
+
+    def _confirm_brittle_publication(self):
+        review = self.annotation_review
+        if review is None:
+            return
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Save sample annotation")
+        dialog.setText(f"Save Brittle = {review.brittle} for {review.composition} {review.microwire}?\n\nProject: {review.source_path}\nA verified backup and publication receipt will be retained.")
+        dialog.setDetailedText(json.dumps(review.to_dict(), indent=2, ensure_ascii=False))
+        dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Save | QtWidgets.QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        if dialog.exec() == QtWidgets.QMessageBox.StandardButton.Save:
+            try:
+                self.publish_brittle_update()
+            except (OSError, ValueError) as exc:
+                self._annotation_failed(str(exc))
+
+    def publish_brittle_update(self, *, review_sha256=None):
+        from .project_annotations import publish_brittle_update
+        review = self.annotation_review
+        if review is None:
+            raise ValueError("Prepare and review a project annotation first")
+        if review_sha256 is not None and review_sha256 != review.candidate_sha256:
+            raise ValueError("The requested review does not match the prepared candidate")
+        sample = self._sample()
+        if (sample["composition"], sample["microwire"], sample["brittle"]) != (review.composition, review.microwire, review.brittle):
+            raise ValueError("The selected sample or Brittle state changed; prepare it again")
+        if Path(self.project_path.text()).resolve() != Path(review.source_path).resolve():
+            raise ValueError("The selected project changed; prepare it again")
+        root = Path(review.review_path).parent
+        self._annotation_operation(lambda: publish_brittle_update(review, backup=root / "original.pydpj",
+            receipt_path=root / "publication_receipt.json"), "publishing", lambda receipt: self._brittle_published(receipt, review))
+
+    def _brittle_published(self, receipt, review):
+        self.annotation_job = dict(state="published", receipt=receipt)
+        self.project_update_receipts.append(dict(composition=review.composition, microwire=review.microwire,
+                                                 brittle=review.brittle, receipt=copy.deepcopy(receipt)))
+        self.annotation_review = None
+        self.annotation_status.setText("Brittle saved to project. Backup and receipt retained. Reload project suggestions before another update.")
+        self._mark_dirty()
 
     def line_drawn(self, start, end):
         if self.image.isNull() or self.camera is not None:
@@ -795,6 +967,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wire_combo.clear()
         self.wire_combo.addItems(sorted({choice.microwire for choices in self.catalogs.values()
                                         for choice in choices if choice.composition == composition}))
+        self._sample_changed()
 
     def choose_save(self):
         if self.image.isNull():
@@ -822,6 +995,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         calibration_evidence=self.calibration_evidence,
                         source_file=self.source_file, captured_utc=self.captured_utc, loaded_utc=self.loaded_utc,
                         camera_format=self.frame_format)
+        if self.project_update_receipts:
+            metadata["project_updates"] = copy.deepcopy(self.project_update_receipts)
         if self.source_file:
             metadata["source_file_sha256"] = self.source_file_hash
         records = copy.deepcopy(self.records)
@@ -893,6 +1068,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     camera_names=[self.camera_combo.itemText(i) for i in range(1, self.camera_combo.count())],
                     selected_camera=self.camera_combo.currentText(), selected_format=self.format_combo.currentText(),
                     catalog_counts={kind: len(choices) for kind, choices in self.catalogs.items()},
+                    project_annotation=copy.deepcopy(self.annotation_job),
                     source_status=self.sample_status.text())
 
     def restore_session(self, directory):
@@ -934,7 +1110,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.restored_sample = copy.deepcopy(sample)
         self.composition_combo.setCurrentText(sample.get("composition", ""))
         self.wire_combo.setCurrentText(sample.get("microwire", ""))
+        self.sample_annotations[self._sample_key()] = dict(brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc"))
+        self._sample_changed()
         self.notes.setPlainText(metadata.get("notes", ""))
+        self.project_update_receipts = copy.deepcopy(metadata.get("project_updates", []))
         self.source_file = metadata.get("source_file")
         self.source_file_hash = metadata.get("source_file_sha256")
         self.captured_utc = metadata.get("captured_utc")
@@ -966,7 +1145,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.command_status()
         if action == "configure":
             allowed = {"action", "objective", "zoom", "composition", "microwire", "output_directory",
-                       "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind"}
+                       "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind", "brittle"}
             if set(command) - allowed:
                 raise ValueError("Unknown configuration field")
             if self.camera is not None and any(k in command for k in ("camera_name", "width", "height")):
@@ -979,6 +1158,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     raise ValueError("Acquisition zoom is outside the supported input range")
             if "auto_save" in command and not isinstance(command["auto_save"], bool):
                 raise ValueError("auto_save must be true or false")
+            if "brittle" in command and command["brittle"] is not None and type(command["brittle"]) is not bool:
+                raise ValueError("brittle must be true, false or null")
             if command.get("output_directory") and not Path(str(command["output_directory"])).expanduser().is_absolute():
                 raise ValueError("Choose an absolute output folder path")
             if "kind" in command and self.kind_combo.findData(command["kind"]) < 0:
@@ -1006,6 +1187,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.composition_combo.setCurrentText(str(command["composition"]))
             if "microwire" in command:
                 self.wire_combo.setCurrentText(str(command["microwire"]))
+            if "brittle" in command:
+                value = command["brittle"]
+                self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked if value is None else
+                                                 QtCore.Qt.CheckState.Checked if value else QtCore.Qt.CheckState.Unchecked)
             if "auto_save" in command:
                 self.auto_save.setChecked(bool(command["auto_save"]))
             if "kind" in command:
@@ -1025,6 +1210,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not matches:
                     raise ValueError("Requested camera mode unavailable")
                 self.format_combo.setCurrentIndex(matches[0])
+        elif action == "prepare_brittle_update":
+            self.prepare_brittle_update(workdir=command.get("workdir"), expected_sha256=command.get("expected_sha256"))
+        elif action == "publish_brittle_update":
+            if not command.get("review_sha256"):
+                raise ValueError("Specify the reviewed candidate SHA-256")
+            self.publish_brittle_update(review_sha256=command["review_sha256"])
         elif action == "start":
             if self.camera is None:
                 if command.get("discard") is True:
@@ -1085,6 +1276,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self.restore_session(command["path"]):
                 raise ValueError("Session restore cancelled")
         elif action == "close":
+            if self.annotation_task is not None:
+                raise ValueError("Wait for the project annotation operation before closing")
             self.stop_preview()
             if self.dirty:
                 self._autosave()
@@ -1096,6 +1289,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.command_status()
 
     def closeEvent(self, event):
+        if self.annotation_task is not None:
+            self.statusBar().showMessage("Wait for the project annotation operation before closing.")
+            event.ignore()
+            return
         if not self._confirm_replace():
             event.ignore()
             return

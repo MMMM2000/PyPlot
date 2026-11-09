@@ -370,6 +370,12 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--width", type=int)
     configure.add_argument("--height", type=int)
     configure.add_argument("--auto-save", action=argparse.BooleanOptionalAction, default=None)
+    configure.add_argument("--brittle", choices=("yes", "no", "unknown"), help="Sample annotation; use project update commands to publish it")
+    prepare = commands.add_parser("prepare-brittle-update", help="Prepare and verify a disposable Builder candidate")
+    prepare.add_argument("--workdir", type=Path)
+    prepare.add_argument("--expected-sha256")
+    publish = commands.add_parser("publish-brittle-update", help="Publish the exact reviewed candidate with backup and receipt")
+    publish.add_argument("--review-sha256", required=True)
     measure = commands.add_parser("measure")
     measure.add_argument("--start", nargs=2, type=float, required=True, metavar=("X", "Y"))
     measure.add_argument("--end", nargs=2, type=float, required=True, metavar=("X", "Y"))
@@ -412,7 +418,7 @@ def command_from_args(args) -> dict:
     payload = {"action": args.subcommand.replace("-", "_")}
     for key, value in vars(args).items():
         if key not in {"subcommand", "runtime_dir", "timeout_ms"} and value is not None:
-            payload[key] = str(value) if isinstance(value, Path) else value
+            payload[key] = {"yes": True, "no": False, "unknown": None}[value] if key == "brittle" else str(value) if isinstance(value, Path) else value
     return payload
 
 

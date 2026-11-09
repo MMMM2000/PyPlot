@@ -270,6 +270,12 @@ DIAMETER_COLUMN = "d (µm)"
 GLASS_DIAMETER_COLUMN = "D (µm)"
 DIAMETER_RATIO_COLUMN = "d/D"
 BRITTLE_COLUMN = "Brittle"
+BRITTLE_OVERRIDE_COLUMN = "_brittle_override"
+
+
+def brittle_override_value(value: object) -> Optional[bool]:
+    """Accept explicit Boolean annotations without treating strings/numbers as flags."""
+    return bool(value) if isinstance(value, (bool, np.bool_)) else None
 
 MICROSCOPE_IMAGE_COLUMNS = (
     "d (µm) image",
@@ -1798,6 +1804,7 @@ class MicroscopeMeasurements:
     glass: List[MicroscopeDetection] = field(default_factory=list)
     other: List[MicroscopeDetection] = field(default_factory=list)
     brittle: bool = False
+    brittle_override: Optional[bool] = None
 
     def _target(self, category: str) -> List[MicroscopeDetection]:
         if category == "core":
@@ -8827,7 +8834,10 @@ def build_database(
                     except (TypeError, ValueError):
                         continue
         if microscope_data:
-            if getattr(microscope_data, "brittle", False):
+            brittle_override = brittle_override_value(getattr(microscope_data, "brittle_override", None))
+            if brittle_override is not None:
+                row[BRITTLE_COLUMN] = "brittle" if brittle_override else None
+            elif getattr(microscope_data, "brittle", False):
                 row[BRITTLE_COLUMN] = "brittle"
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
