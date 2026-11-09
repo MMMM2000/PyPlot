@@ -38,6 +38,65 @@ calibration. The original reference image, reference endpoints and SHA-256 are s
 with the profile. Focus, optical halos, edge selection and the reference uncertainty
 still limit accuracy.
 
+Three enlargement settings have different meanings: the physical objective changes
+the optics, the microscope's digital zoom may crop/enlarge the acquired image, and
+the app's mouse wheel changes only the displayed view. **View N%** reports display
+scaling; it is not optical magnification and does not change saved pixels or scale.
+**Acquisition zoom (manual)** records the actual device setting; it does not read or
+operate the microscope's zoom. Keep device digital zoom fixed while calibrating and
+measuring. The calibrated µm/pixel value is the scale used for measurements.
+
+Calibration profiles are written immediately after their reference PNG is retained.
+The app checks that reference before reusing a saved scale. **Open saved session…**
+restores the image, latest rows and calibration together; opening `image.png` alone
+does not restore the session. A restored valid calibration also becomes available
+for subsequent captures with the same acquisition settings.
+
+## First calibrated measurement session
+
+1. Close S-Viewer and other microscope instances. Choose CamGCC, the intended
+   native resolution, and the actual objective. Keep acquisition zoom fixed. The
+   objective and acquisition zoom fields are manual declarations, not hardware
+   controls; update them to match the microscope.
+2. Choose a permanent output folder and leave auto-save enabled. Select the
+   composition and wire before collecting specimen measurements. The micrometer
+   calibration capture should be clearly identified as a reference, not as a wire
+   diameter measurement.
+3. Focus the micrometer and capture it. Confirm its graduation spacing and units;
+   for example, 0.01 mm is 10 µm. Draw between well-defined graduation centres over
+   a long known span, enter that span in µm, identify the reference, and calibrate.
+   Calibrate each objective and acquisition mode you intend to use separately.
+4. Check a different known span that was not used to set the scale. Check horizontal
+   and vertical spans and avoid relying on the extreme field edges. Repeat after
+   closing and reopening the app to verify the selected profile is recovered.
+   These checks test scale/reuse, not the physical accuracy of a wire edge.
+5. Replace the reference with the wire, refocus, capture, and confirm **Calibrated**
+   status and the correct sample. Start with manual parallel boundaries on a straight
+   section. Repeat the placement at the same location to assess repeatability, then
+   measure several locations separately to examine real diameter variation. Inspect
+   focus and both boundaries before accepting automatic fits. Treat outer and core
+   widths as different measurements; a core label does not validate a transparent
+   glass/metal interface.
+6. Save, then use **Open saved session…** to check that the original image, sample,
+   µm values, geometry and reference evidence return. Read the latest JSON/CSV pair
+   via `latest.json`. Measurements made before calibration remain pixel-only; take
+   new measurements after calibration rather than assuming old rows are converted.
+
+The scalar calibration assumes the same physical scale in both pixel directions.
+If horizontal and vertical checks disagree beyond the required measurement
+tolerance, resolve that difference before measuring tilted wires. The required
+tolerance must come from the experiment; displayed decimal places are not a
+measurement uncertainty. Calibration principles are described in
+[Nikon's micrometry guide](https://www.microscopyu.com/microscopy-basics/linear-measurements-micrometry).
+
+For glass-coated microwires, the coating can act as a cylindrical lens. An inner
+band viewed through glass can therefore be an apparent core width even after a
+correct stage-micrometer calibration. Validate core measurements against an already
+exposed core or a documented cross-section/reference method before treating them
+as physical metal diameters. Do not apply an assumed refractive-index correction.
+This optical effect is described in the
+[Bell Labs fibre-core metrology disclosure](https://patents.google.com/patent/US4362943A/en).
+
 Objective selection is manual; the app cannot detect the physical nosepiece setting.
 When its own source paths have not been set, the app reads TMA's saved project and
 fabrication paths without constructing the TMA logger. Its output defaults to a
@@ -147,6 +206,7 @@ uv run python -m data_logging.microscope_logger.control status
 uv run python -m data_logging.microscope_logger.control configure --camera-name CamGCC --objective 4x --composition Ni50Fe27Ga23 --microwire 10/4
 uv run python -m data_logging.microscope_logger.control start
 uv run python -m data_logging.microscope_logger.control capture
+uv run python -m data_logging.microscope_logger.control calibrate --start 200 200 --end 1200 200 --known-um 500 --source "Synthetic example; replace with the actual micrometer span"
 uv run python -m data_logging.microscope_logger.control parallel --a 800 538 --b 1800 529 --c 1300 600
 uv run python -m data_logging.microscope_logger.control auto --a 800 538 --b 1800 529 --c 1300 600 --samples 15
 uv run python -m data_logging.microscope_logger.control save
@@ -170,7 +230,9 @@ review output folder; `--expected-sha256 HASH` supplies the exact source version
 when the sample catalogue has not been loaded. Both project commands start jobs;
 poll `status` until `project_annotation.state` is `ready`, `published`, or `failed`.
 
-Coordinates above illustrate one image and must be chosen for the actual boundaries.
+Coordinates and reference length above are examples and must be replaced with the
+actual image positions and verified micrometer interval. `status` reports the
+active calibration, µm/pixel and reference evidence after calibration.
 Use `configure --output-directory PATH` to choose storage. `load-sources --kind
 project` and `load-sources --kind fabrication` read suggestions asynchronously;
 fabrication loading reads the selected composition only. With no composition,

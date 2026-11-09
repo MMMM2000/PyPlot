@@ -232,6 +232,11 @@ def test_cli_file_request_avoids_shell_json_quoting(server, qtbot, tmp_path):
 
 def test_named_commands_form_explicit_payloads():
     parser = control.build_parser()
+    assert control.command_from_args(parser.parse_args([
+        "calibrate", "--start", "10", "20", "--end", "110", "20", "--known-um", "50",
+        "--source", "Synthetic reference"])) == {
+        "action": "calibrate", "start": [10, 20], "end": [110, 20],
+        "known_um": 50, "source": "Synthetic reference"}
     assert control.command_from_args(parser.parse_args(["configure", "--objective", "4x", "--width", "2560"])) == {
         "action": "configure", "objective": "4x", "width": 2560}
     assert control.command_from_args(parser.parse_args(["parallel", "--a", "1", "2", "--b", "10", "2", "--c", "1", "20"])) == {

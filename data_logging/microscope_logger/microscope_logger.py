@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import threading
@@ -28,6 +29,7 @@ from .sources_config import read_tma_source_defaults
 class ImageView(QtWidgets.QGraphicsView):
     line_drawn = QtCore.pyqtSignal(object, object)
     guides_drawn = QtCore.pyqtSignal(object, object, object)
+    view_scale_changed = QtCore.pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +56,7 @@ class ImageView(QtWidgets.QGraphicsView):
     def fit_image(self):
         if not self.image_item.pixmap().isNull():
             self.fitInView(self.image_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            self.view_scale_changed.emit(self.transform().m11())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -62,6 +65,8 @@ class ImageView(QtWidgets.QGraphicsView):
     def wheelEvent(self, event):
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
         self.scale(factor, factor)
+        self.view_scale_changed.emit(self.transform().m11())
+        event.accept()
 
     def clear_lines(self):
         self.pending = None
@@ -190,6 +195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.annotation_job = {"state": "idle"}
         self.project_update_receipts = []
         self.calibration = None
+        self.calibration_error = ""
         self.last_line = None
         self.profiles = {}
         self.catalogs = {}
@@ -251,6 +257,9 @@ class MainWindow(QtWidgets.QMainWindow):
         open_button = QtWidgets.QPushButton("Open image…")
         open_button.clicked.connect(self.choose_image)
         form.addRow(open_button)
+        self.open_session_button = QtWidgets.QPushButton("Open saved session…")
+        self.open_session_button.clicked.connect(self.choose_session)
+        form.addRow(self.open_session_button)
         controls.addWidget(camera_box)
 
         sample_box = QtWidgets.QGroupBox("Sample")
@@ -310,8 +319,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_spin.setRange(1, 20)
         self.zoom_spin.setDecimals(2)
         self.zoom_spin.setValue(1)
+        self.zoom_spin.setToolTip("Record the microscope's acquisition zoom manually. This field does not operate camera zoom. Mouse-wheel view enlargement is separate.")
         self.zoom_spin.valueChanged.connect(self._context_changed)
-        form.addRow("Acquisition digital zoom", self.zoom_spin)
+        form.addRow("Acquisition zoom (manual)", self.zoom_spin)
         self.scale_status = QtWidgets.QLabel("Uncalibrated · pixel measurements")
         self.scale_status.setWordWrap(True)
         form.addRow(self.scale_status)
@@ -360,6 +370,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_layout = QtWidgets.QVBoxLayout(bottom)
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.addWidget(QtWidgets.QLabel("Measurements on this image"))
+        self.view_scale_label = QtWidgets.QLabel("View 100%")
+        self.view_scale_label.setToolTip("Display scaling only; measurements always use the original image pixels.")
+        self.view.view_scale_changed.connect(lambda scale: self.view_scale_label.setText(f"View {100 * scale:.0f}%"))
+        toolbar.addWidget(self.view_scale_label)
         toolbar.addStretch()
         toolbar.addWidget(self.save_button)
         fit = QtWidgets.QPushButton("Fit image")
@@ -388,6 +402,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_path.setText(defaults["output_directory"])
         self.auto_save.setChecked(self.settings.value("auto_save", True, type=bool))
         try:
+            self.settings.sync()
             self.profiles = json.loads(self.settings.value("calibration_profiles", "{}", type=str))
             if not isinstance(self.profiles, dict):
                 self.profiles = {}
@@ -520,6 +535,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.load_image(Path(path))
 
+    def choose_session(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Open saved microscope session", self.output_path.text())
+        if not path:
+            return False
+        try:
+            if not self.restore_session(path):
+                return False
+        except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
+            self.statusBar().showMessage(f"Could not open saved session: {exc}")
+            return False
+        self.statusBar().showMessage(f"Opened saved session {path}")
+        return True
+
     def load_image(self, path):
         try:
             raw = Path(path).read_bytes()
@@ -567,11 +596,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     image_size=(self.image.width(), self.image.height()),
                     camera_id=self.frame_camera_id, zoom=self.zoom_spin.value())
 
-    def _profile_key(self):
-        context = self._context()
+    def _profile_key(self, *, context=None, image_identity=None):
+        context = dict(self._context() if context is None else context)
         # Unknown camera: a scale can only be restored for these exact pixels.
-        if not self.frame_camera_id:
-            context["image_identity"] = self.image_identity
+        if not context["camera_id"]:
+            context["image_identity"] = self.image_identity if image_identity is None else image_identity
         return json.dumps(context, sort_keys=True)
 
     def _context_changed(self):
@@ -579,19 +608,85 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.calibration = None
         self.calibration_evidence = None
+        self.calibration_error = ""
         if not self.image.isNull():
             try:
                 value = self.profiles.get(self._profile_key())
                 if value:
-                    self.calibration_evidence = value.get("evidence")
-                    value = dict(value.get("calibration", value))
-                    value["image_size"] = tuple(value["image_size"])
-                    self.calibration = Calibration(**value)
-            except (KeyError, TypeError, ValueError):
-                self.calibration = None
-        self.scale_status.setText("Uncalibrated · pixel measurements" if self.calibration is None
-                                  else f"Calibrated · {self.calibration.um_per_pixel:.6g} µm/pixel")
+                    if not isinstance(value, dict):
+                        raise ValueError("Saved scale is not a calibration profile")
+                    calibration = Calibration(**value.get("calibration", value))
+                    if not calibration.matches(**self._context()):
+                        raise ValueError("Saved scale does not match this acquisition setup")
+                    evidence = self._validated_calibration_evidence(value.get("evidence"), calibration)
+                    self.calibration, self.calibration_evidence = calibration, evidence
+            except (OSError, KeyError, TypeError, ValueError, OverflowError) as exc:
+                self.calibration_error = f"Saved calibration unavailable: {exc}"
+        self._show_calibration_status()
         self._mark_dirty()
+
+    def _show_calibration_status(self):
+        text = ("Uncalibrated · pixel measurements" if self.calibration is None
+                else f"Calibrated · {self.calibration.um_per_pixel:.6g} µm/pixel")
+        if self.calibration_error:
+            text += f" · {self.calibration_error}"
+        self.scale_status.setText(text)
+
+    @staticmethod
+    def _validated_calibration_evidence(evidence, calibration=None):
+        """Verify retained original bytes before enabling a physical scale."""
+        from .measurements import _png_size
+        if not isinstance(evidence, dict):
+            raise ValueError("Calibration reference evidence is missing")
+        digest = evidence.get("image_sha256")
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise ValueError("Invalid calibration image hash")
+        if not isinstance(evidence.get("image_path"), str) or not evidence["image_path"]:
+            raise ValueError("Calibration reference image path is missing")
+        raw = Path(evidence["image_path"]).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("Calibration reference image has changed")
+        dimensions = _png_size(raw)
+        if calibration is not None:
+            if dimensions != calibration.image_size:
+                raise ValueError("Calibration reference image size does not match its scale")
+            distance = measure_line(evidence["start"], evidence["end"],
+                                    image_size=dimensions, objective=calibration.objective)["width_px"]
+            if not math.isclose(distance, calibration.reference_pixels, rel_tol=1e-12):
+                raise ValueError("Calibration reference endpoints do not match its scale")
+        return copy.deepcopy(evidence)
+
+    def _active_calibration(self):
+        # A deleted or changed reference must also fail closed between captures.
+        if self.calibration is not None:
+            try:
+                self._validated_calibration_evidence(self.calibration_evidence, self.calibration)
+            except (OSError, KeyError, TypeError, ValueError, OverflowError) as exc:
+                self.calibration = self.calibration_evidence = None
+                self.calibration_error = f"Saved calibration unavailable: {exc}"
+                self._show_calibration_status()
+        return self.calibration
+
+    def _persist_calibration_profiles(self, profiles):
+        """Publish profiles only after QSettings confirms a durable sync."""
+        raw = json.dumps(profiles, allow_nan=False)
+        previous = self.settings.value("calibration_profiles", "{}", type=str)
+        try:
+            self.settings.setValue("calibration_profiles", raw)
+            self.settings.sync()
+            if self.settings.status() != QtCore.QSettings.Status.NoError:
+                raise OSError(f"QSettings reported {self.settings.status().name}")
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            # QSettings can retain a failed write in its cache. Do not let a
+            # later close silently publish a profile reported as unsuccessful.
+            try:
+                self.settings.setValue("calibration_profiles", previous)
+                self.settings.sync()
+            except (OSError, ValueError, TypeError, RuntimeError):
+                pass
+            raise OSError(f"Could not save calibration profiles: {exc}") from exc
+        self.profiles = profiles
 
     def _mark_dirty(self, *_args):
         if not self.image.isNull():
@@ -622,7 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         automatic = self.action_combo.currentIndex() == 3 if automatic is None else automatic
         try:
             result = refine_parallel_edges(self._gray_image(), a, b, c, samples=samples) if automatic else parallel_width(a, b, c)
-            record = measure_line(result["width_start"], result["width_end"], calibration=self.calibration,
+            record = measure_line(result["width_start"], result["width_end"], calibration=self._active_calibration(),
                                   kind=self.kind_combo.currentData(), **self._context())
         except ValueError as exc:
             self.statusBar().showMessage(str(exc))
@@ -642,8 +737,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return record
 
     def clear_calibration(self):
-        self.profiles.pop(self._profile_key(), None)
+        profiles = copy.deepcopy(self.profiles)
+        profiles.pop(self._profile_key(), None)
+        try:
+            self._persist_calibration_profiles(profiles)
+        except OSError as exc:
+            self.statusBar().showMessage(str(exc))
+            return False
         self._context_changed()
+        self.statusBar().showMessage("Pixel-only mode saved for this acquisition setup. Existing rows retain their original calibration.")
+        return True
 
     def _sample_identity(self):
         composition, wire = self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
@@ -798,7 +901,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.image.isNull() or self.camera is not None:
             return
         try:
-            record = measure_line(start, end, calibration=self.calibration,
+            record = measure_line(start, end, calibration=self._active_calibration(),
                                   kind=self.kind_combo.currentData(), **self._context())
         except ValueError as exc:
             self.statusBar().showMessage(str(exc))
@@ -819,19 +922,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_table()
 
     def calibrate(self):
-        if self.last_line is None or self.image.isNull():
+        if self.last_line is None or self.image.isNull() or self.camera is not None:
             self.statusBar().showMessage("Choose Draw reference length and click the two ends of a known distance first.")
-            return
+            return False
         if not self.reference_source.text().strip():
             self.statusBar().showMessage("Describe the known reference before calibrating.")
-            return
+            return False
         try:
             length = measure_line(*self.last_line, **self._context())["width_px"]
-            self.calibration = make_calibration(length, self.known_um.value(),
-                                               source=self.reference_source.text().strip(), **self._context())
+            calibration = make_calibration(length, self.known_um.value(),
+                                           source=self.reference_source.text().strip(), **self._context())
         except ValueError as exc:
             self.statusBar().showMessage(str(exc))
-            return
+            return False
         # Preserve the calibration image separately from display annotations.
         if self.settings.format() == QtCore.QSettings.Format.IniFormat:
             reference_dir = Path(self.settings.fileName()).parent / "microscope-calibrations"
@@ -846,20 +949,31 @@ class MainWindow(QtWidgets.QMainWindow):
             if not reference_path.exists():
                 with reference_path.open("xb") as stream:
                     stream.write(data)
-            elif hashlib.sha256(reference_path.read_bytes()).hexdigest() != digest:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            if hashlib.sha256(reference_path.read_bytes()).hexdigest() != digest:
                 raise ValueError("Saved reference image failed its integrity check")
         except (ValueError, OSError) as exc:
-            self.calibration = None
             self.statusBar().showMessage(f"Could not preserve calibration reference: {exc}")
-            return
-        self.calibration_evidence = dict(image_path=str(reference_path.resolve()),
-                                        image_sha256=digest, start=list(self.last_line[0]),
-                                        end=list(self.last_line[1]), created_utc=datetime.now(timezone.utc).isoformat())
-        self.profiles[self._profile_key()] = dict(calibration=asdict(self.calibration), evidence=self.calibration_evidence)
+            return False
+        evidence = dict(image_path=str(reference_path.resolve()), image_sha256=digest,
+                        start=list(self.last_line[0]), end=list(self.last_line[1]),
+                        created_utc=datetime.now(timezone.utc).isoformat())
+        profiles = copy.deepcopy(self.profiles)
+        profiles[self._profile_key()] = dict(calibration=asdict(calibration), evidence=evidence)
+        try:
+            self._persist_calibration_profiles(profiles)
+        except OSError as exc:
+            self.statusBar().showMessage(str(exc))
+            return False
         self._context_changed()
+        if self.calibration is None:
+            self.statusBar().showMessage(self.calibration_error or "Saved calibration could not be activated")
+            return False
         self.action_combo.setCurrentIndex(0)
         self._mark_dirty()
         self.statusBar().showMessage("Scale saved for new measurements. Existing rows retain their original calibration.")
+        return True
 
     def _refresh_table(self):
         self.table.setRowCount(len(self.records))
@@ -1057,10 +1171,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.control_server.start()
 
     def command_status(self):
+        self._active_calibration()
         return dict(ok=True, preview_active=self.camera is not None, frames_received=self.frames_received,
                     image_size=[self.image.width(), self.image.height()], sample=self._sample(),
                     objective=self.objective_combo.currentText(), objective_manual=True,
                     calibration_status="Calibrated" if self.calibration else "Uncalibrated",
+                    calibration=asdict(self.calibration) if self.calibration else None,
+                    calibration_evidence=copy.deepcopy(self.calibration_evidence),
+                    calibration_error=self.calibration_error,
+                    acquisition_zoom=self.zoom_spin.value(), acquisition_zoom_manual=True,
+                    view_zoom=self.view.transform().m11(),
                     measurements=self.records, output_directory=self.output_path.text(),
                     active_session=str(self.active_session) if self.active_session else None,
                     autosave_error=self.autosave_error, sources_loading=bool(self.catalog_tasks),
@@ -1072,7 +1192,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     source_status=self.sample_status.text())
 
     def restore_session(self, directory):
-        from .measurements import _validated_record
+        from .measurements import _size, _validated_record
         from .session_revisions import _read_base, _read_latest
         directory = Path(directory).resolve(strict=True)
         base, base_bytes, dimensions, _ = _read_base(directory)
@@ -1081,8 +1201,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if pointer:
             manifest = (directory / json.loads(pointer)["manifest"]).resolve()
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-        records = [_validated_record(record, dimensions) for record in payload["measurements"]]
-        metadata = payload["metadata"]
+        try:
+            if (not isinstance(payload, dict) or not isinstance(payload.get("measurements"), list)
+                    or not isinstance(payload.get("metadata"), dict)):
+                raise ValueError("Session measurements and metadata are invalid")
+            records = [_validated_record(record, dimensions) for record in payload["measurements"]]
+            metadata = payload["metadata"]
+            if _size(metadata.get("image_size", dimensions)) != dimensions:
+                raise ValueError("Session image size does not match its original image")
+            objective, camera_id = metadata.get("objective", "4x"), metadata.get("camera_id", "")
+            if not isinstance(objective, str) or not objective.strip() or not isinstance(camera_id, str):
+                raise ValueError("Session objective or camera identifier is invalid")
+            zoom = float(metadata.get("zoom", 1))
+            if not math.isfinite(zoom) or not self.zoom_spin.minimum() <= zoom <= self.zoom_spin.maximum():
+                raise ValueError("Session acquisition zoom is outside the supported input range")
+            if not math.isclose(zoom, round(zoom, self.zoom_spin.decimals()), rel_tol=0, abs_tol=1e-12):
+                raise ValueError("Session acquisition zoom exceeds the supported input precision")
+            context = dict(objective=objective.strip().replace("x", "×"), image_size=dimensions,
+                           camera_id=camera_id, zoom=zoom)
+            calibration = Calibration(**metadata["calibration"]) if metadata.get("calibration") else None
+            if calibration is not None and not calibration.matches(**context):
+                raise ValueError("Session calibration does not match its acquisition setup")
+            sample = metadata.get("sample", {})
+            if (not isinstance(sample, dict) or any(not isinstance(sample.get(key, ""), str)
+                                                  for key in ("composition", "microwire"))
+                    or not isinstance(metadata.get("notes", ""), str)):
+                raise ValueError("Session sample or notes are invalid")
+        except (KeyError, TypeError, OverflowError) as exc:
+            raise ValueError(f"Invalid microscope session: {exc}") from exc
         raw = (directory / "image.png").read_bytes()
         if hashlib.sha256(raw).hexdigest() != base["image"]["sha256"]:
             raise ValueError("Capture original image has changed")
@@ -1091,22 +1237,36 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError("Could not decode original capture")
         for evidence in [metadata.get("calibration_evidence"),
                          *[record.get("calibration_evidence") for record in records]]:
-            if evidence:
-                digest = evidence["image_sha256"]
-                if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            if evidence is not None:
+                if not isinstance(evidence, dict):
+                    raise ValueError("Calibration reference evidence is invalid")
+                digest = evidence.get("image_sha256")
+                if (not isinstance(digest, str) or len(digest) != 64
+                        or any(c not in "0123456789abcdef" for c in digest)):
                     raise ValueError("Invalid calibration image hash")
                 path = directory / f"reference_{digest}.png"
-                if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                    raise ValueError("Calibration reference image has changed")
                 evidence["image_path"] = str(path)
+                self._validated_calibration_evidence(evidence)
+        evidence = metadata.get("calibration_evidence")
+        if calibration is not None:
+            try:
+                evidence = self._validated_calibration_evidence(evidence, calibration)
+            except (KeyError, TypeError, OverflowError) as exc:
+                raise ValueError(f"Invalid session calibration evidence: {exc}") from exc
         if not self._confirm_replace():
             return False
+        if calibration is not None:
+            rgba = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+            identity = hashlib.sha256(rgba.constBits().asstring(rgba.sizeInBytes())).hexdigest()
+            profiles = copy.deepcopy(self.profiles)
+            key = self._profile_key(context=context, image_identity=identity)
+            profiles[key] = dict(calibration=asdict(calibration), evidence=evidence)
+            self._persist_calibration_profiles(profiles)
         self.stop_preview()
-        self.set_image(image, camera_id=metadata.get("camera_id", ""))
-        self.objective_combo.setCurrentText(str(metadata.get("objective", "4x")).replace("x", "×"))
-        self.zoom_spin.setValue(float(metadata.get("zoom", 1)))
+        self.set_image(image, camera_id=camera_id)
+        self.objective_combo.setCurrentText(objective.replace("x", "×"))
+        self.zoom_spin.setValue(zoom)
         self.records = records
-        sample = metadata.get("sample", {})
         self.restored_sample = copy.deepcopy(sample)
         self.composition_combo.setCurrentText(sample.get("composition", ""))
         self.wire_combo.setCurrentText(sample.get("microwire", ""))
@@ -1119,10 +1279,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.captured_utc = metadata.get("captured_utc")
         self.loaded_utc = metadata.get("loaded_utc")
         self.frame_format = metadata.get("camera_format")
-        self.calibration_evidence = metadata.get("calibration_evidence")
-        self.calibration = Calibration(**metadata["calibration"]) if metadata.get("calibration") else None
-        self.scale_status.setText("Uncalibrated · pixel measurements" if self.calibration is None
-                                  else f"Calibrated · {self.calibration.um_per_pixel:.6g} µm/pixel")
+        self.calibration_evidence = evidence
+        self.calibration = calibration
+        self.calibration_error = ""
+        self._show_calibration_status()
         for index, record in enumerate(records, 1):
             for edge in (record.get("analysis") or {}).get("edge1", []), (record.get("analysis") or {}).get("edge2", []):
                 if edge:
@@ -1143,6 +1303,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.kind_combo.setCurrentIndex(index)
         if action == "status":
             return self.command_status()
+        if action == "calibrate":
+            from .calibration_commands import calibrate_from_command
+            return calibrate_from_command(self, command)
         if action == "configure":
             allowed = {"action", "objective", "zoom", "composition", "microwire", "output_directory",
                        "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind", "brittle"}
@@ -1304,7 +1467,6 @@ class MainWindow(QtWidgets.QMainWindow):
             task.cancelled.set()
         self.settings.setValue("project_path", self.project_path.text())
         self.settings.setValue("fabrication_path", self.fabrication_path.text())
-        self.settings.setValue("calibration_profiles", json.dumps(self.profiles))
         self.settings.setValue("output_directory", self.output_path.text())
         self.settings.setValue("auto_save", self.auto_save.isChecked())
         super().closeEvent(event)
