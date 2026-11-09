@@ -14166,14 +14166,19 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             text = message
         self._progress_callback(int(current), int(total), text)
 
+    def _payload_refs_retained_after_refresh(self) -> Dict[str, str]:
+        """Return immutable evidence references that processing does not replace."""
+        return {}
+
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         self._finish_progress()
         existing_payloads = set(self.data.extra.get("payloads", {}).keys())
         new_payloads = set(result.payloads.keys())
-        for name in existing_payloads - new_payloads:
+        retained_payloads = self._payload_refs_retained_after_refresh()
+        for name in existing_payloads - new_payloads - set(retained_payloads):
             self.store.clear_payload(name)
 
-        payload_map: Dict[str, str] = {}
+        payload_map: Dict[str, str] = dict(retained_payloads)
         for name, payload in result.payloads.items():
             self.store.save_payload(name, payload)
             payload_map[name] = name
@@ -19497,6 +19502,19 @@ class MicroscopeSection(MiniDatabaseSection):
             payloads={"microscope_index": merged_index},
             extra=extra_payload,
         )
+
+    def _payload_refs_retained_after_refresh(self) -> Dict[str, str]:
+        history = self.data.extra.get("microscope_diameter_history")
+        references = self.data.extra.get("payloads")
+        if not isinstance(history, list) or not isinstance(references, dict):
+            return {}
+        evidence_ids = {
+            entry["payload_id"] for entry in history
+            if isinstance(entry, dict) and isinstance(entry.get("payload_id"), str)
+            and entry["payload_id"].startswith("microscope_diameter_evidence_")
+        }
+        return {name: reference for name, reference in references.items()
+                if name in evidence_ids and isinstance(reference, str) and reference}
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)

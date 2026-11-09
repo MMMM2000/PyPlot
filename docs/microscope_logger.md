@@ -112,9 +112,48 @@ for every revision, and earlier measurement sets remain available. **Save image
 and measurements** saves immediately to the selected output folder.
 Calibrated sessions also include the reference images. JSON retains individual
 sample/source bindings, image hashes, calibration and acquisition metadata. Unknown
-physical widths remain blank in CSV and null in JSON. Diameter values are not yet
-written back to Builder; calibration and a reviewed diameter import remain separate
-work. Fabrication workbooks are read only.
+physical widths remain blank in CSV and null in JSON. Reviewed calibrated core and
+outer diameters can be saved to Builder through the workflow below. Fabrication
+workbooks are read only.
+
+## Save core and outer diameters to Builder
+
+1. Load the intended project and select the composition and microwire before
+   measuring. Set **Boundary measured** to **Metal-core width** or **Outer diameter**
+   before drawing. A row keeps its original sample, boundary and calibration.
+2. Select the rows in the measurement table (Ctrl-click selects several), then
+   press **Review selected…**. Check the sample, scale and physical boundaries and
+   confirm the displayed values. Only calibrated core/outer rows with retained
+   reference evidence and project bindings can be reviewed for import. Pixel-only
+   and apparent-width rows are refused. **Unreview selected** withdraws approval.
+3. With the intended reviewed rows selected, press **Save selected diameters to
+   project…**. The app saves the capture first and prepares a separate candidate.
+   Inspect the sample, per-kind means/counts and old/new project values, then Save.
+   Existing values are replaced only for the selected kinds; previous values and
+   evidence remain in the project history. Earlier measurements are not pooled
+   into the new mean. Sample standard deviation describes the selected values,
+   not measurement uncertainty; a single value has no estimated spread.
+4. The normal Builder writer updates `d (µm)` for core, `D (µm)` for outer and `d/D`
+   when both are known, including the matching assembled summary. Authoritative
+   Builder overrides/review state retain the values on reopening and refreshing.
+   Core may not exceed outer diameter, including a previously saved other diameter.
+   Source images, calibration references, original/revision JSON/CSV and selected
+   rows are embedded as portable provenance in the `.pydpj`; unrelated payloads,
+   reviews, specimen variants and Brittle annotations remain intact.
+
+You may save both kinds from one capture together, or save them separately from
+differently focused captures/objectives. Saving one kind preserves the other. The
+project catalogue refreshes after a successful diameter publication; let that finish
+before the next update. Original measurement-source hashes remain historical
+provenance even when the target project has since advanced. Every publication still
+requires the current expected target SHA-256, unchanged reviewed evidence, isolated
+Builder/logger verification and a new backup/receipt. A stale target or changed
+capture is refused. No physical boundary is inferred by the review label.
+
+Review decisions and timestamps also appear in JSON and CSV. Preparing an update
+does not change the source project; publication is the explicit final Save action.
+Save and close any Builder editor working on that target before publication so
+unsaved review edits are not left outside the import baseline.
 
 ## Brittle sample annotation
 
@@ -229,6 +268,21 @@ record not assessed locally. `prepare-brittle-update --workdir PATH` overrides t
 review output folder; `--expected-sha256 HASH` supplies the exact source version
 when the sample catalogue has not been loaded. Both project commands start jobs;
 poll `status` until `project_annotation.state` is `ready`, `published`, or `failed`.
+
+Reviewed diameter publication uses the same guarded workflow:
+
+```powershell
+uv run python -m data_logging.microscope_logger.control review --measurements 1 2 --note "Sample, boundaries and calibration checked"
+uv run python -m data_logging.microscope_logger.control prepare-diameter-update --measurements 1 2
+uv run python -m data_logging.microscope_logger.control status
+# Inspect project_update.review, then supply its exact candidate_sha256.
+uv run python -m data_logging.microscope_logger.control publish-diameter-update --review-sha256 <reviewed-candidate-sha256>
+```
+
+Numbers identify one-based rows in the active capture. Use `review --measurements
+1 --unreview` to withdraw a review. Multiple selected rows of a kind contribute an
+explicit arithmetic mean. The GUI and CLI share the same review and persistence
+logic; `project_update.kind` identifies diameter versus Brittle jobs.
 
 Coordinates and reference length above are examples and must be replaced with the
 actual image positions and verified micrometer interval. `status` reports the

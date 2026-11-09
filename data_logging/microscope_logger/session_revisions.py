@@ -101,7 +101,7 @@ def _read_latest(directory: Path, base: Mapping[str, Any], base_sha: str) -> byt
 
 def _csv_text(records: Sequence[Mapping[str, Any]]) -> str:
     fields = ["measurement", "composition", "microwire", "source_kind", "source_path", "brittle", "brittle_observed_utc",
-              "kind", "width_px", "width_um", "calibration_status", "objective",
+              "kind", "width_px", "width_um", "calibration_status", "review_status", "reviewed_utc", "objective",
               "zoom", "camera_id", "start_x_px", "start_y_px", "end_x_px", "end_y_px"]
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fields)

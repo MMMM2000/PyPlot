@@ -65,6 +65,7 @@ def _copy_exclusive(source: Path, destination: Path) -> None:
 
 def publish_verified_project(
     candidate: Path, target: Path, *, backup: Path, expected_target_sha256: str,
+    expected_candidate_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Publish a strictly valid candidate, preserving the exact previous file.
 
@@ -72,6 +73,7 @@ def publish_verified_project(
     matching project identity and a newer revision. Shares the Builder save lock.
     Even when replacing a damaged target, only its bounded manifest header is
     read; candidate and staged bytes must pass every ordinary integrity check.
+    A supplied candidate hash binds publication to the exact reviewed bytes.
     """
     candidate, target, backup = Path(candidate), Path(target), Path(backup)
     if len({p.resolve() for p in (candidate, target, backup)}) != 3:
@@ -80,9 +82,15 @@ def publish_verified_project(
         raise FileExistsError(backup)
     if not pp._SHA256_RE.fullmatch(expected_target_sha256):
         raise SafeCodecError('Expected target SHA-256 must be a lowercase hex digest')
+    if expected_candidate_sha256 is not None and (
+            not isinstance(expected_candidate_sha256, str)
+            or not pp._SHA256_RE.fullmatch(expected_candidate_sha256)):
+        raise SafeCodecError('Expected candidate SHA-256 must be a lowercase hex digest')
     candidate_index = pp.inspect_project_package(candidate, verify_entries=True)
     candidate_hash = _sha256(candidate)
     candidate_index.assert_unchanged()
+    if expected_candidate_sha256 is not None and candidate_hash != expected_candidate_sha256:
+        raise SafeCodecError('Candidate changed; expected candidate hash does not match')
     lock_path = target.parent / f'.{target.name}.save.lock'
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)

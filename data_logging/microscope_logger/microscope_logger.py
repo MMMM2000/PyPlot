@@ -192,6 +192,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_annotations = {}
         self.annotation_task = None
         self.annotation_review = None
+        self.diameter_review = None
+        self.diameter_selection_snapshot = {}
         self.annotation_job = {"state": "idle"}
         self.project_update_receipts = []
         self.calibration = None
@@ -322,6 +324,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_spin.setToolTip("Record the microscope's acquisition zoom manually. This field does not operate camera zoom. Mouse-wheel view enlargement is separate.")
         self.zoom_spin.valueChanged.connect(self._context_changed)
         form.addRow("Acquisition zoom (manual)", self.zoom_spin)
+        zoom_help = QtWidgets.QLabel("Set device zoom on the microscope. This field only records it. The mouse wheel enlarges the PC view.")
+        zoom_help.setWordWrap(True)
+        form.addRow(zoom_help)
         self.scale_status = QtWidgets.QLabel("Uncalibrated · pixel measurements")
         self.scale_status.setWordWrap(True)
         form.addRow(self.scale_status)
@@ -383,9 +388,23 @@ class MainWindow(QtWidgets.QMainWindow):
         clear.clicked.connect(self.clear_measurements)
         toolbar.addWidget(clear)
         bottom_layout.addLayout(toolbar)
-        self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["#", "Width (px)", "Width (µm)", "Boundary", "Composition", "Microwire"])
+        review_toolbar = QtWidgets.QHBoxLayout()
+        self.review_button = QtWidgets.QPushButton("Review selected…")
+        self.review_button.clicked.connect(self._review_selected_gui)
+        review_toolbar.addWidget(self.review_button)
+        self.unreview_button = QtWidgets.QPushButton("Unreview selected")
+        self.unreview_button.clicked.connect(lambda: self._review_selected_gui(unreview=True))
+        review_toolbar.addWidget(self.unreview_button)
+        self.save_diameters_button = QtWidgets.QPushButton("Save selected diameters to project…")
+        self.save_diameters_button.clicked.connect(self._prepare_diameters_gui)
+        review_toolbar.addWidget(self.save_diameters_button)
+        review_toolbar.addStretch()
+        bottom_layout.addLayout(review_toolbar)
+        self.table = QtWidgets.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["#", "Width (px)", "Width (µm)", "Boundary", "Composition", "Microwire", "Review"])
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         bottom_layout.addWidget(self.table)
         right.addWidget(bottom)
@@ -790,16 +809,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._brittle_label(value)
         self._mark_dirty()
 
-    def _annotation_operation(self, operation, state, callback):
+    def _annotation_operation(self, operation, state, callback, *, kind="brittle"):
         if self.annotation_task is not None:
             raise ValueError("A project annotation operation is already running")
         task = ProjectAnnotationTask(operation)
         thread = QtCore.QThread(self)
         task.moveToThread(thread)
         self.annotation_task = (thread, task)
-        self.annotation_job = {"state": state}
+        self.annotation_job = {"state": state, "kind": kind}
+        if state == "publishing" and kind == "diameters":
+            self.autosave_timer.stop()
+            self.centralWidget().setEnabled(False)
         self.save_brittle_button.setEnabled(False)
-        self.annotation_status.setText("Checking project and preparing annotation…" if state == "preparing" else "Saving verified project annotation…")
+        self.save_diameters_button.setEnabled(False)
+        self.annotation_status.setText("Checking project and preparing update…" if state == "preparing" else "Saving verified project update…")
         thread.started.connect(task.run)
         task.succeeded.connect(callback)
         task.failed.connect(self._annotation_failed)
@@ -811,14 +834,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _annotation_finished(self):
         self.annotation_task = None
+        self.centralWidget().setEnabled(True)
         self.save_brittle_button.setEnabled(True)
+        self.save_diameters_button.setEnabled(True)
         if getattr(self, "_annotation_gui_review", False):
             self._annotation_gui_review = False
             QtCore.QTimer.singleShot(0, self._confirm_brittle_publication)
+        if getattr(self, "_diameter_gui_review", False):
+            self._diameter_gui_review = False
+            QtCore.QTimer.singleShot(0, self._confirm_diameter_publication)
 
     def _annotation_failed(self, message):
-        self.annotation_job = dict(state="failed", error=message)
-        self.annotation_status.setText(f"Project annotation failed: {message}")
+        self.annotation_job = dict(state="failed", kind=self.annotation_job.get("kind"), error=message)
+        self.annotation_status.setText(f"Project update failed: {message}")
 
     def prepare_brittle_update(self, *, workdir=None, expected_sha256=None, gui=False):
         if self.annotation_task is not None:
@@ -839,13 +867,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not root.is_absolute():
             raise ValueError("Choose an absolute output folder for project review files")
         self.annotation_review = None
+        self.diameter_review = None
         operation = lambda: prepare_brittle_update(source, root, composition=sample["composition"],
             microwire=sample["microwire"], brittle=sample["brittle"], expected_sha256=digest)
         self._annotation_operation(operation, "preparing", lambda review: self._brittle_prepared(review, gui))
 
     def _brittle_prepared(self, review, gui=False):
         self.annotation_review = review
-        self.annotation_job = dict(state="ready", review=review.to_dict())
+        self.annotation_job = dict(state="ready", kind="brittle", review=review.to_dict())
         self.annotation_status.setText("Verified annotation is ready to save to the project.")
         if gui:
             # Show the exact prepared change before the final publication action.
@@ -890,12 +919,165 @@ class MainWindow(QtWidgets.QMainWindow):
             receipt_path=root / "publication_receipt.json"), "publishing", lambda receipt: self._brittle_published(receipt, review))
 
     def _brittle_published(self, receipt, review):
-        self.annotation_job = dict(state="published", receipt=receipt)
+        self.annotation_job = dict(state="published", kind="brittle", receipt=receipt)
         self.project_update_receipts.append(dict(composition=review.composition, microwire=review.microwire,
                                                  brittle=review.brittle, receipt=copy.deepcopy(receipt)))
         self.annotation_review = None
         self.annotation_status.setText("Brittle saved to project. Backup and receipt retained. Reload project suggestions before another update.")
         self._mark_dirty()
+
+    def _selected_measurements(self):
+        return sorted(index.row() + 1 for index in self.table.selectionModel().selectedRows())
+
+    @staticmethod
+    def _diameter_summary_text(summary):
+        return "\n".join(f"{kind.capitalize()}: {value['mean_um']:.6g} µm from {value['count']} selected measurement(s)"
+                         for kind in ("core", "outer") if (value := summary.get(kind)))
+
+    def review_measurements(self, measurement_ids, *, unreview=False, note=""):
+        if self.annotation_task is not None and self.annotation_job.get("state") == "publishing":
+            raise ValueError("Wait for the project publication before changing review decisions")
+        from .diameter_review import summarize_reviewed_diameters
+        if not isinstance(note, str):
+            raise ValueError("Review note must be text")
+        if not isinstance(unreview, bool):
+            raise ValueError("unreview must be true or false")
+        if (not isinstance(measurement_ids, (list, tuple)) or not measurement_ids
+                or any(type(index) is not int or not 1 <= index <= len(self.records) for index in measurement_ids)
+                or len(set(measurement_ids)) != len(measurement_ids)):
+            raise ValueError("Select unique existing measurement numbers")
+        if not unreview:
+            proposed = copy.deepcopy(self.records)
+            for index in measurement_ids:
+                proposed[index - 1]["review_status"] = "Reviewed"
+            summarize_reviewed_diameters(proposed, *self._sample_key(), measurement_ids)
+        stamp = datetime.now(timezone.utc).isoformat()
+        for index in measurement_ids:
+            record = self.records[index - 1]
+            record["review_status"] = "Unreviewed" if unreview else "Reviewed"
+            record["reviewed_utc"] = stamp
+            record["review_note"] = note.strip()
+            record.setdefault("review_history", []).append(dict(status=record["review_status"], utc=stamp, note=note.strip()))
+        self._refresh_table()
+        self._mark_dirty()
+        self._autosave()
+        return self.command_status()
+
+    def _review_selected_gui(self, *, unreview=False):
+        ids = self._selected_measurements()
+        try:
+            if not unreview:
+                from .diameter_review import summarize_reviewed_diameters
+                proposed = copy.deepcopy(self.records)
+                for index in ids:
+                    proposed[index - 1]["review_status"] = "Reviewed"
+                summary = summarize_reviewed_diameters(proposed, *self._sample_key(), ids)
+                dialog = QtWidgets.QMessageBox(self)
+                dialog.setWindowTitle("Review selected diameters")
+                dialog.setText("Mark these selected diameters as reviewed?\n\n" + self._diameter_summary_text(summary)
+                    + "\n\nConfirm the sample, scale and physical boundaries. A core seen through glass may be an apparent width; validate it before accepting it as metal diameter.")
+                dialog.setDetailedText(json.dumps(dict(summary=summary, measurements=[self.records[i - 1] for i in ids]), indent=2, ensure_ascii=False))
+                dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel)
+                dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+                if dialog.exec() != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+            self.review_measurements(ids, unreview=unreview, note="Boundary and calibration checked in microscope app" if not unreview else "Review withdrawn")
+        except (OSError, ValueError, KeyError) as exc:
+            self.statusBar().showMessage(f"Could not review measurements: {exc}")
+
+    def prepare_diameter_update(self, measurement_ids, *, workdir=None, expected_sha256=None, gui=False):
+        if self.annotation_task is not None:
+            raise ValueError("A project update is already running")
+        if self.catalog_tasks:
+            raise ValueError("Wait for source loading to finish before preparing a diameter update")
+        from .diameter_review import summarize_reviewed_diameters
+        from .project_diameters import prepare_diameter_update
+        sample = self._sample()
+        summarize_reviewed_diameters(self.records, *self._sample_key(), measurement_ids)
+        source = Path(self.project_path.text().strip()).expanduser().resolve()
+        bindings = [sample, *sample.get("matching_sources", [])]
+        digest = expected_sha256 or next((item.get("source_sha256") for item in bindings
+            if item.get("source_kind") == "project" and Path(item.get("source_path", "")).resolve() == source), None)
+        if not digest:
+            raise ValueError("Load this project sample first, or supply its expected SHA-256")
+        root = Path(workdir) if workdir else Path(self.output_path.text()) / "project_updates"
+        if not root.is_absolute():
+            raise ValueError("Choose an absolute output folder for project review files")
+        if self._autosave(force=True) is None:
+            raise ValueError(self.autosave_error or "Save the capture before preparing a project update")
+        session_directory = self.active_session
+        ids = tuple(sorted(measurement_ids))
+        self.diameter_selection_snapshot = {index: copy.deepcopy(self.records[index - 1]) for index in ids}
+        self.annotation_review = self.diameter_review = None
+        self._annotation_operation(lambda: prepare_diameter_update(source, root,
+            composition=sample["composition"], microwire=sample["microwire"], session_directory=session_directory,
+            measurement_ids=ids, expected_sha256=digest), "preparing",
+            lambda review: self._diameters_prepared(review, gui), kind="diameters")
+
+    def _diameters_prepared(self, review, gui=False):
+        self.diameter_review = review
+        self.annotation_job = dict(state="ready", kind="diameters", review=review.to_dict())
+        self.annotation_status.setText("Verified diameter update is ready to save to the project.")
+        if gui:
+            self._diameter_gui_review = True
+
+    def _prepare_diameters_gui(self):
+        try:
+            self.prepare_diameter_update(self._selected_measurements(), gui=True)
+        except (OSError, ValueError, KeyError) as exc:
+            self._annotation_failed(str(exc))
+
+    def _confirm_diameter_publication(self):
+        review = self.diameter_review
+        if review is None:
+            return
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Save reviewed diameters")
+        dialog.setText(f"Save the selected reviewed diameters for {review.composition} {review.microwire}?\n\n"
+            + self._diameter_summary_text(review.summaries)
+            + f"\n\nProject: {review.source_path}\nInspect the old/new values and retained evidence below. A backup and publication receipt will be kept.")
+        dialog.setDetailedText(json.dumps(review.to_dict(), indent=2, ensure_ascii=False))
+        dialog.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Save | QtWidgets.QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        if dialog.exec() == QtWidgets.QMessageBox.StandardButton.Save:
+            try:
+                self.publish_diameter_update(review_sha256=review.candidate_sha256)
+            except (OSError, ValueError) as exc:
+                self._annotation_failed(str(exc))
+
+    def publish_diameter_update(self, *, review_sha256):
+        from .project_diameters import publish_diameter_update
+        if self.annotation_task is not None:
+            raise ValueError("A project update is already running")
+        review = self.diameter_review
+        if review is None or self.annotation_job.get("kind") != "diameters":
+            raise ValueError("Prepare and review a diameter update first")
+        if review_sha256 != review.candidate_sha256:
+            raise ValueError("The requested review does not match the prepared candidate")
+        if self.dirty:
+            raise ValueError("The capture changed after review; save it and prepare the update again")
+        if self._sample_key() != (review.composition, review.microwire):
+            raise ValueError("The selected sample changed; prepare the update again")
+        if Path(self.project_path.text()).resolve() != Path(review.source_path).resolve():
+            raise ValueError("The selected project changed; prepare the update again")
+        if self.active_session is None or self.active_session.resolve() != Path(review.session_directory).resolve():
+            raise ValueError("The active capture changed; prepare the update again")
+        if any(index > len(self.records) or self.records[index - 1] != record for index, record in self.diameter_selection_snapshot.items()):
+            raise ValueError("A reviewed measurement changed; prepare the update again")
+        root = Path(review.review_path).parent
+        self._annotation_operation(lambda: publish_diameter_update(review, backup=root / "original.pydpj",
+            receipt_path=root / "publication_receipt.json"), "publishing",
+            lambda receipt: self._diameters_published(receipt, review), kind="diameters")
+
+    def _diameters_published(self, receipt, review):
+        self.annotation_job = dict(state="published", kind="diameters", receipt=receipt)
+        self.project_update_receipts.append(dict(composition=review.composition, microwire=review.microwire,
+                                                 diameters=copy.deepcopy(review.summaries), receipt=copy.deepcopy(receipt)))
+        self.diameter_review = None
+        self.annotation_status.setText(f"Reviewed diameters saved for {review.composition} {review.microwire}. Backup and receipt retained; refreshing project suggestions.")
+        self._mark_dirty()
+        if not self.catalog_tasks:
+            self._load_catalog("project")
 
     def line_drawn(self, start, end):
         if self.image.isNull() or self.camera is not None:
@@ -976,14 +1158,19 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_table(self):
+        selected = self._selected_measurements()
         self.table.setRowCount(len(self.records))
         for row, record in enumerate(self.records):
             sample = record.get("sample", {})
             values = [str(row + 1), f"{record['width_px']:.2f}",
                       "—" if record["width_um"] is None else f"{record['width_um']:.3f}",
-                      record["kind"], sample.get("composition", ""), sample.get("microwire", "")]
+                      record["kind"], sample.get("composition", ""), sample.get("microwire", ""), record.get("review_status", "Unreviewed")]
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+        for index in selected:
+            if index <= len(self.records):
+                self.table.selectionModel().select(self.table.model().index(index - 1, 0),
+                    QtCore.QItemSelectionModel.SelectionFlag.Select | QtCore.QItemSelectionModel.SelectionFlag.Rows)
 
     def _confirm_replace(self):
         return not self.dirty or QtWidgets.QMessageBox.question(
@@ -1189,6 +1376,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     selected_camera=self.camera_combo.currentText(), selected_format=self.format_combo.currentText(),
                     catalog_counts={kind: len(choices) for kind, choices in self.catalogs.items()},
                     project_annotation=copy.deepcopy(self.annotation_job),
+                    project_update=copy.deepcopy(self.annotation_job),
                     source_status=self.sample_status.text())
 
     def restore_session(self, directory):
@@ -1296,6 +1484,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_command(self, command):
         action = command.get("action")
+        if (self.annotation_task is not None and self.annotation_job.get("state") == "publishing"
+                and self.annotation_job.get("kind") == "diameters" and action not in {"status", "stop"}):
+            raise ValueError("Wait for diameter publication before changing the active capture or its review")
         if action in {"measure", "parallel", "auto"} and "kind" in command:
             index = self.kind_combo.findData(command["kind"])
             if index < 0:
@@ -1306,6 +1497,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if action == "calibrate":
             from .calibration_commands import calibrate_from_command
             return calibrate_from_command(self, command)
+        if action == "review":
+            return self.review_measurements(command.get("measurements"), unreview=command.get("unreview", False), note=command.get("note", ""))
         if action == "configure":
             allowed = {"action", "objective", "zoom", "composition", "microwire", "output_directory",
                        "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind", "brittle"}
@@ -1375,6 +1568,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.format_combo.setCurrentIndex(matches[0])
         elif action == "prepare_brittle_update":
             self.prepare_brittle_update(workdir=command.get("workdir"), expected_sha256=command.get("expected_sha256"))
+        elif action == "prepare_diameter_update":
+            self.prepare_diameter_update(command.get("measurements"), workdir=command.get("workdir"), expected_sha256=command.get("expected_sha256"))
+        elif action == "publish_diameter_update":
+            if not command.get("review_sha256"):
+                raise ValueError("Specify the reviewed candidate SHA-256")
+            self.publish_diameter_update(review_sha256=command["review_sha256"])
         elif action == "publish_brittle_update":
             if not command.get("review_sha256"):
                 raise ValueError("Specify the reviewed candidate SHA-256")

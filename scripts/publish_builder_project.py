@@ -13,7 +13,9 @@ if __name__ == '__main__':
     parser.add_argument('target', type=Path)
     parser.add_argument('--backup', required=True, type=Path)
     parser.add_argument('--expected-target-sha256', required=True)
+    parser.add_argument('--expected-candidate-sha256', help='Require the exact reviewed candidate SHA-256')
     args = parser.parse_args()
     receipt = publish_verified_project(args.candidate, args.target, backup=args.backup,
-                                       expected_target_sha256=args.expected_target_sha256)
+                                       expected_target_sha256=args.expected_target_sha256,
+                                       expected_candidate_sha256=args.expected_candidate_sha256)
     print(json.dumps(receipt))

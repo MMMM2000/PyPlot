@@ -245,7 +245,7 @@ def save_session(output_parent: str | Path, image_png_bytes: bytes,
     # Validate JSON before creating anything, including arbitrary extra fields.
     json_text = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False)
     fields = ["measurement", "composition", "microwire", "source_kind", "source_path", "brittle", "brittle_observed_utc",
-              "kind", "width_px", "width_um", "calibration_status", "objective",
+              "kind", "width_px", "width_um", "calibration_status", "review_status", "reviewed_utc", "objective",
               "zoom", "camera_id", "start_x_px", "start_y_px", "end_x_px", "end_y_px"]
     csv_buffer = io.StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=fields)

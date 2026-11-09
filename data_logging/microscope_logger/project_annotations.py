@@ -356,7 +356,8 @@ def publish_brittle_update(review: BrittleUpdateReview, *, backup: str | Path,
         save_receipt(pending)
         command = [executable, str(Path(__file__).resolve().parents[2] / "scripts" / "publish_builder_project.py"),
                    str(candidate), str(source), "--backup", str(backup),
-                   "--expected-target-sha256", review.source_sha256]
+                   "--expected-target-sha256", review.source_sha256,
+                   "--expected-candidate-sha256", review.candidate_sha256]
         try:
             with stdout_path.open("x", encoding="utf-8") as stdout_stream, stderr_path.open("x", encoding="utf-8") as stderr_stream:
                 completed = subprocess.run(command, cwd=Path(__file__).resolve().parents[2],
