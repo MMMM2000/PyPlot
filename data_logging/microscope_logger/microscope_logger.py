@@ -206,6 +206,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fabrication_loaded_root = None
         self.fabrication_checked_compositions = set()
         self.fabrication_folder_listing_loaded = False
+        self.capture_annotation = None
+        self.saved_preferences = {}
         self.last_display = 0.0
         self.last_conversion = 0.0
         self.dirty = False
@@ -304,9 +306,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.brittle_toggle = QtWidgets.QCheckBox("Brittle · not assessed")
         self.brittle_toggle.setTristate(True)
         self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked)
-        self.brittle_toggle.setToolTip("Checked: brittle. Unchecked: not brittle. Dash: not assessed. Recorded for this sample; project changes require Save Brittle to project.")
+        self.brittle_toggle.setToolTip("Checked: brittle. Unchecked: not brittle. Dash: not assessed. Camera captures keep the sample and Brittle value recorded at capture; later changes apply to the next capture. Project changes require Save Brittle to project.")
         self.brittle_toggle.checkStateChanged.connect(self._brittle_changed)
         form.addRow(self.brittle_toggle)
+        self.capture_sample_label = QtWidgets.QLabel()
+        self.capture_sample_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.capture_sample_label.setWordWrap(True)
+        self.capture_sample_label.hide()
+        form.addRow(self.capture_sample_label)
         self.save_brittle_button = QtWidgets.QPushButton("Save Brittle to project…")
         self.save_brittle_button.clicked.connect(self._review_brittle_gui)
         form.addRow(self.save_brittle_button)
@@ -436,6 +443,51 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.profiles = {}
         except (ValueError, TypeError):
             self.profiles = {}
+        try:
+            prefs = json.loads(self.settings.value("ui_preferences", "{}", type=str))
+            if not isinstance(prefs, dict):
+                prefs = {}
+        except (ValueError, TypeError):
+            prefs = {}
+        self.saved_preferences = prefs
+        for item in prefs.get("annotations", []) if isinstance(prefs.get("annotations", []), list) else []:
+            if isinstance(item, dict) and isinstance(item.get("composition"), str) and isinstance(item.get("wire"), str):
+                value = item.get("brittle")
+                if value is None or type(value) is bool:
+                    self.sample_annotations[(item["composition"], item["wire"])] = dict(brittle=value, observed_utc=item.get("observed_utc"))
+        for name, widget in (("objective", self.objective_combo), ("composition", self.composition_combo), ("wire", self.wire_combo)):
+            if isinstance(prefs.get(name), str):
+                widget.setCurrentText(prefs[name])
+        for name, widget in (("zoom", self.zoom_spin), ("reference_um", self.known_um)):
+            value = prefs.get(name)
+            if isinstance(value, (int, float)) and math.isfinite(value) and widget.minimum() <= value <= widget.maximum():
+                widget.setValue(value)
+        if isinstance(prefs.get("reference_source"), str):
+            self.reference_source.setText(prefs["reference_source"])
+        for name, widget in (("tool", self.action_combo), ("boundary", self.kind_combo)):
+            index = prefs.get(name)
+            if type(index) is int and 0 <= index < widget.count():
+                widget.setCurrentIndex(index)
+        geometry = self.settings.value("window_geometry")
+        if isinstance(geometry, QtCore.QByteArray):
+            self.restoreGeometry(geometry)
+        self._sample_changed()
+
+    def _save_preferences(self):
+        prefs = dict(objective=self.objective_combo.currentText(), zoom=self.zoom_spin.value(),
+                     composition=self.composition_combo.currentText(), wire=self.wire_combo.currentText(),
+                     tool=self.action_combo.currentIndex(), boundary=self.kind_combo.currentIndex(),
+                     reference_um=self.known_um.value(), reference_source=self.reference_source.text(),
+                     camera=self.camera_combo.currentText(), camera_format=self.format_combo.currentText(),
+                     annotations=[dict(composition=c, wire=w, **value) for (c, w), value in self.sample_annotations.items()])
+        # Also remember a catalogue-provided checkbox value without inventing an observation.
+        key = self._sample_key()
+        if key not in self.sample_annotations and all(key):
+            sample = self._sample()
+            prefs["annotations"].append(dict(composition=key[0], wire=key[1], brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc")))
+        self.settings.setValue("ui_preferences", json.dumps(prefs, allow_nan=False))
+        self.settings.setValue("window_geometry", self.saveGeometry())
+        self.settings.sync()
 
     def refresh_cameras(self):
         if self.camera is not None:
@@ -450,6 +502,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if "CamGCC" in self.camera_combo.itemText(index):
                 self.camera_combo.setCurrentIndex(index)
                 break
+        preferred = self.camera_combo.findText(self.saved_preferences.get("camera", ""))
+        if preferred > 0:
+            self.camera_combo.setCurrentIndex(preferred)
+        self._restore_format_preference()
+
+    def _restore_format_preference(self):
+        if self.camera_combo.currentText() == self.saved_preferences.get("camera"):
+            index = self.format_combo.findText(self.saved_preferences.get("camera_format", ""))
+            if index >= 0:
+                self.format_combo.setCurrentIndex(index)
 
     def _camera_changed(self):
         self.format_combo.clear()
@@ -460,6 +522,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f.resolution().width() * f.resolution().height(), f.maxFrameRate()), reverse=True)
         for fmt in formats:
             self.format_combo.addItem(f"{fmt.resolution().width()} × {fmt.resolution().height()} · {fmt.maxFrameRate():g} fps · {fmt.pixelFormat().name.removeprefix('Format_')}", fmt)
+        self._restore_format_preference()
 
     def _set_connected(self, connected):
         self.camera_combo.setEnabled(not connected)
@@ -482,6 +545,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.clear_lines()
         self._refresh_table()
         self.image = QtGui.QImage()
+        self.capture_annotation = None
+        self._show_capture_sample()
         self.dirty = False
         self.last_frame = None
         self.frames_received = 0
@@ -556,6 +621,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pixel_format=fmt.pixelFormat().name, max_fps=fmt.maxFrameRate())
         self.stop_preview()
         self.set_image(image, camera_id=self.frame_camera_id)
+        self.capture_annotation = copy.deepcopy(self._sample())
+        self._show_capture_sample()
         self._autosave()
 
     def choose_image(self):
@@ -599,6 +666,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def set_image(self, image, *, camera_id=""):
+        self.capture_annotation = None
+        self._show_capture_sample()
         self.image = image.copy()
         self.frame_camera_id = camera_id
         self.source_file = None
@@ -752,7 +821,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         record.update(method="automatic_parallel_edges" if automatic else "parallel_edges",
                       guides=dict(a=list(a), b=list(b), c=list(c)),
-                      analysis=result, sample=self._sample(), calibration_evidence=self.calibration_evidence,
+                      analysis=result, sample=self._image_sample(), calibration_evidence=self.calibration_evidence,
                       measured_utc=datetime.now(timezone.utc).isoformat(), review_status="Unreviewed")
         self.records.append(record)
         for edge in (result["edge1"], result["edge2"]):
@@ -797,6 +866,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sample_key(self):
         return self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
+
+    def _image_sample(self):
+        return copy.deepcopy(self.capture_annotation) if self.capture_annotation is not None else self._sample()
+
+    def _show_capture_sample(self):
+        sample = self.capture_annotation
+        self.capture_sample_label.setVisible(sample is not None)
+        if sample is not None:
+            brittle = "not assessed" if sample.get("brittle") is None else "yes" if sample["brittle"] else "no"
+            self.capture_sample_label.setText(f"This image: {sample.get('composition', '')} · {sample.get('microwire', '')} · Brittle: {brittle}. Controls above prepare the next capture.")
 
     def _sample_changed(self, *_args):
         self._update_sample_validation()
@@ -854,7 +933,8 @@ class MainWindow(QtWidgets.QMainWindow):
         value = None if state == QtCore.Qt.CheckState.PartiallyChecked else state == QtCore.Qt.CheckState.Checked
         self.sample_annotations[self._sample_key()] = dict(brittle=value, observed_utc=datetime.now(timezone.utc).isoformat())
         self._brittle_label(value)
-        self._mark_dirty()
+        if self.capture_annotation is None:
+            self._mark_dirty()
 
     def _annotation_operation(self, operation, state, callback, *, kind="brittle"):
         if self.annotation_task is not None:
@@ -1140,7 +1220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.add_line(start, end, "reference", "#ffd35a")
             self.statusBar().showMessage(f"Reference line: {record['width_px']:.2f} px. Enter its known length, then calibrate.")
             return
-        record["sample"] = self._sample()
+        record["sample"] = self._image_sample()
         record["method"] = "manual_line"
         record["review_status"] = "Unreviewed"
         record["measured_utc"] = datetime.now(timezone.utc).isoformat()
@@ -1352,11 +1432,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _export_payload(self):
         data = self._image_png()
-        metadata = dict(self._context(), sample=self._sample(), notes=self.notes.toPlainText(),
+        metadata = dict(self._context(), sample=self._image_sample(), notes=self.notes.toPlainText(),
                         calibration=asdict(self.calibration) if self.calibration else None,
                         calibration_evidence=self.calibration_evidence,
                         source_file=self.source_file, captured_utc=self.captured_utc, loaded_utc=self.loaded_utc,
                         camera_format=self.frame_format)
+        metadata["captured_sample_snapshot"] = self.capture_annotation is not None
         if self.project_update_receipts:
             metadata["project_updates"] = copy.deepcopy(self.project_update_receipts)
         if self.source_file:
@@ -1528,6 +1609,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.captured_utc = metadata.get("captured_utc")
         self.loaded_utc = metadata.get("loaded_utc")
         self.frame_format = metadata.get("camera_format")
+        if metadata.get("captured_sample_snapshot") or self.frame_format:
+            self.capture_annotation = copy.deepcopy(sample)
+        self._show_capture_sample()
         self.calibration_evidence = evidence
         self.calibration = calibration
         self.calibration_error = ""
@@ -1729,6 +1813,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("fabrication_path", self.fabrication_path.text())
         self.settings.setValue("output_directory", self.output_path.text())
         self.settings.setValue("auto_save", self.auto_save.isChecked())
+        self._save_preferences()
         super().closeEvent(event)
 
 

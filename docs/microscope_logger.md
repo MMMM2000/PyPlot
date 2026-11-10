@@ -166,6 +166,19 @@ unsaved review edits are not left outside the import baseline.
 
 ## Brittle sample annotation
 
+Camera captures retain the sample identity and Brittle value selected when the
+frame was captured. Changing these controls afterwards prepares the next capture;
+it does not relabel the existing camera image or its subsequent measurements.
+Saved camera sessions retain this behaviour when reopened. Manually opened images
+can still be annotated before saving.
+
+On closing the app, the current composition/piece, per-sample Brittle values,
+manual objective/acquisition zoom, camera/mode, tool/boundary, reference inputs and
+window geometry are remembered, along with the existing path and auto-save settings.
+Images, measurements and image-specific notes are reopened through saved sessions.
+The camera does not start automatically. Check that the remembered objective and
+zoom still match the physical microscope.
+
 The **Brittle** checkbox has three states: checked (**yes**), unchecked (**no**),
 and a dash (**not assessed**). Saved project annotations populate the selection
 when available. An unmarked legacy project cell is unknown, rather than evidence
