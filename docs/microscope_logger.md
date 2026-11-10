@@ -118,6 +118,15 @@ workbooks are read only.
 
 ## Save core and outer diameters to Builder
 
+The composition and wire/piece fields remain editable. Red highlighting means the
+identity is not listed in the loaded fabrication data; the inline message shows
+the listed pieces. Amber means the fabrication data has not yet been checked for
+that composition, rather than proving the sample does not exist. The configured
+fabrication folder loads asynchronously at startup. Select a composition to load
+its samples, or press its Load button. Manual identities can still be captured.
+Changing the fabrication folder clears previous checks. A project match alone
+does not establish that a piece is listed in fabrication data.
+
 1. Load the intended project and select the composition and microwire before
    measuring. Set **Boundary measured** to **Metal-core width** or **Outer diameter**
    before drawing. A row keeps its original sample, boundary and calibration.

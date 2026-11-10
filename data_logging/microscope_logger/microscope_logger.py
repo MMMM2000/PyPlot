@@ -204,13 +204,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.catalog_tasks = []
         self.fabrication_compositions = []
         self.fabrication_loaded_root = None
+        self.fabrication_checked_compositions = set()
+        self.fabrication_folder_listing_loaded = False
         self.last_display = 0.0
         self.last_conversion = 0.0
         self.dirty = False
         self._build_ui()
         self._load_settings()
+        self._update_sample_validation()
         if enumerate_cameras:
             self.refresh_cameras()
+            if self.fabrication_path.text().strip():
+                QtCore.QTimer.singleShot(0, lambda: self._load_catalog("fabrication"))
 
     def _build_ui(self):
         central = QtWidgets.QWidget()
@@ -292,6 +297,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wire_combo.currentTextChanged.connect(self._sample_changed)
         form.addRow("Composition", self.composition_combo)
         form.addRow("Microwire / piece", self.wire_combo)
+        self.sample_validation = QtWidgets.QLabel()
+        self.sample_validation.setWordWrap(True)
+        form.addRow(self.sample_validation)
+        self.fabrication_path.textChanged.connect(self._fabrication_source_changed)
         self.brittle_toggle = QtWidgets.QCheckBox("Brittle · not assessed")
         self.brittle_toggle.setTristate(True)
         self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked)
@@ -790,6 +799,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
 
     def _sample_changed(self, *_args):
+        self._update_sample_validation()
         if not hasattr(self, "brittle_toggle"):
             return
         value = self._sample().get("brittle")
@@ -799,6 +809,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.brittle_toggle.blockSignals(False)
         self._brittle_label(value)
         self._mark_dirty()
+
+    def _fabrication_source_changed(self, *_args):
+        self.catalogs.pop("fabrication", None)
+        self.fabrication_checked_compositions.clear()
+        self.fabrication_compositions = []
+        self.fabrication_folder_listing_loaded = False
+        self.fabrication_loaded_root = None
+        self._update_sample_validation()
+
+    def _update_sample_validation(self):
+        if not hasattr(self, "sample_validation"):
+            return
+        composition, wire = self._sample_key()
+        state, message = "unchecked", "Fabrication data not checked. Load the fabrication folder to verify the sample."
+        if not composition or not wire:
+            message = "Choose a composition and wire/piece. Manual entry is allowed."
+        elif self.fabrication_folder_listing_loaded and composition not in self.fabrication_compositions:
+            # A direct catalogue load may supply choices without a folder listing.
+            if composition not in self.fabrication_checked_compositions:
+                state, message = "missing", f"Composition {composition} is not listed in the loaded fabrication data. Manual entry is allowed."
+        if composition and wire and composition in self.fabrication_checked_compositions:
+            available = sorted({c.microwire for c in self.catalogs.get("fabrication", []) if c.composition == composition})
+            if wire in available:
+                state, message = "listed", "Sample is listed in the fabrication data."
+            else:
+                state = "missing"
+                message = f"{composition} · {wire} is not listed in the fabrication data. Listed pieces: {', '.join(available) or 'none'}. Manual entry is allowed."
+        elif composition and wire and state != "missing" and self.fabrication_loaded_root:
+            message = "This composition's fabrication samples have not been checked yet. Select it or press Load beside Fabrication folder."
+        styles = {"unchecked": "background-color: #fff0cc; color: #613b00; border: 1px solid #b77b16;",
+                  "missing": "background-color: #fde2df; color: #7d1b17; border: 1px solid #cc3a2e;", "listed": ""}
+        for widget in (self.composition_combo, self.wire_combo):
+            widget.setStyleSheet(styles[state])
+            widget.setToolTip(message)
+            widget.setProperty("sampleValidation", state)
+        self.sample_validation.setText(message)
+        self.sample_validation.setAccessibleName("Sample verification: " + message)
 
     def _brittle_label(self, value):
         self.brittle_toggle.setText("Brittle · " + ("not assessed" if value is None else "yes" if value else "no"))
@@ -1208,14 +1255,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.catalogs.pop(kind, None)
         self._refresh_samples()
         composition = composition or self.composition_combo.currentText().strip() if kind == "fabrication" else None
+        if kind == "fabrication" and composition:
+            self.fabrication_checked_compositions.discard(composition)
+            self.catalogs[kind] = [c for c in self.catalogs.get(kind, []) if c.composition != composition]
+            self._update_sample_validation()
         task = CatalogTask(kind, Path(path), composition=composition)
         task.loaded.connect(lambda k, p, choices: self._catalog_received(k, p, choices, composition))
         task.folders_loaded.connect(self._fabrication_folders_loaded)
         task.failed.connect(self.sample_status.setText)
-        task.finished.connect(lambda: self.catalog_tasks.remove(task) if task in self.catalog_tasks else None)
+        task.finished.connect(lambda: self._catalog_finished(task))
         self.catalog_tasks.append(task)
         self.sample_status.setText("Reading sample identities…")
         threading.Thread(target=task.run, daemon=True).start()
+
+    def _catalog_finished(self, task):
+        if task in self.catalog_tasks:
+            self.catalog_tasks.remove(task)
+        self._update_sample_validation()
 
     def _catalog_received(self, kind, path, choices, composition=None):
         field = self.project_path if kind == "project" else self.fabrication_path
@@ -1225,6 +1281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if kind == "fabrication":
             self.fabrication_loaded_root = path
             if composition:
+                self.fabrication_checked_compositions.add(composition)
                 choices = [choice for choice in self.catalogs.get(kind, [])
                            if choice.composition != composition] + choices
         self._catalog_loaded(kind, choices)
@@ -1233,6 +1290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if str(Path(self.fabrication_path.text().strip()).resolve()) != path:
             return
         self.fabrication_loaded_root = path
+        self.fabrication_folder_listing_loaded = True
         self.fabrication_compositions = names
         self._refresh_samples()
         self.sample_status.setText("Select a composition, then load its production samples.")
@@ -1245,6 +1303,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _catalog_loaded(self, kind, choices):
         self.catalogs[kind] = choices
+        if kind == "fabrication":
+            self.fabrication_checked_compositions.update(c.composition for c in choices)
         self._refresh_samples()
         self.sample_status.setText(f"Loaded {len(choices)} sample identities. Project bindings take priority for shared identities.")
 
@@ -1266,7 +1326,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _composition_changed(self):
         composition = self.composition_combo.currentText()
         self.wire_combo.clear()
-        self.wire_combo.addItems(sorted({choice.microwire for choices in self.catalogs.values()
+        catalogs = [self.catalogs.get("fabrication", [])] if composition in self.fabrication_checked_compositions else self.catalogs.values()
+        self.wire_combo.addItems(sorted({choice.microwire for choices in catalogs
                                         for choice in choices if choice.composition == composition}))
         self._sample_changed()
 

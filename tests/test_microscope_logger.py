@@ -152,6 +152,53 @@ def test_catalog_dropdowns_and_record_sample_snapshots(window):
     assert first["sample"]["microwire"] == "12/2"
 
 
+def test_missing_fabrication_piece_warns_even_when_project_contains_it(window, tmp_path):
+    window.fabrication_path.setText(str(tmp_path))
+    window._catalog_loaded("project", [SampleChoice("SyntheticA", "1/3", "project", "fixture", "a"*64)])
+    assert window.wire_combo.property("sampleValidation") == "unchecked"
+    window._catalog_received("fabrication", str(tmp_path.resolve()), [
+        SampleChoice("SyntheticA", p, "fabrication", str(tmp_path), "b"*64) for p in ("1/1", "1/2")], "SyntheticA")
+    window.wire_combo.setEditText("1/3")
+    assert window.wire_combo.property("sampleValidation") == "missing"
+    assert [window.wire_combo.itemText(i) for i in range(window.wire_combo.count())] == ["1/1", "1/2"]
+    assert "1/1, 1/2" in window.sample_validation.text()
+    assert window.wire_combo.lineEdit().isReadOnly() is False
+    window.set_image(_image())
+    window.line_drawn((50, 40), (50, 80))
+    assert window.records[-1]["sample"]["microwire"] == "1/3"
+    window.wire_combo.setEditText("1/2")
+    assert window.wire_combo.property("sampleValidation") == "listed"
+    assert not window.wire_combo.styleSheet()
+
+
+def test_unloaded_composition_is_unknown_and_source_change_invalidates_check(window, tmp_path):
+    window.fabrication_path.setText(str(tmp_path))
+    window._catalog_received("fabrication", str(tmp_path.resolve()), [
+        SampleChoice("SyntheticA", "1/1", "fabrication", str(tmp_path), "b"*64)], "SyntheticA")
+    window.composition_combo.setEditText("SyntheticB")
+    window.wire_combo.setEditText("1/1")
+    assert window.wire_combo.property("sampleValidation") == "unchecked"
+    window.composition_combo.setEditText("SyntheticA")
+    assert window.wire_combo.property("sampleValidation") == "listed"
+    window.fabrication_path.setText(str(tmp_path / "another-source"))
+    assert window.wire_combo.property("sampleValidation") == "unchecked"
+    assert not window.fabrication_checked_compositions
+
+
+def test_empty_loaded_composition_and_unknown_composition_warn(window, tmp_path):
+    window.fabrication_path.setText(str(tmp_path))
+    window.composition_combo.setEditText("SyntheticA")
+    window.wire_combo.setEditText("1/3")
+    window._catalog_received("fabrication", str(tmp_path.resolve()), [], "SyntheticA")
+    assert window.wire_combo.property("sampleValidation") == "missing"
+    assert "none" in window.sample_validation.text()
+    window._fabrication_folders_loaded(str(tmp_path.resolve()), ["SyntheticA"])
+    window.composition_combo.setEditText("Invented composition")
+    window.wire_combo.setEditText("1/1")
+    assert window.wire_combo.property("sampleValidation") == "missing"
+    assert "Composition" in window.sample_validation.text()
+
+
 def test_export_keeps_original_pixels_and_per_record_selection(window, tmp_path):
     source = tmp_path / "synthetic-original.png"
     assert _image().save(str(source), "PNG")

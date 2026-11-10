@@ -1,0 +1,1 @@
+Microscope sample selection now highlights identities absent from loaded fabrication data in red, and identities not yet checked in amber. Inline text lists available pieces; manual entry and capture remain available. The configured fabrication folder is loaded asynchronously on camera-enabled startup, and changing its path invalidates old checks.
