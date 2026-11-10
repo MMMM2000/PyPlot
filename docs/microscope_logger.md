@@ -54,6 +54,13 @@ for subsequent captures with the same acquisition settings.
 
 ## First calibrated measurement session
 
+A persistent badge above the image distinguishes green **LIVE** preview from blue
+**CAPTURED**, **OPENED IMAGE** and **SAVED IMAGE** static views. Amber indicates
+startup, a paused preview or no recent frames; camera errors are red. The live
+badge requires an arriving camera frame and changes if frames stop updating.
+Saving or loading samples cannot hide this indicator. CLI `status` includes
+`image_view_state` for the same distinction.
+
 1. Close S-Viewer and other microscope instances. Choose CamGCC, the intended
    native resolution, and the actual objective. Keep acquisition zoom fixed. The
    objective and acquisition zoom fields are manual declarations, not hardware

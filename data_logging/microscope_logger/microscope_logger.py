@@ -181,6 +181,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frame_format = None
         self.preview_generation = 0
         self.preview_fitted = False
+        self.last_preview_frame_at = None
+        self.preview_state_timer = QtCore.QTimer(self)
+        self.preview_state_timer.setInterval(500)
+        self.preview_state_timer.timeout.connect(self._refresh_preview_state)
         self.image_identity = ""
         self.source_file_hash = None
         self.captured_utc = None
@@ -383,10 +387,22 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addStretch()
 
         right = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        image_panel = QtWidgets.QWidget()
+        image_layout = QtWidgets.QVBoxLayout(image_panel)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        state_row = QtWidgets.QHBoxLayout()
+        self.image_state_badge = QtWidgets.QLabel()
+        self.image_state_hint = QtWidgets.QLabel()
+        self.image_state_hint.setWordWrap(True)
+        state_row.addWidget(self.image_state_badge)
+        state_row.addWidget(self.image_state_hint, 1)
+        image_layout.addLayout(state_row)
         self.view = ImageView()
         self.view.line_drawn.connect(self.line_drawn)
         self.view.guides_drawn.connect(self.guides_drawn)
-        right.addWidget(self.view)
+        image_layout.addWidget(self.view, 1)
+        right.addWidget(image_panel)
+        self._set_image_state("empty")
         bottom = QtWidgets.QWidget()
         bottom_layout = QtWidgets.QVBoxLayout(bottom)
         toolbar = QtWidgets.QHBoxLayout()
@@ -531,6 +547,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_button.setText("Stop preview" if connected else "Start preview")
         self.view.measure_enabled = not connected and not self.image.isNull()
 
+    def _set_image_state(self, state):
+        labels = {
+            "empty": ("NO IMAGE", "Start preview or open a saved image.", "#4b5563"),
+            "starting": ("STARTING", "Waiting for the first camera frame.", "#92400e"),
+            "live": ("LIVE", "Camera preview is updating. Capture a frame to measure.", "#166534"),
+            "stalled": ("NO RECENT FRAMES", "Preview is not updating; the displayed frame may be stale.", "#92400e"),
+            "paused": ("PAUSED", "Last preview frame only; this frame has not been captured.", "#92400e"),
+            "still": ("STILL IMAGE", "Static image; measurements use original pixels.", "#1e40af"),
+            "captured": ("CAPTURED", "Frozen camera image. Preview is stopped.", "#1e40af"),
+            "opened": ("OPENED IMAGE", "Static image from a file. Preview is stopped.", "#1e40af"),
+            "saved": ("SAVED IMAGE", "Static image from a saved session. Preview is stopped.", "#1e40af"),
+            "error": ("CAMERA ERROR", "Preview stopped; any displayed frame is static.", "#b91c1c"),
+        }
+        label, hint, color = labels[state]
+        self.image_view_state = state
+        self.image_state_badge.setText(label)
+        self.image_state_badge.setStyleSheet(f"background-color: {color}; color: white; padding: 6px 10px; border-radius: 4px; font-weight: bold;")
+        self.image_state_hint.setText(hint)
+        self.image_state_badge.setAccessibleName("Image state: " + label)
+
+    def _refresh_preview_state(self):
+        if self.camera is not None:
+            if self.last_preview_frame_at is None:
+                self._set_image_state("starting")
+            else:
+                self._set_image_state("live" if time.monotonic() - self.last_preview_frame_at <= 2 else "stalled")
+
     def toggle_preview(self):
         if self.camera is not None:
             self.stop_preview()
@@ -564,6 +607,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.camera.errorOccurred.connect(lambda error, message: self._camera_error(error, message, generation))
         self.frame_camera_id = bytes(device.id()).decode("utf-8", "replace")
         self._set_connected(True)
+        self.last_preview_frame_at = None
+        self._set_image_state("starting")
+        self.preview_state_timer.start()
         self.camera.start()
         self.statusBar().showMessage("Starting preview. Close other software using this camera if it is busy.")
 
@@ -583,6 +629,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if image.isNull():
             return
         self.last_frame = image.copy()
+        self.last_preview_frame_at = now
+        self._set_image_state("live")
         self.capture_button.setEnabled(True)
         if now - self.last_display >= 0.1:
             self.view.set_image(self.last_frame, fit=not self.preview_fitted, preview=True)
@@ -594,9 +642,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.camera is None or (generation is not None and generation != self.preview_generation):
             return
         self.stop_preview()
+        self._set_image_state("error")
         self.statusBar().showMessage(f"Camera: {message}. Close other camera applications and retry.")
 
     def stop_preview(self):
+        was_previewing = self.camera is not None
+        self.preview_state_timer.stop()
         self.preview_generation += 1
         if self.camera is not None:
             self.sink.videoFrameChanged.disconnect()
@@ -610,6 +661,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.camera = self.session = self.sink = None
         self.capture_button.setEnabled(False)
         self._set_connected(False)
+        if was_previewing:
+            self._set_image_state("paused" if self.last_frame is not None else "empty")
 
     def capture_frame(self):
         if self.last_frame is None:
@@ -623,6 +676,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_image(image, camera_id=self.frame_camera_id)
         self.capture_annotation = copy.deepcopy(self._sample())
         self._show_capture_sample()
+        self._set_image_state("captured")
         self._autosave()
 
     def choose_image(self):
@@ -663,6 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frame_format = None
         self.loaded_utc = self.captured_utc
         self.captured_utc = None
+        self._set_image_state("opened")
         return True
 
     def set_image(self, image, *, camera_id=""):
@@ -682,6 +737,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_line = None
         self.view.clear_lines()
         self.view.set_image(image, fit=True)
+        self._set_image_state("still")
         self.view.measure_enabled = True
         self._refresh_table()
         self._context_changed()
@@ -1502,6 +1558,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def command_status(self):
         self._active_calibration()
         return dict(ok=True, preview_active=self.camera is not None, frames_received=self.frames_received,
+                    image_view_state=self.image_view_state,
                     image_size=[self.image.width(), self.image.height()], sample=self._sample(),
                     objective=self.objective_combo.currentText(), objective_manual=True,
                     calibration_status="Calibrated" if self.calibration else "Uncalibrated",
@@ -1625,6 +1682,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.active_session = directory
         self.autosave_timer.stop()
         self.dirty = False
+        self._set_image_state("saved")
         return True
 
     def handle_command(self, command):

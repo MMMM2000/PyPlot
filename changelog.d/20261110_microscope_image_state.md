@@ -1,0 +1,1 @@
+Microscope Diameter now shows a persistent image-state badge above the image: live preview, waiting for frames, stale preview, paused frame, captured still, opened image, saved-session image or camera error. The CLI status exposes the same state. Live status requires a decoded camera frame and drops when frames stop arriving.
