@@ -7,6 +7,7 @@
 - Keep changing device/bench, branch, PR, owner and acceptance state in a task ledger/handoff, not this file. See `docs/work-register.md` for the handoff fields.
 - Never force-sync, reset, discard, overwrite, or remove user work without explicit authorization.
 - For user-visible changes on a feature branch, add a UTC-dated fragment under `changelog.d/`. Keep existing fragments during routine cleanup; consolidate only when preparing a release or integration to `main`.
+- When Codex PR review is enabled, wait for it to finish before merging the PR into `main`. Verify that the completed review covers the current PR head commit, and address actionable findings or document why they do not apply. After pushing fixes or other new commits, verify review coverage again and wait for any required new review. A queued/running/failed review or the absence of comments is not evidence of completion. If the review is unavailable, report that and obtain an explicit user exception before merging; do not bypass this gate with auto-merge. Codex review supplements the required local checks and applicable acceptance work.
 
 ## Test Data and Artifacts
 
