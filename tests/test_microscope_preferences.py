@@ -71,3 +71,36 @@ def test_invalid_preferences_do_not_prevent_startup(qtbot, tmp_path, monkeypatch
     w = make_window(qtbot, tmp_path, monkeypatch)
     assert w.zoom_spin.value() == 1 and w.kind_combo.currentIndex() == 0
     assert w._sample()["brittle"] is None
+
+
+def test_remembered_composition_does_not_hide_other_compositions(qtbot, tmp_path, monkeypatch):
+    import threading
+    from data_logging.microscope_logger import microscope_logger as module
+    from data_logging.microscope_logger.samples import SampleChoice
+    class FakeTask(QtCore.QObject):
+        loaded = QtCore.pyqtSignal(str, str, object)
+        folders_loaded = QtCore.pyqtSignal(str, object)
+        failed = QtCore.pyqtSignal(str)
+        finished = QtCore.pyqtSignal()
+        def __init__(self, kind, path, composition=None):
+            super().__init__()
+            self.kind, self.path, self.composition = kind, str(path.resolve()), composition
+            self.cancelled = threading.Event()
+        def run(self):
+            if self.composition:
+                self.loaded.emit(self.kind, self.path, [SampleChoice(self.composition, "1/4", "fabrication", self.path, "b"*64)])
+            else:
+                self.folders_loaded.emit(self.path, ["Remembered alloy", "Other alloy"])
+            self.finished.emit()
+    monkeypatch.setattr(module, "CatalogTask", FakeTask)
+    w = make_window(qtbot, tmp_path, monkeypatch)
+    w.handle_command(dict(action="configure", composition="Remembered alloy", microwire="1/4"))
+    w.fabrication_path.setText(str(tmp_path))
+    w._load_catalog("fabrication", list_compositions=True)
+    qtbot.waitUntil(lambda: "Remembered alloy" in w.fabrication_checked_compositions and not w.catalog_tasks)
+    assert {w.composition_combo.itemText(i) for i in range(w.composition_combo.count())} == {"Remembered alloy", "Other alloy"}
+    assert w._sample_key() == ("Remembered alloy", "1/4")
+    w.composition_combo.setCurrentText("Other alloy")
+    w._maybe_load_fabrication()
+    qtbot.waitUntil(lambda: "Other alloy" in w.fabrication_checked_compositions and not w.catalog_tasks)
+    assert w.wire_combo.currentText() == "1/4"

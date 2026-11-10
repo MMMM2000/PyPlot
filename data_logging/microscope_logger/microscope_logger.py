@@ -221,7 +221,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if enumerate_cameras:
             self.refresh_cameras()
             if self.fabrication_path.text().strip():
-                QtCore.QTimer.singleShot(0, lambda: self._load_catalog("fabrication"))
+                QtCore.QTimer.singleShot(0, lambda: self._load_catalog("fabrication", list_compositions=True))
 
     def _build_ui(self):
         central = QtWidgets.QWidget()
@@ -1377,9 +1377,9 @@ class MainWindow(QtWidgets.QMainWindow):
             path = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose fabrication folder")
         if path:
             (self.project_path if kind == "project" else self.fabrication_path).setText(path)
-            self._load_catalog(kind)
+            self._load_catalog(kind, list_compositions=kind == "fabrication")
 
-    def _load_catalog(self, kind, composition=None):
+    def _load_catalog(self, kind, composition=None, *, list_compositions=False):
         field = self.project_path if kind == "project" else self.fabrication_path
         path = field.text().strip()
         if not path:
@@ -1391,6 +1391,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.catalogs.pop(kind, None)
         self._refresh_samples()
         composition = composition or self.composition_combo.currentText().strip() if kind == "fabrication" else None
+        if kind == "fabrication" and list_compositions:
+            composition = None
         if kind == "fabrication" and composition:
             self.fabrication_checked_compositions.discard(composition)
             self.catalogs[kind] = [c for c in self.catalogs.get(kind, []) if c.composition != composition]
@@ -1408,6 +1410,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if task in self.catalog_tasks:
             self.catalog_tasks.remove(task)
         self._update_sample_validation()
+        if task.kind == "fabrication" and not task.composition and not task.cancelled.is_set() and self.fabrication_folder_listing_loaded:
+            QtCore.QTimer.singleShot(0, self._maybe_load_fabrication)
 
     def _catalog_received(self, kind, path, choices, composition=None):
         field = self.project_path if kind == "project" else self.fabrication_path
