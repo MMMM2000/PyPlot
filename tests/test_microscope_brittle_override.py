@@ -153,3 +153,35 @@ def test_core_database_output_honors_explicit_bool(tmp_path, flag):
         output_dir=tmp_path / "out"), measurement_records=[], microscope_index=index, skip_exports=True)
     assert result.dataframe.iloc[0][core.BRITTLE_COLUMN] == ("brittle" if flag else None)
     assert core.BRITTLE_OVERRIDE_COLUMN not in result.dataframe.columns
+
+
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("base_key", [("SyntheticAlloy", 1, 1, None), ("SyntheticAlloy", 1, 1), ("SyntheticAlloy", 1, 1, "other")])
+def test_explicit_override_does_not_transfer_to_an_unassessed_variant(tmp_path, flag, base_key):
+    variant = ("SyntheticAlloy", 1, 1, "oe")
+    measurements = core.MicroscopeMeasurements(brittle=flag, brittle_override=flag,
+        core=[core.MicroscopeDetection(10.0, None, source="manual", category="core")],
+        glass=[core.MicroscopeDetection(30.0, None, source="manual", category="glass")])
+    strain = core.StrainRecord("SyntheticAlloy", 1, 1, "1/1oe", None, None, None, False, tmp_path/'synthetic.xlsx')
+    result = core.build_database(core.BuilderConfig(fabrication_files=[], annealing_files=[], output_dir=tmp_path/'out'),
+        measurement_records=[], microscope_index={base_key: measurements}, strain_records={variant: strain}, skip_exports=True)
+    row = result.dataframe.loc[result.dataframe['Microwire'] == '1/1oe'].iloc[0]
+    assert pd.isna(row[core.BRITTLE_COLUMN])
+    # Existing diameter fallback remains available independently of annotations.
+    assert row['d (µm)'] == 10 and row['D (µm)'] == 30
+
+
+@pytest.mark.parametrize("variant_flag", [False, True])
+def test_exact_variant_override_wins_and_legacy_inference_is_retained(tmp_path, variant_flag):
+    base = ("SyntheticAlloy", 1, 1, None)
+    variant = ("SyntheticAlloy", 1, 1, "oe")
+    index = {base: core.MicroscopeMeasurements(brittle=not variant_flag, brittle_override=not variant_flag),
+             variant: core.MicroscopeMeasurements(brittle=not variant_flag, brittle_override=variant_flag)}
+    config = core.BuilderConfig(fabrication_files=[], annealing_files=[], output_dir=tmp_path/'out')
+    result = core.build_database(config, measurement_records=[], microscope_index=index, skip_exports=True)
+    row = result.dataframe.loc[result.dataframe['Microwire'] == '1/1oe'].iloc[0]
+    assert (row[core.BRITTLE_COLUMN] == 'brittle') if variant_flag else pd.isna(row[core.BRITTLE_COLUMN])
+    legacy = core.MicroscopeMeasurements(brittle=True)
+    strain = core.StrainRecord("SyntheticAlloy", 1, 1, "1/1oe", None, None, None, False, tmp_path/'synthetic.xlsx')
+    result = core.build_database(config, measurement_records=[], microscope_index={base:legacy}, strain_records={variant:strain}, skip_exports=True)
+    assert result.dataframe.loc[result.dataframe['Microwire']=='1/1oe',core.BRITTLE_COLUMN].iloc[0] == 'brittle'
