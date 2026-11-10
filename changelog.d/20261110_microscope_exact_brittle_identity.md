@@ -1,0 +1,1 @@
+Explicit microscope Brittle overrides now apply only to the exact specimen identity during Assemble rebuilds. Legacy diameter fallback remains available, but an annotation for a base piece or another variant no longer marks an unassessed variant brittle.

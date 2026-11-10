@@ -1,0 +1,1 @@
+Restoring a remembered microscope composition now loads the full fabrication composition list before checking that sample, so other compositions remain available in the dropdown. The remembered piece is preserved while the asynchronous loads complete.

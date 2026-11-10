@@ -1201,6 +1201,40 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _replace_package_checked(
+    temporary: Path,
+    target: Path,
+    expected_target: FileFingerprint | None,
+    *,
+    source_index: ProjectIndex | None = None,
+) -> None:
+    """Retry brief Windows sharing failures without weakening publish guards.
+
+    Six attempts wait at most 1.5 seconds in total. Every attempt rechecks both
+    the indexed source and the original destination (or our exclusive empty
+    placeholder), so a competing writer is never overwritten on a later retry.
+    """
+    for attempt in range(6):
+        if source_index is not None:
+            source_index.assert_unchanged()
+        try:
+            current_target = FileFingerprint.capture(target)
+        except SafeCodecError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                current_target = None
+            else:
+                raise
+        if current_target != expected_target:
+            raise SafeCodecError("Builder project target changed during save; publish was cancelled")
+        try:
+            os.replace(temporary, target)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
 def _entry_json_descriptor(path: str, role: str, raw: bytes) -> EntryDescriptor:
     return EntryDescriptor(path, role, "application/json", hashlib.sha256(raw).hexdigest(), len(raw))
 
@@ -1525,13 +1559,13 @@ def write_project_package(
         if current_target != expected_target:
             raise SafeCodecError("Builder project target changed during save; publish was cancelled")
         if replace_existing:
-            os.replace(temp_path, target)
+            _replace_package_checked(temp_path, target, expected_target, source_index=source_index)
         else:
             placeholder_fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_RDWR)
             os.close(placeholder_fd)
             placeholder_created = True
             placeholder_fingerprint = FileFingerprint.capture(target)
-            os.replace(temp_path, target)
+            _replace_package_checked(temp_path, target, placeholder_fingerprint, source_index=source_index)
             placeholder_created = False
             placeholder_fingerprint = None
         temp_path = None
@@ -1775,13 +1809,13 @@ def write_project_package_streaming(
         if current_target != expected_target:
             raise SafeCodecError("Builder migration target changed during publish")
         if replace_existing:
-            os.replace(temp_path, target)
+            _replace_package_checked(temp_path, target, expected_target)
         else:
             placeholder_fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_RDWR)
             os.close(placeholder_fd)
             placeholder_created = True
             placeholder_fingerprint = FileFingerprint.capture(target)
-            os.replace(temp_path, target)
+            _replace_package_checked(temp_path, target, placeholder_fingerprint)
             placeholder_created = False
             placeholder_fingerprint = None
         temp_path = None
