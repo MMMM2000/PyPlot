@@ -119,6 +119,10 @@ class ControlServer(QtCore.QObject):
         if self.running:
             return True
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        # Windows packaged-app storage can resolve to its physical LocalCache
+        # path only after the directory exists. Bind the same materialized path
+        # that discovery clients resolve, rather than the pre-creation spelling.
+        self.endpoint = _endpoint(self.runtime_dir)
         lock = QtCore.QLockFile(str(self.runtime_dir / "server.lock"))
         lock.setStaleLockTime(0)
         if not lock.tryLock(0):
