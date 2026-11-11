@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser
+
 import csv
 import ctypes
 import hashlib
@@ -10003,6 +10005,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_name_specimen = QtWidgets.QLineEdit(naming_box)
         self.edit_name_specimen.setPlaceholderText("e.g. s1")
         naming_form.addRow("Sample ID", self.edit_name_specimen)
+        attach_sample_chooser(self.edit_name_specimen, self.edit_name_composition, self.edit_name_wire)
+
         self.edit_name_condition = QtWidgets.QLineEdit(naming_box)
         self.edit_name_condition.setPlaceholderText("e.g. preload test")
         naming_form.addRow("Condition / notes", self.edit_name_condition)

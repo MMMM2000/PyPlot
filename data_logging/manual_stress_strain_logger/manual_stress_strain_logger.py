@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser
+
 import math
 import os
 import json
@@ -191,6 +193,8 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         self.s_number.setText("s1")
         grid.addWidget(QtWidgets.QLabel("Sample number:", stress), 1, 0)
         grid.addWidget(self.s_number, 1, 1)
+
+        attach_sample_chooser(self.s_number, self.s_comp, self.s_sample)
 
         self.s_current = QtWidgets.QLineEdit(self)
         self.s_current.setText("74mA")
