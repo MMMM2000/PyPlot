@@ -488,12 +488,90 @@ def _aggregate_repeated_measurements(frame: pd.DataFrame, mode: str) -> pd.DataF
     passthrough_frame = frame.loc[~valid_mask]
 
     ordered_rows: list[tuple[int, dict[str, object]]] = []
-    for _, subset in grouped_frame.groupby(group_columns, dropna=False, sort=False):
-        row: dict[str, object] = {}
-        for column in frame.columns:
-            row[str(column)] = _aggregate_column(subset[column], column=str(column))
-        row["measurement_count"] = int(len(subset.index))
-        ordered_rows.append((int(subset.index[0]), row))
+    from microwire_data_builder.physical_samples import PHYSICAL_SAMPLE_COLUMN, PHYSICAL_SAMPLE_SCOPE_COLUMN, parse_identity_ledger
+
+    def _has_identity_value(value):
+        if value is None or value is pd.NA:
+            return False
+        if isinstance(value, float) and math.isnan(value):
+            return False
+        return not (isinstance(value, str) and not value.strip())
+
+    def _piece_key(row):
+        from uuid import UUID
+        from data_logging.sample_identity import wire_key, sample_number
+        from microwire_data_builder.physical_samples import validated_physical_sample
+        identities = []
+        evidence = False
+        if _has_identity_value(row.get(PHYSICAL_SAMPLE_SCOPE_COLUMN)):
+            # Wire assembly contains outcomes beyond its partial identity ledger.
+            return True, None
+        composition = str(row.get("Composition", "")).strip()
+        wire = wire_key(str(row.get("Microwire", "")))
+        explicit_labels = [row.get(column) for column in ("Physical sample ID", "Sample ID", "specimen")
+                           if _has_identity_value(row.get(column))]
+        if explicit_labels:
+            evidence = True
+            if any(not isinstance(label, str) or sample_number(label) is None for label in explicit_labels):
+                return True, None
+            if len(set(explicit_labels)) != 1:
+                return True, None
+        explicit_label = explicit_labels[0] if explicit_labels else None
+        for column in ("Physical sample UUID", "sample_uid"):
+            value = row.get(column)
+            if _has_identity_value(value):
+                evidence = True
+                try:
+                    if not isinstance(value, str):
+                        return True, None
+                    uid = str(UUID(value))
+                except ValueError:
+                    return True, None
+                if explicit_label is not None and (not isinstance(explicit_label, str) or sample_number(explicit_label) is None):
+                    return True, None
+                identities.append((uid, composition, wire, explicit_label))
+        ledger = row.get(PHYSICAL_SAMPLE_COLUMN)
+        if _has_identity_value(ledger):
+            evidence = True
+            try:
+                entries = parse_identity_ledger(ledger)
+            except (ValueError, TypeError):
+                return True, None
+            for entry in entries:
+                identity = validated_physical_sample(entry.get("physical_sample"), composition=composition, wire=wire)
+                if not identity or not identity.get("uid"):
+                    return True, None
+                if explicit_label is not None and explicit_label != identity["label"]:
+                    return True, None
+                identities.append((identity["uid"], composition, wire, identity["label"]))
+        known = set(identities)
+        return evidence, next(iter(known)) if len(known) == 1 else None
+
+    for _, wire_subset in grouped_frame.groupby(group_columns, dropna=False, sort=False):
+        keys = [_piece_key(row) for _, row in wire_subset.iterrows()]
+        if any(evidence for evidence, _ in keys):
+            # An explicit UUID permits repeated-measurement aggregation only for
+            # that same physical piece. Unknown/mixed records stay independent.
+            partitions = {}
+            for position, (_, uid) in enumerate(keys):
+                key = ("uid", uid) if uid else ("unverified", position)
+                partitions.setdefault(key, []).append(position)
+            subsets = [wire_subset.iloc[positions] for positions in partitions.values()]
+        else:
+            subsets = [wire_subset]  # Historical no-identity behavior is unchanged.
+        for subset in subsets:
+            row: dict[str, object] = {}
+            for column in frame.columns:
+                if column == PHYSICAL_SAMPLE_COLUMN and len(subset) > 1:
+                    entries = []
+                    for value in subset[column]:
+                        if isinstance(value, str) and value.strip():
+                            entries.extend(parse_identity_ledger(value))
+                    row[column] = json.dumps(entries, ensure_ascii=False, sort_keys=True) if entries else ""
+                else:
+                    row[str(column)] = _aggregate_column(subset[column], column=str(column))
+            row["measurement_count"] = int(len(subset.index))
+            ordered_rows.append((int(subset.index[0]), row))
     for row_idx, row in passthrough_frame.iterrows():
         preserved = row.to_dict()
         preserved["measurement_count"] = 1

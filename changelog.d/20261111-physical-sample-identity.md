@@ -8,3 +8,7 @@
   prevent piece-specific microscope data leaking into wire-level Builder rows.
 - Add explicit record exchange with atomic imports and visible collisions.
   This remains local/imported coverage, not a central cross-device allocator.
+- Preserve explicit per-measurement identity through additive Builder provenance and
+  compact TMA records; keep historical data and source-wire keys unchanged.
+- Keep distinct or unverified physical pieces separate during EDA repeated-measurement
+  aggregation rather than assigning one piece identity to a mixed wire row.

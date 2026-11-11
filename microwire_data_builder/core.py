@@ -1296,6 +1296,7 @@ class MiniDmaRecord:
     transition_summary: Tuple[str, ...] = ()
     break_summary: str = ""
     initial_length_calibration: Optional[Dict[str, Any]] = None
+    physical_sample: Optional[Dict[str, Any]] = None
 
 
 def mini_dma_calibration_frame_identity(frame: pd.DataFrame) -> str:
@@ -4154,6 +4155,7 @@ class MeasurementMetadata:
     file_name: str
     relpath: str
     timestamp_mtime_utc: str
+    physical_sample: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -4186,6 +4188,7 @@ def _current_program_sample_from_folder(name: str) -> Optional[str]:
 
 
 def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementMetadata:
+    from microwire_data_builder.physical_samples import validated_physical_sample
     stat = path.stat()
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
@@ -4261,6 +4264,10 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
         file_name=path.parent.name if logger_metadata else path.name,
         relpath=relpath,
         timestamp_mtime_utc=timestamp,
+        physical_sample=validated_physical_sample(
+            logger_metadata.get("physical_sample"),
+            composition=str(logger_metadata.get("composition") or composition),
+            wire=f"{draw_x}/{piece_y}" if draw_x is not None and piece_y is not None else None),
     )
 
 
@@ -7835,6 +7842,7 @@ def build_database(
 
     include_crops = bool(getattr(config, "include_microscope_crops", True))
     highlight_ocr = bool(getattr(config, "highlight_ocr_values", True))
+    from microwire_data_builder.physical_samples import PHYSICAL_SAMPLE_COLUMN, PHYSICAL_SAMPLE_SCOPE_COLUMN, measurement_identity_ledger
     output_columns = list(OUTPUT_COLUMNS)
     d_column = DIAMETER_COLUMN
     D_column = GLASS_DIAMETER_COLUMN
@@ -9299,6 +9307,15 @@ def build_database(
                 if other_descriptors:
                     row["Figure — other annealing (Origin)"] = _collapse_asset_references(other_descriptors)
         _backfill_current_densities(row)
+        identity_ledger = measurement_identity_ledger([*records, *mini_dma_entries])
+        if identity_ledger:
+            row[PHYSICAL_SAMPLE_COLUMN] = identity_ledger
+            # Other source-wire outcomes (including map-only legacy results) are
+            # not attributable to these pieces. Never imply complete coverage.
+            row[PHYSICAL_SAMPLE_SCOPE_COLUMN] = "source_wire_summary"
+            for column in (PHYSICAL_SAMPLE_COLUMN, PHYSICAL_SAMPLE_SCOPE_COLUMN):
+                if column not in output_columns:
+                    output_columns.append(column)
         row_index = len(rows)
         rows.append(row)
         if row_highlights:
