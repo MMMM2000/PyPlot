@@ -20,6 +20,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices, QVideoSink
 
 from plotting.shared.theme import ensure_app_theme
+from data_logging.sample_identity_ui import attach_sample_chooser, selection_metadata
 from .measurements import Calibration, make_calibration, measure_line, save_session
 from .samples import load_project_samples, load_fabrication_samples, list_fabrication_compositions
 from .edges import parallel_width, refine_parallel_edges
@@ -302,7 +303,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.composition_combo.lineEdit().editingFinished.connect(self._maybe_load_fabrication)
         self.wire_combo.currentTextChanged.connect(self._sample_changed)
         form.addRow("Composition", self.composition_combo)
-        form.addRow("Microwire / piece", self.wire_combo)
+        form.addRow("Source microwire", self.wire_combo)
+        self.specimen_edit = QtWidgets.QLineEdit()
+        self.specimen_edit.setPlaceholderText("Physical piece, e.g. s1; blank for unknown legacy identity")
+        attach_sample_chooser(self.specimen_edit, self.composition_combo.lineEdit(), self.wire_combo.lineEdit())
+        self.specimen_edit.textChanged.connect(self._sample_changed)
+        form.addRow("Physical sample ID", self.specimen_edit)
         self.sample_validation = QtWidgets.QLabel()
         self.sample_validation.setWordWrap(True)
         form.addRow(self.sample_validation)
@@ -432,8 +438,8 @@ class MainWindow(QtWidgets.QMainWindow):
         review_toolbar.addWidget(self.save_diameters_button)
         review_toolbar.addStretch()
         bottom_layout.addLayout(review_toolbar)
-        self.table = QtWidgets.QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["#", "Width (px)", "Width (µm)", "Boundary", "Composition", "Microwire", "Review"])
+        self.table = QtWidgets.QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["#", "Width (px)", "Width (µm)", "Boundary", "Composition", "Microwire", "Review", "Sample ID"])
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -470,7 +476,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(item, dict) and isinstance(item.get("composition"), str) and isinstance(item.get("wire"), str):
                 value = item.get("brittle")
                 if value is None or type(value) is bool:
-                    self.sample_annotations[(item["composition"], item["wire"])] = dict(brittle=value, observed_utc=item.get("observed_utc"))
+                    self.sample_annotations[(item["composition"], item["wire"], str(item.get("specimen", "")))] = dict(brittle=value, observed_utc=item.get("observed_utc"))
         for name, widget in (("objective", self.objective_combo), ("composition", self.composition_combo), ("wire", self.wire_combo)):
             if isinstance(prefs.get(name), str):
                 widget.setCurrentText(prefs[name])
@@ -487,20 +493,22 @@ class MainWindow(QtWidgets.QMainWindow):
         geometry = self.settings.value("window_geometry")
         if isinstance(geometry, QtCore.QByteArray):
             self.restoreGeometry(geometry)
+        self.specimen_edit.setProperty("physicalSample", None)
+        self.specimen_edit.setText(str(prefs.get("specimen", "")))
         self._sample_changed()
 
     def _save_preferences(self):
         prefs = dict(objective=self.objective_combo.currentText(), zoom=self.zoom_spin.value(),
-                     composition=self.composition_combo.currentText(), wire=self.wire_combo.currentText(),
+                     composition=self.composition_combo.currentText(), wire=self.wire_combo.currentText(), specimen=self.specimen_edit.text(),
                      tool=self.action_combo.currentIndex(), boundary=self.kind_combo.currentIndex(),
                      reference_um=self.known_um.value(), reference_source=self.reference_source.text(),
                      camera=self.camera_combo.currentText(), camera_format=self.format_combo.currentText(),
-                     annotations=[dict(composition=c, wire=w, **value) for (c, w), value in self.sample_annotations.items()])
+                     annotations=[dict(composition=c, wire=w, specimen=p, **value) for (c, w, p), value in self.sample_annotations.items()])
         # Also remember a catalogue-provided checkbox value without inventing an observation.
-        key = self._sample_key()
-        if key not in self.sample_annotations and all(key):
+        key = self._annotation_key()
+        if key not in self.sample_annotations and all(key[:2]):
             sample = self._sample()
-            prefs["annotations"].append(dict(composition=key[0], wire=key[1], brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc")))
+            prefs["annotations"].append(dict(composition=key[0], wire=key[1], specimen=key[2], brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc")))
         self.settings.setValue("ui_preferences", json.dumps(prefs, allow_nan=False))
         self.settings.setValue("window_geometry", self.saveGeometry())
         self.settings.sync()
@@ -915,10 +923,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sample(self):
         result = self._sample_identity()
-        annotation = self.sample_annotations.get(self._sample_key(), {})
+        piece = self.specimen_edit.text().strip()
+        if piece != result.get("specimen", ""):
+            result.pop("brittle", None)
+            result.pop("brittle_observed_utc", None)
+        result["specimen"] = piece
+        result["physical_sample"] = selection_metadata(self.specimen_edit, result.get("composition", ""),
+                                                       result.get("microwire", ""), piece)
+        annotation = self.sample_annotations.get(self._annotation_key(), {})
         result.update(brittle=annotation.get("brittle", result.get("brittle")),
                       brittle_observed_utc=annotation.get("observed_utc", result.get("brittle_observed_utc")))
         return result
+
+    def _annotation_key(self):
+        return (*self._sample_key(), self.specimen_edit.text().strip())
 
     def _sample_key(self):
         return self.composition_combo.currentText().strip(), self.wire_combo.currentText().strip()
@@ -931,7 +949,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capture_sample_label.setVisible(sample is not None)
         if sample is not None:
             brittle = "not assessed" if sample.get("brittle") is None else "yes" if sample["brittle"] else "no"
-            self.capture_sample_label.setText(f"This image: {sample.get('composition', '')} · {sample.get('microwire', '')} · Brittle: {brittle}. Controls above prepare the next capture.")
+            self.capture_sample_label.setText(f"This image: {sample.get('composition', '')} · {sample.get('microwire', '')} / {sample.get('specimen', '')} · Brittle: {brittle}. Controls above prepare the next capture.")
 
     def _sample_changed(self, *_args):
         self._update_sample_validation()
@@ -987,7 +1005,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _brittle_changed(self, state):
         value = None if state == QtCore.Qt.CheckState.PartiallyChecked else state == QtCore.Qt.CheckState.Checked
-        self.sample_annotations[self._sample_key()] = dict(brittle=value, observed_utc=datetime.now(timezone.utc).isoformat())
+        self.sample_annotations[self._annotation_key()] = dict(brittle=value, observed_utc=datetime.now(timezone.utc).isoformat())
         self._brittle_label(value)
         if self.capture_annotation is None:
             self._mark_dirty()
@@ -1036,6 +1054,8 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError("A project annotation operation is already running")
         from .project_annotations import prepare_brittle_update
         sample = self._sample()
+        if sample.get("specimen"):
+            raise ValueError("Piece-specific Brittle is saved in the capture. Wire-level project writeback is not safe for an individual piece.")
         if type(sample.get("brittle")) is not bool:
             raise ValueError("Set Brittle to yes or no; not assessed does not modify the project")
         if not all(self._sample_key()):
@@ -1093,6 +1113,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if review_sha256 is not None and review_sha256 != review.candidate_sha256:
             raise ValueError("The requested review does not match the prepared candidate")
         sample = self._sample()
+        if sample.get("specimen"):
+            raise ValueError("Piece-specific Brittle cannot be published to the wire-level project. Prepare it again without a specimen.")
         if (sample["composition"], sample["microwire"], sample["brittle"]) != (review.composition, review.microwire, review.brittle):
             raise ValueError("The selected sample or Brittle state changed; prepare it again")
         if Path(self.project_path.text()).resolve() != Path(review.source_path).resolve():
@@ -1177,6 +1199,8 @@ class MainWindow(QtWidgets.QMainWindow):
         from .project_diameters import prepare_diameter_update
         sample = self._sample()
         summarize_reviewed_diameters(self.records, *self._sample_key(), measurement_ids)
+        from .diameter_review import require_wire_level_diameters
+        require_wire_level_diameters([self.records[index - 1] for index in measurement_ids])
         source = Path(self.project_path.text().strip()).expanduser().resolve()
         bindings = [sample, *sample.get("matching_sources", [])]
         digest = expected_sha256 or next((item.get("source_sha256") for item in bindings
@@ -1347,7 +1371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sample = record.get("sample", {})
             values = [str(row + 1), f"{record['width_px']:.2f}",
                       "—" if record["width_um"] is None else f"{record['width_um']:.3f}",
-                      record["kind"], sample.get("composition", ""), sample.get("microwire", ""), record.get("review_status", "Unreviewed")]
+                      record["kind"], sample.get("composition", ""), sample.get("microwire", ""), record.get("review_status", "Unreviewed"), sample.get("specimen", "")]
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
         for index in selected:
@@ -1615,7 +1639,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Session calibration does not match its acquisition setup")
             sample = metadata.get("sample", {})
             if (not isinstance(sample, dict) or any(not isinstance(sample.get(key, ""), str)
-                                                  for key in ("composition", "microwire"))
+                                                  for key in ("composition", "microwire", "specimen"))
                     or not isinstance(metadata.get("notes", ""), str)):
                 raise ValueError("Session sample or notes are invalid")
         except (KeyError, TypeError, OverflowError) as exc:
@@ -1661,7 +1685,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.restored_sample = copy.deepcopy(sample)
         self.composition_combo.setCurrentText(sample.get("composition", ""))
         self.wire_combo.setCurrentText(sample.get("microwire", ""))
-        self.sample_annotations[self._sample_key()] = dict(brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc"))
+        self.specimen_edit.setText(sample.get("specimen", ""))
+        self.specimen_edit.setProperty("physicalSample", sample.get("physical_sample"))
+        self.sample_annotations[self._annotation_key()] = dict(brittle=sample.get("brittle"), observed_utc=sample.get("brittle_observed_utc"))
         self._sample_changed()
         self.notes.setPlainText(metadata.get("notes", ""))
         self.project_update_receipts = copy.deepcopy(metadata.get("project_updates", []))
@@ -1707,7 +1733,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if action == "review":
             return self.review_measurements(command.get("measurements"), unreview=command.get("unreview", False), note=command.get("note", ""))
         if action == "configure":
-            allowed = {"action", "objective", "zoom", "composition", "microwire", "output_directory",
+            allowed = {"action", "objective", "zoom", "composition", "microwire", "specimen", "output_directory",
                        "project_path", "fabrication_path", "camera_name", "width", "height", "auto_save", "kind", "brittle"}
             if set(command) - allowed:
                 raise ValueError("Unknown configuration field")
@@ -1746,10 +1772,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.objective_combo.setCurrentText(str(command["objective"]).replace("x", "×"))
             if "zoom" in command:
                 self.zoom_spin.setValue(float(command["zoom"]))
+            if any(key in command for key in ("composition", "microwire", "specimen")):
+                # Automation supplies labels, not a verified registry selection.
+                self.specimen_edit.setProperty("physicalSample", None)
             if "composition" in command:
                 self.composition_combo.setCurrentText(str(command["composition"]))
             if "microwire" in command:
                 self.wire_combo.setCurrentText(str(command["microwire"]))
+            if "specimen" in command:
+                self.specimen_edit.setText(str(command["specimen"]))
             if "brittle" in command:
                 value = command["brittle"]
                 self.brittle_toggle.setCheckState(QtCore.Qt.CheckState.PartiallyChecked if value is None else

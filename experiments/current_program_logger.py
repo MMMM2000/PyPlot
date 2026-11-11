@@ -29,6 +29,7 @@ from experiments.current_program_support import (
 from experiments.current_program_profiles import PROFILES
 from plotting.shared.power_guard import create_experiment_sleep_guard
 
+from data_logging.sample_identity_ui import attach_sample_chooser, selection_metadata
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
 from plotting.shared.experiment_processes import ExperimentProcessSpec, launch_experiment_process
@@ -548,6 +549,7 @@ class RunConfig:
     stop_when_sequence_complete: bool = False
     cold_reset: ColdResetLimits | None = None
     emergency_resistance_ohm: float | None = None
+    physical_sample: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.emergency_resistance_ohm is not None and (
@@ -900,6 +902,7 @@ class ProgramWorker(QtCore.QThread):
         try:
             run_dir.mkdir(parents=True, exist_ok=False)
             metadata = {
+                "physical_sample": self.config.physical_sample,
                 "schema": "current_program_logger_v1",
                 "resistance_settling_s": getattr(self.adapter, "settling_s", 0.0),
                 "started_utc": started_utc,
@@ -1633,6 +1636,14 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         output_form.addRow("Folder", output_row)
         self.name_edit = QtWidgets.QLineEdit("current-program")
         output_form.addRow("Run name", self.name_edit)
+        self.composition_edit = QtWidgets.QLineEdit()
+        self.wire_edit = QtWidgets.QLineEdit()
+        self.specimen_edit = QtWidgets.QLineEdit()
+        self.specimen_edit.setPlaceholderText("s1; same piece keeps its ID")
+        attach_sample_chooser(self.specimen_edit, self.composition_edit, self.wire_edit)
+        output_form.addRow("Composition", self.composition_edit)
+        output_form.addRow("Source microwire", self.wire_edit)
+        output_form.addRow("Physical sample ID", self.specimen_edit)
         self.history_button = QtWidgets.QPushButton("Measurement history…")
         self.history_button.clicked.connect(self._show_measurement_history)
         output_form.addRow(self.history_button)
@@ -2423,6 +2434,8 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             blocks=blocks,
             output_dir=output_dir,
             run_name=self.name_edit.text().strip(),
+            physical_sample=selection_metadata(self.specimen_edit, self.composition_edit.text(),
+                                               self.wire_edit.text(), self.specimen_edit.text()),
             control_rate_hz=self.control_rate_spin.value(),
             measurement_rate_hz=self.measurement_rate_spin.value(),
             ui_rate_hz=self.ui_rate_spin.value(),
@@ -2788,9 +2801,12 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
             self._refresh_visa_resources()
 
     def _load_settings(self) -> None:
+        self.specimen_edit.setProperty("physicalSample", None)
         self.bundle_load_spin.setValue(float(self.settings.value("bundle_load_g", 0.0)))
         self.output_edit.setText(str(self.settings.value("output_dir", str(Path.home()/"Downloads"))))
         self.name_edit.setText(str(self.settings.value("run_name", "current-program")))
+        for key, edit in (("composition", self.composition_edit), ("wire", self.wire_edit), ("specimen", self.specimen_edit)):
+            edit.setText(str(self.settings.value(key, "")))
         mode = str(self.settings.value("connection_mode", "Simulation"))
         if mode not in PROFILES: mode = "Simulation"
         self.mode_combo.setCurrentText(mode)
@@ -2813,6 +2829,8 @@ class CurrentProgramWindow(QtWidgets.QMainWindow):
         self.settings.setValue("connection_mode", self.mode_combo.currentText())
         self.settings.setValue("output_dir", self.output_edit.text())
         self.settings.setValue("run_name", self.name_edit.text())
+        for key, edit in (("composition", self.composition_edit), ("wire", self.wire_edit), ("specimen", self.specimen_edit)):
+            self.settings.setValue(key, edit.text())
         self.settings.setValue("bundle_load_g", self.bundle_load_spin.value())
 
     def _new_settings(self):

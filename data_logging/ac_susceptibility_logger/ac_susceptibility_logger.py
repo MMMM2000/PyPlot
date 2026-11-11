@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import selection_metadata
+
 import ctypes
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -3845,6 +3847,8 @@ class MainWindow(CurrentAnnealingWindow):
             lcr_continuous_log_aggregate_s=self._lcr_debug_log_cadence_s(),
             lcr_continuous_log_max_rows_per_point=self._lcr_debug_log_max_rows_per_point(),
             lcr_correction=self._lcr_correction_metadata(),
+            physical_sample=selection_metadata(getattr(self.ui, "lineEdit_sample", None), self._ui_text("lineEdit_composition"),
+                                               self._ui_text("lineEdit_microwire"), self._ui_text("lineEdit_sample")),
         )
 
     def _lcr_correction_metadata(self) -> dict[str, Any]:
@@ -5069,6 +5073,9 @@ class MainWindow(CurrentAnnealingWindow):
                 if mode != "a":
                     fh.write(HEADER_LINE + "\n")
                     self._write_lcr_metadata(fh)
+                identity = selection_metadata(getattr(self.ui, "lineEdit_sample", None), self._ui_text("lineEdit_composition"),
+                                              self._ui_text("lineEdit_microwire"), self._ui_text("lineEdit_sample"))
+                fh.write("# Physical sample: " + json.dumps(identity, ensure_ascii=True) + "\n")
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open {path}: {exc}")
             return False

@@ -7,6 +7,8 @@ match the English identifiers used throughout the logger logic.
 
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser
+
 import re
 from typing import Optional
 
@@ -80,12 +82,15 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         return super().text()
 
     def setText(self, text: str) -> None:
+        # Settings/preset restores may use the same label and block signals.
+        # Only an explicit chooser selection can attach its UUID again.
+        self.setProperty("physicalSample", None)
         normalized = (text or "").strip()
         if not normalized:
             self._allow_empty = True
-            self.blockSignals(True)
+            was_blocked = self.blockSignals(True)
             self.setValue(self.minimum())
-            self.blockSignals(False)
+            self.blockSignals(was_blocked)
             return
         parsed = self._parse(normalized)
         if parsed is None:
@@ -95,9 +100,9 @@ class SampleSpinBox(QtWidgets.QSpinBox):
             self._prefix = prefix or "s"
             self._suffix = suffix or ""
         self._allow_empty = False
-        self.blockSignals(True)
+        was_blocked = self.blockSignals(True)
         self.setValue(value)
-        self.blockSignals(False)
+        self.blockSignals(was_blocked)
 
     def _parse(self, text: str) -> Optional[tuple[str, int, str]]:
         match = self._pattern.match(text.strip())
@@ -594,7 +599,8 @@ class Ui_MainWindow(object):
         self.lineEdit_microwire.setMinimumWidth(300)
         self.lineEdit_sample = SampleSpinBox()
         self.lineEdit_sample.setMinimumWidth(300)
-        self.lineEdit_sample.setText("s1")
+        self.lineEdit_sample.setText("")
+        attach_sample_chooser(self.lineEdit_sample, self.lineEdit_composition, self.lineEdit_microwire)
         self.label_composition = QtWidgets.QLabel("Composition:")
         name_grid.addWidget(self.label_composition, 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)

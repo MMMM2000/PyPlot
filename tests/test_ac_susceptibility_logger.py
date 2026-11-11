@@ -882,6 +882,27 @@ def test_sweep_metadata_snapshot_includes_full_settings(tmp_path: Path) -> None:
     assert snapshot["lcr_correction"]["source"] == "not_checked"
 
 
+def test_resume_does_not_mix_physical_pieces(tmp_path: Path) -> None:
+    from dataclasses import replace
+    identity = {"composition": "Demo", "wire": "12/2", "label": "s23", "uid": "synthetic-id"}
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.3)],
+        current_points=[sweep.CurrentLoopPoint(0.0, "zero")],
+        physical_sample=identity,
+        dwell_s=0, psu_backend="owon_spe6102", psu_resource="synthetic", voltage_limit_v=5,
+    )
+    path = tmp_path / "same-piece.tsv"
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata(); writer.close()
+    snapshot = json.loads(next(line.removeprefix("# config_json=") for line in path.read_text(encoding="utf-8").splitlines()
+                               if line.startswith("# config_json=")))
+    assert snapshot["physical_sample"] == identity
+    assert sweep.build_resume_plan(config, [path]).config.physical_sample == identity
+    for changed in ({**identity, "label": "s24"}, {**identity, "uid": "another-piece"}):
+        with pytest.raises(ValueError, match="physical sample"):
+            sweep.build_resume_plan(replace(config, physical_sample=changed), [path])
+
+
 def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_path: Path) -> None:
     path = tmp_path / "shared-broker.tsv"
     config = sweep.AcSweepConfig(
@@ -5783,3 +5804,18 @@ def test_ac_logger_writes_baseline_file_with_lcr_only_header(tmp_path: Path) -> 
     assert lines[3] == ac_logger.BASELINE_HEADER_LINE
     assert "Current (mA)" not in lines[3]
     assert lines[4].split("\t") == row
+
+
+@pytest.mark.parametrize("current_uid,file_uid", [(None, "piece-A"), ("piece-A", None), ("piece-A", "piece-B")])
+def test_resume_rejects_asymmetric_or_different_piece_uuid(tmp_path, current_uid, file_uid):
+    from data_logging.ac_susceptibility_logger.sweep import _check_resume_physical_sample
+    current = dict(composition="Ni", wire="12/2", label="s1")
+    observed = dict(current)
+    if current_uid:
+        current["uid"] = current_uid
+    if file_uid:
+        observed["uid"] = file_uid
+    path = tmp_path / "synthetic.tsv"
+    path.write_text("# config_json=" + json.dumps({"physical_sample": observed}) + "\n")
+    with pytest.raises(ValueError, match="physical sample"):
+        _check_resume_physical_sample(current, path)

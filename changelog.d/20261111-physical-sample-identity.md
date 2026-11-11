@@ -1,10 +1,10 @@
 ## 2026-11-11 UTC
 
-- Accept positive physical piece labels such as s1 in general logger naming,
-  retaining legacy labels such as s2-1.
-- Add an explicit local physical-sample chooser to general, manual stress-strain
-  and TMA naming fields. It preserves remeasurement IDs, rejects duplicate local
-  creation and reports imported identity conflicts without silent renumbering.
-- This is a local-only first stage, not a cross-device allocation service or a
-  complete historical sample inventory. Other logger adapters and structured
-  UUID export remain to be implemented.
+- Accept plain sN piece labels while preserving legacy labels, without inventing
+  a default physical identity for new forms.
+- Add explicit local piece selection to general, manual stress-strain, TMA,
+  annealing, AC, current-program and microscope workflows.
+- Preserve selected identities in supported run metadata; guard AC resume and
+  prevent piece-specific microscope data leaking into wire-level Builder rows.
+- Add explicit record exchange with atomic imports and visible collisions.
+  This remains local/imported coverage, not a central cross-device allocator.

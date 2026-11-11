@@ -9,11 +9,13 @@ an ID. Legacy measurements must be imported explicitly, not guessed from filenam
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import asdict
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
 import re
 import sqlite3
+import json
 from uuid import uuid4
 
 
@@ -25,7 +27,8 @@ def sample_number(label: str) -> int | None:
 def wire_key(wire: str) -> str:
     """Unify the loggers' numeric display/filename forms without guessing aliases."""
     value = wire.strip()
-    return value.replace("_", "/") if re.fullmatch(r"[0-9]+_[0-9]+", value) else value
+    match = re.fullmatch(r"([0-9]+)\s*[/_\\-]\s*([0-9]+)", value)
+    return f"{int(match[1])}/{int(match[2])}" if match else value
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,37 @@ class SampleRegistry:
         for row in self.known(composition, wire):
             grouped.setdefault(row.label, []).append(row)
         return {label: tuple(rows) for label, rows in grouped.items() if len(rows) > 1}
+
+    def snapshot(self) -> str:
+        """Portable immutable records, not a global allocation lease or counter."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM samples ORDER BY uid").fetchall()
+        return json.dumps({"schema_version": 1, "application": "PyPlot physical samples",
+                           "records": [asdict(PhysicalSample(*row)) for row in rows]},
+                          ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def parse_snapshot(text: str) -> tuple[PhysicalSample, ...]:
+        """Validate an explicitly selected exchange file without touching storage."""
+        if len(text) > 5_000_000:
+            raise ValueError("Sample exchange exceeds the 5 MB limit")
+        payload = json.loads(text)
+        if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+                or payload.get("application") != "PyPlot physical samples"
+                or not isinstance(payload.get("records"), list)):
+            raise ValueError("Not a supported physical sample exchange")
+        records = []
+        keys = {"uid", "composition", "wire", "label", "source", "parent_uid"}
+        for value in payload["records"]:
+            if not isinstance(value, dict) or set(value) != keys:
+                raise ValueError("Invalid sample exchange record")
+            if any(not isinstance(value[key], str) or not value[key].strip()
+                   for key in keys - {"parent_uid"}):
+                raise ValueError("Sample exchange identity fields must be non-empty strings")
+            if value["parent_uid"] is not None and not isinstance(value["parent_uid"], str):
+                raise ValueError("Invalid parent sample identity")
+            records.append(PhysicalSample(**value))
+        return tuple(records)
 
     def create(self, composition: str, wire: str, label: str, *, source: str,
                parent_uid: str | None = None) -> PhysicalSample:

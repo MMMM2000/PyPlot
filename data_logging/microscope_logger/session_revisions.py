@@ -100,7 +100,7 @@ def _read_latest(directory: Path, base: Mapping[str, Any], base_sha: str) -> byt
 
 
 def _csv_text(records: Sequence[Mapping[str, Any]]) -> str:
-    fields = ["measurement", "composition", "microwire", "source_kind", "source_path", "brittle", "brittle_observed_utc",
+    fields = ["measurement", "composition", "microwire", "specimen", "sample_uid", "source_kind", "source_path", "brittle", "brittle_observed_utc",
               "kind", "width_px", "width_um", "calibration_status", "review_status", "reviewed_utc", "objective",
               "zoom", "camera_id", "start_x_px", "start_y_px", "end_x_px", "end_y_px"]
     buffer = io.StringIO(newline="")
@@ -112,7 +112,9 @@ def _csv_text(records: Sequence[Mapping[str, Any]]) -> str:
             raise ValueError("Measurement sample must be a mapping")
         row = {key: record.get(key) for key in fields if key in record}
         row.update({key: sample.get(key, "") for key in
-                    ("composition", "microwire", "source_kind", "source_path")})
+                    ("composition", "microwire", "specimen", "source_kind", "source_path")})
+        identity = sample.get("physical_sample")
+        row["sample_uid"] = identity.get("uid", "") if isinstance(identity, Mapping) else ""
         row.update(brittle=sample.get("brittle"), brittle_observed_utc=sample.get("brittle_observed_utc"),
                    measurement=index, start_x_px=record["start"][0], start_y_px=record["start"][1],
                    end_x_px=record["end"][0], end_y_px=record["end"][1])

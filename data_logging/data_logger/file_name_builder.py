@@ -147,7 +147,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
 
         self.s_number = InfoLineEdit("Physical piece ID, e.g., s1. Keep the same ID when remeasuring the same piece. Legacy labels such as s2-1 remain supported.")
         self.s_number.setMinimumWidth(260)
-        self.s_number.setText("s2-1")
+        self.s_number.setText("")
         self.s_number.set_validation(
             r"^(?:s[1-9][0-9]*|[A-Za-z0-9]+-[A-Za-z0-9]+)$",
             "Use a positive piece ID such as s1, or an existing legacy label such as s2-2",
@@ -195,7 +195,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
 
         self.t_number = InfoLineEdit("Physical piece ID, e.g., s1. Keep the same ID when remeasuring the same piece. Legacy labels such as s2-1 remain supported.")
         self.t_number.setMinimumWidth(260)
-        self.t_number.setText("s2-1")
+        self.t_number.setText("")
         self.t_number.set_validation(
             r"^(?:s[1-9][0-9]*|[A-Za-z0-9]+-[A-Za-z0-9]+)$",
             "Use a positive piece ID such as s1, or an existing legacy label such as s2-2",
@@ -357,14 +357,14 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.combo_format.setCurrentIndex(int(s.value("format", 0)))
         self.s_comp.setText(s.value("s_comp", "FeSiBP"))
         self.s_sample.setText(s.value("s_sample", "156_2"))
-        self.s_number.setText(s.value("s_number", "s2-1"))
+        self.s_number.setText(s.value("s_number", ""))
         self.s_end.setCurrentIndex(int(s.value("s_end", 0)))
         self.s_anneal.setText(s.value("s_anneal", "74mA"))
         self.s_load.setValue(float(s.value("s_load", 2.5)))
         self.s_dir.setCurrentIndex(int(s.value("s_dir", 0)))
         self.t_comp.setText(s.value("t_comp", "FeSiBP"))
         self.t_sample.setText(s.value("t_sample", "156_2"))
-        self.t_number.setText(s.value("t_number", "s2-1"))
+        self.t_number.setText(s.value("t_number", ""))
         self.t_anneal.setText(s.value("t_anneal", "74mA"))
         self.t_temp.setCurrentIndex(int(s.value("t_temp", 0)))
         self.m_head.setValue(int(s.value("m_head", 1)))

@@ -13,6 +13,24 @@ def make_window(qtbot, tmp_path, monkeypatch):
     return w
 
 
+def test_physical_piece_annotations_do_not_bleed_and_restart_preserves_piece(qtbot, tmp_path, monkeypatch):
+    w = make_window(qtbot, tmp_path, monkeypatch)
+    w.handle_command(dict(action="configure", composition="Invented", microwire="12/2", specimen="s1", brittle=True))
+    assert w._sample()["specimen"] == "s1"
+    w.specimen_edit.setText("s2")
+    assert w._sample()["brittle"] is None
+    w.specimen_edit.setText("s1")
+    assert w._sample()["brittle"] is True
+    w.dirty = False; w.close()
+    other = make_window(qtbot, tmp_path, monkeypatch)
+    assert other.specimen_edit.text() == "s1"
+    assert other._sample()["brittle"] is True
+    import pytest
+    with pytest.raises(ValueError, match="Wire-level"):
+        other.prepare_brittle_update()
+    other.dirty = False
+
+
 def test_restart_remembers_settings_and_sample_scoped_annotations(qtbot, tmp_path, monkeypatch):
     w = make_window(qtbot, tmp_path, monkeypatch)
     w.handle_command(dict(action="configure", composition="Invented A", microwire="1/4", brittle=True, objective="40x", zoom=2.5))
