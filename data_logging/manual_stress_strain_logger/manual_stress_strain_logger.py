@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser
+
 import math
 import os
 import json
@@ -188,9 +190,11 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
 
         self.s_number = QtWidgets.QLineEdit(self)
         self.s_number.setPlaceholderText("optional, e.g. s1")
-        self.s_number.setText("s1")
+        self.s_number.setText("")
         grid.addWidget(QtWidgets.QLabel("Sample number:", stress), 1, 0)
         grid.addWidget(self.s_number, 1, 1)
+
+        attach_sample_chooser(self.s_number, self.s_comp, self.s_sample)
 
         self.s_current = QtWidgets.QLineEdit(self)
         self.s_current.setText("74mA")
@@ -298,7 +302,7 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         self.combo_format.setCurrentIndex(int(settings.value("format", 0) or 0))
         self.s_comp.setText(settings.value("s_comp", "FeSiBP", type=str))
         self.s_sample.setText(settings.value("s_sample", "156_2", type=str))
-        self.s_number.setText(settings.value("s_number", "s1", type=str))
+        self.s_number.setText(settings.value("s_number", "", type=str))
         self.s_current.setText(settings.value("s_current", "74mA", type=str))
         self.s_notes.setText(settings.value("s_notes", "", type=str))
         self.target.setText(settings.value("custom_text", "", type=str))

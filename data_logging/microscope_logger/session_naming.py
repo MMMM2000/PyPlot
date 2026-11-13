@@ -53,5 +53,8 @@ def new_session_name(metadata: Mapping[str, object], *, timestamp: datetime | No
     sample = sample if isinstance(sample, Mapping) else {}
     composition = _component(sample.get("composition"), limit=48, fallback="Unassigned")
     microwire = _component(sample.get("microwire"), limit=32, fallback="Unassigned")
+    piece = _component(sample.get("specimen"), limit=24, fallback="") if sample.get("specimen") else ""
+    if piece:
+        microwire += f"__{piece}"
     utc_stamp = stamp.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{composition}__{microwire}__{utc_stamp}_{identifier[:8].lower()}"

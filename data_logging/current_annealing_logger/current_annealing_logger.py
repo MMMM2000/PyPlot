@@ -32,6 +32,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 from .ui_en import Ui_MainWindow
 from .keithley import AnnealingKeithley, KeithleyAcquisition, CONTROL_HZ, READ_HZ, NPLC
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
+from data_logging.sample_identity_ui import selection_metadata
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
@@ -199,7 +200,7 @@ DEFAULT_PRESET = {
     "preset": 0,
     "composition": "Ni51Fe26Ga21",
     "microwire": "1_2",
-    "sample": "s1",
+    "sample": "",
     "load": "",
     "notes": "",
     "custom_name": "",
@@ -6965,6 +6966,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "composition": self._ui_text("lineEdit_composition"),
             "microwire": self._ui_text("lineEdit_microwire"),
             "sample": self._ui_text("lineEdit_sample"),
+            "physical_sample": selection_metadata(getattr(self.ui, "lineEdit_sample", None), self._ui_text("lineEdit_composition"),
+                                                  self._ui_text("lineEdit_microwire"), self._ui_text("lineEdit_sample")),
             "load": self._ui_text("lineEdit_load"),
             "notes": self._ui_text("lineEdit_notes"),
             "start_current_mA": int(getattr(self, "start_current_mA", 1)),

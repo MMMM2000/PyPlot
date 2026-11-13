@@ -335,6 +335,7 @@ def test_worker_logs_continuously_and_turns_adapter_off(tmp_path: Path) -> None:
         blocks=(module.CurrentBlock("Hold", 1.0, None),),
         output_dir=tmp_path,
         run_name="test",
+        physical_sample={"composition": "Demo", "wire": "12/2", "label": "s23"},
         control_rate_hz=100.0,
         measurement_rate_hz=100.0,
         ui_rate_hz=50.0,
@@ -357,6 +358,7 @@ def test_worker_logs_continuously_and_turns_adapter_off(tmp_path: Path) -> None:
     assert rows[-1]["block_type"] == "Hold"
     assert rows[-1]["cycle_index"] == "1"
     assert float(rows[-1]["power_mW"]) == pytest.approx(0.1)
+    assert metadata["physical_sample"]["label"] == "s23"
     assert metadata["status"] == "stopped"
     assert metadata["rows"] == len(rows)
     assert metadata["control_rate_hz"] == 100.0

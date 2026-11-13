@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser
+
 import re
 
 COMPOSITION_TOTAL_TARGET = 100.0
@@ -143,14 +145,14 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.s_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         form.addRow("Microwire:", self.s_sample)
 
-        self.s_number = InfoLineEdit("Sample number, e.g., s2-1")
+        self.s_number = InfoLineEdit("Physical piece ID, e.g., s1. Keep the same ID when remeasuring the same piece. Legacy labels such as s2-1 remain supported.")
         self.s_number.setMinimumWidth(260)
-        self.s_number.setText("s2-1")
+        self.s_number.setText("")
         self.s_number.set_validation(
-            r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
-            "Use pattern like s2-2 with a single '-'",
+            r"^(?:s[1-9][0-9]*|[A-Za-z0-9]+-[A-Za-z0-9]+)$",
+            "Use a positive piece ID such as s1, or an existing legacy label such as s2-2",
         )
-        form.addRow("Sample number:", self.s_number)
+        form.addRow("Physical sample ID:", self.s_number)
         self.s_end = QtWidgets.QComboBox()
         self.s_end.addItem("Marked end (a)", "a")
         self.s_end.addItem("Unmarked end (b)", "b")
@@ -191,14 +193,14 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.t_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         tform.addRow("Microwire:", self.t_sample)
 
-        self.t_number = InfoLineEdit("Sample number, e.g., s2-1")
+        self.t_number = InfoLineEdit("Physical piece ID, e.g., s1. Keep the same ID when remeasuring the same piece. Legacy labels such as s2-1 remain supported.")
         self.t_number.setMinimumWidth(260)
-        self.t_number.setText("s2-1")
+        self.t_number.setText("")
         self.t_number.set_validation(
-            r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
-            "Use pattern like s2-2 with a single '-'",
+            r"^(?:s[1-9][0-9]*|[A-Za-z0-9]+-[A-Za-z0-9]+)$",
+            "Use a positive piece ID such as s1, or an existing legacy label such as s2-2",
         )
-        tform.addRow("Sample number:", self.t_number)
+        tform.addRow("Physical sample ID:", self.t_number)
 
         self.t_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
         self.t_anneal.setMinimumWidth(300)
@@ -210,6 +212,9 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.t_temp.addItems(["25C", "25-100C", "100C"])
         tform.addRow("Temperature:", self.t_temp)
         self.stacked.addWidget(temp)
+
+        attach_sample_chooser(self.s_number, self.s_comp, self.s_sample)
+        attach_sample_chooser(self.t_number, self.t_comp, self.t_sample)
 
         # Maxion format -------------------------------------------------
         maxw = QtWidgets.QWidget()
@@ -352,14 +357,14 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.combo_format.setCurrentIndex(int(s.value("format", 0)))
         self.s_comp.setText(s.value("s_comp", "FeSiBP"))
         self.s_sample.setText(s.value("s_sample", "156_2"))
-        self.s_number.setText(s.value("s_number", "s2-1"))
+        self.s_number.setText(s.value("s_number", ""))
         self.s_end.setCurrentIndex(int(s.value("s_end", 0)))
         self.s_anneal.setText(s.value("s_anneal", "74mA"))
         self.s_load.setValue(float(s.value("s_load", 2.5)))
         self.s_dir.setCurrentIndex(int(s.value("s_dir", 0)))
         self.t_comp.setText(s.value("t_comp", "FeSiBP"))
         self.t_sample.setText(s.value("t_sample", "156_2"))
-        self.t_number.setText(s.value("t_number", "s2-1"))
+        self.t_number.setText(s.value("t_number", ""))
         self.t_anneal.setText(s.value("t_anneal", "74mA"))
         self.t_temp.setCurrentIndex(int(s.value("t_temp", 0)))
         self.m_head.setValue(int(s.value("m_head", 1)))

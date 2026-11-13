@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_logging.sample_identity_ui import attach_sample_chooser, selection_metadata
+
 import csv
 import ctypes
 import hashlib
@@ -10003,6 +10005,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_name_specimen = QtWidgets.QLineEdit(naming_box)
         self.edit_name_specimen.setPlaceholderText("e.g. s1")
         naming_form.addRow("Sample ID", self.edit_name_specimen)
+        attach_sample_chooser(self.edit_name_specimen, self.edit_name_composition, self.edit_name_wire)
+
         self.edit_name_condition = QtWidgets.QLineEdit(naming_box)
         self.edit_name_condition.setPlaceholderText("e.g. preload test")
         naming_form.addRow("Condition / notes", self.edit_name_condition)
@@ -16446,6 +16450,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_path = match.path
         self._builder_project_match = match
         row = match.matched_row
+        if update_identity:
+            # Project rows are legacy labels, not verified piece identities.
+            self.edit_name_specimen.setProperty("physicalSample", None)
         self._builder_import_in_progress = True
         try:
             if update_identity and row.get("Composition"):
@@ -27571,6 +27578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             "created_utc": self._session_created_utc or _utc_timestamp(),
             "sample_name": self.edit_sample_name.text().strip(),
+            "physical_sample": selection_metadata(self.edit_name_specimen, self.edit_name_composition.text(),
+                                                  self.edit_name_wire.text(), self.edit_name_specimen.text()),
             "name_fields": {
                 "composition": self.edit_name_composition.text().strip(),
                 "microwire": self.edit_name_wire.text().strip(),
@@ -38183,6 +38192,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_name_composition.setText(self.settings.value("name_composition", "", type=str))
         saved_wire = self.settings.value("name_wire", "", type=str)
         self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(saved_wire) or saved_wire)
+        self.edit_name_specimen.setProperty("physicalSample", None)
         self.edit_name_specimen.setText(self.settings.value("name_specimen", "", type=str))
         self.edit_name_condition.setText(self.settings.value("name_condition", "", type=str))
         self.edit_sample_name.setText(self.settings.value("sample_name", "", type=str))

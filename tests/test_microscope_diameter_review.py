@@ -48,6 +48,19 @@ def test_selected_rows_produce_exact_per_kind_statistics_and_preserve_input():
     assert records == before
 
 
+def test_piece_diameter_cannot_silently_update_all_source_wire_rows():
+    from data_logging.microscope_logger.diameter_review import require_wire_level_diameters
+    value = record()
+    value["sample"]["specimen"] = "s23"
+    assert summarize([value])["core"]["count"] == 1
+    with pytest.raises(ValueError, match="Piece-specific diameter"):
+        require_wire_level_diameters([value])
+    other = copy.deepcopy(value)
+    other["sample"]["specimen"] = "s24"
+    with pytest.raises(ValueError, match="different.*physical pieces"):
+        summarize([value, other])
+
+
 @pytest.mark.parametrize("kind", ["core", "outer"])
 def test_one_kind_and_one_measurement_is_allowed_without_invented_deviation(kind):
     result = summarize([record(11, kind=kind)])

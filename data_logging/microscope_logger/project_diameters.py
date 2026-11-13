@@ -317,7 +317,7 @@ def prepare_diameter_update(source: str | Path, workdir: str | Path, *, composit
     """Prepare selected reviewed core/outer widths; never modify the source."""
     _python_executable()
     from microwire_data_builder import core, ui, project_package as pp, safe_codec
-    from .diameter_review import summarize_reviewed_diameters
+    from .diameter_review import summarize_reviewed_diameters, require_wire_level_diameters
 
     if not re.fullmatch(r"[0-9a-f]{64}", str(expected_sha256)):
         raise ValueError("A lowercase expected target SHA-256 is required.")
@@ -332,6 +332,7 @@ def prepare_diameter_update(source: str | Path, workdir: str | Path, *, composit
     summaries = summarize_reviewed_diameters(manifest["measurements"], composition=composition,
                                             microwire=microwire, selected_rows=measurement_ids)
     selected = [copy.deepcopy(manifest["measurements"][number - 1]) for number in summaries["selected_rows"]]
+    require_wire_level_diameters(selected)
     index = pp.inspect_project_package(source, verify_entries=True)
     sections = {key: index.read_section(key, load_payloads=False) for key in index.sections}
     bindings = []

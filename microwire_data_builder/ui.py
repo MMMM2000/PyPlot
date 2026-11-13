@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from microwire_data_builder.physical_samples import (
+    PHYSICAL_SAMPLE_COLUMN, measurement_identity_ledger, measurement_preview_cache_key, parse_identity_ledger,
+    physical_sample_from_metadata_file, validated_physical_sample,
+)
+
 import base64
 import concurrent.futures
 import copy
@@ -11976,9 +11981,13 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
         sample = getattr(record, "sample", None)
         if isinstance(sample, str) and sample.strip():
             grouped.setdefault(sample, []).append(record)
+    if any(getattr(record, "physical_sample", None) for record in records):
+        frame[PHYSICAL_SAMPLE_COLUMN] = ""
     for index, row in frame.iterrows():
         sample = row.get("_sample", "")
         group = grouped.get(sample, []) if isinstance(sample, str) else []
+        if PHYSICAL_SAMPLE_COLUMN in frame.columns:
+            frame.at[index, PHYSICAL_SAMPLE_COLUMN] = measurement_identity_ledger(group)
         strain_lines: List[str] = []
         transition_lines: List[str] = []
         break_lines: List[str] = []
@@ -12016,7 +12025,7 @@ def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[Min
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return []
     records: List[MiniDmaRecord] = []
-    seen_paths: Set[str] = set()
+    records_by_source: Dict[str, MiniDmaRecord] = {}
     for _index, row in frame.iterrows():
         raw_sources = row.get("_sources")
         if isinstance(raw_sources, (str, Path)):
@@ -12037,11 +12046,32 @@ def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[Min
             sample = _row_sample_value(row) or "TMA"
         raw_key = str(row.get("_group_key") or "").strip()
         parsed_key = _microwire_key_from_string(raw_key) if raw_key else None
+        raw_ledger = row.get(PHYSICAL_SAMPLE_COLUMN, "")
+        try:
+            identities = {}
+            conflicted_sources = set()
+            for entry in parse_identity_ledger(raw_ledger):
+                source = entry["source"]
+                identity = validated_physical_sample(
+                    entry.get("physical_sample"),
+                    composition=parsed_key[0] if parsed_key else None,
+                    wire=f"{parsed_key[1]}/{parsed_key[2]}" if parsed_key else None)
+                if source in identities and identities[source] != identity:
+                    conflicted_sources.add(source)
+                identities[source] = identity
+            for source in conflicted_sources:
+                identities[source] = None
+        except (ValueError, TypeError):
+            identities = {}  # Malformed provenance must never invent a UUID.
         for position, raw_source in enumerate(sources):
             source_text = str(raw_source or "").strip()
-            if not source_text or source_text in seen_paths:
+            if not source_text:
                 continue
-            seen_paths.add(source_text)
+            if source_text in records_by_source:
+                previous = records_by_source[source_text]
+                if previous.physical_sample != identities.get(source_text):
+                    previous.physical_sample = None
+                continue
             path = Path(source_text)
             label = labels[position] if position < len(labels) else path.name
             records.append(
@@ -12051,8 +12081,10 @@ def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[Min
                     data=pd.DataFrame(),
                     key=parsed_key,  # type: ignore[arg-type]
                     label=label or path.name,
+                    physical_sample=identities.get(source_text),
                 )
             )
+            records_by_source[source_text] = records[-1]
     return records
 
 
@@ -27103,6 +27135,10 @@ class MiniDmaSection(MiniDatabaseSection):
                 strain_summary=strain_summary,
                 transition_summary=transition_summary,
                 break_summary=break_summary,
+                physical_sample=physical_sample_from_metadata_file(
+                    measurement_path.with_name("metadata.json"),
+                    composition=key[0] if key else None,
+                    wire=f"{key[1]}/{key[2]}" if key else None),
             )
             record.initial_length_calibration = capture_mini_dma_initial_length_calibration(record)
             if variant:
@@ -27843,6 +27879,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     transition_summary=tuple(reviewed_lines),
                     break_summary=record.break_summary,
                     initial_length_calibration=copy.deepcopy(getattr(record, "initial_length_calibration", None)),
+                    physical_sample=copy.deepcopy(getattr(record, "physical_sample", None)),
                 )
             )
         return result
@@ -34769,7 +34806,7 @@ class CompareSection(MiniDatabaseSection):
                     cache_key = (
                         "annealing",
                         field,
-                        measurement_id or str(getattr(target, "path", "")),
+                        measurement_preview_cache_key(target),
                     )
                     cached = self._matrix_pixmap_cache.get(cache_key)
                     if cached is not None:
@@ -38236,7 +38273,7 @@ class AssemblySection(QtWidgets.QWidget):
                     cache_key = (
                         "annealing",
                         column_label,
-                        measurement_id or str(getattr(target, "path", "")),
+                        measurement_preview_cache_key(target),
                     )
                     cached = self._graph_pixmap_cache.get(cache_key)
                     if cached is not None:
@@ -39608,8 +39645,8 @@ class AssemblySection(QtWidgets.QWidget):
     ) -> str:
         if record is None:
             return ""
-        measurement_id = getattr(getattr(record, "metadata", object()), "measurement_id", None)
-        if isinstance(measurement_id, str) and measurement_id in cache:
+        measurement_id = measurement_preview_cache_key(record)
+        if measurement_id in cache:
             return cache[measurement_id]
         try:
             plot_path = _plot_measurement_matplotlib(

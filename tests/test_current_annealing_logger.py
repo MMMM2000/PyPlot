@@ -3927,6 +3927,8 @@ def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None
     assert payload["output_file"] == str(output)
     assert payload["composition"] == "Ni50Fe27Ga23"
     assert payload["microwire"] == "12_2"
+    assert payload["physical_sample"]["label"] == "s1"
+    assert payload["physical_sample"]["status"] == "unregistered"
     assert payload["max_current_mA"] == 100
     assert payload["reverse_enabled"] is True
     assert payload["loops"] == 2

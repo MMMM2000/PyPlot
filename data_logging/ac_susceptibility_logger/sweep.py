@@ -176,6 +176,7 @@ class AcSweepConfig:
     lcr_continuous_log_aggregate_s: float = 1.0
     lcr_continuous_log_max_rows_per_point: int = 120
     lcr_correction: dict[str, Any] | None = None
+    physical_sample: dict[str, Any] | None = None
 
     @property
     def uses_shared_broker(self) -> bool:
@@ -367,6 +368,27 @@ def estimate_sweep(
     )
 
 
+def _check_resume_physical_sample(expected: dict[str, Any] | None, path: Path) -> None:
+    """Do not skip measurements belonging to another (or unknown) physical piece."""
+    if not expected or not expected.get("label"):
+        return  # Legacy unassigned workflows keep their existing behavior.
+    from data_logging.sample_identity import wire_key
+    observed = None
+    with path.open("r", encoding="utf-8") as stream:
+        for number, line in enumerate(stream):
+            if number > 1000:
+                break
+            if line.startswith("# config_json="):
+                observed = json.loads(line.removeprefix("# config_json=")).get("physical_sample")
+                break
+    if (not isinstance(observed, dict)
+            or observed.get("composition") != expected.get("composition")
+            or wire_key(str(observed.get("wire", ""))) != wire_key(str(expected.get("wire", "")))
+            or observed.get("label") != expected.get("label")
+            or observed.get("uid") != expected.get("uid")):
+        raise ValueError("Cannot resume from a different or unverified physical sample. Start a new sweep or verify the original piece identity.")
+
+
 def build_resume_plan(config: AcSweepConfig, completed_paths: Sequence[str | Path]) -> AcResumePlan:
     """Return a config that skips settings already completed in previous TSVs.
 
@@ -383,6 +405,7 @@ def build_resume_plan(config: AcSweepConfig, completed_paths: Sequence[str | Pat
     observed_by_setting: dict[tuple[Any, ...], set[tuple[float, str]]] = {}
     run_statuses = [classify_ac_run_status(path) for path in completed_paths]
     for path in completed_paths:
+        _check_resume_physical_sample(config.physical_sample, Path(path))
         snapshot_settings, observed = _read_completed_sweep_observations(Path(path))
         for setting_index, points in observed.items():
             if setting_index < 1 or setting_index > len(snapshot_settings):
@@ -987,6 +1010,7 @@ class AcSweepTsvWriter:
                 "aggregate_s": float(self.config.lcr_continuous_log_aggregate_s),
                 "max_rows_per_point": int(self.config.lcr_continuous_log_max_rows_per_point),
             },
+            "physical_sample": self.config.physical_sample,
             "lcr_correction": self.config.lcr_correction or {
                 "open_enabled": None,
                 "short_enabled": None,

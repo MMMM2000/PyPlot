@@ -25,6 +25,13 @@ def _same_sample(value: Mapping, composition: str, microwire: str) -> bool:
             and _wire_display(value.get("microwire")) == microwire)
 
 
+def require_wire_level_diameters(records: Sequence[Mapping]) -> None:
+    """Current Builder writer updates a wire, not an individual physical piece."""
+    if any(isinstance(record.get("sample"), Mapping) and record["sample"].get("specimen")
+           for record in records):
+        raise ValueError("Piece-specific diameter cannot be applied to wire-level project rows; retain it in the capture")
+
+
 def _has_project_binding(sample: Mapping, composition: str, microwire: str) -> bool:
     alternatives = sample.get("matching_sources", [])
     if not isinstance(alternatives, (list, tuple)):
@@ -86,6 +93,7 @@ def summarize_reviewed_diameters(records: Sequence[Mapping], composition: str, m
         raise ValueError("A measurement number cannot be selected twice")
     selected = sorted(selected_rows)
     grouped = {"core": [], "outer": []}
+    piece_keys = set()
     for number in selected:
         record = records[number - 1]
         try:
@@ -99,6 +107,11 @@ def summarize_reviewed_diameters(records: Sequence[Mapping], composition: str, m
             sample = record.get("sample")
             if not isinstance(sample, Mapping) or not _same_sample(sample, composition, microwire):
                 raise ValueError("Measurement belongs to a different specimen")
+            identity = sample.get("physical_sample")
+            uid = identity.get("uid", "") if isinstance(identity, Mapping) else ""
+            piece_keys.add((sample.get("specimen", ""), uid))
+            if len(piece_keys) > 1:
+                raise ValueError("Measurements belong to different or incompletely identified physical pieces")
             if not _has_project_binding(sample, composition, microwire):
                 raise ValueError("An exact original project row binding with SHA-256 is required")
             if record.get("calibration_status") != "Calibrated" or not isinstance(record.get("calibration"), Mapping):

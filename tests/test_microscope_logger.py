@@ -148,7 +148,9 @@ def test_catalog_dropdowns_and_record_sample_snapshots(window):
     window.line_drawn((90, 40), (90, 80))
     assert window.records[-1]["sample"] == {
         "composition": "Manual synthetic sample", "microwire": "unknown-piece", "source_kind": "manual",
-        "brittle": None, "brittle_observed_utc": None}
+        "brittle": None, "brittle_observed_utc": None, "specimen": "",
+        "physical_sample": {"composition": "Manual synthetic sample", "wire": "unknown-piece",
+                            "label": "", "status": "unregistered", "coverage": "local_only"}}
     assert first["sample"]["microwire"] == "12/2"
 
 
@@ -206,9 +208,12 @@ def test_export_keeps_original_pixels_and_per_record_selection(window, tmp_path)
     assert window.load_image(source)
     window.composition_combo.setEditText("First synthetic sample")
     window.wire_combo.setEditText("1/1")
+    window.specimen_edit.setText("s23")
+    window.specimen_edit.setProperty("physicalSample", {"composition": "First synthetic sample", "wire": "1/1", "label": "s23", "uid": "synthetic-piece"})
     window.line_drawn((50, 40), (50, 80))
     window.composition_combo.setEditText("Second synthetic sample")
     window.wire_combo.setEditText("2/1")
+    window.specimen_edit.setText("s24")
     _calibrate(window)
     window.line_drawn((70, 40), (70, 80))
     window.notes.setPlainText("Synthetic GUI export; no research data")
@@ -224,6 +229,30 @@ def test_export_keeps_original_pixels_and_per_record_selection(window, tmp_path)
     assert source.read_bytes() == source_bytes
     with (directory / "measurements.csv").open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
+    assert rows[0]["specimen"] == "s23"
+    assert rows[0]["sample_uid"] == "synthetic-piece"
+    assert rows[1]["specimen"] == "s24"
+    assert rows[1]["sample_uid"] == ""
     assert rows[0]["width_um"] == ""
     assert float(rows[1]["width_um"]) == 20
     assert not window.dirty
+
+
+
+def test_brittle_publication_rechecks_piece_scope(window, monkeypatch):
+    from types import SimpleNamespace
+    window.annotation_review = SimpleNamespace(composition="Ni", microwire="12/2", brittle=True)
+    monkeypatch.setattr(window, "_sample", lambda: dict(composition="Ni", microwire="12/2", brittle=True, specimen="s1"))
+    monkeypatch.setattr(window, "_annotation_operation", lambda *args, **kwargs: pytest.fail("Must not publish piece data"))
+    with pytest.raises(ValueError, match="Piece-specific Brittle"):
+        window.publish_brittle_update()
+
+
+
+def test_configure_same_piece_label_does_not_reuse_selected_uuid(window):
+    window.composition_combo.setCurrentText("Ni")
+    window.wire_combo.setCurrentText("12/2")
+    window.specimen_edit.setText("s1")
+    window.specimen_edit.setProperty("physicalSample", dict(uid="piece-A", composition="Ni", wire="12/2", label="s1"))
+    window.handle_command({"action": "configure", "specimen": "s1"})
+    assert "uid" not in window._sample()["physical_sample"]
